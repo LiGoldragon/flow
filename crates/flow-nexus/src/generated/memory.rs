@@ -874,8 +874,15 @@ pub struct OrderedLaunch {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum RefreshCaller {
+    AddressFlow(signal_flow::FlowId),
+    Elsewhere(signal_flow::Origin),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum ReplacementOrder {
-    Refresh,
+    Refresh(RefreshCaller),
     Launch(std::boxed::Box<OrderedLaunch>),
     Restart,
 }
@@ -911,7 +918,7 @@ pub struct EmergencyRefreshWithoutHandover_Data {
 pub enum SuccessionCause {
     Refresh,
     Exit,
-    Ordered,
+    Ordered(RefreshCaller),
     Replace,
     EmergencyRefreshWithoutHandover(EmergencyRefreshWithoutHandover_Data),
 }

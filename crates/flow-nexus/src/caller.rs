@@ -559,13 +559,13 @@ pub trait ReadsRefreshCaller {
         &self,
         peer: Option<&Process>,
         address: &Address,
-    ) -> crate::generated::operation::RefreshCaller;
+    ) -> crate::generated::memory::RefreshCaller;
     /// The same, for a caller whose origin was already read.
     fn origin_refresh_caller(
         &self,
         origin: signal_flow::Origin,
         address: &Address,
-    ) -> crate::generated::operation::RefreshCaller;
+    ) -> crate::generated::memory::RefreshCaller;
 }
 
 /// The flow a calling process runs in, live or ended, and the Addresses a
@@ -633,8 +633,8 @@ impl ReadsRefreshCaller for RunningNexus {
         &self,
         peer: Option<&Process>,
         address: &Address,
-    ) -> crate::generated::operation::RefreshCaller {
-        use crate::generated::operation::RefreshCaller;
+    ) -> crate::generated::memory::RefreshCaller {
+        use crate::generated::memory::RefreshCaller;
         let origin = self.origin_of_process(peer);
         let flow = match &origin {
             signal_flow::Origin::Flow(bound) => Some(bound.flow_id.clone()),
@@ -652,8 +652,8 @@ impl ReadsRefreshCaller for RunningNexus {
         &self,
         origin: signal_flow::Origin,
         address: &Address,
-    ) -> crate::generated::operation::RefreshCaller {
-        use crate::generated::operation::RefreshCaller;
+    ) -> crate::generated::memory::RefreshCaller {
+        use crate::generated::memory::RefreshCaller;
         match &origin {
             signal_flow::Origin::Flow(bound) if self.flow_of_address(&bound.flow_id, address) => {
                 RefreshCaller::AddressFlow(bound.flow_id.clone())

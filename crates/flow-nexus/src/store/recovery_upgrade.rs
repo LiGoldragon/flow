@@ -24,8 +24,7 @@
 //! deploy.
 
 use super::reap_upgrade::{StartRejectionV9, StoredLaunchOutcomeV9};
-use super::successor::SuccessorIntent;
-use super::successor_upgrade::{SuccessorIntentV3, UpgradesSuccessorIntent};
+use super::successor_upgrade::{SuccessorIntentV3, SuccessorIntentV4, UpgradesSuccessorIntent};
 use super::{
     FLOW_LAUNCH_OUTCOME_TABLE_NAME, FlowStore, LaunchOutcome, StoreError, StoredLaunchOutcome,
 };
@@ -204,7 +203,7 @@ impl UpgradesRecoveryMemory for FlowStore {
             }
         }
         if successor_intents_at_v3 {
-            <SuccessorIntent as UpgradesSuccessorIntent>::upgrade_or_register(engine)
+            <SuccessorIntentV4 as UpgradesSuccessorIntent>::upgrade_or_register(engine)
                 .map_err(StoreError::SuccessorIntentUpgrade)?;
         }
         Ok(())

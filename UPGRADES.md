@@ -21,6 +21,18 @@ Not a release: no version is chosen and nothing is deployed.
   - successor intents: v3 to v4, the cause gaining
     `EmergencyRefreshWithoutHandover.{ FlowId Option<TranscriptPath> }`; every
     v3 cause keeps its ordinary meaning.
+  - successor intents: v4 to v5, the cause `Ordered` gaining the caller of the
+    Refresh that ordered it. ordered replacements: v1 to v2, a queued Refresh
+    gaining its caller (`ReplacementOrder::Refresh.RefreshCaller`). The caller
+    is recorded bare, the one the Nexus read from the calling process
+    (`AddressFlow.FlowId` or `Elsewhere.Origin`), and never defaulted; it is
+    carried from the queued Refresh to its succession and across a restart.
+    **The step refuses while a Refresh is open**: no caller can be invented
+    for a queued Refresh (v1) or an ordered succession (v4), so the open
+    refuses at once, before writing anything, naming each such row (its
+    Address and predecessor, and for a succession its launch request). Close
+    or settle every open Refresh before deploying; with none open the step
+    upgrades and every other row carries over unchanged.
   - handover configuration: v1 to v2 (the 60 s publication deadline seeded),
     then v2 to v3 (the approved recovery text seeded once; a configured text,
     the empty one included, is kept across reopens and other setters).

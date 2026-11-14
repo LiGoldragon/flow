@@ -19,7 +19,7 @@ use signal_flow::{Address, LaunchAttempt, LaunchAttemptPhase};
 pub(super) const ORDERED_REPLACEMENT_TABLE_NAME: TableName =
     TableName::new("flow_nexus_ordered_replacements");
 pub(super) const ORDERED_REPLACEMENT_FAMILY: &str = "flow-nexus-ordered-replacement";
-pub(super) const ORDERED_REPLACEMENT_SCHEMA: &str = "flow-nexus-ordered-replacement-v1";
+pub(super) const ORDERED_REPLACEMENT_SCHEMA: &str = "flow-nexus-ordered-replacement-v2";
 
 impl EngineRecord for OrderedReplacement {
     fn record_key(&self) -> RecordKey {
@@ -29,7 +29,7 @@ impl EngineRecord for OrderedReplacement {
 
 impl MemoryDefinition for OrderedReplacement {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(1)
+        MemoryVersion::new(2)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -48,6 +48,7 @@ impl DescribesOrderedReplacementTable for OrderedReplacement {
             FamilyName::new(ORDERED_REPLACEMENT_FAMILY),
             SchemaHash::for_label(ORDERED_REPLACEMENT_SCHEMA),
         )
+        .with_predecessor::<super::refresh_caller_upgrade::OrderedReplacementV1>()
     }
 }
 
@@ -60,7 +61,7 @@ impl NamesOrderedLaunch for OrderedReplacement {
     fn ordered_launch(&self) -> Option<&OrderedLaunch> {
         match &self.replacement_order {
             ReplacementOrder::Launch(launch) => Some(&**launch),
-            ReplacementOrder::Refresh | ReplacementOrder::Restart => None,
+            ReplacementOrder::Refresh(_) | ReplacementOrder::Restart => None,
         }
     }
 }

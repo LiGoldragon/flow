@@ -1355,7 +1355,7 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         // A meta peer is no flow of the Address: it refreshes the current
         // flow.
         let caller =
-            crate::generated::operation::RefreshCaller::Elsewhere(signal_flow::Origin::Unbound);
+            crate::generated::memory::RefreshCaller::Elsewhere(signal_flow::Origin::Unbound);
         match self.nexus.refresh(address, &caller).into_meta() {
             meta_signal_flow::Output::Refreshed(refreshed) => Ok(refreshed),
             other => Err(other),
@@ -2551,7 +2551,7 @@ trait DispatchesSerially {
     fn dispatch_refresh(
         &self,
         address: signal_flow::Address,
-        caller: crate::generated::operation::RefreshCaller,
+        caller: crate::generated::memory::RefreshCaller,
     ) -> Output;
     fn dispatch_meta_serially(
         &self,
@@ -2564,7 +2564,7 @@ impl DispatchesSerially for RunningNexus {
     fn dispatch_refresh(
         &self,
         address: signal_flow::Address,
-        caller: crate::generated::operation::RefreshCaller,
+        caller: crate::generated::memory::RefreshCaller,
     ) -> Output {
         use crate::waking::RefreshesMetaflows;
         let response = self.refresh(&address, &caller);

@@ -1134,14 +1134,18 @@ mod tests {
             launch_request_id: signal_flow::LaunchRequestId("launch-l".into()),
             native_session_id: signal_flow::NativeSessionId("thread-l".into()),
         });
+        // The ordered replacement the hand type declared is the v1 format,
+        // frozen in `refresh_caller_upgrade` since v2 gave a Refresh its
+        // caller.
+        use super::super::refresh_caller_upgrade::{OrderedReplacementV1, ReplacementOrderV1};
         for (frozen_order, order) in [
             (
                 frozen::ReplacementOrder::Refresh,
-                generated::ReplacementOrder::Refresh,
+                ReplacementOrderV1::Refresh,
             ),
             (
                 frozen::ReplacementOrder::Restart,
-                generated::ReplacementOrder::Restart,
+                ReplacementOrderV1::Restart,
             ),
         ] {
             frozen::OrderedReplacement {
@@ -1149,7 +1153,7 @@ mod tests {
                 predecessor: "flow-old".into(),
                 order: frozen_order,
             }
-            .archives_alike(&generated::OrderedReplacement {
+            .archives_alike(&OrderedReplacementV1 {
                 address: Address::sample("replaced"),
                 predecessor: generated::Predecessor("flow-old".into()),
                 replacement_order: order,

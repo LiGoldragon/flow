@@ -21,7 +21,7 @@ use signal_flow::Address;
 pub(super) const SUCCESSOR_INTENT_TABLE_NAME: TableName =
     TableName::new("flow_nexus_successor_intents");
 pub(super) const SUCCESSOR_INTENT_FAMILY: &str = "flow-nexus-successor-intent";
-pub(super) const SUCCESSOR_INTENT_SCHEMA: &str = "flow-nexus-successor-intent-v4";
+pub(super) const SUCCESSOR_INTENT_SCHEMA: &str = "flow-nexus-successor-intent-v5";
 
 impl EngineRecord for SuccessorIntent {
     fn record_key(&self) -> RecordKey {
@@ -31,7 +31,7 @@ impl EngineRecord for SuccessorIntent {
 
 impl MemoryDefinition for SuccessorIntent {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(4)
+        MemoryVersion::new(5)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -51,6 +51,7 @@ impl DescribesSuccessorIntentTable for SuccessorIntent {
             SchemaHash::for_label(SUCCESSOR_INTENT_SCHEMA),
         )
         .with_predecessor::<super::successor_upgrade::SuccessorIntentV3>()
+        .with_predecessor::<super::successor_upgrade::SuccessorIntentV4>()
     }
 }
 

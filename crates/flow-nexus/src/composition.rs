@@ -2256,7 +2256,9 @@ pub(crate) mod tests {
         let composer = recovery_composer(&profile, None, "Configured recovery.");
         for ordinary in [
             crate::generated::memory::SuccessionCause::Refresh,
-            crate::generated::memory::SuccessionCause::Ordered,
+            crate::generated::memory::SuccessionCause::Ordered(
+                crate::generated::memory::RefreshCaller::Elsewhere(signal_flow::Origin::Unbound),
+            ),
             crate::generated::memory::SuccessionCause::Exit,
             crate::generated::memory::SuccessionCause::Replace,
         ] {

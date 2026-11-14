@@ -1459,7 +1459,12 @@ fn a_launch_ordered_replace_owes_its_successor_until_it_is_confirmed() {
 /// it, and nothing is typed into the predecessor.
 #[test]
 fn a_nexus_start_starts_a_successor_owed_after_a_refresh_or_a_replace() {
-    for cause in [SuccessionCause::Ordered, SuccessionCause::Replace] {
+    for cause in [
+        SuccessionCause::Ordered(crate::generated::memory::RefreshCaller::Elsewhere(
+            Origin::Unbound,
+        )),
+        SuccessionCause::Replace,
+    ] {
         let (fixture, _) =
             refreshable_with_successor(Continuity::Maintained, flow_ethos::Delivery::Queue);
         fixture
@@ -1727,29 +1732,17 @@ fn a_replacing_launch_of_a_working_seat_answers_launch_pending_and_waits() {
     );
 }
 
-/// A refresh recorded for a working flow is kept by a Nexus that starts
-/// again on the same Memory: the reopened store holds it, the new Nexus's
-/// start keeps it while the flow works, and the flow's idle event carries
-/// it out.
-#[test]
-fn the_ordered_replacement_survives_a_nexus_restart() {
-    use crate::store::ordered_replacement::{OrdersReplacements, ReplacementOrder};
-    use crate::store::{OpensFlowStore, SetsNativeOwnerEnvironmentForTests};
-    use crate::waking::SleepsAndWakesSeats;
-    let mut fixture = NexusFixture::new();
-    fixture.accept_pane_operations(
-        vec![claude_agent(&fixture)],
-        PromptFixture::Prompted("w1:p3"),
-    );
-    awake_seat(&fixture, vec![]);
-    declare(&fixture, seat_address());
-    super::waking::claude_prompt_taken(&fixture);
-    assert!(matches!(
-        fixture.nexus.dispatch(Input::Refresh(seat_address())),
-        Output::RefreshQueued(_)
-    ));
+/// A Refresh's caller as the Nexus read it: a flow of another Address.
+fn another_flows_caller() -> crate::generated::memory::RefreshCaller {
+    crate::generated::memory::RefreshCaller::Elsewhere(Origin::Flow(signal_flow::FlowOrigin {
+        flow_id: flow_ethos::FlowId("c0ffee".into()),
+        session_id: signal_flow::SessionId("c0ffee-session".into()),
+    }))
+}
 
-    // The store closed and opened again at the same path.
+/// The store closed and opened again at the same path.
+fn reopen_store(fixture: &mut NexusFixture) {
+    use crate::store::{OpensFlowStore, SetsNativeOwnerEnvironmentForTests};
     let placeholder = FlowStore::open(&fixture.directory.path().join("placeholder.sema"))
         .expect("placeholder store");
     drop(std::mem::replace(
@@ -1763,6 +1756,52 @@ fn the_ordered_replacement_survives_a_nexus_restart() {
         boot_id: "isolated-test-boot".into(),
     });
     fixture.nexus.store = reopened.into();
+}
+
+/// A refresh recorded for a working flow is kept by a Nexus that starts
+/// again on the same Memory: the reopened store holds it with the caller it
+/// was called by, the new Nexus's start keeps it while the flow works, and
+/// the flow's idle event carries it out. A second caller of the waiting
+/// Refresh does not replace the first.
+#[test]
+fn the_ordered_replacement_survives_a_nexus_restart() {
+    use crate::store::ordered_replacement::{OrdersReplacements, ReplacementOrder};
+    use crate::waking::{RefreshesMetaflows, SleepsAndWakesSeats};
+    let mut fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    awake_seat(&fixture, vec![]);
+    declare(&fixture, seat_address());
+    super::waking::claude_prompt_taken(&fixture);
+    let caller = another_flows_caller();
+    assert!(matches!(
+        fixture.nexus.refresh(&seat_address(), &caller),
+        Output::RefreshQueued(_)
+    ));
+    // Another caller of the waiting Refresh is answered queued and leaves
+    // the recorded caller as it was.
+    assert!(matches!(
+        fixture.nexus.refresh(
+            &seat_address(),
+            &crate::generated::memory::RefreshCaller::Elsewhere(Origin::Unbound)
+        ),
+        Output::RefreshQueued(_)
+    ));
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .ordered_replacement(&seat_address())
+            .unwrap()
+            .expect("the refresh is queued")
+            .replacement_order,
+        ReplacementOrder::Refresh(caller.clone()),
+        "a queued refresh keeps the caller that queued it"
+    );
+
+    reopen_store(&mut fixture);
 
     let order = fixture
         .nexus
@@ -1771,7 +1810,11 @@ fn the_ordered_replacement_survives_a_nexus_restart() {
         .unwrap()
         .expect("the refresh survives");
     assert_eq!(order.predecessor.0, CLAUDE_SEAT);
-    assert_eq!(order.replacement_order, ReplacementOrder::Refresh);
+    assert_eq!(
+        order.replacement_order,
+        ReplacementOrder::Refresh(caller.clone()),
+        "the reopened store keeps the caller"
+    );
 
     fixture.nexus.recover_wakes();
     assert!(!closed(&fixture), "the working flow is not closed at start");
@@ -1791,6 +1834,109 @@ fn the_ordered_replacement_survives_a_nexus_restart() {
     assert_eq!(stored(&fixture).state, State::Asleep);
 }
 
+/// The succession a queued Refresh causes carries the caller the Refresh was
+/// called by, through the queue and a Nexus restart: the Refresh of a
+/// working Maintained flow waits for its rest, a Nexus starts again on the
+/// same Memory, the flow rests, and the successor owed (its launch not yet
+/// confirmed) records the cause `Ordered` with that caller, which a reopened
+/// store reads back whole.
+#[test]
+fn a_queued_refresh_hands_its_caller_to_the_succession_it_causes() {
+    use crate::store::ordered_replacement::OrdersReplacements;
+    use crate::waking::{RefreshesMetaflows, SleepsAndWakesSeats};
+    let (mut fixture, _) = refreshable_with_staged_successor(
+        Continuity::Maintained,
+        flow_ethos::Delivery::Queue,
+        false,
+    );
+    super::waking::claude_prompt_taken(&fixture);
+    let caller = another_flows_caller();
+    assert!(matches!(
+        fixture.nexus.refresh(&seat_address(), &caller),
+        Output::RefreshQueued(_)
+    ));
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .successor_intent(&seat_address())
+            .unwrap()
+            .map(|intent| intent.succession_cause),
+        Some(SuccessionCause::Refresh),
+        "the fixture owes the successor for the threshold only, while the flow works"
+    );
+
+    reopen_store(&mut fixture);
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .ordered_replacement(&seat_address())
+            .unwrap()
+            .expect("the refresh waits across the restart")
+            .replacement_order,
+        crate::store::ordered_replacement::ReplacementOrder::Refresh(caller.clone()),
+        "the reopened store holds it with its caller"
+    );
+
+    // The new Nexus's start and the flow's rest carry it out, whichever
+    // comes first: its order is read from the reopened Memory.
+    fixture.nexus.recover_wakes();
+    super::waking::report_claude_stop(&fixture, vec![]);
+    let owed = fixture
+        .nexus
+        .store
+        .successor_intent(&seat_address())
+        .unwrap()
+        .expect("the successor stays owed, its launch unconfirmed");
+    assert_eq!(owed.predecessor.0, CLAUDE_SEAT);
+    assert_eq!(
+        owed.succession_cause,
+        SuccessionCause::Ordered(caller.clone()),
+        "the succession carries the caller of the Refresh that caused it"
+    );
+
+    reopen_store(&mut fixture);
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .successor_intent(&seat_address())
+            .unwrap()
+            .expect("the owed successor survives")
+            .succession_cause,
+        SuccessionCause::Ordered(caller),
+        "the reopened store keeps it"
+    );
+}
+
+/// A Refresh called while its flow rests carries its caller straight into
+/// the succession it causes.
+#[test]
+fn an_immediate_refresh_records_its_caller_on_the_succession_it_causes() {
+    use crate::waking::RefreshesMetaflows;
+    let (fixture, _) = refreshable_with_staged_successor(
+        Continuity::Maintained,
+        flow_ethos::Delivery::Queue,
+        false,
+    );
+    let caller = another_flows_caller();
+    assert_eq!(
+        fixture.nexus.refresh(&seat_address(), &caller),
+        Output::RefreshRejected(RefreshRejection::SuccessorUnconfirmed)
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .successor_intent(&seat_address())
+            .unwrap()
+            .expect("the successor stays owed")
+            .succession_cause,
+        SuccessionCause::Ordered(caller)
+    );
+}
+
 /// primary-k7jy: a Refresh is bound to its caller. A flow of the Address
 /// that is no longer the one it is Awake as, a past flow among them,
 /// refreshes nothing: it is refused CallerNotCurrent, naming itself and
@@ -1798,7 +1944,7 @@ fn the_ordered_replacement_survives_a_nexus_restart() {
 #[test]
 fn a_flow_no_longer_current_is_refused_caller_not_current() {
     use crate::caller::ReadsRefreshCaller;
-    use crate::generated::operation::RefreshCaller;
+    use crate::generated::memory::RefreshCaller;
     use crate::waking::RefreshesMetaflows;
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
@@ -1857,7 +2003,7 @@ fn a_flow_no_longer_current_is_refused_caller_not_current() {
 #[test]
 fn the_current_flow_and_any_other_caller_refresh_the_current_flow() {
     use crate::caller::ReadsRefreshCaller;
-    use crate::generated::operation::RefreshCaller;
+    use crate::generated::memory::RefreshCaller;
     use crate::waking::RefreshesMetaflows;
     let elsewhere = signal_flow::FlowOrigin {
         flow_id: flow_ethos::FlowId("c0ffee".into()),

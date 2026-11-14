@@ -39,6 +39,7 @@ pub(crate) mod pending_reap;
 pub(crate) mod queue_delivery;
 pub(crate) mod reap_upgrade;
 pub(crate) mod recovery_upgrade;
+pub(crate) mod refresh_caller_upgrade;
 pub mod reminder;
 pub(crate) mod repair;
 #[cfg(test)]
@@ -1581,6 +1582,13 @@ pub enum StoreError {
     RecoveryUpgrade(String),
     #[error("successor intent upgrade failed: {0}")]
     SuccessorIntentUpgrade(String),
+    #[error(
+        "Memory upgrade refused, no caller can be invented for an open Refresh: {}",
+        .0.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
+    )]
+    RefreshCallerUpgrade(Vec<refresh_caller_upgrade::OpenRefreshWithoutCaller>),
+    #[error("refresh-caller Memory upgrade failed: {0}")]
+    RefreshCallerUpgradeFailed(String),
     #[error("0.54.2 Memory upgrade failed: {0}")]
     LivingUpgrade(String),
     #[error("harness event Memory upgrade failed: {0}")]
@@ -2755,6 +2763,14 @@ impl OpensFlowStore for FlowStore {
         // (v10) take signal-flow 64's wider rejection, and the successor
         // intents (v3) the emergency cause, before anything is registered.
         <FlowStore as recovery_upgrade::UpgradesRecoveryMemory>::upgrade_recovery_memory(
+            &mut engine,
+        )?;
+        // The next step: a Refresh's caller is recorded on its queued order
+        // (ordered replacements v1 to v2) and on the succession it causes
+        // (successor intents v4 to v5). It refuses, naming every open
+        // Refresh, since no caller can be invented for one, and writes
+        // nothing then.
+        <FlowStore as refresh_caller_upgrade::UpgradesRefreshCallers>::upgrade_refresh_callers(
             &mut engine,
         )?;
 
@@ -5697,6 +5713,11 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                 "flow-nexus-successor-intent",
                 "flow-nexus-successor-intent-v3",
             )),
+            // Unchanged from 0.53.2 until a Refresh's caller was recorded.
+            "flow_nexus_ordered_replacements" => Some((
+                ordered_replacement::ORDERED_REPLACEMENT_FAMILY,
+                refresh_caller_upgrade::ORDERED_REPLACEMENT_SCHEMA_V1,
+            )),
             // Unchanged from 0.53.2 until 0.54.3 named a Herdr session.
             "flow_nexus_meta_nexus_configuration" => Some((
                 "flow-nexus-meta-nexus-configuration",
@@ -5789,7 +5810,23 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
             && identity.table_name() == table_key
             && identity.family().as_str() == successor::SUCCESSOR_INTENT_FAMILY
             && identity.schema_hash() == SchemaHash::for_label("flow-nexus-successor-intent-v3");
-        before_recovery_cause
+        // The successor intents as the recovery step wrote them (v4), and
+        // the ordered replacements as 0.56.x wrote them (v1), upgraded on
+        // open.
+        let before_refresh_callers = (table_key == successor::SUCCESSOR_INTENT_TABLE_NAME.as_str()
+            && identity.table_name() == table_key
+            && identity.family().as_str() == successor::SUCCESSOR_INTENT_FAMILY
+            && identity.schema_hash()
+                == SchemaHash::for_label(successor_upgrade::SUCCESSOR_INTENT_SCHEMA_V4))
+            || (table_key == OPTIONAL_ORDERED_REPLACEMENT_TABLE
+                && identity.table_name() == table_key
+                && identity.family().as_str() == ordered_replacement::ORDERED_REPLACEMENT_FAMILY
+                && identity.schema_hash()
+                    == SchemaHash::for_label(
+                        refresh_caller_upgrade::ORDERED_REPLACEMENT_SCHEMA_V1,
+                    ));
+        before_refresh_callers
+            || before_recovery_cause
             || before_recovery_refusals
             || before_living
             || before_event_metadata

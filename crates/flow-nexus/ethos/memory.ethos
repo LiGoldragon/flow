@@ -306,10 +306,19 @@ Memory
   ; A launch ordered as a replacement's successor, with the first prompt's
   ; digest as its profile composed it when ordered.
   OrderedLaunch.{ LaunchProfile Origin PromptSha256.String }
+  ; Who called a Refresh, as the Nexus reads the calling process: a flow of
+  ; the refreshed Address, current or past, which refreshes only itself; or
+  ; any other caller, a flow of another Address or a process in no flow,
+  ; which refreshes the flow the Address is Awake as. It is recorded on the
+  ; Refresh and on the succession the Refresh causes, never defaulted: a
+  ; Refresh always has the caller the Nexus read when it was called.
+  RefreshCaller.[ AddressFlow.FlowId
+                  Elsewhere.Origin ]
   ; What a replacement was ordered as: a Refresh, whose successor is what
-  ; any refresh starts; a Launch or Replace, its own profile the successor;
-  ; or a Restart, the flow's harness closed and its own session resumed.
-  ReplacementOrder.[ Refresh Launch.Box<OrderedLaunch> Restart ]
+  ; any refresh starts and whose caller is kept with it; a Launch or Replace,
+  ; its own profile the successor; or a Restart, the flow's harness closed
+  ; and its own session resumed.
+  ReplacementOrder.[ Refresh.RefreshCaller Launch.Box<OrderedLaunch> Restart ]
   ; A replacement ordered at an Address, keyed by the Address.
   OrderedReplacement.{ Address Predecessor ReplacementOrder }
   ; One open Task's reminders, keyed by the task's LogicalDeliveryId: the
@@ -320,9 +329,9 @@ Memory
   Reminder.{ LogicalDeliveryId Address Recipient Minutes Option<Due> Sent }
   ; Why a successor is owed: its flow passed its refresh threshold and
   ; rested; it ended without Flow or an owner ending it, its pane gone; a
-  ; Refresh ordered from outside ended it; or a Replace ended it, its
-  ; successor the Replace's own launch.
-  SuccessionCause.[ Refresh Exit Ordered Replace
+  ; Refresh ordered from outside ended it, by the caller recorded here; or
+  ; a Replace ended it, its successor the Replace's own launch.
+  SuccessionCause.[ Refresh Exit Ordered.RefreshCaller Replace
                      ; Emergency recovery always names its predecessor; its path may be absent.
                      EmergencyRefreshWithoutHandover.{ FlowId Option<TranscriptPath> } ]
   ; The successor an Address is owed, keyed by the Address.

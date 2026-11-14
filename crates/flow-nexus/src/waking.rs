@@ -100,10 +100,9 @@ use crate::composition::{FreshSeat, JoinsPurpose, RendersQueuedWork};
 use crate::delivery::body::RendersNativeContent;
 use crate::delivery::lease::LeasesPanes;
 use crate::delivery::{DeliversMessages, FindsDeliveryTarget, ReadsLeasedPane};
-use crate::generated::memory::{Device, Inode, Offset};
+use crate::generated::memory::{Device, Inode, Offset, RefreshCaller};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
-    RefreshCaller,
 };
 use crate::generated::starter::ProfilesFreshSeat;
 use crate::herdr::pane::{PaneAgent, WritesPane};
@@ -1769,7 +1768,7 @@ impl SleepsAndWakesSeats for RunningNexus {
                                 | SuccessionCause::Exit => {
                                     refreshes.push(current);
                                 }
-                                SuccessionCause::Ordered | SuccessionCause::Replace => {
+                                SuccessionCause::Ordered(_) | SuccessionCause::Replace => {
                                     owed.push(intent);
                                 }
                             }
@@ -1983,9 +1982,9 @@ impl RefreshesMetaflows for RunningNexus {
         // A refresh never closes a working flow, whoever asks: one that does
         // not rest now is refreshed at its idle event.
         if !self.rests_for_closing(&flow_id.0) {
-            return self.queue_refresh(address, &flow_id.0);
+            return self.queue_refresh(address, &flow_id.0, caller);
         }
-        self.refresh_held(address, metaflow, flow_id, node, turn, lock)
+        self.refresh_held(address, metaflow, flow_id, node, caller, turn, lock)
     }
 
     fn replace_held(&self, profile: LaunchProfile, origin: Origin) -> Output {
@@ -2047,13 +2046,15 @@ pub(crate) trait WaitsForRestToReplace {
         metaflow: Metaflow,
         flow_id: FlowId,
         node: FlowNode,
+        caller: &RefreshCaller,
         turn: std::sync::MutexGuard<'_, ()>,
         lock: WakingLease<'_>,
     ) -> Output;
-    /// Records a Refresh of the working `flow_id`, under the gate, and
-    /// answers RefreshQueued; a Launch already waiting for it refuses it
-    /// Locked.
-    fn queue_refresh(&self, address: &Address, flow_id: &str) -> Output;
+    /// Records a Refresh of the working `flow_id` with its `caller`, under
+    /// the gate, and answers RefreshQueued; a Refresh already waiting for it
+    /// keeps the caller it was recorded with, and a Launch already waiting
+    /// for it refuses it Locked.
+    fn queue_refresh(&self, address: &Address, flow_id: &str, caller: &RefreshCaller) -> Output;
     /// Records the Launch or Replace of the working `predecessor`, under the
     /// gate, once its successor composes, and answers LaunchPending with the
     /// attempt it waits as; another order waiting for it refuses it Locked.
@@ -2098,6 +2099,7 @@ impl WaitsForRestToReplace for RunningNexus {
         metaflow: Metaflow,
         flow_id: FlowId,
         node: FlowNode,
+        caller: &RefreshCaller,
         turn: std::sync::MutexGuard<'_, ()>,
         lock: WakingLease<'_>,
     ) -> Output {
@@ -2122,8 +2124,11 @@ impl WaitsForRestToReplace for RunningNexus {
             // Replace takes the gate for its own steps; the lock keeps any
             // wake, drain or delivery of the metaflow out meanwhile.
             drop(turn);
-            let replaced =
-                self.refresh_successor_first(&flow_id.0, &metaflow, SuccessionCause::Ordered);
+            let replaced = self.refresh_successor_first(
+                &flow_id.0,
+                &metaflow,
+                SuccessionCause::Ordered(caller.clone()),
+            );
             drop(lock);
             self.wake_deferred();
             return match replaced {
@@ -2195,12 +2200,12 @@ impl WaitsForRestToReplace for RunningNexus {
         refreshed
     }
 
-    fn queue_refresh(&self, address: &Address, flow_id: &str) -> Output {
+    fn queue_refresh(&self, address: &Address, flow_id: &str, caller: &RefreshCaller) -> Output {
         use signal_flow::{RefreshQueued, RefreshRejection, Refusal};
         match self.store.ordered_replacement(address) {
             Ok(Some(order)) if order.predecessor.0 == flow_id => {
                 return match order.replacement_order {
-                    ReplacementOrder::Refresh => Output::RefreshQueued(RefreshQueued {
+                    ReplacementOrder::Refresh(_) => Output::RefreshQueued(RefreshQueued {
                         address: address.clone(),
                         flow_id: signal_flow::FlowId(flow_id.to_owned()),
                     }),
@@ -2215,7 +2220,7 @@ impl WaitsForRestToReplace for RunningNexus {
         if let Err(error) = self.store.order_replacement(OrderedReplacement {
             address: address.clone(),
             predecessor: crate::generated::memory::Predecessor(flow_id.to_owned()),
-            replacement_order: ReplacementOrder::Refresh,
+            replacement_order: ReplacementOrder::Refresh(caller.clone()),
         }) {
             return Output::Refused(Refusal::Store(error.to_string()));
         }
@@ -2355,11 +2360,12 @@ impl WaitsForRestToReplace for RunningNexus {
                     response => AtStop::Kept(KeptAtStop::OrderedRefused(Box::new(response))),
                 };
             }
-            ReplacementOrder::Refresh => self.refresh_held(
+            ReplacementOrder::Refresh(caller) => self.refresh_held(
                 &address,
                 metaflow,
                 signal_flow::FlowId(order.predecessor.0),
                 node,
+                &caller,
                 turn,
                 lock,
             ),
@@ -3711,7 +3717,7 @@ impl WakesInParts for RunningNexus {
                 if intent.predecessor.0 == flow_id
                     && matches!(
                         intent.succession_cause,
-                        SuccessionCause::Refresh | SuccessionCause::Ordered
+                        SuccessionCause::Refresh | SuccessionCause::Ordered(_)
                     )
                     && !intent.launch_request_id.0.is_empty()
                     && !self.launch_refused(&intent.launch_request_id.0) =>
@@ -4088,7 +4094,7 @@ impl WakesInParts for RunningNexus {
         let ordered_now = ordered.as_ref().is_some_and(|order| {
             matches!(
                 order.replacement_order,
-                ReplacementOrder::Refresh | ReplacementOrder::Restart
+                ReplacementOrder::Refresh(_) | ReplacementOrder::Restart
             )
         });
         // Whether the harness may be closed now: a Claude seat only once its

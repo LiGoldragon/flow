@@ -600,9 +600,14 @@ answer, settles every request the prompt carried, at the first event that
 reads it. A direct Send that woke its
 recipient waits for that receipt and is never typed into the new pane a
 second time. A wake that started its seat and could not record what the
-first prompt carried answers that Send `SendAccepted` with its delivery
+first prompt carried leaves that Send to record it: what the prompt
+carried and the queue still holds is parked Uncertain at the session's
+start, as a typed payload is, so no drain types it again and the launch's
+receipt settles it. The Send then answers `SendAccepted` with its delivery
 `Uncertain`, the request placed without its receipt, and writes no retry
-cause on the queue: nothing failed before the native submission.
+cause on the queue: nothing failed before the native submission. A Send
+queued behind what the prompt carried waits for the seat's turn; a record
+the store refuses answers `Failed` with the store's refusal.
 
 A Codex seat runs no hook and reports no Stop; its turn ends are its
 app-server's. Every connection Flow keeps on a Codex thread (the launch's

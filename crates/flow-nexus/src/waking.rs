@@ -3130,6 +3130,16 @@ pub(crate) trait CarriesStartup {
     /// start. False when the store refused or the batch is not the queue's
     /// head.
     fn carry_startup(&self, address: &Address, flow_id: &str, startup: &[QueueEntry]) -> bool;
+    /// Under the dispatch gate the caller holds, after a wake started flow
+    /// `flow_id` and could not record what its first prompt carried: parks
+    /// what that prompt carried and the queue still holds, as
+    /// `carry_startup` parks a batch, so no drain types it again and the
+    /// launch's receipt settles it. The carried requests are those whose
+    /// rendered run, after the ones already parked at the session's start,
+    /// ends the launch's brief. Answers the requests it parked, oldest
+    /// first, none when nothing carried is still queued; None when the
+    /// store refused.
+    fn carry_left_queued(&self, address: &Address, flow_id: &str) -> Option<Vec<QueueEntry>>;
     /// The launch whose first prompt carried `attempt`, when one did: an
     /// attempt anchored at its session's start, in a flow whose launch
     /// typed a first prompt whose brief ends with the run of requests the
@@ -3232,6 +3242,55 @@ impl CarriesStartup for RunningNexus {
             carried.len()
         );
         carried.len() == startup.len()
+    }
+
+    fn carry_left_queued(&self, address: &Address, flow_id: &str) -> Option<Vec<QueueEntry>> {
+        let node = self.store.flow_node(flow_id).ok()??;
+        let profile = self.last_launch_profile(flow_id)?;
+        let queue = self.store.metaflow(address).ok()??.queue.0;
+        let anchor = node.harness_kind.session_start_anchor();
+        let parked = self
+            .store
+            .unsettled_deliveries(address)
+            .ok()?
+            .into_iter()
+            .filter(|attempt| {
+                attempt.flow_id.0 == flow_id
+                    && attempt.thread_id.0 == node.session_id.0
+                    && attempt.native_history_anchor == anchor
+                    && matches!(
+                        attempt.queue_delivery_phase,
+                        QueueDeliveryPhase::Prepared
+                            | QueueDeliveryPhase::Uncertain(_)
+                            | QueueDeliveryPhase::ReceiptRecorded(_)
+                    )
+            })
+            .filter_map(|attempt| match attempt.queue_evidence {
+                meta_signal_flow::QueueEvidence::Logical(entry) => Some(entry),
+                meta_signal_flow::QueueEvidence::Legacy(_) => None,
+            })
+            .collect::<Vec<_>>();
+        // Work admitted while the launch started is queued behind its batch:
+        // what the prompt carried is the longest head of the queue that,
+        // after what is already parked, renders as the brief's end.
+        if profile.opens_without_prompt() {
+            return Some(Vec::new());
+        }
+        let brief = &profile.instruction_prompt.0;
+        let left = (1..=queue.len())
+            .rev()
+            .map(|length| &queue[..length])
+            .find(|head| {
+                let run = parked
+                    .iter()
+                    .chain(head.iter())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                brief.ends_with(&run.prompt_text(address))
+            })
+            .map(<[QueueEntry]>::to_vec)
+            .unwrap_or_default();
+        (left.is_empty() || self.carry_startup(address, flow_id, &left)).then_some(left)
     }
 
     fn startup_launch(&self, attempt: &QueueDeliveryAttempt) -> Option<String> {

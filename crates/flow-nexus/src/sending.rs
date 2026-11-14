@@ -1347,10 +1347,11 @@ impl CompletesDirectSends for RunningNexus {
             .then(|| self.wake(address.clone()));
         // A wake refused after it left its seat Awake started that seat and
         // could not record what the seat's first prompt carried: the prompt
-        // was submitted, carrying the queue.
+        // was submitted, carrying the head of the queue.
         let started_unsettled =
             matches!(woken, Some(crate::generated::operation::Outcome::Failed(_)))
-                && self.live_awake_flow(address).is_some();
+                .then(|| self.live_awake_flow(address))
+                .flatten();
         // Subscribe before input. File events only schedule the existing
         // exact session/inode/cursor/content correlation, never delivery.
         let _receipt_watch = self.direct_receipt_watch(address);
@@ -1437,15 +1438,66 @@ impl CompletesDirectSends for RunningNexus {
         ) && self.carrying_attempt(address, &logical_id.0).is_none()
         {
             // The wake started its seat and could not record what the
-            // seat's first prompt carried: this request was placed without
-            // its receipt. Nothing failed before the native submission, so
-            // no retry cause is written; the request is accepted Uncertain.
-            if started_unsettled {
-                return PrivateSendResponse::SendAccepted(signal_flow::SendAcceptance {
-                    delivery_state: DeliveryState::Uncertain,
-                    ..acceptance
-                })
-                .into();
+            // seat's first prompt carried. What it carried is recorded now
+            // as placed without its receipt, as a typed payload is: no drain
+            // types it again, and the launch's receipt settles it. Nothing
+            // failed before the native submission, so no retry cause is
+            // written. A request the prompt carried is accepted Uncertain;
+            // one queued behind the prompt waits for the seat's turn, as
+            // any queued request does; a refused record is a refused Send.
+            if let Some(flow_id) = started_unsettled {
+                let (carried, still_queued) = {
+                    let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+                    let carried =
+                        crate::waking::CarriesStartup::carry_left_queued(self, address, &flow_id);
+                    let still_queued = match self.store.metaflow(address) {
+                        Ok(Some(metaflow)) => Some(
+                            metaflow
+                                .queue
+                                .0
+                                .iter()
+                                .any(|entry| entry.logical_delivery_id == logical_id),
+                        ),
+                        _ => None,
+                    };
+                    (carried, still_queued)
+                };
+                return match (carried, still_queued) {
+                    (_, Some(false)) => {
+                        PrivateSendResponse::SendAccepted(signal_flow::SendAcceptance {
+                            delivery_state: DeliveryState::Uncertain,
+                            ..acceptance
+                        })
+                        .into()
+                    }
+                    (Some(_), Some(true)) => {
+                        let private_response = PrivateSendResponse::SendAccepted(acceptance);
+                        SendAnswer {
+                            response:
+                                crate::message_projection::ProjectsSendResponse::visible_send_response(
+                                    &private_response,
+                                ),
+                            private_response,
+                            pending: Some(PendingSend {
+                                address: address.clone(),
+                            }),
+                            _pending_answer: None,
+                        }
+                    }
+                    _ => PrivateSendResponse::Failed(SendFailure::Admitted(
+                        signal_flow::SendFailure_Admitted_Data {
+                            logical_delivery_id: logical_id,
+                            request_id: acceptance.request_id.clone(),
+                            send_failure_reason: SendFailureReason::NotSent(format!(
+                                "{:?}",
+                                crate::generated::operation::Outcome::Failed(
+                                    crate::generated::operation::Failed_Data::StoreRefused
+                                )
+                            )),
+                        },
+                    ))
+                    .into(),
+                };
             }
             // Starting the next flow failed before any native submission.
             // The existing metaflow still owns the same admitted request;

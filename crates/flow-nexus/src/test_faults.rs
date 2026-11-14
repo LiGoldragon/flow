@@ -10,7 +10,7 @@
 //! commit, as a refused commit does: sema-engine commits atomically, so a
 //! commit that did not land is a write refused whole.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Condvar, Mutex};
 
 /// The points after a successor's confirmation a crash is injected at.
@@ -89,7 +89,8 @@ pub(crate) enum RefusedWrite {
 #[derive(Debug, Default)]
 pub(crate) struct StoreFaults {
     crashes: Mutex<BTreeSet<CrashPoint>>,
-    refusals: Mutex<BTreeSet<RefusedWrite>>,
+    /// Each armed refusal with the number of times it still refuses.
+    refusals: Mutex<BTreeMap<RefusedWrite, usize>>,
     /// Every obligation commit attempted, in order, for the counting hook.
     attempts: Mutex<Vec<String>>,
     /// Announced each time an armed crash fires.
@@ -106,7 +107,9 @@ pub(crate) trait InjectsCrashes {
     fn crash_if_armed(&self, point: CrashPoint);
     /// Arms one refusal of `write`.
     fn refuse_next(&self, write: RefusedWrite);
-    /// Whether `write` is refused now, disarming it.
+    /// Arms `write` to be refused the next `times` times it is attempted.
+    fn refuse_times(&self, write: RefusedWrite, times: usize);
+    /// Whether `write` is refused now, spending one armed refusal.
     fn refused_now(&self, write: RefusedWrite) -> bool;
     /// Notes one obligation commit attempted, named.
     fn attempted(&self, name: &str);
@@ -137,17 +140,34 @@ impl InjectsCrashes for StoreFaults {
     }
 
     fn refuse_next(&self, write: RefusedWrite) {
-        self.refusals
+        self.refuse_times(write, 1);
+    }
+
+    fn refuse_times(&self, write: RefusedWrite, times: usize) {
+        let mut refusals = self
+            .refusals
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(write);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if times == 0 {
+            refusals.remove(&write);
+        } else {
+            refusals.insert(write, times);
+        }
     }
 
     fn refused_now(&self, write: RefusedWrite) -> bool {
-        self.refusals
+        let mut refusals = self
+            .refusals
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&write)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(left) = refusals.get_mut(&write) else {
+            return false;
+        };
+        *left -= 1;
+        if *left == 0 {
+            refusals.remove(&write);
+        }
+        true
     }
 
     fn attempted(&self, name: &str) {

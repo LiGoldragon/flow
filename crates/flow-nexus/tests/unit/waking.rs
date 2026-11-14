@@ -2200,6 +2200,203 @@ fn a_direct_send_whose_wake_started_its_seat_and_kept_its_batch_is_accepted_unce
     peer.end();
 }
 
+/// A direct Order to an asleep Claude metaflow wakes it, and the woken
+/// flow's first prompt carries the Order, its receipt not yet written. The
+/// store refuses the wake's record of the batch, so the Send records it:
+/// the Order leaves the queue as an Uncertain attempt at the session's
+/// start and the Send is accepted Uncertain. A drain after it types
+/// nothing, and once the first prompt's receipt lands a drain settles the
+/// Order Delivered on it, never typed into the pane.
+#[test]
+fn a_direct_send_whose_wake_kept_its_batch_records_it_uncertain_and_no_drain_types_it_again() {
+    use crate::sending::SendsRequests;
+    use crate::store::queue_delivery::AccountsQueueDelivery;
+    use crate::test_faults::{InjectsCrashes, RefusedWrite};
+    use crate::waking::AnchorsSessionStart;
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let world = fixture.fresh_claude_world();
+    fs::write(world.state.join("startup-rows-later"), "").unwrap();
+    let sender = psyche_core_opus();
+    let peer = BoundPeer::spawn();
+    peer.bind(&fixture, sender.clone());
+    fixture
+        .nexus
+        .store
+        .faults
+        .refuse_next(RefusedWrite::DeliveryPrepare);
+
+    let answer = fixture.nexus.send_request(
+        signal_flow::SendRequest {
+            address: at.clone(),
+            sendable_message: super::sendable_message(Message::MiddleAbrupt(Request::Order(
+                "Carry it.".into(),
+            ))),
+        },
+        Some(&peer.process()),
+    );
+
+    let signal_flow::PrivateSendResponse::SendAccepted(accepted) = &answer.private_response else {
+        panic!(
+            "the Send its wake's first prompt carried is accepted: {:?}; Herdr calls: {}",
+            answer.private_response,
+            world.calls()
+        );
+    };
+    assert_eq!(
+        accepted.delivery_state,
+        signal_flow::DeliveryState::Uncertain,
+        "{accepted:?}"
+    );
+    assert!(answer.pending.is_none(), "nothing is scheduled to type it");
+    let snapshot = |fixture: &NexusFixture| {
+        fixture
+            .nexus
+            .store
+            .logical_delivery_snapshot(&accepted.logical_delivery_id)
+            .unwrap()
+            .expect("the Order is held")
+            .delivery_state
+    };
+    assert_eq!(snapshot(&fixture), signal_flow::DeliveryState::Uncertain);
+    let woken = stored(&fixture, Model::Sol);
+    assert!(
+        matches!(&woken.state, State::Awake(flow_id) if flow_id.0 != "abc123"),
+        "the wake started its seat: {woken:?}"
+    );
+    assert!(
+        woken.queue.0.is_empty(),
+        "no queued entry is left for a drain to type: {woken:?}"
+    );
+    let awaiting = fixture.nexus.store.unsettled_deliveries(&at).unwrap();
+    assert_eq!(awaiting.len(), 1, "{awaiting:?}");
+    assert_eq!(
+        awaiting[0].native_history_anchor,
+        HarnessKind::Claude.session_start_anchor(),
+        "the Order awaits the first prompt's receipt: {awaiting:?}"
+    );
+
+    // A drain before the receipt lands types nothing and settles nothing.
+    assert_eq!(
+        fixture.nexus.perform(Operation::Drain(at.clone())),
+        Outcome::Drained(Vec::new())
+    );
+    assert_eq!(snapshot(&fixture), signal_flow::DeliveryState::Uncertain);
+    assert!(later_prompts(&world).is_empty(), "{}", world.calls());
+
+    // The first prompt's receipt lands; the drain after it settles the
+    // Order on it and types nothing.
+    startup_rows_land(&fixture, &world);
+    for _ in 0..2 {
+        assert_eq!(
+            fixture.nexus.perform(Operation::Drain(at.clone())),
+            Outcome::Drained(Vec::new())
+        );
+    }
+    assert!(
+        matches!(snapshot(&fixture), signal_flow::DeliveryState::Delivered(_)),
+        "the Order settles on its first prompt's receipt: {:?}",
+        snapshot(&fixture)
+    );
+    assert_eq!(startup_prompts(&world), 1, "{}", world.calls());
+    assert!(
+        later_prompts(&world).is_empty(),
+        "the Order is never typed into the pane: {}",
+        world.calls()
+    );
+    peer.end();
+}
+
+/// As above, but the store refuses the Send's record of the batch too:
+/// the Send answers Failed with the store's refusal, not Uncertain, and
+/// writes no retry cause; the Order stays queued as it stood.
+#[test]
+fn a_direct_send_whose_record_of_its_wakes_batch_is_refused_answers_failed_store_refused() {
+    use crate::sending::SendsRequests;
+    use crate::test_faults::{InjectsCrashes, RefusedWrite};
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let world = fixture.fresh_claude_world();
+    fs::write(world.state.join("startup-rows-later"), "").unwrap();
+    let sender = psyche_core_opus();
+    let peer = BoundPeer::spawn();
+    peer.bind(&fixture, sender.clone());
+    // The wake's record of its batch, then the Send's.
+    fixture
+        .nexus
+        .store
+        .faults
+        .refuse_times(RefusedWrite::DeliveryPrepare, 2);
+
+    let answer = fixture.nexus.send_request(
+        signal_flow::SendRequest {
+            address: at.clone(),
+            sendable_message: super::sendable_message(Message::MiddleAbrupt(Request::Order(
+                "Carry it.".into(),
+            ))),
+        },
+        Some(&peer.process()),
+    );
+
+    let signal_flow::PrivateSendResponse::Failed(signal_flow::SendFailure::Admitted(failed)) =
+        &answer.private_response
+    else {
+        panic!(
+            "the Send whose record was refused fails: {:?}; Herdr calls: {}",
+            answer.private_response,
+            world.calls()
+        );
+    };
+    assert_eq!(
+        failed.send_failure_reason,
+        signal_flow::SendFailureReason::NotSent(format!(
+            "{:?}",
+            Outcome::Failed(Failed_Data::StoreRefused)
+        )),
+        "{failed:?}"
+    );
+    assert!(answer.pending.is_none(), "nothing is scheduled to type it");
+    let woken = stored(&fixture, Model::Sol);
+    assert!(
+        matches!(&woken.state, State::Awake(flow_id) if flow_id.0 != "abc123"),
+        "the wake started its seat: {woken:?}"
+    );
+    assert!(
+        woken
+            .queue
+            .0
+            .iter()
+            .any(|entry| entry.logical_delivery_id == failed.logical_delivery_id),
+        "the refused record left the Order queued as it stood: {woken:?}"
+    );
+    let snapshot = fixture
+        .nexus
+        .store
+        .logical_delivery_snapshot(&failed.logical_delivery_id)
+        .unwrap()
+        .expect("the Order is held");
+    assert!(
+        !matches!(
+            snapshot.delivery_state,
+            signal_flow::DeliveryState::Retryable(_)
+        ),
+        "no retry cause is written: {snapshot:?}"
+    );
+    assert_eq!(startup_prompts(&world), 1, "{}", world.calls());
+    assert!(later_prompts(&world).is_empty(), "{}", world.calls());
+    peer.end();
+}
+
 /// A wake a queued request makes due, whose first prompt's receipt lands
 /// after the wake looked for it, leaves the request it carried out of the
 /// queue: the turn end after it types only what arrived since, and the

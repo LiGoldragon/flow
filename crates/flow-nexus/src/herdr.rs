@@ -9,13 +9,14 @@ pub mod pane;
 pub mod reservation;
 
 use crate::codex::{CodexEndpoint, CodexEndpoints};
+use crate::emission::{AddressesHerdrSession, ReadsProcessReply};
+use crate::generated::emission::{
+    AgentStatus, AgentWait, Emittable, HerdrCommand, HerdrSessionCommand, Milliseconds,
+    ProcessReply,
+};
 use crate::live::{HoldsLiveValue, Live};
 use std::collections::BTreeSet;
-use std::{
-    fs,
-    path::PathBuf,
-    process::{Command, Output},
-};
+use std::{fs, path::PathBuf};
 
 use signal_flow::{
     EndpointSelection, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection, RouteReadiness,
@@ -309,44 +310,24 @@ impl OperatesHerdrPane for HerdrCli {
         ) {
             return false;
         }
-        Command::new(&self.executable)
-            .args([
-                "--session",
-                route.herdr_session_name.0.as_str(),
-                "pane",
-                "close",
-                route.herdr_pane_id.0.as_str(),
-            ])
-            .output()
-            .is_ok_and(|output| output.status.success())
+        HerdrCommand::in_session(
+            &route.herdr_session_name,
+            HerdrSessionCommand::ClosePane(route.herdr_pane_id.clone()),
+        )
+        .emit(self)
+        .succeeded()
     }
 }
 
 /// Herdr's answer to one `agent prompt`, read for what it proves about the
 /// bound pane. Herdr prints a success reply on stdout and an error reply on
 /// stderr, each one JSON object.
-struct PromptReply {
-    output: Output,
-}
-
 trait ReadsPromptReply {
     /// The wait that observes the recipient react: Herdr 0.8.2 requires a
     /// lifecycle change within five seconds of an accepted prompt to a
     /// non-working agent, else `agent_prompt_stalled`; any observed state
     /// then matches.
-    const OBSERVATION: [&'static str; 11] = [
-        "--wait",
-        "--until",
-        "working",
-        "--until",
-        "idle",
-        "--until",
-        "done",
-        "--until",
-        "blocked",
-        "--timeout",
-        "10000",
-    ];
+    fn observation() -> AgentWait;
     /// Herdr 0.8.2 error codes answered before any input is sent to the
     /// pane (`handle_agent_prompt` and the pre-prompt `agent get`). Every
     /// other failure may follow typed input and is Uncertain.
@@ -366,23 +347,37 @@ trait ReadsPromptReply {
     fn prompted_binding(&self, route: &HerdrRoute) -> bool;
 }
 
-impl ReadsPromptReply for PromptReply {
+impl ReadsPromptReply for ProcessReply {
+    fn observation() -> AgentWait {
+        AgentWait {
+            agent_status_vector: vec![
+                AgentStatus::Working,
+                AgentStatus::Idle,
+                AgentStatus::Done,
+                AgentStatus::Blocked,
+            ],
+            milliseconds: Milliseconds(10_000),
+        }
+    }
+
     fn refused_before_input(&self) -> bool {
-        !self.output.status.success()
-            && serde_json::from_slice::<serde_json::Value>(&self.output.stderr)
-                .ok()
-                .and_then(|reply| {
-                    reply
-                        .pointer("/error/code")
-                        .and_then(serde_json::Value::as_str)
-                        .map(|code| Self::BEFORE_INPUT.contains(&code))
-                })
-                .unwrap_or(false)
+        let ProcessReply::Failed(printout) = self else {
+            return false;
+        };
+        serde_json::from_str::<serde_json::Value>(&printout.stderr.0)
+            .ok()
+            .and_then(|reply| {
+                reply
+                    .pointer("/error/code")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|code| Self::BEFORE_INPUT.contains(&code))
+            })
+            .unwrap_or(false)
     }
 
     fn prompted_binding(&self, route: &HerdrRoute) -> bool {
-        self.output.status.success()
-            && serde_json::from_slice::<serde_json::Value>(&self.output.stdout).is_ok_and(|reply| {
+        self.printed().is_some_and(|printed| {
+            serde_json::from_str::<serde_json::Value>(printed).is_ok_and(|reply| {
                 reply
                     .pointer("/result/type")
                     .and_then(serde_json::Value::as_str)
@@ -396,6 +391,7 @@ impl ReadsPromptReply for PromptReply {
                         .and_then(serde_json::Value::as_str)
                         == Some(route.herdr_terminal_id.0.as_str())
             })
+        })
     }
 }
 
@@ -652,14 +648,12 @@ impl ReadsHerdrPanes for HerdrCli {
     }
 
     fn pane_label(&self, herdr_session_name: &str, herdr_pane_id: &str) -> Option<String> {
-        use crate::herdr::launch::RunsHerdr;
-        self.run_json(&[
-            "--session".into(),
-            herdr_session_name.into(),
-            "pane".into(),
-            "get".into(),
-            herdr_pane_id.into(),
-        ])
+        HerdrCommand::in_session(
+            &signal_flow::HerdrSessionName(herdr_session_name.to_owned()),
+            HerdrSessionCommand::GetPane(signal_flow::HerdrPaneId(herdr_pane_id.to_owned())),
+        )
+        .emit(self)
+        .json()
         .ok()?
         .pointer("/result/pane/label")
         .and_then(serde_json::Value::as_str)
@@ -667,15 +661,12 @@ impl ReadsHerdrPanes for HerdrCli {
     }
 
     fn foreground_processes(&self, route: &HerdrRoute) -> Option<Vec<ForegroundProcess>> {
-        use crate::herdr::launch::RunsHerdr;
-        self.run_json(&[
-            "--session".into(),
-            route.herdr_session_name.clone().0,
-            "pane".into(),
-            "process-info".into(),
-            "--pane".into(),
-            route.herdr_pane_id.clone().0,
-        ])
+        HerdrCommand::in_session(
+            &route.herdr_session_name,
+            HerdrSessionCommand::ReadPaneProcesses(route.herdr_pane_id.clone()),
+        )
+        .emit(self)
+        .json()
         .ok()?
         .foreground_processes_of(route)
     }
@@ -781,29 +772,20 @@ impl ReadsHerdrPanes for HerdrCli {
     }
 
     fn session_snapshot(&self, herdr_session_name: &str) -> Option<serde_json::Value> {
-        let output = Command::new(&self.executable)
-            .args(["--session", herdr_session_name, "api", "snapshot"])
-            .output()
-            .ok()?;
-        output
-            .status
-            .success()
-            .then(|| serde_json::from_slice(&output.stdout).ok())
-            .flatten()
+        HerdrCommand::in_session(
+            &signal_flow::HerdrSessionName(herdr_session_name.to_owned()),
+            HerdrSessionCommand::Snapshot,
+        )
+        .emit(self)
+        .json()
+        .ok()
     }
 }
 
 impl crate::caller::KnowsHerdrServers for HerdrCli {
     /// `herdr session list --json` names each session with its socket.
     fn herdr_sessions(&self) -> Option<Vec<crate::caller::HerdrSession>> {
-        let output = Command::new(&self.executable)
-            .args(["session", "list", "--json"])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let listing: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+        let listing = HerdrCommand::ListSessions.emit(self).json().ok()?;
         listing
             .get("sessions")?
             .as_array()?
@@ -1420,12 +1402,12 @@ impl ReadsHerdrListing for serde_json::Value {
 /// waited on together with the worker's cancellation. A cancelled call's
 /// child is killed and reaped before the call answers.
 pub(crate) trait ReadsHerdrUntilCancelled {
-    /// `herdr <args>` with stdout piped; waits on [stdout, cancellation]
-    /// and reads to EOF, then reaps the child through its pidfd. Ok(None)
-    /// when Herdr could not be run or answered a failure.
+    /// The command emitted through `CancellableHerdr`: what it printed,
+    /// Ok(None) when Herdr could not be run or answered a failure, and the
+    /// cancellation's cause when it was cancelled.
     fn output_until(
         &self,
-        args: &[&str],
+        command: &HerdrCommand,
         cancellation: &crate::observation_lifetime::ObservationCancellation,
     ) -> Result<Option<Vec<u8>>, crate::observation_lifetime::ObservationCancellationCause>;
     fn session_socket_until(
@@ -1462,69 +1444,16 @@ pub(crate) trait ReadsHerdrUntilCancelled {
 impl ReadsHerdrUntilCancelled for HerdrCli {
     fn output_until(
         &self,
-        args: &[&str],
+        command: &HerdrCommand,
         cancellation: &crate::observation_lifetime::ObservationCancellation,
     ) -> Result<Option<Vec<u8>>, crate::observation_lifetime::ObservationCancellationCause> {
-        use crate::event_wait::{AwaitsDescriptors, OpensExitDescriptor};
-        use crate::observation_lifetime::CancelsObservation;
-        use std::io::Read;
-        use std::os::fd::AsFd;
-        if let Some(cause) = cancellation.cause() {
-            return Err(cause);
-        }
-        let Ok(mut child) = Command::new(&self.executable)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        else {
-            return Ok(None);
-        };
-        let exited = child.id().exit_descriptor().ok();
-        let cancelled = |child: &mut std::process::Child, cause| {
-            let _ = child.kill();
-            if let Some(exited) = &exited {
-                let _ = [exited.as_fd()].ready(None);
-            }
-            let _ = child.wait();
-            Err(cause)
-        };
-        let mut output = Vec::new();
-        if let Some(mut stdout) = child.stdout.take() {
-            let mut buffer = [0_u8; 8192];
-            while let Ok(ready) = [stdout.as_fd(), cancellation.descriptor()].ready(None) {
-                if ready[1] || cancellation.cause().is_some() {
-                    let cause = cancellation.cause().unwrap_or(
-                        crate::observation_lifetime::ObservationCancellationCause::NexusStopped,
-                    );
-                    return cancelled(&mut child, cause);
-                }
-                match stdout.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(count) => output.extend_from_slice(&buffer[..count]),
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                    Err(_) => break,
-                }
-            }
-        }
-        // The child closed its stdout; its exit is awaited with the
-        // cancellation, so a child that lingers is still killed and reaped.
-        if let Some(exited) = &exited {
-            match [exited.as_fd(), cancellation.descriptor()].ready(None) {
-                Ok(ready) if ready[1] && !ready[0] => {
-                    let cause = cancellation.cause().unwrap_or(
-                        crate::observation_lifetime::ObservationCancellationCause::NexusStopped,
-                    );
-                    return cancelled(&mut child, cause);
-                }
-                _ => {}
-            }
-        }
-        match child.wait() {
-            Ok(status) if status.success() => Ok(Some(output)),
-            _ => Ok(None),
-        }
+        let reply = command.emit(&crate::emission::CancellableHerdr {
+            herdr: self,
+            cancellation,
+        });
+        reply
+            .observed(cancellation)
+            .map(|printed| printed.map(|printed| printed.as_bytes().to_vec()))
     }
 
     fn session_socket_until(
@@ -1532,7 +1461,7 @@ impl ReadsHerdrUntilCancelled for HerdrCli {
         session: &str,
         cancellation: &crate::observation_lifetime::ObservationCancellation,
     ) -> Result<Option<PathBuf>, crate::observation_lifetime::ObservationCancellationCause> {
-        let Some(output) = self.output_until(&["session", "list", "--json"], cancellation)? else {
+        let Some(output) = self.output_until(&HerdrCommand::ListSessions, cancellation)? else {
             return Ok(None);
         };
         Ok(serde_json::from_slice::<serde_json::Value>(&output)
@@ -1555,12 +1484,7 @@ impl ReadsHerdrUntilCancelled for HerdrCli {
             return Ok(PaneOwnership::Unknown);
         };
         let Some(output) = self.output_until(
-            &[
-                "--session",
-                route.herdr_session_name.0.as_str(),
-                "api",
-                "snapshot",
-            ],
+            &HerdrCommand::in_session(&route.herdr_session_name, HerdrSessionCommand::Snapshot),
             cancellation,
         )?
         else {
@@ -1592,14 +1516,10 @@ impl ReadsHerdrUntilCancelled for HerdrCli {
     ) -> Result<Option<BTreeSet<String>>, crate::observation_lifetime::ObservationCancellationCause>
     {
         let Some(output) = self.output_until(
-            &[
-                "--session",
-                route.herdr_session_name.0.as_str(),
-                "pane",
-                "process-info",
-                "--pane",
-                route.herdr_pane_id.0.as_str(),
-            ],
+            &HerdrCommand::in_session(
+                &route.herdr_session_name,
+                HerdrSessionCommand::ReadPaneProcesses(route.herdr_pane_id.clone()),
+            ),
             cancellation,
         )?
         else {
@@ -1618,13 +1538,10 @@ impl ReadsHerdrUntilCancelled for HerdrCli {
     ) -> Result<PaneClose, crate::observation_lifetime::ObservationCancellationCause> {
         Ok(
             match self.output_until(
-                &[
-                    "--session",
-                    route.herdr_session_name.0.as_str(),
-                    "pane",
-                    "close",
-                    route.herdr_pane_id.0.as_str(),
-                ],
+                &HerdrCommand::in_session(
+                    &route.herdr_session_name,
+                    HerdrSessionCommand::ClosePane(route.herdr_pane_id.clone()),
+                ),
                 cancellation,
             )? {
                 Some(_) => PaneClose::Closed,

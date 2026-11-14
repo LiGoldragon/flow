@@ -1,0 +1,54 @@
+; What Flow sends into the world. Each emission is one external call, and
+; its outcome is what the translator observed of it: the n-th outcome is
+; the n-th emission's. A command line is a type: a variant per subcommand,
+; a field per argument, and a String only where a person writes freely or
+; the world answers in free text. The translator, src/emission.rs, is the
+; one place that holds the words.
+
+Emission
+[ signal_flow:[ HerdrSessionName HerdrAgentName HerdrWorkspaceId HerdrPaneId
+                HarnessKind LaunchRequestId ]
+  flow_ethos:[ KeyName ] ]
+[ ; Herdr's command line: one `herdr` process.
+  Herdr.HerdrCommand ]
+[ ; What the process printed, and whether it ran and succeeded.
+  Herdr.ProcessReply ]
+[ HerdrCommand.[ ListSessions
+                 InSession.{ HerdrSessionName HerdrSessionCommand } ]
+  ; A command addressed to one Herdr session.
+  HerdrSessionCommand.[ Snapshot
+                        ClosePane.HerdrPaneId
+                        GetPane.HerdrPaneId
+                        ReadPaneProcesses.HerdrPaneId
+                        RunInPane.{ HerdrPaneId ShellLine.String }
+                        WaitForPaneOutput.{ HerdrPaneId OutputMatch.String OutputSource LineCount Milliseconds }
+                        RenamePane.{ HerdrPaneId Label }
+                        ReportPaneMetadata.{ HerdrPaneId MetadataSource DisplayAgent.String }
+                        SendKeys.{ HerdrPaneId Vector<KeyName> }
+                        CreateWorkspace.{ WorkingDirectory.String LaunchRequestId Focus.[ Focused Unfocused ] }
+                        RenameWorkspace.{ HerdrWorkspaceId Label }
+                        GetWorkspace.HerdrWorkspaceId
+                        StartAgent.{ HerdrAgentName HarnessKind HerdrPaneId Milliseconds Option<CodexExecutable> HarnessCommandLine }
+                        WaitForAgent.{ AgentTarget AgentWait }
+                        GetAgent.AgentTarget
+                        ReadAgent.{ HerdrPaneId OutputSource LineCount ScreenFormat.[ Ansi ] }
+                        PromptAgent.{ HerdrPaneId PromptText.String Option<AgentWait> } ]
+  ; Which of a pane's output a read or a wait looks at.
+  OutputSource.[ Visible RecentUnwrapped ]
+  LineCount.Integer
+  Milliseconds.Integer
+  Label.String
+  ; Who reports a pane's metadata: Flow itself.
+  MetadataSource.[ Flow ]
+  ; An agent is named by its pane, or by the agent name Flow gave it.
+  AgentTarget.[ Pane.HerdrPaneId Agent.HerdrAgentName ]
+  AgentStatus.[ Working Idle Done Blocked ]
+  ; Wait until the agent shows any of these states, or the time passes.
+  AgentWait.{ Vector<AgentStatus> Milliseconds }
+  CodexExecutable.String
+  ; The harness's own command line, as Herdr types it into the pane.
+  HarnessCommandLine.Vector<String>
+  Printout.{ Stdout.String Stderr.String }
+  ; Unstarted: the process could not be run. Cancelled: the observation
+  ; it served was cancelled while it ran, and the process was ended.
+  ProcessReply.[ Unstarted.String Succeeded.Printout Failed.Printout Cancelled ] ]

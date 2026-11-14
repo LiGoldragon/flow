@@ -11,6 +11,14 @@ use super::{DecodesFlowClaim, FlowClaim, HerdrCli, claude_paste};
 use crate::codex::NamesBoundCodexThread;
 use crate::codex::SelectsCodexEndpoint;
 use crate::composition::HERDR_REQUEST_LINE_LIMIT;
+use crate::emission::{AddressesHerdrSession, ReadsProcessReply};
+use crate::generated::emission::{
+    AgentStatus, AgentTarget, AgentWait, CodexExecutable, CreateWorkspace_Data, Emittable, Focus,
+    HarnessCommandLine, HerdrCommand, HerdrSessionCommand, Label, LineCount, MetadataSource,
+    Milliseconds, OutputMatch, OutputSource, ProcessReply, RenamePane_Data, RenameWorkspace_Data,
+    ReportPaneMetadata_Data, RunInPane_Data, ShellLine, StartAgent_Data, WaitForAgent_Data,
+    WaitForPaneOutput_Data, WorkingDirectory,
+};
 pub use crate::generated::starter::StartupProgress;
 use crate::generated::starter::{
     DeliveryIntended, JsonRow, LeanStart, PaneBound, PromptsThroughHerdrSocket, ReadsStartupRecord,
@@ -593,30 +601,32 @@ impl PreparesClaudePane for HerdrCli {
             )
         );
         let marker = format!("FLOW_CLAUDE_ENV_READY_{marker_suffix}");
-        self.run_status(&[
-            "--session".into(),
-            pane.herdr_session_name.clone().0,
-            "pane".into(),
-            "run".into(),
-            pane.herdr_pane_id.clone().0,
-            marker_suffix
-                .claude_environment_preparation(reserved, &launch.lean_start().environment()),
-        ])?;
-        let response = self.run_json(&[
-            "--session".into(),
-            pane.herdr_session_name.clone().0,
-            "pane".into(),
-            "wait-output".into(),
-            pane.herdr_pane_id.clone().0,
-            "--match".into(),
-            marker.clone(),
-            "--source".into(),
-            "recent-unwrapped".into(),
-            "--lines".into(),
-            "50".into(),
-            "--timeout".into(),
-            "5000".into(),
-        ])?;
+        HerdrCommand::in_session(
+            &pane.herdr_session_name,
+            HerdrSessionCommand::RunInPane(RunInPane_Data {
+                herdr_pane_id: pane.herdr_pane_id.clone(),
+                shell_line: ShellLine(
+                    marker_suffix.claude_environment_preparation(
+                        reserved,
+                        &launch.lean_start().environment(),
+                    ),
+                ),
+            }),
+        )
+        .emit(self)
+        .status()?;
+        let response = HerdrCommand::in_session(
+            &pane.herdr_session_name,
+            HerdrSessionCommand::WaitForPaneOutput(WaitForPaneOutput_Data {
+                herdr_pane_id: pane.herdr_pane_id.clone(),
+                output_match: OutputMatch(marker.clone()),
+                output_source: OutputSource::RecentUnwrapped,
+                line_count: LineCount(50),
+                milliseconds: Milliseconds(5000),
+            }),
+        )
+        .emit(self)
+        .json()?;
         let observed_pane = response
             .pointer("/result/pane_id")
             .and_then(serde_json::Value::as_str);
@@ -629,42 +639,6 @@ impl PreparesClaudePane for HerdrCli {
             return Err(
                 "Herdr did not prove the Claude environment was prepared in the launch pane".into(),
             );
-        }
-        Ok(())
-    }
-}
-
-pub(crate) trait RunsHerdr {
-    fn run_json(&self, arguments: &[String]) -> Result<serde_json::Value, String>;
-    fn run_status(&self, arguments: &[String]) -> Result<(), String>;
-}
-
-impl RunsHerdr for HerdrCli {
-    fn run_json(&self, arguments: &[String]) -> Result<serde_json::Value, String> {
-        let output = Command::new(&self.executable)
-            .args(arguments)
-            .output()
-            .map_err(|error| format!("Herdr command could not start: {error}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "Herdr command refused the launch stage: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        serde_json::from_slice(&output.stdout)
-            .map_err(|error| format!("Herdr returned unreadable JSON: {error}"))
-    }
-
-    fn run_status(&self, arguments: &[String]) -> Result<(), String> {
-        let output = Command::new(&self.executable)
-            .args(arguments)
-            .output()
-            .map_err(|error| format!("Herdr command could not start: {error}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "Herdr command refused the launch stage: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
         }
         Ok(())
     }
@@ -792,15 +766,13 @@ impl ClaimsNativeIdentity for HerdrCli {
     ) -> Result<serde_json::Value, NativeTargetRefusal> {
         // The pane id is the target: the flow may have renamed its agent
         // since launch, and the name is read, never matched.
-        let response = self
-            .run_json(&[
-                "--session".into(),
-                pane.herdr_session_name.clone().0,
-                "agent".into(),
-                "get".into(),
-                pane.herdr_pane_id.clone().0,
-            ])
-            .map_err(NativeTargetRefusal::HerdrUnreadable)?;
+        let response = HerdrCommand::in_session(
+            &pane.herdr_session_name,
+            HerdrSessionCommand::GetAgent(AgentTarget::Pane(pane.herdr_pane_id.clone())),
+        )
+        .emit(self)
+        .json()
+        .map_err(NativeTargetRefusal::HerdrUnreadable)?;
         let agent = response.pointer("/result/agent").ok_or_else(|| {
             NativeTargetRefusal::HerdrUnreadable(
                 "Herdr agent get returned no receipt target".into(),
@@ -1555,8 +1527,14 @@ impl AwaitsTitleCue for TitleCues {
 }
 
 pub(crate) trait TitlesClaudeSession {
-    /// The source under which Flow reports a pane's displayed agent to Herdr.
-    const DISPLAY_SOURCE: &'static str = "flow";
+    /// Reports the title as the pane's displayed agent, under Flow's own
+    /// metadata source. Herdr answers with no output: it is read for its
+    /// status.
+    fn report_display_agent(
+        &self,
+        pane: &HerdrPaneBinding,
+        title: &NativeTitle,
+    ) -> Result<(), String>;
     /// How long a launch's title is waited for.
     fn title_wait(&self) -> Duration;
     /// Herdr's events of the launch pane, subscribed now, bounded by the
@@ -1607,6 +1585,23 @@ pub(crate) trait TitlesClaudeSession {
 }
 
 impl TitlesClaudeSession for HerdrCli {
+    fn report_display_agent(
+        &self,
+        pane: &HerdrPaneBinding,
+        title: &NativeTitle,
+    ) -> Result<(), String> {
+        HerdrCommand::in_session(
+            &pane.herdr_session_name,
+            HerdrSessionCommand::ReportPaneMetadata(ReportPaneMetadata_Data {
+                herdr_pane_id: pane.herdr_pane_id.clone(),
+                metadata_source: MetadataSource::Flow,
+                display_agent: crate::generated::emission::DisplayAgent(title.as_str().into()),
+            }),
+        )
+        .emit(self)
+        .status()
+    }
+
     fn title_wait(&self) -> Duration {
         self.title_wait
     }
@@ -1742,36 +1737,25 @@ impl TitlesClaudeSession for HerdrCli {
     }
 
     fn label_herdr_pane(&self, pane: &HerdrPaneBinding, title: &NativeTitle) -> Result<(), String> {
-        self.run_json(&[
-            "--session".into(),
-            pane.herdr_session_name.clone().0,
-            "pane".into(),
-            "rename".into(),
-            pane.herdr_pane_id.clone().0,
-            title.as_str().into(),
-        ])?;
+        HerdrCommand::in_session(
+            &pane.herdr_session_name,
+            HerdrSessionCommand::RenamePane(RenamePane_Data {
+                herdr_pane_id: pane.herdr_pane_id.clone(),
+                label: Label(title.as_str().into()),
+            }),
+        )
+        .emit(self)
+        .json()?;
         // Herdr shows a pane's agent by its reported display agent, else by
         // its agent name; Flow reports the title, unexpiring and unguarded,
         // so the name never reaches the living.
-        // Herdr answers report-metadata with no output: run it for its status.
-        self.run_status(&[
-            "--session".into(),
-            pane.herdr_session_name.clone().0,
-            "pane".into(),
-            "report-metadata".into(),
-            pane.herdr_pane_id.clone().0,
-            "--source".into(),
-            Self::DISPLAY_SOURCE.into(),
-            "--display-agent".into(),
-            title.as_str().into(),
-        ])?;
-        let response = self.run_json(&[
-            "--session".into(),
-            pane.herdr_session_name.clone().0,
-            "pane".into(),
-            "get".into(),
-            pane.herdr_pane_id.clone().0,
-        ])?;
+        self.report_display_agent(pane, title)?;
+        let response = HerdrCommand::in_session(
+            &pane.herdr_session_name,
+            HerdrSessionCommand::GetPane(pane.herdr_pane_id.clone()),
+        )
+        .emit(self)
+        .json()?;
         let read = response
             .pointer("/result/pane")
             .ok_or_else(|| "Herdr pane get returned no pane".to_owned())?;
@@ -1795,26 +1779,16 @@ impl TitlesClaudeSession for HerdrCli {
         pane: &HerdrPaneBinding,
         title: &NativeTitle,
     ) -> Result<(), String> {
-        self.run_json(&[
-            "--session".into(),
-            pane.herdr_session_name.clone().0,
-            "workspace".into(),
-            "rename".into(),
-            pane.herdr_workspace_id.clone().0,
-            title.as_str().into(),
-        ])?;
-        // Herdr answers report-metadata with no output: run it for its status.
-        self.run_status(&[
-            "--session".into(),
-            pane.herdr_session_name.clone().0,
-            "pane".into(),
-            "report-metadata".into(),
-            pane.herdr_pane_id.clone().0,
-            "--source".into(),
-            Self::DISPLAY_SOURCE.into(),
-            "--display-agent".into(),
-            title.as_str().into(),
-        ])?;
+        HerdrCommand::in_session(
+            &pane.herdr_session_name,
+            HerdrSessionCommand::RenameWorkspace(RenameWorkspace_Data {
+                herdr_workspace_id: pane.herdr_workspace_id.clone(),
+                label: Label(title.as_str().into()),
+            }),
+        )
+        .emit(self)
+        .json()?;
+        self.report_display_agent(pane, title)?;
         Ok(())
     }
 
@@ -1823,21 +1797,21 @@ impl TitlesClaudeSession for HerdrCli {
         pane: &HerdrPaneBinding,
         title: &NativeTitle,
     ) -> Result<(), String> {
-        self.run_json(&[
-            "--session".into(),
-            pane.herdr_session_name.clone().0,
-            "workspace".into(),
-            "rename".into(),
-            pane.herdr_workspace_id.clone().0,
-            title.as_str().into(),
-        ])?;
-        let response = self.run_json(&[
-            "--session".into(),
-            pane.herdr_session_name.clone().0,
-            "workspace".into(),
-            "get".into(),
-            pane.herdr_workspace_id.clone().0,
-        ])?;
+        HerdrCommand::in_session(
+            &pane.herdr_session_name,
+            HerdrSessionCommand::RenameWorkspace(RenameWorkspace_Data {
+                herdr_workspace_id: pane.herdr_workspace_id.clone(),
+                label: Label(title.as_str().into()),
+            }),
+        )
+        .emit(self)
+        .json()?;
+        let response = HerdrCommand::in_session(
+            &pane.herdr_session_name,
+            HerdrSessionCommand::GetWorkspace(pane.herdr_workspace_id.clone()),
+        )
+        .emit(self)
+        .json()?;
         let read = response
             .pointer("/result/workspace")
             .ok_or_else(|| "Herdr workspace get returned no workspace".to_owned())?;
@@ -1900,24 +1874,22 @@ impl CreatesHerdrLaunchPane for HerdrCli {
             return Err("configured metaflow root is not an absolute directory".into());
         }
         let agent_name = launch.launch_agent_name();
-        let response = self.run_json(&[
-            "--session".into(),
-            launch.launch_profile.herdr_session_name.clone().0,
-            "workspace".into(),
-            "create".into(),
-            "--cwd".into(),
-            root.to_str()
-                .ok_or_else(|| "configured metaflow root is not UTF-8".to_owned())?
-                .into(),
-            // No label: the agent name is internal, and the workspace is
-            // labelled with the title once the Flow ID is claimed.
-            "--env".into(),
-            format!(
-                "FLOW_LAUNCH_REQUEST_ID={}",
-                launch.launch_profile.launch_request_id.0
-            ),
-            "--no-focus".into(),
-        ])?;
+        // No label: the agent name is internal, and the workspace is
+        // labelled with the title once the Flow ID is claimed.
+        let response = HerdrCommand::in_session(
+            &launch.launch_profile.herdr_session_name,
+            HerdrSessionCommand::CreateWorkspace(CreateWorkspace_Data {
+                working_directory: WorkingDirectory(
+                    root.to_str()
+                        .ok_or_else(|| "configured metaflow root is not UTF-8".to_owned())?
+                        .into(),
+                ),
+                launch_request_id: launch.launch_profile.launch_request_id.clone(),
+                focus: Focus::Unfocused,
+            }),
+        )
+        .emit(self)
+        .json()?;
         let workspace = response
             .pointer("/result/workspace/workspace_id")
             .and_then(serde_json::Value::as_str)
@@ -2023,7 +1995,7 @@ pub(crate) trait ConstructsHarnessCommand {
         launch: &ComposedLaunch,
         resources: HarnessCommandResources,
         harness_arguments: &[String],
-    ) -> Result<Vec<String>, SpawnFailure>;
+    ) -> Result<HerdrCommand, SpawnFailure>;
 }
 
 impl ConstructsHarnessCommand for HerdrCli {
@@ -2032,31 +2004,11 @@ impl ConstructsHarnessCommand for HerdrCli {
         launch: &ComposedLaunch,
         resources: HarnessCommandResources,
         harness_arguments: &[String],
-    ) -> Result<Vec<String>, SpawnFailure> {
-        let executable = self
-            .executable
+    ) -> Result<HerdrCommand, SpawnFailure> {
+        self.executable
             .to_str()
             .ok_or_else(|| SpawnFailure::Unattempted("Herdr path must be valid UTF-8".into()))?;
-        let harness = launch.harness_kind.expected_harness();
-        let mut arguments = vec![
-            "--session".into(),
-            resources.herdr_session,
-            "agent".into(),
-            "start".into(),
-            resources.agent,
-            "--kind".into(),
-            harness.into(),
-            "--pane".into(),
-            resources.pane,
-            "--timeout".into(),
-            "30000".into(),
-        ];
-        if launch.harness_kind == HarnessKind::Codex {
-            arguments.push("--executable".into());
-            arguments.push(resources.program.clone());
-        }
-        arguments.push("--".into());
-        let typed_from = arguments.len();
+        let mut arguments: Vec<String> = Vec::new();
         if let Some(socket) = resources.codex_socket {
             arguments.push("--remote".into());
             arguments.push(format!("unix://{socket}"));
@@ -2110,15 +2062,24 @@ impl ConstructsHarnessCommand for HerdrCli {
             arguments.push("resume".into());
             arguments.push(thread);
         }
-        let typed = std::iter::once(resources.program)
-            .chain(arguments[typed_from..].iter().cloned())
+        let typed = std::iter::once(resources.program.clone())
+            .chain(arguments.iter().cloned())
             .collect::<Vec<_>>();
         if let Some(cause) = typed.typed_command_refusal() {
             return Err(SpawnFailure::Refused(cause));
         }
-        Ok(std::iter::once(executable.to_owned())
-            .chain(arguments)
-            .collect())
+        Ok(HerdrCommand::in_session(
+            &signal_flow::HerdrSessionName(resources.herdr_session),
+            HerdrSessionCommand::StartAgent(StartAgent_Data {
+                herdr_agent_name: signal_flow::HerdrAgentName(resources.agent),
+                harness_kind: launch.harness_kind.clone(),
+                herdr_pane_id: signal_flow::HerdrPaneId(resources.pane),
+                milliseconds: Milliseconds(30_000),
+                codex_executable_option: (launch.harness_kind == HarnessKind::Codex)
+                    .then_some(CodexExecutable(resources.program)),
+                harness_command_line: HarnessCommandLine(arguments),
+            }),
+        ))
     }
 }
 
@@ -2227,7 +2188,7 @@ impl SpawnsNativeHarness for HerdrCli {
                 self.release_system_prompt(&launch.launch_profile.launch_request_id.0)
             })?;
         // No positional prompt: the first USER message is typed after.
-        self.run_agent_start(&command[1..])
+        self.run_agent_start(&command)
             .inspect_err(|_| self.release_system_prompt(&launch.launch_profile.launch_request_id.0))
     }
 }
@@ -2368,26 +2329,30 @@ impl HoldsSystemPrompt for HerdrCli {
 
 /// Herdr's `agent start`, whose refusal is kept as Herdr wrote it.
 pub(crate) trait StartsHerdrAgent {
-    fn run_agent_start(&self, arguments: &[String]) -> Result<(), SpawnFailure>;
+    fn run_agent_start(&self, command: &HerdrCommand) -> Result<(), SpawnFailure>;
 }
 
 impl StartsHerdrAgent for HerdrCli {
-    fn run_agent_start(&self, arguments: &[String]) -> Result<(), SpawnFailure> {
-        let output = Command::new(&self.executable)
-            .args(arguments)
-            .output()
-            .map_err(|error| format!("Herdr command could not start: {error}"))?;
-        if !output.status.success() {
-            return Err(SpawnFailure::Refused(
+    fn run_agent_start(&self, command: &HerdrCommand) -> Result<(), SpawnFailure> {
+        match command.emit(self) {
+            ProcessReply::Unstarted(error) => {
+                Err(format!("Herdr command could not start: {error}").into())
+            }
+            ProcessReply::Failed(printout) => Err(SpawnFailure::Refused(
                 signal_flow::SpawnRefusalCause::Herdr(signal_flow::HerdrRefusal::from_printed(
-                    &output.stderr,
-                    &output.stdout,
+                    printout.stderr.0.as_bytes(),
+                    printout.stdout.0.as_bytes(),
                 )),
-            ));
+            )),
+            ProcessReply::Cancelled => Err("Herdr command was cancelled".into()),
+            ProcessReply::Succeeded(printout) => {
+                serde_json::from_str::<serde_json::Value>(&printout.stdout.0)
+                    .map(|_| ())
+                    .map_err(|error| {
+                        SpawnFailure::from(format!("Herdr returned unreadable JSON: {error}"))
+                    })
+            }
         }
-        serde_json::from_slice::<serde_json::Value>(&output.stdout)
-            .map(|_| ())
-            .map_err(|error| SpawnFailure::from(format!("Herdr returned unreadable JSON: {error}")))
     }
 }
 
@@ -2445,19 +2410,20 @@ impl WaitsForPaneRest for HerdrCli {
     }
 
     fn await_pane_rest(&self, pane: &HerdrPaneBinding) -> Result<(), String> {
-        self.run_status(&[
-            "--session".into(),
-            pane.herdr_session_name.clone().0,
-            "agent".into(),
-            "wait".into(),
-            pane.herdr_pane_id.clone().0,
-            "--until".into(),
-            "idle".into(),
-            "--until".into(),
-            "done".into(),
-            "--timeout".into(),
-            self.rest_wait().as_millis().to_string(),
-        ])
+        HerdrCommand::in_session(
+            &pane.herdr_session_name,
+            HerdrSessionCommand::WaitForAgent(WaitForAgent_Data {
+                agent_target: AgentTarget::Pane(pane.herdr_pane_id.clone()),
+                agent_wait: AgentWait {
+                    agent_status_vector: vec![AgentStatus::Idle, AgentStatus::Done],
+                    milliseconds: Milliseconds(
+                        i64::try_from(self.rest_wait().as_millis()).unwrap_or(i64::MAX),
+                    ),
+                },
+            }),
+        )
+        .emit(self)
+        .status()
         .map_err(|_| Self::NOT_READY.to_owned())
     }
 }
@@ -2530,13 +2496,12 @@ impl ObservesBoundPane for HerdrCli {
         // Herdr may report a just-started harness before it is ready: it is
         // waited for, never checked once.
         self.await_pane_rest(pane)?;
-        let response = self.run_json(&[
-            "--session".into(),
-            pane.herdr_session_name.clone().0,
-            "agent".into(),
-            "get".into(),
-            pane.herdr_agent_name.clone().0,
-        ])?;
+        let response = HerdrCommand::in_session(
+            &pane.herdr_session_name,
+            HerdrSessionCommand::GetAgent(AgentTarget::Agent(pane.herdr_agent_name.clone())),
+        )
+        .emit(self)
+        .json()?;
         let agent = response
             .pointer("/result/agent")
             .ok_or_else(|| "Herdr agent get returned no agent record".to_owned())?;

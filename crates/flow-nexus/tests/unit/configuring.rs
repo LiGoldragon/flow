@@ -2424,13 +2424,27 @@ fn recovery_text_is_seeded_configured_preserved_by_other_setters_and_reopened() 
         assert_eq!(snapshot(&nexus).successor_recovery_text, changed);
         assert_eq!(nexus.store.successor_recovery_text().unwrap(), changed);
     }
-    // A negative count is refused before anything is written; this Flow
-    // answers the store's refusal as Refused, as it does for every
-    // handover-configuration refusal.
-    assert!(matches!(
+    // A negative count is refused before anything is written, with the
+    // typed refusal the contract declares for it.
+    assert_eq!(
         configure(&nexus, ConfigurationChange::HandoverCount(-1)),
-        MetaResponse::Refused(_)
-    ));
+        MetaResponse::ConfigureRefused(
+            meta_signal_flow::ConfigureRefusal::HandoverConfigurationRefused(
+                meta_signal_flow::HandoverConfigurationRefusal::NegativeHandoverCount
+            )
+        )
+    );
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::PublicationDeadline(meta_signal_flow::Duration(0))
+        ),
+        MetaResponse::ConfigureRefused(
+            meta_signal_flow::ConfigureRefusal::HandoverConfigurationRefused(
+                meta_signal_flow::HandoverConfigurationRefusal::InvalidPublicationDeadline
+            )
+        )
+    );
     assert_eq!(snapshot(&nexus).successor_recovery_text, changed);
     drop(nexus);
     let nexus = fixture.open();

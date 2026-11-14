@@ -2151,6 +2151,11 @@ impl ConfiguresFromMeta for RunningNexus {
                     meta_signal_flow::ConfigureRefusal::ContextWarningConfigurationRefused(reason),
                 )
             }
+            Err(store::StoreError::HandoverConfigurationRefused(reason)) => {
+                meta_signal_flow::Output::ConfigureRefused(
+                    meta_signal_flow::ConfigureRefusal::HandoverConfigurationRefused(reason),
+                )
+            }
             Err(store::StoreError::DuplicateConfigurationEntry) => {
                 meta_signal_flow::Output::ConfigureRefused(
                     meta_signal_flow::ConfigureRefusal::DuplicateEntry,

@@ -760,7 +760,7 @@ fn atomic_same_expected_reminder_state_rejects_duplicate_admission() {
     let mut advanced = reminder.clone();
     advanced.sent = crate::generated::memory::Sent(1);
     advanced.next_due = crate::generated::memory::NextDue(300);
-    let message = Message::HardAbrupt(Request::Notice("flow-nexus 'Notice'".into()));
+    let message = Message::HardAbrupt(Request::Notice("flow 'Notice'".into()));
     let first = fixture
         .nexus
         .store

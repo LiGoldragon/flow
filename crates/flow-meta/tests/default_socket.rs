@@ -1,4 +1,4 @@
-//! The CLI is `flow-nexus-meta '<Input>'`: it takes the datom and nothing
+//! The CLI is `flow-meta '<Input>'`: it takes the datom and nothing
 //! else. The place is the Flow configuration's,
 //! `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`, resolved under
 //! `$XDG_RUNTIME_DIR/nexus/` to that place's meta socket alone.
@@ -10,7 +10,7 @@ use std::{
 };
 
 fn client(runtime: &Path, configuration_home: &Path, other: &Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_flow-nexus-meta"))
+    Command::new(env!("CARGO_BIN_EXE_flow-meta"))
         .env_clear()
         .env("XDG_RUNTIME_DIR", runtime)
         .env("XDG_CONFIG_HOME", configuration_home)
@@ -87,7 +87,7 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
     );
     assert_eq!(refused.status.code(), Some(2), "{refused:?}");
     assert!(
-        String::from_utf8_lossy(&refused.stderr).starts_with("usage: flow-nexus-meta '"),
+        String::from_utf8_lossy(&refused.stderr).starts_with("usage: flow-meta '"),
         "{refused:?}"
     );
 

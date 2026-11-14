@@ -249,10 +249,10 @@
 
 (def binary-names
   "Each package interface's binaries: a package whose clients read their
-  place from their configuration names its clients after the Nexus and its
-  daemon flow-nexus-daemon; an earlier package flow, flow-meta and
+  place from their configuration names its clients flow and flow-meta and
+  its daemon flow-nexus-daemon; an earlier package flow, flow-meta and
   flow-nexus."
-  {:place {:client "flow-nexus" :meta "flow-nexus-meta" :daemon "flow-nexus-daemon"}
+  {:place {:client "flow" :meta "flow-meta" :daemon "flow-nexus-daemon"}
    :query {:client "flow" :meta "flow-meta" :daemon "flow-nexus"}
    :invocation {:client "flow" :meta "flow-meta" :daemon "flow-nexus"}})
 

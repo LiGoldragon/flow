@@ -8046,7 +8046,7 @@ mod tests {
             .unwrap()
             .parent()
             .unwrap()
-            .join("flow-nexus-meta");
+            .join("flow-meta");
         std::thread::scope(|scope| {
             let server = scope.spawn(|| {
                 for _ in 0..2 {

@@ -2,7 +2,7 @@
 //! Claude flow it launches. Claude Code runs it on SessionStart, PostToolUse,
 //! UserPromptSubmit, Stop and SessionEnd with the event as JSON on stdin; it turns the
 //! event into one `Report.{ FlowId Option<Process> Event }` and sends it,
-//! through the client the `flow-nexus` CLI speaks Signal with, to the socket
+//! through the client the `flow` CLI speaks Signal with, to the socket
 //! its typed configuration names: the socket of the place whose Nexus
 //! launched the flow.
 //!

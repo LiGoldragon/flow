@@ -98,7 +98,7 @@ fn command_of(thread: &str) -> (SpawnedProcess, signal_flow::Process) {
     (command, process)
 }
 
-/// One real `flow-nexus` CLI invocation below three live shell hops. The outer
+/// One real `flow` CLI invocation below three live shell hops. The outer
 /// shell is the configured app-server's child and carries the Codex thread;
 /// the wrapper writes its PID, then execs the CLI without changing it.
 struct CodexCliWorld {
@@ -177,9 +177,9 @@ impl CodexCliWorld {
         let binaries = executable
             .ancestors()
             .skip(1)
-            .find(|directory| directory.join("flow-nexus").is_file())
-            .unwrap_or_else(|| panic!("no flow-nexus CLI above {}", executable.display()));
-        let flow = fs::canonicalize(binaries.join("flow-nexus")).unwrap();
+            .find(|directory| directory.join("flow").is_file())
+            .unwrap_or_else(|| panic!("no flow CLI above {}", executable.display()));
+        let flow = fs::canonicalize(binaries.join("flow")).unwrap();
         let shell = fixture.directory.path().join("caller-shell.sh");
         let script = fixture.directory.path().join("caller-script.sh");
         let wrapper = fixture.directory.path().join("caller-wrapper.sh");
@@ -309,14 +309,14 @@ impl CodexCliWorld {
         };
         go.release();
         crate::exec_witness::SeizesUntilExec::exec_completed(exec)
-            .expect("the wrapper execs the real flow-nexus CLI");
+            .expect("the wrapper execs the real flow CLI");
         let cli = CallerProcess {
             process_id: wrapper_pid,
         };
         assert_eq!(
             cli.executable().as_ref(),
             Some(&self.flow),
-            "wrapper execs the real flow-nexus CLI"
+            "wrapper execs the real flow CLI"
         );
         assert_eq!(
             cli.parent().map(|parent| parent.process_id),
@@ -342,14 +342,8 @@ impl CodexCliWorld {
         };
         drop(gate);
         let output = child.wait_with_output().unwrap();
-        assert!(
-            output.status.success(),
-            "real flow-nexus CLI failed: {output:?}"
-        );
-        assert!(
-            output.stderr.is_empty(),
-            "real flow-nexus CLI stderr: {output:?}"
-        );
+        assert!(output.status.success(), "real flow CLI failed: {output:?}");
+        assert!(output.stderr.is_empty(), "real flow CLI stderr: {output:?}");
         CodexCliCall {
             process,
             answer: String::from_utf8(output.stdout).unwrap().trim().to_owned(),

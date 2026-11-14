@@ -1,3 +1,26 @@
+# Unreleased (branch w0f8-90d453): the Flow clients are `flow` and `flow-meta`
+
+Contracts: signal-flow 63.0.0 and meta-signal-flow 79.0.0, unchanged. **Neither
+the wire nor the stored format changes**; no upgrade runs. The version is not
+bumped here; the release that carries this change sets it.
+
+- **The ordinary client is `flow`, the meta client `flow-meta`.** The Nexus is
+  `flow-nexus`, its CLI the component name alone and its meta CLI the component
+  name with `-meta`. Before, the clients were `flow-nexus` and
+  `flow-nexus-meta`. The binaries, the usage line the clients print, the
+  `--version` answer (`flow <version>`), the capsule, the tests and the README
+  carry the new names, and no old name is left as an alias.
+- **Unchanged:** the daemon `flow-nexus-daemon`, the hook `flow-nexus-hook`
+  and the hook command Flow writes into every Claude flow's settings, the
+  sockets, and the CLI configuration file
+  `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`.
+- **To deploy:** everything that runs `flow-nexus` or `flow-nexus-meta` by name
+  moves in the same switch: Home's `~/.local/bin` links and its versioned
+  clients (`flow-<version>`, `flow-meta-<version>`), the generated skills and
+  agent definitions (a Curriculum regeneration), CriomOS's notify command, and
+  the Flow program the Energy Nexus is configured with
+  (`Configure.Program.{ Flow /home/li/.local/bin/flow }`).
+
 # Flow 0.56.2: Flow's external calls are typed Emissions generated from Ethos
 
 Contracts: signal-flow 63.0.0 and meta-signal-flow 79.0.0, unchanged from

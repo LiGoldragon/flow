@@ -7,7 +7,7 @@ use flow_ethos::place::{
 use protos::ReaderBudget;
 use std::env;
 
-/// The CLI is `flow-nexus '<Input>'`: named after the Nexus, taking the datom
+/// The CLI is `flow '<Input>'`: the component's name, taking the datom
 /// and nothing else. The place is its configuration's,
 /// `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`, resolved under
 /// `$XDG_RUNTIME_DIR/nexus/` to the place's ordinary socket; no place is
@@ -27,7 +27,7 @@ impl ParsesFlowCommand for FlowClient {
         place: &dyn ResolvesCliPlace,
     ) -> Result<Invocation, String> {
         let usage = || {
-            "usage: flow-nexus '<one inline Input datom>'; the place is read from $XDG_CONFIG_HOME/nexus/flow-nexus.datom".to_owned()
+            "usage: flow '<one inline Input datom>'; the place is read from $XDG_CONFIG_HOME/nexus/flow-nexus.datom".to_owned()
         };
         let (Some(value), None) = (arguments.next(), arguments.next()) else {
             return Err(usage());
@@ -63,9 +63,7 @@ trait AnswersVersion {
 impl AnswersVersion for [String] {
     fn version_answer(&self) -> Option<String> {
         match self {
-            [only] if only == "--version" => {
-                Some(format!("flow-nexus {}", env!("CARGO_PKG_VERSION")))
-            }
+            [only] if only == "--version" => Some(format!("flow {}", env!("CARGO_PKG_VERSION"))),
             _ => None,
         }
     }
@@ -245,7 +243,7 @@ mod tests {
     fn version_is_the_one_non_datom_invocation() {
         assert_eq!(
             (&["--version".to_owned()] as &[String]).version_answer(),
-            Some(format!("flow-nexus {}", env!("CARGO_PKG_VERSION")))
+            Some(format!("flow {}", env!("CARGO_PKG_VERSION")))
         );
         assert_eq!(
             (&["--version".to_owned(), "extra".to_owned()] as &[String]).version_answer(),

@@ -7,7 +7,7 @@ build = "build.rs"
 default = ["datom"]
 datom = []
 [[bin]]
-name = "flow-nexus"
+name = "flow"
 path = "src/main.rs"
 [[bin]]
 name = "flow-nexus-hook"

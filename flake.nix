@@ -153,15 +153,15 @@
           checkEnvironments = {
             # The approval pipeline's and the handover archive's tests read a
             # real git repository, one holds a pipe in a session of its own
-            # (setsid), and two drive the flow-nexus and flow-nexus-meta CLIs.
+            # (setsid), and two drive the flow and flow-meta CLIs.
             flow-nexus = {
               inputs = [
                 pkgs.git
                 pkgs.util-linux
               ];
               beside = [
-                "${members.flow}/bin/flow-nexus"
-                "${members.flow-meta}/bin/flow-nexus-meta"
+                "${members.flow}/bin/flow"
+                "${members.flow-meta}/bin/flow-meta"
               ];
             };
           };

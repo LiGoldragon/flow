@@ -25,8 +25,8 @@ struct FlowConnectionAdapter<'a> {
 }
 
 enum ReplyOutput {
-    Ordinary(Output),
-    Meta(meta_signal_flow::Output),
+    Ordinary(Box<Output>),
+    Meta(Box<meta_signal_flow::Output>),
 }
 
 struct Reply {
@@ -66,7 +66,7 @@ enum Observation {
 }
 
 enum Serving {
-    Reply(Reply),
+    Reply(Box<Reply>),
     Observation(Observation),
 }
 
@@ -282,19 +282,19 @@ impl AdaptsFlowConnection for FlowConnectionAdapter<'_> {
 
 impl YieldsFlowReply for Output {
     fn reply(self, completion: Completion) -> Serving {
-        Serving::Reply(Reply {
-            output: ReplyOutput::Ordinary(self),
+        Serving::Reply(Box::new(Reply {
+            output: ReplyOutput::Ordinary(Box::new(self)),
             completion,
-        })
+        }))
     }
 }
 
 impl YieldsFlowReply for meta_signal_flow::Output {
     fn reply(self, completion: Completion) -> Serving {
-        Serving::Reply(Reply {
-            output: ReplyOutput::Meta(self),
+        Serving::Reply(Box::new(Reply {
+            output: ReplyOutput::Meta(Box::new(self)),
             completion,
-        })
+        }))
     }
 }
 
@@ -352,7 +352,7 @@ impl PerformsPostReply for PostReplyOperation {
 impl ServesAdaptedConnection for Connection {
     fn serve_adapted(self, nexus: &RunningNexus, serving: Serving) -> Result<(), String> {
         match serving {
-            Serving::Reply(reply) => self.write_reply(reply, |operation| operation.perform(nexus)),
+            Serving::Reply(reply) => self.write_reply(*reply, |operation| operation.perform(nexus)),
             Serving::Observation(observation) => self.serve_observation(nexus, observation),
         }
     }
@@ -517,7 +517,7 @@ mod tests {
         };
         let result = connection.write_reply(
             Reply {
-                output: ReplyOutput::Ordinary(Output::Reported),
+                output: ReplyOutput::Ordinary(Box::new(Output::Reported)),
                 completion: Completion::OnSuccessfulWrite(PostReplyOperation::SettleStops),
             },
             |_| {
@@ -541,7 +541,7 @@ mod tests {
         };
         let result = connection.write_reply(
             Reply {
-                output: ReplyOutput::Ordinary(Output::Reported),
+                output: ReplyOutput::Ordinary(Box::new(Output::Reported)),
                 completion: Completion::AfterAnyWrite(PostReplyOperation::SettleStops),
             },
             |_| {

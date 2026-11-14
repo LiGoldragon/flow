@@ -655,7 +655,12 @@ impl RehearsesDeclared for RunningNexus {
             .herdr
             .harness_command(&composed, resources, &harness_arguments)
         {
-            Ok(command) => Output::Rehearsed(signal_flow::Command(command.shell_command())),
+            Ok(command) => {
+                use crate::emission::WritesHerdrCommandLine;
+                Output::Rehearsed(signal_flow::Command(
+                    self.herdr.command_line(&command).shell_command(),
+                ))
+            }
             Err(failure) => {
                 let cause = match failure {
                     crate::herdr::launch::SpawnFailure::Refused(cause) => cause,

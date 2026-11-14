@@ -435,16 +435,14 @@ impl DiscardsCreatedPane for HerdrCli {
             Some(false) => return true,
             Some(true) => {}
         }
-        let closed = std::process::Command::new(&self.executable)
-            .args([
-                "--session",
-                pane.herdr_session_name.0.as_str(),
-                "pane",
-                "close",
-                pane.herdr_pane_id.0.as_str(),
-            ])
-            .output()
-            .is_ok_and(|output| output.status.success());
+        use crate::emission::{AddressesHerdrSession, ReadsProcessReply};
+        use crate::generated::emission::{Emittable, HerdrCommand, HerdrSessionCommand};
+        let closed = HerdrCommand::in_session(
+            &pane.herdr_session_name,
+            HerdrSessionCommand::ClosePane(pane.herdr_pane_id.clone()),
+        )
+        .emit(self)
+        .succeeded();
         closed && self.shows_created(pane) == Some(false)
     }
 }

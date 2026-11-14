@@ -40,6 +40,7 @@ pub mod compacting;
 pub mod composition;
 pub mod context;
 pub mod delivery;
+pub(crate) mod emission;
 pub mod event_wait;
 pub mod lean;
 pub mod live;

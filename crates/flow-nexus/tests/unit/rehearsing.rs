@@ -1,5 +1,6 @@
 use super::NexusFixture;
 use crate::Dispatches;
+use crate::emission::WritesHerdrCommandLine;
 use crate::harness_command::{
     HarnessCommandResources, ParsesHarnessFlags, RehearsesHarnessResources, RendersShellCommand,
 };
@@ -153,12 +154,16 @@ fn one_constructor_gives_actual_and_rehearsal_the_same_argv_shape() {
         .unwrap();
     for harness in [HarnessKind::Claude, HarnessKind::Codex] {
         let launch = Fixture::launch(harness.clone());
-        let actual = herdr
-            .harness_command(&launch, Fixture::actual_resources(&harness), &tail)
-            .unwrap();
-        let rehearsed = herdr
-            .harness_command(&launch, HarnessCommandResources::rehearsal(&harness), &tail)
-            .unwrap();
+        let actual = herdr.command_line(
+            &herdr
+                .harness_command(&launch, Fixture::actual_resources(&harness), &tail)
+                .unwrap(),
+        );
+        let rehearsed = herdr.command_line(
+            &herdr
+                .harness_command(&launch, HarnessCommandResources::rehearsal(&harness), &tail)
+                .unwrap(),
+        );
         assert_eq!(Fixture::substitute(rehearsed, &harness), actual);
         let tail_at = actual
             .windows(tail.len())

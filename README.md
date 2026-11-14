@@ -14,7 +14,7 @@ The wire contracts are independent repositories:
   `List`, `ResolveRecipient` for Message Nexus routing, `ResolveCaller`,
   which names the flow, aspect and model of the process that calls,
   and `Observe.Agent`, a flow's Herdr agent state on open and on each change.
-  A frame that decodes as no Query, an earlier hook's Report among them, is
+  A frame that decodes as no Input, an earlier hook's Report among them, is
   answered `FrameRefused` with its caller's process and seat and recorded;
   `Observe.Undecodable` shows every record and each new one.
   `Observe.TurnEnds` sends the last turn end of each harness, then each
@@ -28,7 +28,7 @@ The wire contracts are independent repositories:
 - `meta-signal-flow` defines `Configure`, reset-credit consumption, `Retire`,
   and the pane writes: `Deliver`, `Vet`, `Command`, plus `ResolvePeer`.
 
-The ordinary client accepts exactly one inline `Query` Datom from the
+The ordinary client accepts exactly one inline `Input` Datom from the
 `signal-flow` contract. `Start` and `Replace` also require the caller to name
 the selected SYSTEM modules explicitly; use an empty vector when none are
 selected. This CLI-only list filters those exact names from the resolver's
@@ -36,9 +36,9 @@ expanded USER skill vector. It does not change the typed profile or inspect
 the supplied precomposed SYSTEM file.
 
 ```sh
-flow-nexus '<one inline Query datom>'
-flow-nexus --system-modules '[ spirit-core vision-design ]' '<one inline Start or Replace Query datom>'
-flow-nexus --system-modules '[]' '<one inline Start or Replace Query datom>'
+flow-nexus '<one inline Input datom>'
+flow-nexus --system-modules '[ spirit-core vision-design ]' '<one inline Start or Replace Input datom>'
+flow-nexus --system-modules '[]' '<one inline Start or Replace Input datom>'
 ```
 
 `Rehearse` carries the same declared `LaunchRequest` as `Launch`. It reads the
@@ -76,8 +76,8 @@ A Nexus starts in its place, the one datom it is started with, and reads
 nothing else for it: `flow-nexus-daemon '{ main /run/user/1001/nexus/main
 /home/li/.local/state/nexus/main }'`, the place name, Runtime (its sockets
 `flow.sock` and `flow-meta.sock`) and State (its memory `flow.sema`). A
-client takes the datom and nothing else: `flow-nexus '<Query>'` or
-`flow-nexus-meta '<Query>'`, both named after the Nexus. The place is their
+client takes the datom and nothing else: `flow-nexus '<Input>'` or
+`flow-nexus-meta '<Input>'`, both named after the Nexus. The place is their
 configuration's, one datom at `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`
 (`~/.config/nexus/flow-nexus.datom` when the variable is unset),
 `CliConfiguration.{ PlaceName }`, `{ main }`; the place
@@ -94,11 +94,11 @@ socket every flow's hook reports to is its launching place's, so a flow
 launched at main keeps reporting to whichever version is main.
 
 Every connection greets first, on both sockets. The client writes its
-contract's Signal greeting (`signal_flow::Query::greeting()` on `flow.sock`,
-`meta_signal_flow::Query::greeting()` on `flow-meta.sock`) and reads the
-receipt; it writes its Query only after `Greeted` names its own digest. A
+contract's Signal greeting (`signal_flow::Input::greeting()` on `flow.sock`,
+`meta_signal_flow::Input::greeting()` on `flow-meta.sock`) and reads the
+receipt; it writes its Input only after `Greeted` names its own digest. A
 first frame that is not this contract's greeting, an older peer's greeting
-or its raw Query among them, is answered `GreetingRefused.ContractMismatch`
+or its raw Input among them, is answered `GreetingRefused.ContractMismatch`
 with this contract's digest before anything is decoded, the connection
 ends, and the refusal is recorded, metadata alone, in `Observe.Undecodable`.
 The `flow-nexus` CLI, `flow-nexus-hook` and `flow-nexus-meta` greet; a
@@ -346,8 +346,8 @@ Flow workspace root, and the project Claude skill catalog. `CODEX_HOME` and
 `CLAUDE_CONFIG_DIR` select native transcript and personal-skill roots, and
 `CLAUDE_ENTERPRISE_SKILLS_DIR` optionally adds the highest-precedence Claude
 skill catalog (see `NON_IDEAL_AGENTS.md`). Each client invocation is one
-typed struct: the target socket followed by its existing Query. The client
-sends the Query alone over that socket. Every Claude hook command carries
+typed struct: the target socket followed by its existing Input. The client
+sends the Input alone over that socket. Every Claude hook command carries
 the launching Nexus's ordinary socket in typed hook configuration.
 
 A fresh Flow receives exactly one prompt. The harness starts with no

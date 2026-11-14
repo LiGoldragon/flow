@@ -38,6 +38,7 @@ pub mod codex;
 pub mod codex_turns;
 pub mod compacting;
 pub mod composition;
+mod connection_adapter;
 pub mod context;
 pub mod delivery;
 pub(crate) mod emission;
@@ -2013,216 +2014,8 @@ impl ServesConnection for Connection {
                 Ok(query) => query,
                 Err(refused) => return self.peer.write_response(&refused),
             };
-        let response = match query {
-            // Reads of launch state never wait behind a running launch.
-            Input::LaunchStatus(launch_request_id) => nexus.launch_status(&launch_request_id.0),
-            Input::Observe(ObserveSelection::Launch(launch_request_id)) => {
-                use crate::observation_lifetime::ServesCancellableObservation;
-                return self.serve_cancellable_observation(nexus, &mut |cancellation, peer| {
-                    nexus.observe_launch(&launch_request_id.0, cancellation, &mut |response| {
-                        peer.write_response(response)
-                    })
-                });
-            }
-            Input::Observe(ObserveSelection::Agent(flow_id)) => {
-                use crate::observation_lifetime::ServesCancellableObservation;
-                return self.serve_cancellable_observation(nexus, &mut |cancellation, peer| {
-                    nexus.observe_agent(&flow_id.0, cancellation, &mut |response| {
-                        peer.write_response(response)
-                    })
-                });
-            }
-            Input::Observe(ObserveSelection::Undecodable) => {
-                return self.serve_undecodable(nexus);
-            }
-            Input::Observe(ObserveSelection::TurnEnds) => {
-                return self.serve_turn_ends(nexus);
-            }
-            Input::Observe(ObserveSelection::Metaflows) => {
-                return self.serve_metaflows(nexus);
-            }
-            Input::Observe(ObserveSelection::Retirement(address)) => {
-                use crate::store::handover::HoldsHandovers;
-                let subscription = match nexus.store.observe_handover_retirement(&address) {
-                    Ok(subscription) => subscription,
-                    Err(error) => {
-                        return self
-                            .peer
-                            .write_response(&Output::RetirementObservationFailed(
-                                signal_flow::RetirementObservationFailure::MissingEvidence(
-                                    error.to_string(),
-                                ),
-                            ));
-                    }
-                };
-                return self.serve_retirement(nexus, subscription);
-            }
-            // Every send, whoever sent it.
-            Input::ObserveSends(cursor) => {
-                return self.serve_sends(
-                    nexus,
-                    &crate::observe_sends::SendSelection::Every,
-                    cursor.map(|value| value.0),
-                );
-            }
-            // The sends of the process or thread the query names.
-            Input::ObserveSender(forwarded) => {
-                let sender = match nexus.observation_sender(&forwarded) {
-                    Ok(sender) => sender,
-                    Err(refusal) => return self.peer.write_response(&refusal),
-                };
-                return self.serve_sends(
-                    nexus,
-                    &crate::observe_sends::SendSelection::Sent(sender),
-                    forwarded.delivery_cursor_option.map(|value| value.0),
-                );
-            }
-            Input::ObserveDeliveries(cursor) => {
-                return self.serve_sends(
-                    nexus,
-                    &crate::observe_sends::SendSelection::Message,
-                    cursor.map(|value| value.0),
-                );
-            }
-            // A hook's Report never waits behind a running launch: the
-            // launch may itself be waiting on the harness whose hook this is.
-            // What the report sets going runs after the hook has its answer
-            // and the connection is closed: the harness waits on its hook,
-            // and the settling waits on the harness.
-            // The Report names the harness that ran its hook by its birth:
-            // a seat a restart bound acts only on events of its own harness.
-            // The answer is Reported whoever reports.
-            Input::Report(report) => {
-                use crate::restarting::FencesSeatEvents;
-                let (flow_id, event) = (report.flow_id.clone(), report.event.clone());
-                let acts = nexus.report_acts(&flow_id.0, report.process_option.as_ref());
-                let response = nexus.report(report);
-                self.peer.write_response(&response)?;
-                drop(self);
-                if response == Output::Reported {
-                    if acts {
-                        nexus.after_attributed_report(&flow_id, &event);
-                    } else {
-                        eprintln!(
-                            "flow-nexus: a report for flow {flow_id} is not its bound seat's; it acts on nothing",
-                            flow_id = flow_id.0
-                        );
-                    }
-                }
-                return Ok(());
-            }
-            // The caller is the peer of this connection, read from the kernel.
-            Input::ResolveCaller(claim) => nexus.resolve_caller(
-                self.peer
-                    .peer_process()
-                    .and_then(|process| process.caller_pane(&nexus.herdr)),
-                claim,
-            ),
-            query @ (Input::Bind(_)
-            | Input::Identify(_)
-            | Input::IdentifyThread(_)
-            | Input::Lock(_)
-            | Input::Release(_)
-            | Input::ArchiveRequest(_)
-            | Input::Acknowledge(_)) => {
-                // The bridge operations, from any caller.
-                let answer = nexus.dispatch_metaflow_peer(query, self.process.as_ref());
-                return self.peer.write_response(&answer.response);
-            }
-            Input::Deliver(request) => {
-                let address = request.lock.second_address.clone();
-                let answer =
-                    nexus.dispatch_metaflow_peer(Input::Deliver(request), self.process.as_ref());
-                let accepted = matches!(answer.response, Output::SendAccepted(_));
-                let written = self.peer.write_response(&answer.response);
-                drop(self);
-                if accepted {
-                    nexus.wake_due(address);
-                }
-                return written;
-            }
-            // A Send: its sender is filled in from the calling process, and
-            // a caller in no flow sends as Unbound. A queued request's wake
-            // is read after the answer, off the gate.
-            Input::Send(send) => {
-                let answer = nexus.send_request(send, self.process.as_ref());
-                let written = self.peer.write_response(&answer.response);
-                drop(self);
-                if let Some(pending) = answer.pending {
-                    nexus.wake_due(pending.address);
-                }
-                return written;
-            }
-            Input::DeliverAll(address) => {
-                let response = nexus.deliver_all(address);
-                return self.peer.write_response(&response);
-            }
-            // A reminder is sent from whoever asks for it, as a Send is.
-            Input::Remind(remind) => {
-                use crate::sending::IdentifiesSender;
-                let sent_by = match self.process.as_ref() {
-                    Some(process) => nexus.sender_of(process),
-                    None => Ok(signal_flow::SentBy::Unbound),
-                };
-                let response = match sent_by {
-                    Ok(sent_by) => nexus.remind(remind, sent_by),
-                    Err(refusal) => *refusal,
-                };
-                return self.peer.write_response(&response);
-            }
-            // An adopted seat resting at its adoption is handed what is
-            // queued for it now, as its turn's end would; Flow sees no Stop
-            // from a seat it did not start until its next turn ends.
-            Input::BindSeat(request) => {
-                let address = request.address.clone();
-                let response = nexus.bind_seat(request);
-                let written = self.peer.write_response(&response);
-                drop(self);
-                if matches!(response, Output::SeatBound(_)) {
-                    nexus.drain_awake(&address);
-                }
-                return written;
-            }
-            Input::Adopt(request) => {
-                let address = request.address.clone();
-                let response = nexus.adopt(request);
-                let written = self.peer.write_response(&response);
-                drop(self);
-                if matches!(response, Output::Adopted(_)) {
-                    nexus.drain_awake(&address);
-                }
-                return written;
-            }
-            // A Launch is the Start its declaration names, from the calling
-            // process, or, for a metaflow Awake as a live flow, the Replace
-            // of that flow under the metaflow's lock.
-            Input::Launch(launch) => {
-                let origin = nexus.origin_of_process(self.process.as_ref());
-                let declared = {
-                    let _turn = nexus
-                        .dispatch_gate
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    nexus.declared_launch(launch)
-                };
-                match declared {
-                    Ok(query) => nexus.dispatch_serially(query, origin),
-                    Err(refusal) => *refusal,
-                }
-            }
-            // A launch's origin is the calling process, as Identify reads
-            // it: its pane's bound flow and that flow's native session,
-            // recorded and changing no answer.
-            query @ (Input::Start(_) | Input::Replace(_)) => {
-                let origin = nexus.origin_of_process(self.process.as_ref());
-                nexus.dispatch_serially(query, origin)
-            }
-            query => nexus.dispatch_serially(query, Origin::Unbound),
-        };
-        self.peer.write_response(&response)?;
-        drop(self);
-        nexus.settle_stops_at_confirmation();
-        Ok(())
+        use connection_adapter::AdaptsDecodedConnection;
+        self.serve_decoded_ordinary(nexus, query)
     }
 
     fn serve_meta(mut self, nexus: &RunningNexus) -> Result<(), String> {
@@ -2232,28 +2025,8 @@ impl ServesConnection for Connection {
             Err(GreetingEnd::Transport(error)) => return Err(error),
         }
         let query = self.peer.read_meta_query()?;
-        // Every peer is answered alike. The peer is read from the kernel,
-        // only for the records that name who asked; nothing in the query
-        // names it.
-        if query == meta_signal_flow::Input::ObserveConfiguration {
-            return self.serve_configuration(nexus);
-        }
-        let resolver = nexus.meta_resolver(self.peer.peer_process());
-        let response = nexus.dispatch_meta_serially(query, Some(resolver));
-        self.peer.write_meta_response(&response)?;
-        drop(self);
-        nexus.settle_stops_at_confirmation();
-        // An adopted seat resting at its adoption is handed its queue now.
-        if let meta_signal_flow::Output::BoundExisting(bound) = &response
-            && let meta_signal_flow::FlowBindingResult::Bound(binding) = &bound.flow_binding_result
-            && let Ok(Some(metaflow)) = crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(
-                &*nexus.store,
-                &binding.flow_id.0,
-            )
-        {
-            nexus.drain_awake(&metaflow.address);
-        }
-        Ok(())
+        use connection_adapter::AdaptsDecodedConnection;
+        self.serve_decoded_meta(nexus, query)
     }
 }
 

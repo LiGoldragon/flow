@@ -1452,7 +1452,10 @@ impl ReconcilesQueueDelivery for RunningNexus {
                 Some(Ok((run, turn_id, native_receipt, seat_after))) => {
                     self.settle_received(&attempt, &run, turn_id, native_receipt, seat_after)
                 }
-                Some(Err(undecided)) => self.undecided(&attempt, undecided),
+                Some(Err(undecided)) => {
+                    self.await_letter(&attempt);
+                    self.undecided(&attempt, undecided)
+                }
                 None => self.reconcile_delivery(&attempt),
             };
             eprintln!("flow-nexus: a queued delivery was reconciled at start: {reconciled:?}");
@@ -2866,6 +2869,11 @@ pub(crate) trait ParksCohort {
     /// The run of typed attempts native history shows one exact receipt
     /// for, with that receipt; else why it cannot be decided.
     fn find_receipt(&self, attempt: &QueueDeliveryAttempt) -> Result<Receipted, Undecided>;
+    /// Under the gate, at start: a Codex attempt typed before this Nexus
+    /// started whose receipt history does not show is a letter its
+    /// thread's ledger awaits, until its user message or the queue settles
+    /// it. A first prompt's batch is its launch's own turn, never a letter.
+    fn await_letter(&self, attempt: &QueueDeliveryAttempt);
 }
 
 /// A run of attempts one payload carried, and the receipt that took it.
@@ -3127,30 +3135,14 @@ impl ParksCohort for RunningNexus {
                         .iter()
                         .map(|member| member.native_request_id),
                 );
-                // A letter typed before this Nexus started is pending in its
-                // thread's ledger until a receipt or the queue settles it.
-                if attempt.harness_kind == HarnessKind::Codex
-                    && let Some((_, payload)) = self.cohort_runs(&attempt).into_iter().next()
-                {
-                    use crate::generated::turn_ledger::{
-                        Interrupt, LedgerEvent, PayloadText, PendingLetter,
-                    };
+                // Read off the gate; settle under it.
+                let Ok((run, turn_id, native_receipt, seat_after)) = self.find_receipt(&attempt)
+                else {
                     let _turn = self
                         .dispatch_gate
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    self.codex_turns.apply(
-                        &attempt.thread_id.0,
-                        LedgerEvent::LetterTyped(PendingLetter {
-                            queue_attempt_id: attempt.queue_attempt_id.clone(),
-                            payload_text: PayloadText(payload),
-                            interrupt: Interrupt::NotPressed,
-                        }),
-                    );
-                }
-                // Read off the gate; settle under it.
-                let Ok((run, turn_id, native_receipt, seat_after)) = self.find_receipt(&attempt)
-                else {
+                    self.await_letter(&attempt);
                     continue;
                 };
                 let _turn = self
@@ -3160,6 +3152,24 @@ impl ParksCohort for RunningNexus {
                 let _ = self.settle_received(&attempt, &run, turn_id, native_receipt, seat_after);
             }
         }
+    }
+
+    fn await_letter(&self, attempt: &QueueDeliveryAttempt) {
+        use crate::generated::turn_ledger::{Interrupt, LedgerEvent, PayloadText, PendingLetter};
+        if attempt.harness_kind != HarnessKind::Codex || self.startup_launch(attempt).is_some() {
+            return;
+        }
+        let Some((_, payload)) = self.cohort_runs(attempt).into_iter().next() else {
+            return;
+        };
+        self.codex_turns.apply(
+            &attempt.thread_id.0,
+            LedgerEvent::LetterTyped(PendingLetter {
+                queue_attempt_id: attempt.queue_attempt_id.clone(),
+                payload_text: PayloadText(payload),
+                interrupt: Interrupt::NotPressed,
+            }),
+        );
     }
 
     fn cohort_runs(

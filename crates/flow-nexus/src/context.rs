@@ -122,14 +122,14 @@ impl ResolvesModule for CurriculumComposer {
         match self.exchange(CurriculumQuery::ResolveSources(vec![
             signal_curriculum_nexus::ModuleIdentity(identity.0.clone()),
         ])) {
-            Ok(CurriculumOutcome::ResolvedSources(modules))
+            Ok(CurriculumOutcome::SourcesResolved(modules))
                 if modules
                     .iter()
                     .any(|module| module.module_identity.0 == identity.0) =>
             {
                 ModuleStanding::Held
             }
-            Ok(CurriculumOutcome::ResolvedSources(_)) => ModuleStanding::Unknown,
+            Ok(CurriculumOutcome::SourcesResolved(_)) => ModuleStanding::Unknown,
             Ok(CurriculumOutcome::Rejected(reason)) if reason.starts_with("missing module") => {
                 ModuleStanding::Unknown
             }

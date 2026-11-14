@@ -3029,8 +3029,8 @@ rec {
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal-curriculum-nexus";
-          rev = "3e8b5b9a8cb7523ab205a74c9bbe828dc9f31cdc";
-          sha256 = "139qjyp4i8w0928z8i5400pybchr6s320gwgvjxgjrq7v4xmsvyy";
+          rev = "4358aa1c2bcba273fe18037ab7e99ebb117a9a47";
+          sha256 = "1awfjf2vcs09vyhyc2x259wvwzd1dnn6a8c3pqbfvdc97n5znnj3";
         };
         libName = "signal_curriculum_nexus";
         dependencies = [

@@ -885,7 +885,7 @@ dependencies = [
 [[package]]
 name = "signal-curriculum-nexus"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-curriculum-nexus?rev=3e8b5b9#3e8b5b9a8cb7523ab205a74c9bbe828dc9f31cdc"
+source = "git+https://github.com/LiGoldragon/signal-curriculum-nexus?rev=4358aa1#4358aa1c2bcba273fe18037ab7e99ebb117a9a47"
 dependencies = [
  "datom-codec",
  "ethos-zero 27.0.0",

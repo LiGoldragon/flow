@@ -1,0 +1,216 @@
+{
+  "task": "vuvv",
+  "kind": "historical archive-producer helpers, not old Nexus runtime",
+  "builder": "prometheus.goldragon.criome",
+  "schema_version": 1,
+  "memory_version": 1,
+  "table": "flow_nexus_meta_handover_configuration",
+  "family": "flow-nexus-handover-configuration",
+  "schema_label": "flow-nexus-handover-configuration-v1",
+  "record_key": "handover",
+  "consumer_execution": "none",
+  "boundary_producers": [
+    {
+      "producer_revision": "4b8134040b2dfc1ecabb333c098042aa07a115f1",
+      "meta_revision": "2f0a8de1e767929e2c8e1191a8e5a8a67492ae8e",
+      "historical_source": "crates/flow-nexus/src/store/handover_configuration.rs",
+      "historical_prefix_bytes": 1648,
+      "whole_original_module": true,
+      "flow_ethos_patch": "original/crates/flow-ethos",
+      "archive_features": {
+        "version": "0.8",
+        "default-features": false,
+        "features": [
+          "std",
+          "bytecheck",
+          "little_endian",
+          "pointer_width_32",
+          "unaligned"
+        ]
+      },
+      "dependency_additions": [
+        [
+          "historical-v1-store-producer",
+          "0.0.0",
+          "path"
+        ]
+      ],
+      "lock_closure_identity_preserved": true,
+      "selected_dependencies": [
+        {
+          "name": "flow-ethos",
+          "version": "0.53.2",
+          "source": "path"
+        },
+        {
+          "name": "meta-signal-flow",
+          "version": "66.0.0",
+          "source": "git+https://github.com/LiGoldragon/meta-signal-flow?rev=2f0a8de1e767929e2c8e1191a8e5a8a67492ae8e#2f0a8de1e767929e2c8e1191a8e5a8a67492ae8e"
+        },
+        {
+          "name": "rkyv",
+          "version": "0.8.18",
+          "source": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "sema-engine",
+          "version": "0.18.0",
+          "source": "git+https://github.com/LiGoldragon/sema-engine?rev=9884905ff9c660ad97a35c524e42532d5c7bac90#9884905ff9c660ad97a35c524e42532d5c7bac90"
+        },
+        {
+          "name": "signal-flow",
+          "version": "52.0.0",
+          "source": "git+https://github.com/LiGoldragon/signal-flow?rev=32902052a31745f0ddb6c35c8013146d0dfca4d6#32902052a31745f0ddb6c35c8013146d0dfca4d6"
+        }
+      ],
+      "producer_source_sha256": "5d32a541526028cb73753ff4983c1e7e3a478eb283e7c01de0618d09e56f46db",
+      "historical_source_sha256": "dfcc20be4bc6d411e7fd25fff6941e9873b221ac69878c7b86a2669727981d91",
+      "stores": [
+        {
+          "path": "4b813404/stores/empty-policy.sema",
+          "bytes": 69632,
+          "sha256": "1b81a172809ed3b665a30c1b0e8d4cd08bb8ef7bb3f7da600a2937b067431ae8",
+          "expected": {
+            "policies": [],
+            "archive": "/historical/empty policy/archive",
+            "count": 7
+          }
+        },
+        {
+          "path": "4b813404/stores/nonempty-policy.sema",
+          "bytes": 69632,
+          "sha256": "c91eecaa94d5673b683b23e90d8a1e5fe40a73f59ae11a541690a9e78a536346",
+          "expected": {
+            "policies": [
+              {
+                "model_name": "historicalModelOne",
+                "warning_share_left": 17,
+                "reminder_text": "Historical reminder one: preserve nested text.",
+                "every_minutes": 3
+              },
+              {
+                "model_name": "historicalModelTwo",
+                "warning_share_left": 29,
+                "reminder_text": "Historical reminder two: distinct bytes.",
+                "every_minutes": 11
+              }
+            ],
+            "archive": "/historical/nonempty policy/archive",
+            "count": 13
+          }
+        },
+        {
+          "path": "4b813404/stores/unconfigured.sema",
+          "bytes": 69632,
+          "sha256": "a0c41ecb8851527b9f525e28c9775964b48bb0e317228d1912f2e11fac17f475",
+          "expected": {
+            "policies": "Unconfigured",
+            "archive": "Unconfigured",
+            "count": "Unconfigured"
+          }
+        }
+      ]
+    },
+    {
+      "producer_revision": "b0331a849fc214c1072e1c7a60c7c2a679db958c",
+      "meta_revision": "91e1f45adced679a006638f1cec1b6456e5a4dc0",
+      "historical_source": "crates/flow-nexus/src/store/handover_configuration.rs",
+      "historical_prefix_bytes": 1868,
+      "whole_original_module": false,
+      "flow_ethos_patch": "original/crates/flow-ethos",
+      "archive_features": {
+        "version": "0.8",
+        "default-features": false,
+        "features": [
+          "std",
+          "bytecheck",
+          "little_endian",
+          "pointer_width_32",
+          "unaligned"
+        ]
+      },
+      "dependency_additions": [
+        [
+          "historical-v1-store-producer",
+          "0.0.0",
+          "path"
+        ]
+      ],
+      "lock_closure_identity_preserved": true,
+      "selected_dependencies": [
+        {
+          "name": "flow-ethos",
+          "version": "0.53.2",
+          "source": "path"
+        },
+        {
+          "name": "meta-signal-flow",
+          "version": "68.0.0",
+          "source": "git+https://github.com/LiGoldragon/meta-signal-flow?rev=91e1f45adced679a006638f1cec1b6456e5a4dc0#91e1f45adced679a006638f1cec1b6456e5a4dc0"
+        },
+        {
+          "name": "rkyv",
+          "version": "0.8.18",
+          "source": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "sema-engine",
+          "version": "0.18.0",
+          "source": "git+https://github.com/LiGoldragon/sema-engine?rev=9884905ff9c660ad97a35c524e42532d5c7bac90#9884905ff9c660ad97a35c524e42532d5c7bac90"
+        },
+        {
+          "name": "signal-flow",
+          "version": "55.0.0",
+          "source": "git+https://github.com/LiGoldragon/signal-flow?rev=e050c8fbf334d859391cb64f6a47663a2c689c11#e050c8fbf334d859391cb64f6a47663a2c689c11"
+        }
+      ],
+      "producer_source_sha256": "5d32a541526028cb73753ff4983c1e7e3a478eb283e7c01de0618d09e56f46db",
+      "historical_source_sha256": "e6db8e73caad64c304547285752931e18896e9ced506b49b336e6064c43ea73b",
+      "stores": [
+        {
+          "path": "b0331a84/stores/empty-policy.sema",
+          "bytes": 69632,
+          "sha256": "1b81a172809ed3b665a30c1b0e8d4cd08bb8ef7bb3f7da600a2937b067431ae8",
+          "expected": {
+            "policies": [],
+            "archive": "/historical/empty policy/archive",
+            "count": 7
+          }
+        },
+        {
+          "path": "b0331a84/stores/nonempty-policy.sema",
+          "bytes": 69632,
+          "sha256": "c91eecaa94d5673b683b23e90d8a1e5fe40a73f59ae11a541690a9e78a536346",
+          "expected": {
+            "policies": [
+              {
+                "model_name": "historicalModelOne",
+                "warning_share_left": 17,
+                "reminder_text": "Historical reminder one: preserve nested text.",
+                "every_minutes": 3
+              },
+              {
+                "model_name": "historicalModelTwo",
+                "warning_share_left": 29,
+                "reminder_text": "Historical reminder two: distinct bytes.",
+                "every_minutes": 11
+              }
+            ],
+            "archive": "/historical/nonempty policy/archive",
+            "count": 13
+          }
+        },
+        {
+          "path": "b0331a84/stores/unconfigured.sema",
+          "bytes": 69632,
+          "sha256": "a0c41ecb8851527b9f525e28c9775964b48bb0e317228d1912f2e11fac17f475",
+          "expected": {
+            "policies": "Unconfigured",
+            "archive": "Unconfigured",
+            "count": "Unconfigured"
+          }
+        }
+      ]
+    }
+  ]
+}

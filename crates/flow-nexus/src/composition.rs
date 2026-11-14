@@ -2400,4 +2400,275 @@ pub(crate) mod tests {
             .collect();
         assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{text}");
     }
+
+    fn emergency_intent(
+        profile: &LaunchProfile,
+        recorded_address: Address,
+        intent_predecessor: &str,
+        recovery_predecessor: &str,
+        path: Option<signal_flow::TranscriptPath>,
+    ) -> crate::generated::memory::SuccessorIntent {
+        crate::generated::memory::SuccessorIntent {
+            address: recorded_address,
+            predecessor: crate::generated::memory::Predecessor(intent_predecessor.into()),
+            succession_cause:
+                crate::generated::memory::SuccessionCause::EmergencyRefreshWithoutHandover(
+                    crate::generated::memory::EmergencyRefreshWithoutHandover_Data {
+                        flow_id: signal_flow::FlowId(recovery_predecessor.into()),
+                        transcript_path_option: path,
+                    },
+                ),
+            launch_request_id: profile.launch_request_id.clone(),
+        }
+    }
+
+    /// The two compositions a successor takes: the regular one with its
+    /// brief, and the simplified one with an empty brief.
+    fn successor_launches(profile: &LaunchProfile) -> [LaunchProfile; 2] {
+        let regular = profile.clone();
+        let mut simplified = profile.clone();
+        simplified.flow_kind = signal_flow::FlowKind::Simplified;
+        simplified.instruction_prompt.0 = String::new();
+        [regular, simplified]
+    }
+
+    fn composed_with(
+        composer: &LaunchComposer,
+        profile: LaunchProfile,
+    ) -> Result<signal_flow::ComposedLaunch, CompositionError> {
+        composer.compose_in_root(
+            HarnessedProfile {
+                remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
+                harness_kind: HarnessKind::Claude,
+                launch_profile: profile,
+            },
+            Vec::<LeaveOut>::new(),
+            HandoverRoot::At(Path::new("/fixture")),
+            &[],
+        )
+    }
+
+    fn composer_reading(
+        recovery: Arc<dyn super::ReadsSuccessorRecovery>,
+        handover: Handover,
+    ) -> LaunchComposer {
+        let mut composer = fixture_composer();
+        composer.successor_recovery = recovery;
+        composer.with_handover_source(Arc::new(RecoveryHandoverFixture { value: handover }))
+    }
+
+    /// Gap 1. Each identity guard refuses alone: a recorded Address, an
+    /// intent predecessor or an emergency predecessor other than the
+    /// launch's, the other two matching, refuses the composition with every
+    /// typed field, through the regular composition and the simplified one
+    /// with an empty brief.
+    #[test]
+    fn each_recovery_identity_guard_refuses_alone_with_every_typed_field() {
+        let profile = fixture_profile();
+        let launched = profile.flow_id_option.clone().unwrap().0;
+        let elsewhere = recovery_address("recordedElsewhere");
+        for (recorded_address, intent_predecessor, recovery_predecessor) in [
+            (elsewhere.clone(), launched.as_str(), launched.as_str()),
+            (profile.address.clone(), "intent", launched.as_str()),
+            (profile.address.clone(), launched.as_str(), "recovr"),
+        ] {
+            let expected = CompositionError::RecoveryPredecessorMismatch {
+                address: profile.address.clone(),
+                recorded_address: recorded_address.clone(),
+                expected_predecessor: signal_flow::FlowId(launched.clone()),
+                intent_predecessor: signal_flow::FlowId(intent_predecessor.into()),
+                recovery_predecessor: signal_flow::FlowId(recovery_predecessor.into()),
+            };
+            for launch in successor_launches(&profile) {
+                let composer = composer_reading(
+                    Arc::new(FixtureSuccessorRecovery {
+                        intent: Some(emergency_intent(
+                            &profile,
+                            recorded_address.clone(),
+                            intent_predecessor,
+                            recovery_predecessor,
+                            None,
+                        )),
+                        text: meta_signal_flow::SuccessorRecoveryText("Configured.".into()),
+                    }),
+                    Handover::Absent,
+                );
+                assert_eq!(
+                    composed_with(&composer, launch).unwrap_err(),
+                    expected,
+                    "{recorded_address:?} {intent_predecessor} {recovery_predecessor}"
+                );
+            }
+        }
+    }
+
+    /// A recovery source whose successor-intent read fails.
+    #[derive(Debug)]
+    struct UnreadableSuccessorIntent;
+    impl super::ReadsSuccessorRecovery for UnreadableSuccessorIntent {
+        fn successor_intent(
+            &self,
+            _address: &Address,
+        ) -> Result<Option<crate::generated::memory::SuccessorIntent>, crate::store::StoreError>
+        {
+            Err(crate::store::StoreError::SuccessorIntentUpgrade(
+                "the intent row could not be read".into(),
+            ))
+        }
+        fn successor_recovery_text(
+            &self,
+        ) -> Result<meta_signal_flow::SuccessorRecoveryText, crate::store::StoreError> {
+            Ok(meta_signal_flow::SuccessorRecoveryText("Configured.".into()))
+        }
+    }
+
+    /// A recovery source holding an emergency intent whose recovery-text
+    /// read fails.
+    #[derive(Debug)]
+    struct UnreadableRecoveryText(crate::generated::memory::SuccessorIntent);
+    impl super::ReadsSuccessorRecovery for UnreadableRecoveryText {
+        fn successor_intent(
+            &self,
+            _address: &Address,
+        ) -> Result<Option<crate::generated::memory::SuccessorIntent>, crate::store::StoreError>
+        {
+            Ok(Some(self.0.clone()))
+        }
+        fn successor_recovery_text(
+            &self,
+        ) -> Result<meta_signal_flow::SuccessorRecoveryText, crate::store::StoreError> {
+            Err(crate::store::StoreError::HandoverConfigurationUpgrade(
+                "the recovery text could not be read".into(),
+            ))
+        }
+    }
+
+    /// Gap 2. Each recovery read that fails refuses the composition
+    /// RecoveryUnavailable with the launch's Address, its predecessor and
+    /// the reader's own text, through both compositions; a handover the
+    /// source cannot read stays HandoverUnreadable, and a real handover is
+    /// taken without the recovery text being read.
+    #[test]
+    fn each_recovery_read_failure_refuses_unavailable_apart_from_an_unreadable_handover() {
+        let profile = fixture_profile();
+        let launched = profile.flow_id_option.clone().unwrap();
+        let intent = emergency_intent(
+            &profile,
+            profile.address.clone(),
+            &launched.0,
+            &launched.0,
+            None,
+        );
+        let intent_failure = crate::store::StoreError::SuccessorIntentUpgrade(
+            "the intent row could not be read".into(),
+        );
+        let text_failure = crate::store::StoreError::HandoverConfigurationUpgrade(
+            "the recovery text could not be read".into(),
+        );
+        let sources: [(Arc<dyn super::ReadsSuccessorRecovery>, String); 2] = [
+            (Arc::new(UnreadableSuccessorIntent), intent_failure.to_string()),
+            (
+                Arc::new(UnreadableRecoveryText(intent.clone())),
+                text_failure.to_string(),
+            ),
+        ];
+        for (source, reason) in sources {
+            for launch in successor_launches(&profile) {
+                let composer = composer_reading(source.clone(), Handover::Absent);
+                assert_eq!(
+                    composed_with(&composer, launch).unwrap_err(),
+                    CompositionError::RecoveryUnavailable {
+                        address: profile.address.clone(),
+                        predecessor: launched.clone(),
+                        reason: reason.clone(),
+                    }
+                );
+            }
+        }
+        let fault = signal_flow::HandoverFault::Unreadable("handover bytes unreadable".into());
+        for launch in successor_launches(&profile) {
+            let composer = composer_reading(
+                Arc::new(FixtureSuccessorRecovery {
+                    intent: Some(intent.clone()),
+                    text: meta_signal_flow::SuccessorRecoveryText("Configured.".into()),
+                }),
+                Handover::Unreadable(fault.clone()),
+            );
+            assert_eq!(
+                composed_with(&composer, launch.clone()).unwrap_err(),
+                CompositionError::HandoverUnreadable {
+                    predecessor: launched.0.clone(),
+                    fault: fault.clone(),
+                }
+            );
+            let composer = composer_reading(
+                Arc::new(UnreadableRecoveryText(intent.clone())),
+                Handover::Text("The predecessor's own handover.".into()),
+            );
+            let composed = composed_with(&composer, launch).unwrap();
+            assert!(
+                composed
+                    .first_prompt_payload
+                    .first_prompt_body
+                    .0
+                    .contains("The predecessor's own handover.")
+            );
+        }
+    }
+
+    /// Gap 7. The provenance rendered after the recovery text reads back,
+    /// as a typed SuccessionCause, equal to the recorded cause: its exact
+    /// predecessor and its path, absent or present, through both
+    /// compositions.
+    #[test]
+    fn rendered_emergency_provenance_reads_back_as_the_recorded_cause() {
+        use datom_codec::{Actualizing, Budget, Potential};
+        let profile = fixture_profile();
+        let launched = profile.flow_id_option.clone().unwrap().0;
+        let text = "Recover from the predecessor's transcript.";
+        for path in [
+            None,
+            Some(signal_flow::TranscriptPath(
+                "/native/sessions/predecessor transcript.jsonl".into(),
+            )),
+        ] {
+            let intent = emergency_intent(
+                &profile,
+                profile.address.clone(),
+                &launched,
+                &launched,
+                path.clone(),
+            );
+            for launch in successor_launches(&profile) {
+                let composer = composer_reading(
+                    Arc::new(FixtureSuccessorRecovery {
+                        intent: Some(intent.clone()),
+                        text: meta_signal_flow::SuccessorRecoveryText(text.into()),
+                    }),
+                    Handover::Absent,
+                );
+                let body = composed_with(&composer, launch)
+                    .unwrap()
+                    .first_prompt_payload
+                    .first_prompt_body
+                    .0;
+                let rendered = body[body.find(text).expect("the recovery text") + text.len()..]
+                    .strip_prefix("\n\n")
+                    .and_then(|after| after.lines().next())
+                    .unwrap_or_else(|| panic!("a cause line after the text: {body}"));
+                let mut budget = Budget {
+                    remaining: 65_536,
+                    reader: protos::ReaderBudget::try_from(65_536).expect("a reader budget"),
+                    depth: 0,
+                    maximum_depth: 1_024,
+                };
+                let read = Potential::<crate::generated::memory::SuccessionCause>::from(
+                    rendered.to_owned(),
+                )
+                .actualize(&mut budget)
+                .unwrap_or_else(|error| panic!("{rendered}: {error:?}"));
+                assert_eq!(read, intent.succession_cause, "{rendered}");
+            }
+        }
+    }
 }

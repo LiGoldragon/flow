@@ -312,8 +312,8 @@ mod tests {
         );
         assert_eq!(current.duration, meta_signal_flow::Duration(60_000));
         assert_eq!(
-            current.successor_recovery_text,
-            SuccessorRecoveryText::initial()
+            current.successor_recovery_text.0,
+            crate::tests::handover_configuration::APPROVED_RECOVERY_TEXT
         );
     }
 
@@ -399,8 +399,8 @@ mod tests {
                 assert_eq!(current.handover_count_configuration, predecessor.count);
                 assert_eq!(current.duration, meta_signal_flow::Duration(60_000));
                 assert_eq!(
-                    current.successor_recovery_text,
-                    SuccessorRecoveryText::initial()
+                    current.successor_recovery_text.0,
+                    crate::tests::handover_configuration::APPROVED_RECOVERY_TEXT
                 );
                 assert_eq!(
                     engine
@@ -442,8 +442,23 @@ mod tests {
     fn persisted_v2_upgrade_preserves_configuration_and_never_reseeds_changed_text() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("handover-v2.sema");
+        // Gap 3: a nonempty policy vector, each policy distinct in every
+        // field, is carried whole.
         let old = StoredHandoverConfigurationV2 {
-            handover_policies_configuration: HandoverPoliciesConfiguration::Unconfigured,
+            handover_policies_configuration: HandoverPoliciesConfiguration::Configured(vec![
+                meta_signal_flow::HandoverPolicy {
+                    model_name: flow_ethos::ModelName("v2ModelOne".into()),
+                    warning_share_left: meta_signal_flow::WarningShareLeft(19),
+                    reminder_text: meta_signal_flow::ReminderText("V2 reminder one.".into()),
+                    every_minutes: meta_signal_flow::EveryMinutes(4),
+                },
+                meta_signal_flow::HandoverPolicy {
+                    model_name: flow_ethos::ModelName("v2ModelTwo".into()),
+                    warning_share_left: meta_signal_flow::WarningShareLeft(31),
+                    reminder_text: meta_signal_flow::ReminderText("V2 reminder two.".into()),
+                    every_minutes: meta_signal_flow::EveryMinutes(9),
+                },
+            ]),
             handover_archive_configuration: HandoverArchiveConfiguration::Configured(
                 meta_signal_flow::generated::signal::Path("/v2/archive".into()),
             ),
@@ -473,6 +488,10 @@ mod tests {
                 .records()[0]
                 .clone();
             assert_eq!(
+                row.handover_policies_configuration,
+                old.handover_policies_configuration
+            );
+            assert_eq!(
                 row.handover_archive_configuration,
                 old.handover_archive_configuration
             );
@@ -482,8 +501,8 @@ mod tests {
             );
             assert_eq!(row.duration, old.duration);
             assert_eq!(
-                row.successor_recovery_text,
-                SuccessorRecoveryText::initial()
+                row.successor_recovery_text.0,
+                crate::tests::handover_configuration::APPROVED_RECOVERY_TEXT
             );
             let mut changed = row;
             changed.successor_recovery_text = SuccessorRecoveryText("After migration.".into());
@@ -507,8 +526,281 @@ mod tests {
                 .unwrap()
                 .records()[0]
                 .clone();
-            assert_eq!(row.successor_recovery_text.0, "After migration.");
+            assert_eq!(
+                row,
+                StoredHandoverConfiguration {
+                    handover_policies_configuration: old.handover_policies_configuration.clone(),
+                    handover_archive_configuration: old.handover_archive_configuration.clone(),
+                    handover_count_configuration: old.handover_count_configuration.clone(),
+                    duration: old.duration,
+                    successor_recovery_text: SuccessorRecoveryText("After migration.".into()),
+                }
+            );
         }
     }
 
+    /// The six v1 stores the published producers wrote, byte for byte:
+    /// 4b813404 on meta-signal-flow 66 and b0331a84 on meta-signal-flow 68.
+    /// Their provenance (producer source, dependency closure, archive
+    /// features, digests) is `tests/unit/historical-v1-handover/`.
+    const HISTORICAL_V1_STORES: [(&str, &str, &[u8]); 6] = [
+        (
+            "4b813404",
+            "unconfigured",
+            include_bytes!("../../tests/unit/historical-v1-handover/4b813404/stores/unconfigured.sema"),
+        ),
+        (
+            "4b813404",
+            "empty-policy",
+            include_bytes!("../../tests/unit/historical-v1-handover/4b813404/stores/empty-policy.sema"),
+        ),
+        (
+            "4b813404",
+            "nonempty-policy",
+            include_bytes!(
+                "../../tests/unit/historical-v1-handover/4b813404/stores/nonempty-policy.sema"
+            ),
+        ),
+        (
+            "b0331a84",
+            "unconfigured",
+            include_bytes!("../../tests/unit/historical-v1-handover/b0331a84/stores/unconfigured.sema"),
+        ),
+        (
+            "b0331a84",
+            "empty-policy",
+            include_bytes!("../../tests/unit/historical-v1-handover/b0331a84/stores/empty-policy.sema"),
+        ),
+        (
+            "b0331a84",
+            "nonempty-policy",
+            include_bytes!(
+                "../../tests/unit/historical-v1-handover/b0331a84/stores/nonempty-policy.sema"
+            ),
+        ),
+    ];
+
+    /// What each historical store holds, as its producer's manifest writes
+    /// it, in the current types; the deadline v2 seeds and the approved
+    /// recovery text v3 seeds follow.
+    fn historical_upgraded(store: &str) -> StoredHandoverConfiguration {
+        let (policies, archive, count) = match store {
+            "unconfigured" => (
+                HandoverPoliciesConfiguration::Unconfigured,
+                HandoverArchiveConfiguration::Unconfigured,
+                HandoverCountConfiguration::Unconfigured,
+            ),
+            "empty-policy" => (
+                HandoverPoliciesConfiguration::Configured(Vec::new()),
+                HandoverArchiveConfiguration::Configured(
+                    meta_signal_flow::generated::signal::Path(
+                        "/historical/empty policy/archive".into(),
+                    ),
+                ),
+                HandoverCountConfiguration::Configured(7),
+            ),
+            "nonempty-policy" => (
+                HandoverPoliciesConfiguration::Configured(vec![
+                    meta_signal_flow::HandoverPolicy {
+                        model_name: flow_ethos::ModelName("historicalModelOne".into()),
+                        warning_share_left: meta_signal_flow::WarningShareLeft(17),
+                        reminder_text: meta_signal_flow::ReminderText(
+                            "Historical reminder one: preserve nested text.".into(),
+                        ),
+                        every_minutes: meta_signal_flow::EveryMinutes(3),
+                    },
+                    meta_signal_flow::HandoverPolicy {
+                        model_name: flow_ethos::ModelName("historicalModelTwo".into()),
+                        warning_share_left: meta_signal_flow::WarningShareLeft(29),
+                        reminder_text: meta_signal_flow::ReminderText(
+                            "Historical reminder two: distinct bytes.".into(),
+                        ),
+                        every_minutes: meta_signal_flow::EveryMinutes(11),
+                    },
+                ]),
+                HandoverArchiveConfiguration::Configured(
+                    meta_signal_flow::generated::signal::Path(
+                        "/historical/nonempty policy/archive".into(),
+                    ),
+                ),
+                HandoverCountConfiguration::Configured(13),
+            ),
+            other => panic!("no historical store {other}"),
+        };
+        StoredHandoverConfiguration {
+            handover_policies_configuration: policies,
+            handover_archive_configuration: archive,
+            handover_count_configuration: count,
+            duration: Duration(60_000),
+            successor_recovery_text: SuccessorRecoveryText(
+                crate::tests::handover_configuration::APPROVED_RECOVERY_TEXT.into(),
+            ),
+        }
+    }
+
+    /// Gap 4, the whole file. Each producer-written store opens in this
+    /// engine, and the family's own upgrader takes it through v2 to v3:
+    /// every v1 field kept, the deadline and the approved text seeded once,
+    /// a text changed after the upgrade kept across reopens.
+    #[test]
+    fn producer_written_v1_stores_upgrade_whole_through_v2_to_v3_and_never_reseed() {
+        for (producer, store, bytes) in HISTORICAL_V1_STORES {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(format!("{store}.sema"));
+            std::fs::write(&path, bytes).unwrap();
+            let expected = historical_upgraded(store);
+            let changed = StoredHandoverConfiguration {
+                successor_recovery_text: SuccessorRecoveryText("Changed after upgrade.".into()),
+                ..expected.clone()
+            };
+            let open = || {
+                Engine::open(
+                    EngineOpen::new(&path, SchemaVersion::new(1))
+                        .with_family(&StoredHandoverConfiguration::descriptor()),
+                )
+                .unwrap_or_else(|error| panic!("{producer} {store} opens: {error:?}"))
+            };
+            {
+                let mut engine = open();
+                let table = StoredHandoverConfiguration::upgrade_or_register(&mut engine)
+                    .unwrap_or_else(|error| panic!("{producer} {store} upgrades: {error}"));
+                assert_eq!(
+                    engine
+                        .match_records(QueryPlan::all(table))
+                        .unwrap()
+                        .records(),
+                    std::slice::from_ref(&expected),
+                    "{producer} {store}"
+                );
+                engine
+                    .mutate_keyed(sema_engine::KeyedMutation::new(
+                        table,
+                        RecordKey::new("handover"),
+                        changed.clone(),
+                    ))
+                    .unwrap();
+            }
+            for _ in 0..2 {
+                let mut engine = open();
+                let table = StoredHandoverConfiguration::upgrade_or_register(&mut engine).unwrap();
+                assert_eq!(
+                    engine
+                        .match_records(QueryPlan::all(table))
+                        .unwrap()
+                        .records(),
+                    std::slice::from_ref(&changed),
+                    "{producer} {store} reopened"
+                );
+            }
+        }
+    }
+
+    /// Gap 4, through Flow's own openers. The producer's catalog entry and
+    /// row, exact bytes, stand in a configured Flow store for its handover
+    /// family; the configuration opener upgrades them, Configure changes
+    /// the recovery text, and the Flow opener reads the change back after
+    /// each reopen, every v1 field kept.
+    #[test]
+    fn producer_written_v1_rows_upgrade_through_flow_openers_and_keep_a_configured_text() {
+        use crate::store::{
+            ConfigurationOnlyStore, ConfiguresOnlyStore, FlowStore, ManagesMetaflowState,
+            OpensFlowStore,
+        };
+        let rows = redb::TableDefinition::<String, &[u8]>::new(super::super::OPTIONAL_HANDOVER_TABLE);
+        for (producer, store, bytes) in HISTORICAL_V1_STORES {
+            let directory = tempfile::tempdir().unwrap();
+            let produced = directory.path().join("produced.sema");
+            std::fs::write(&produced, bytes).unwrap();
+            let (registration, row) = {
+                use redb::ReadableDatabase as _;
+                let database = redb::Database::open(&produced).unwrap();
+                let read = database.begin_read().unwrap();
+                let catalog = read.open_table(super::super::SEMA_CATALOG_TABLE).unwrap();
+                let registration = catalog
+                    .get(super::super::OPTIONAL_HANDOVER_TABLE)
+                    .unwrap()
+                    .expect("the producer registered the family")
+                    .value()
+                    .to_vec();
+                let row = read
+                    .open_table(rows)
+                    .unwrap()
+                    .get("handover".to_owned())
+                    .unwrap()
+                    .expect("the producer wrote its row")
+                    .value()
+                    .to_vec();
+                (registration, row)
+            };
+            let fixture = crate::tests::configuring::ConfiguredStore::new();
+            {
+                let database = redb::Database::open(fixture.path()).unwrap();
+                let write = database.begin_write().unwrap();
+                write
+                    .open_table(super::super::SEMA_CATALOG_TABLE)
+                    .unwrap()
+                    .insert(super::super::OPTIONAL_HANDOVER_TABLE, registration.as_slice())
+                    .unwrap();
+                write
+                    .open_table(rows)
+                    .unwrap()
+                    .insert("handover".to_owned(), row.as_slice())
+                    .unwrap();
+                write.commit().unwrap();
+            }
+            let expected = historical_upgraded(store);
+            let configuration = ConfigurationOnlyStore::open(fixture.path())
+                .unwrap_or_else(|error| panic!("{producer} {store} upgrades: {error}"));
+            let families = configuration.configuration_snapshot().unwrap().unwrap();
+            assert_eq!(
+                (
+                    families.handover_policies,
+                    families.handover_archive,
+                    families.handover_count,
+                    families.publication_deadline,
+                    families.successor_recovery_text,
+                ),
+                (
+                    expected.handover_policies_configuration.clone(),
+                    expected.handover_archive_configuration.clone(),
+                    expected.handover_count_configuration.clone(),
+                    expected.duration,
+                    expected.successor_recovery_text.clone(),
+                ),
+                "{producer} {store}"
+            );
+            configuration
+                .configure_change(meta_signal_flow::ConfigurationChange::SuccessorRecoveryText(
+                    SuccessorRecoveryText("Configured after the historical upgrade.".into()),
+                ))
+                .unwrap();
+            drop(configuration);
+            for _ in 0..2 {
+                let running = FlowStore::open_configured(fixture.path())
+                    .unwrap_or_else(|error| panic!("{producer} {store} reopens: {error}"));
+                let snapshot = running.configuration_snapshot().unwrap().unwrap();
+                assert_eq!(
+                    snapshot.successor_recovery_text.0,
+                    "Configured after the historical upgrade.",
+                    "{producer} {store}"
+                );
+                assert_eq!(
+                    snapshot.configured_handover_policies.0,
+                    expected.handover_policies_configuration
+                );
+                assert_eq!(
+                    snapshot.configured_handover_archive.0,
+                    expected.handover_archive_configuration
+                );
+                assert_eq!(
+                    snapshot.configured_handover_count.0,
+                    expected.handover_count_configuration
+                );
+                assert_eq!(
+                    snapshot.configured_publication_deadline.0,
+                    expected.duration
+                );
+            }
+        }
+    }
 }

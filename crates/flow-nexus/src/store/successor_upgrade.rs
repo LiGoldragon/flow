@@ -95,77 +95,100 @@ mod tests {
         }
     }
 
+    /// Gap 6. A persisted v3 intent upgrades through the family's own
+    /// upgrader, and the emergency provenance written over it, with no path
+    /// and with one, reads back whole after a reopen: Address, predecessor,
+    /// launch request and the cause with its exact predecessor and path.
     #[test]
     fn persisted_v3_intent_upgrades_and_v4_emergency_provenance_survives_reopen() {
         use sema_engine::{
             Assertion, EngineOpen, FamilyName, QueryPlan, SchemaVersion, TableDescriptor,
         };
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("successor-v3.sema");
-        let address = Address {
-            aspect: signal_flow::Aspect::Mind,
-            topic: flow_ethos::Topic("persistedRecovery".into()),
-            model: signal_flow::Model::Sol,
-        };
-        let old = SuccessorIntentV3 {
-            address: address.clone(),
-            predecessor: Predecessor("before".into()),
-            succession_cause: SuccessionCauseV3::Refresh,
-            launch_request_id: LaunchRequestId("launch-before".into()),
-        };
-        {
-            let mut engine = Engine::open(EngineOpen::new(&path, SchemaVersion::new(1))).unwrap();
-            let descriptor = TableDescriptor::<SuccessorIntentV3>::new(
-                super::super::successor::SUCCESSOR_INTENT_TABLE_NAME,
-                FamilyName::new(super::super::successor::SUCCESSOR_INTENT_FAMILY),
-                SuccessorIntentV3::schema_hash(),
-            );
-            let table = engine.register_table(descriptor).unwrap();
-            engine.assert(Assertion::new(table, old.clone())).unwrap();
-        }
-        let key = old.record_key();
-        {
-            let mut engine = Engine::open(
-                EngineOpen::new(&path, SchemaVersion::new(1))
-                    .with_family(&SuccessorIntent::descriptor()),
-            )
-            .unwrap();
-            let table = SuccessorIntent::upgrade_or_register(&mut engine).unwrap();
-            let mut row = engine
-                .match_records(QueryPlan::key(table, key.clone()))
-                .unwrap()
-                .records()[0]
-                .clone();
-            assert_eq!(row.succession_cause, SuccessionCause::Refresh);
-            assert_eq!(row.predecessor, old.predecessor);
-            row.succession_cause = SuccessionCause::EmergencyRefreshWithoutHandover(
-                crate::generated::memory::EmergencyRefreshWithoutHandover_Data {
-                    flow_id: signal_flow::FlowId("before".into()),
-                    transcript_path_option: None,
-                },
-            );
-            engine
-                .mutate_keyed(sema_engine::KeyedMutation::new(table, key.clone(), row))
-                .unwrap();
-        }
-        {
-            let mut engine = Engine::open(
-                EngineOpen::new(&path, SchemaVersion::new(1))
-                    .with_family(&SuccessorIntent::descriptor()),
-            )
-            .unwrap();
-            let table = SuccessorIntent::upgrade_or_register(&mut engine).unwrap();
-            let row = engine
-                .match_records(QueryPlan::key(table, key))
-                .unwrap()
-                .records()[0]
-                .clone();
-            let SuccessionCause::EmergencyRefreshWithoutHandover(provenance) = row.succession_cause
-            else {
-                panic!("emergency intent survived")
+        for path in [
+            None,
+            Some(signal_flow::TranscriptPath(
+                "/native/sessions/before transcript.jsonl".into(),
+            )),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = directory.path().join("successor-v3.sema");
+            let address = Address {
+                aspect: signal_flow::Aspect::Mind,
+                topic: flow_ethos::Topic("persistedRecovery".into()),
+                model: signal_flow::Model::Sol,
             };
-            assert_eq!(provenance.flow_id.0, "before");
-            assert_eq!(provenance.transcript_path_option, None);
+            let old = SuccessorIntentV3 {
+                address: address.clone(),
+                predecessor: Predecessor("before".into()),
+                succession_cause: SuccessionCauseV3::Refresh,
+                launch_request_id: LaunchRequestId("launch-before".into()),
+            };
+            {
+                let mut engine =
+                    Engine::open(EngineOpen::new(&store, SchemaVersion::new(1))).unwrap();
+                let descriptor = TableDescriptor::<SuccessorIntentV3>::new(
+                    super::super::successor::SUCCESSOR_INTENT_TABLE_NAME,
+                    FamilyName::new(super::super::successor::SUCCESSOR_INTENT_FAMILY),
+                    SuccessorIntentV3::schema_hash(),
+                );
+                let table = engine.register_table(descriptor).unwrap();
+                engine.assert(Assertion::new(table, old.clone())).unwrap();
+            }
+            let key = old.record_key();
+            let emergency = SuccessorIntent {
+                address: address.clone(),
+                predecessor: Predecessor("before".into()),
+                succession_cause: SuccessionCause::EmergencyRefreshWithoutHandover(
+                    crate::generated::memory::EmergencyRefreshWithoutHandover_Data {
+                        flow_id: signal_flow::FlowId("before".into()),
+                        transcript_path_option: path.clone(),
+                    },
+                ),
+                launch_request_id: LaunchRequestId("launch-before".into()),
+            };
+            {
+                let mut engine = Engine::open(
+                    EngineOpen::new(&store, SchemaVersion::new(1))
+                        .with_family(&SuccessorIntent::descriptor()),
+                )
+                .unwrap();
+                let table = SuccessorIntent::upgrade_or_register(&mut engine).unwrap();
+                let row = engine
+                    .match_records(QueryPlan::key(table, key.clone()))
+                    .unwrap()
+                    .records()[0]
+                    .clone();
+                assert_eq!(
+                    row,
+                    SuccessorIntent {
+                        succession_cause: SuccessionCause::Refresh,
+                        ..emergency.clone()
+                    }
+                );
+                engine
+                    .mutate_keyed(sema_engine::KeyedMutation::new(
+                        table,
+                        key.clone(),
+                        emergency.clone(),
+                    ))
+                    .unwrap();
+            }
+            for _ in 0..2 {
+                let mut engine = Engine::open(
+                    EngineOpen::new(&store, SchemaVersion::new(1))
+                        .with_family(&SuccessorIntent::descriptor()),
+                )
+                .unwrap();
+                let table = SuccessorIntent::upgrade_or_register(&mut engine).unwrap();
+                assert_eq!(
+                    engine
+                        .match_records(QueryPlan::key(table, key.clone()))
+                        .unwrap()
+                        .records(),
+                    std::slice::from_ref(&emergency),
+                    "{path:?}"
+                );
+            }
         }
     }
 }

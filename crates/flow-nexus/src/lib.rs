@@ -2869,14 +2869,14 @@ mod tests {
     use crate::live::{HoldsLiveValue, Live};
     mod admission;
     pub(crate) mod codex_turns;
-    mod configuring;
+    pub(crate) mod configuring;
     mod counters;
     mod curriculum;
     mod delivery;
     mod ending;
     mod handover;
     mod handover_archive;
-    mod handover_configuration;
+    pub(crate) mod handover_configuration;
     mod handover_memory;
     mod handover_reminding;
     mod heartbeat_production;
@@ -2888,6 +2888,7 @@ mod tests {
     mod queue_operations;
     mod reap_takeover;
     pub(crate) mod reaping;
+    mod recovery;
     mod refresh_and_compaction;
     mod refreshing;
     mod rehearsing;

@@ -110,7 +110,7 @@ fn start(home: &Path, place: &Place, environment: &[(&str, &str)]) -> (StartedNe
     )
 }
 
-/// Starts the given daemon executable as `start` starts this crate's.
+/// Starts the given daemon executable as `start` starts this crate's (a test-only edit, the proof that it rebuilds the test build alone).
 fn start_daemon(
     daemon: &Path,
     home: &Path,

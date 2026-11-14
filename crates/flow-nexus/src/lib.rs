@@ -1533,71 +1533,13 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
     }
 }
 
-trait ChecksExecutableDefault {
-    fn validate_executable_default_configuration(&self) -> Result<(), store::StoreError>;
-}
-
-impl ChecksExecutableDefault for meta_signal_flow::ConfigureNexus {
-    fn validate_executable_default_configuration(&self) -> Result<(), store::StoreError> {
-        let configuration = self;
-        // The first Codex endpoint is the stable one, the second the next.
-        let stable_codex = &configuration.first_codex_endpoint;
-        let next_codex = &configuration.second_codex_endpoint;
-        let required_paths = [
-            configuration.source_root.0.as_str(),
-            stable_codex.client_path.0.as_str(),
-            stable_codex.home.0.as_str(),
-            stable_codex.control_socket_path.0.as_str(),
-            next_codex.client_path.0.as_str(),
-            next_codex.home.0.as_str(),
-            next_codex.control_socket_path.0.as_str(),
-            configuration.curriculum_nexus_path.0.as_str(),
-        ];
-        if required_paths
-            .iter()
-            .any(|path| !Path::new(path).is_absolute())
-            || stable_codex.model_name_vector.is_empty()
-            || configuration.harness_profiles.0.is_empty()
-            || configuration.meta_aspects.0.is_empty()
-            || configuration.lease.0 <= 0
-        {
-            return Err(store::StoreError::MissingDefaultConfiguration);
-        }
-        Ok(())
-    }
-}
-
-/// The configuration an executable carries, built into its daemon binary
-/// alone, so the library is one build whatever configuration a package
-/// carries: a fresh memory starts with it, and a memory that exists is
-/// left as it is.
-pub trait SeedsExecutableDefault {
-    fn seed_executable_default(self, place: &place::Place) -> Result<(), store::StoreError>;
-}
-
-impl SeedsExecutableDefault for meta_signal_flow::ConfigureNexus {
-    fn seed_executable_default(self, place: &place::Place) -> Result<(), store::StoreError> {
-        use place::LaysOutPlace;
-        let store_path = place.store();
-        let store_path = store_path.as_path();
-        if store_path.exists() {
-            return Ok(());
-        }
-        self.validate_executable_default_configuration()?;
-        let configuration_store = store::ConfigurationOnlyStore::open(store_path)?;
-        if configuration_store.configuration_snapshot()?.is_none() {
-            configuration_store
-                .configure_change(meta_signal_flow::ConfigurationChange::Nexus(self))?;
-        }
-        Ok(())
-    }
-}
-
 pub trait OpensRunningNexus {
     /// Opens the Nexus in its place: the memory in State, the socket its
     /// flows report to in Runtime. Durable runner values come from the
-    /// committed Meta configuration snapshot; a fresh memory starts with
-    /// the configuration built into the executable.
+    /// committed Meta configuration snapshot. A new memory is made empty and
+    /// the Nexus starts unconfigured: the executable holds no configuration,
+    /// and the configuration reaches it over the meta socket, a release
+    /// replaying it there, and is applied as it commits.
     fn open(place: &place::Place) -> Result<Self, store::StoreError>
     where
         Self: Sized;
@@ -1608,15 +1550,23 @@ impl OpensRunningNexus for RunningNexus {
         use place::LaysOutPlace;
         let store_path = place.store();
         let store_path = store_path.as_path();
+        // A new memory is made empty, holding no configuration.
+        if !store_path.exists() {
+            drop(store::ConfigurationOnlyStore::open(store_path)?);
+        }
         // The configured opener checks the typed store path read-only first,
         // reads the committed snapshot, and only then registers runtime tables.
         // It never seeds defaults or settles work, and refuses a store an
         // earlier Flow wrote.
         let store = Arc::new(FlowStore::open_configured(store_path)?);
-        let snapshot = store
-            .configuration_snapshot()?
-            .ok_or(store::StoreError::NotConfigured)?;
-        let configured = ConfiguredRunner::from(&snapshot);
+        let snapshot = store.configuration_snapshot()?;
+        let configured = snapshot
+            .as_ref()
+            .map_or_else(ConfiguredRunner::unconfigured, ConfiguredRunner::from);
+        let harness_hook = snapshot.as_ref().map_or(
+            meta_signal_flow::HarnessHookConfiguration::Unconfigured,
+            |snapshot| snapshot.configured_harness_hook.0.clone(),
+        );
         // The socket this Nexus serves is its place's, never the store's.
         let ordinary_socket = place.ordinary_socket();
         Ok(Self {
@@ -1625,7 +1575,7 @@ impl OpensRunningNexus for RunningNexus {
             herdr: herdr::HerdrCli::default()
                 .with_source_root(&configured.source_root)
                 .with_codex_endpoints(configured.codex_endpoints.clone())
-                .with_harness_hook(&snapshot.configured_harness_hook.0)
+                .with_harness_hook(&harness_hook)
                 .with_ordinary_socket(&ordinary_socket),
             // A launch's context is composed by the Curriculum Nexus at the
             // socket the configuration names.
@@ -1680,6 +1630,35 @@ impl From<&meta_signal_flow::ConfigurationSnapshot> for ConfiguredRunner {
                 .presentation_prompt_option
                 .clone()
                 .map(|value| value.0),
+        }
+    }
+}
+
+/// The runner of a Nexus no configuration has reached yet: no Codex
+/// endpoint, no source root and no Curriculum socket, so a launch is refused
+/// Unconfigured until the meta socket configures the Nexus.
+trait StartsUnconfigured {
+    fn unconfigured() -> Self;
+}
+
+impl StartsUnconfigured for ConfiguredRunner {
+    fn unconfigured() -> Self {
+        let none = store::CodexEndpointConfiguration {
+            client_path: String::new(),
+            home: String::new(),
+            socket: String::new(),
+            model_names: Vec::new(),
+        };
+        let runtime = store::RuntimeConfiguration {
+            source_root: String::new(),
+            stable_codex: none.clone(),
+            next_codex: none,
+        };
+        Self {
+            codex_endpoints: CodexEndpoints::from(&runtime),
+            source_root: PathBuf::new(),
+            curriculum_nexus_path: String::new(),
+            presentation_prompt_option: None,
         }
     }
 }

@@ -15,14 +15,14 @@ use std::path::{Path, PathBuf};
 /// deployment lays it out: `<runtime>/nexus/<name>`, `<state>/nexus/<name>`.
 fn place(root: &Path, name: &str) -> Place {
     Place {
-        place_name: crate::generated::library::PlaceName(name.into()),
-        runtime: crate::generated::library::Runtime(
+        place_name: crate::place::PlaceName(name.into()),
+        runtime: crate::place::Runtime(
             root.join("run/nexus")
                 .join(name)
                 .to_string_lossy()
                 .into_owned(),
         ),
-        state: crate::generated::library::State(
+        state: crate::place::State(
             root.join("state/nexus")
                 .join(name)
                 .to_string_lossy()
@@ -112,7 +112,7 @@ fn a_launch_receives_the_socket_of_the_place_the_nexus_opened_in() {
 
     // The same memory opened at another place serves that place's socket.
     let elsewhere = Place {
-        runtime: crate::generated::library::Runtime(
+        runtime: crate::place::Runtime(
             directory
                 .path()
                 .join("run/nexus/next")

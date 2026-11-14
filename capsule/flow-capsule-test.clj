@@ -264,10 +264,17 @@
                 (not (str/starts-with? (:err configured) "Missing."))))
     (check "a typed place is a second argument, refused"
            (and (= 2 (:exit typed)) (str/includes? (:err typed) "usage:"))))
-  (check "a place-started Nexus is started with its place"
-         (= (str "{ «main» «" (fs/path flow-capsule/places-root "main") "» «/state/capsule» }")
+  (check "a place-started Nexus is started with its place's name"
+         (= "main"
             (flow-capsule/start-text flow-package flow-capsule/ordinary-socket flow-capsule/meta-socket
-                                     "/state/capsule/flow.sema"))))
+                                     "/state/capsule/flow.sema")))
+  (check "its place, written to its place file, is the directory of its sockets and of its memory"
+         (= (str "{ «main» «" (fs/path flow-capsule/places-root "main") "» «/state/capsule» }")
+            (flow-capsule/place-datom flow-capsule/ordinary-socket "/state/capsule/flow.sema")))
+  (check "every place's file lies under the capsule's own configuration home"
+         (= [(str flow-capsule/config-home "/nexus/main/flow-nexus.signal")
+             (str flow-capsule/config-home "/nexus/next/flow-nexus.signal")]
+            (map flow-capsule/place-file [flow-capsule/ordinary-socket flow-capsule/seed-socket]))))
 
 ;; The readback: each Awake seat's FlowId by Address; a seat whose FlowId
 ;; changed, went Asleep or is gone is a changed seat.

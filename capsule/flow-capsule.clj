@@ -1352,23 +1352,61 @@
     (throw (ex-info "the capsule's Codex app-server opened no socket" {})))
   (println (str "codex | " codex-binary " | " codex-model " | " codex-socket)))
 
+(def nexus-configure
+  "translator's nexus-configure, which compiles a place written in datom into
+  the place file a Nexus reads at start; named by the launcher."
+  (not-empty (System/getenv "FLOW_CAPSULE_NEXUS_CONFIGURE")))
+
+(defn place-datom
+  "The place a Nexus on these sockets and store starts in, in datom: its
+  name, the directory of the sockets and of the store."
+  [ordinary store]
+  (when-not (= "flow.sema" (str (fs/file-name store)))
+    (throw (ex-info "a place keeps its memory as flow.sema" {:store store})))
+  (str "{ «" (place-name-of ordinary) "» «" (fs/parent ordinary) "» «" (fs/parent store) "» }"))
+
+(defn place-file
+  "The place file of the place a socket lies in, under the capsule's own
+  XDG_CONFIG_HOME, which every capsule Nexus is started with:
+  nexus/<place>/flow-nexus.signal."
+  [socket]
+  (str config-home "/nexus/" (place-name-of socket) "/flow-nexus.signal"))
+
 (defn start-text
   "The datom pkg's Nexus is started with on these sockets and store: its
-  place, the directory of the sockets and of the store, or the earlier
-  Start naming each."
+  place's name, the place itself in its place file (place-file!), or the
+  earlier Start naming each."
   ([pkg] (start-text pkg ordinary-socket meta-socket store-path))
   ([pkg ordinary meta store]
    (if (= :place (get @package-interface pkg))
-     (do (when-not (= "flow.sema" (str (fs/file-name store)))
-           (throw (ex-info "a place keeps its memory as flow.sema" {:store store})))
-         (str "{ «" (place-name-of ordinary) "» «" (fs/parent ordinary) "» «" (fs/parent store) "» }"))
+     (do (place-datom ordinary store)
+         (place-name-of ordinary))
      (str "{ «" ordinary "» «" meta "» «" store "» None }"))))
+
+(defn place-file!
+  "For a package whose Nexus reads its place file, the place of these
+  sockets and store compiled into it by nexus-configure, before the Nexus
+  starts; nothing for an earlier package."
+  [pkg ordinary store]
+  (when (= :place (get @package-interface pkg))
+    (when-not nexus-configure
+      (throw (ex-info "no nexus-configure: set FLOW_CAPSULE_NEXUS_CONFIGURE" {})))
+    (let [datom-file (str state-root "/place-" (place-name-of ordinary) ".datom")
+          signal-file (place-file ordinary)]
+      (fs/create-dirs state-root)
+      (spit datom-file (str (place-datom ordinary store) "\n"))
+      (let [{:keys [exit out err]} (run {} nexus-configure (str "Compile.{ «" datom-file "» «" signal-file "» }"))]
+        (when-not (and (zero? exit) (str/starts-with? (str/trim out) "Compiled."))
+          (throw (ex-info "nexus-configure refused the capsule's place"
+                          {:exit exit :out (str/trim out) :err (str/trim err)})))
+        signal-file))))
 
 (defn start-nexus! [log]
   ;; A place's Runtime is declared by the environment, as Home's tmpfiles
   ;; rules declare it (mode 0700); the Nexus finds it and never makes it.
   (fs/create-dirs (fs/parent ordinary-socket))
   (fs/set-posix-file-permissions (fs/parent ordinary-socket) "rwx------")
+  (place-file! @package ordinary-socket store-path)
   (reset! nexus (p/process [(binary @package :daemon) (start-text @package)]
                            {:env (clean-env) :out :append :out-file (fs/file log) :err :append :err-file (fs/file log) :in ""}))
   (reset! nexus-store store-path)
@@ -1978,8 +2016,8 @@
   declared configuration-only; then a full Nexus given Counters, the lower
   one and the Configuration read; then the rest of the replay
   configuration-only, in the file's order. A Nexus that starts in its place
-  (interface :place) starts on the empty store with its built-in
-  configuration and takes every step running, in the same order. Nil
+  (interface :place) starts on the empty store unconfigured and
+  takes every step running, in the same order, the Nexus declared first. Nil
   without a Nexus declaration."
   ([replay counters lowered] (seed-plan replay counters lowered :invocation))
   ([replay counters lowered interface]
@@ -2073,8 +2111,10 @@
 (defn guard-refuses? [probe] (boolean (some owner-answers? (vals probe))))
 
 (defn nexus-command
-  "The command a Nexus of pkg is started by on the capsule's sockets."
+  "The command a Nexus of pkg is started by on the capsule's sockets, its
+  place file written first."
   [pkg store]
+  (place-file! pkg ordinary-socket store)
   {:argv [(binary pkg :daemon) (start-text pkg ordinary-socket meta-socket store)] :env (package-env pkg {})})
 
 (defn start-command! [{:keys [argv env]} log]
@@ -2223,6 +2263,7 @@
         _ (fs/create-dirs (fs/parent store))
         _ (fs/create-dirs (fs/parent seed-meta-socket))
         start (start-text pkg seed-socket seed-meta-socket store)
+        _ (place-file! pkg seed-socket store)
         counters (counters-datom maxima counter-margin)
         lowered (counters-datom maxima (dec counter-margin))
         replay (split-replay (str/join "\n" (:replay (:configuration @takeover))))
@@ -2671,8 +2712,9 @@
         (if skip-codex
           (println "codex | FLOW_CAPSULE_SKIP_CODEX=1: app-server not started, Codex scenarios skipped")
           (start-codex! log))
-        ;; The Nexus starts in its place with its built-in configuration and
-        ;; is configured as it runs.
+        ;; The Nexus starts in its place, read from its place file, with a
+        ;; new memory and unconfigured; configure.datom is replayed through
+        ;; its meta socket as it runs, as a release replays it.
         (reset! nexus-log log)
         (start-nexus! log)
         (configure! log)

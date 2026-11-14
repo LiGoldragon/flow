@@ -457,6 +457,10 @@ mod tests {
             configured_announcement_tries: meta_signal_flow::ConfiguredAnnouncementTries(
                 meta_signal_flow::TryBound(3),
             ),
+            configured_context_warning_policies: meta_signal_flow::ConfiguredContextWarningPolicies(
+                vec![],
+            ),
+            configured_harness_hook_events: meta_signal_flow::ConfiguredHarnessHookEvents(vec![]),
             configured_harness_hook: meta_signal_flow::ConfiguredHarnessHook(
                 meta_signal_flow::HarnessHookConfiguration::Unconfigured,
             ),

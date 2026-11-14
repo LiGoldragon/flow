@@ -10,6 +10,7 @@ use crate::test_faults;
 pub(crate) mod address_hold;
 pub mod compaction;
 pub mod context;
+pub(crate) mod context_warnings;
 pub(crate) mod counters;
 mod created_pane;
 pub mod delivery;
@@ -68,6 +69,10 @@ pub(crate) use crate::generated::memory::{
     StoredMetaThresholdConfiguration, StoredMetaflow, StoredMetaflowLock, StoredRole,
 };
 use address_hold::HoldsLaunchAddress;
+use context_warnings::{
+    ConfiguresContextWarnings, ContextWarningConfigurationTables, DescribesWarningRecord,
+    ProjectsWarningPolicy, RegistersContextWarningConfiguration,
+};
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
 use flow_ethos::State as MetaflowState;
@@ -1563,6 +1568,8 @@ pub enum StoreError {
     AnnouncementTriesRefused,
     #[error("no Nexus is declared")]
     NexusUnconfigured,
+    #[error("context warning configuration refused: {0:?}")]
+    ContextWarningConfigurationRefused(meta_signal_flow::ContextWarningConfigurationRefusal),
     #[error("store {path} is held by another open; its lock cannot be acquired")]
     StoreHeld { path: String },
     #[error("the store's open could not be staged: {0}")]
@@ -1576,6 +1583,7 @@ pub enum StoreError {
 }
 
 pub(crate) struct MetaConfigurationTables {
+    context_warnings: ContextWarningConfigurationTables,
     handover: TableReference<handover_configuration::StoredHandoverConfiguration>,
     nexus: TableReference<StoredMetaNexusConfiguration>,
     models: TableReference<StoredMetaModelConfiguration>,
@@ -1598,6 +1606,7 @@ trait RegistersMetaConfigurationTables: Sized {
 impl RegistersMetaConfigurationTables for MetaConfigurationTables {
     fn register(engine: &mut Engine) -> Result<Self, StoreError> {
         Ok(Self {
+            context_warnings: ContextWarningConfigurationTables::register(engine)?,
             handover: <handover_configuration::StoredHandoverConfiguration as handover_configuration::UpgradesHandoverConfiguration>::upgrade_or_register(engine).map_err(StoreError::HandoverConfigurationUpgrade)?,
             nexus: engine.register_table(StoredMetaNexusConfiguration::descriptor())?,
             models: engine.register_table(StoredMetaModelConfiguration::descriptor())?,
@@ -1653,6 +1662,7 @@ pub struct FlowStore {
     delivery_tables: DeliveryTables,
     event_tables: events::EventTables,
     context_sizes: TableReference<context::FlowContextSize>,
+    warning_progress: TableReference<context_warnings::ContextWarningProgress>,
     address_holds: TableReference<address_hold::AddressHold>,
     opened_threads: TableReference<opened_thread::OpenedLaunchThread>,
     send_calls: TableReference<crate::generated::send_tool::SendCall>,
@@ -1827,6 +1837,8 @@ pub struct ConfiguredFamilies {
     pub heartbeat: Option<HeartbeatConfig>,
     pub protected_addresses: Vec<Address>,
     pub harness_hook: meta_signal_flow::HarnessHookConfiguration,
+    pub context_warning_policies: Vec<meta_signal_flow::ContextWarningPolicy>,
+    pub harness_hook_events: Vec<meta_signal_flow::HarnessHookEvent>,
     pub handover_policies: meta_signal_flow::HandoverPoliciesConfiguration,
     pub handover_archive: meta_signal_flow::HandoverArchiveConfiguration,
     pub handover_count: meta_signal_flow::HandoverCountConfiguration,
@@ -1879,6 +1891,12 @@ impl CompletesSnapshot for ConfiguredFamilies {
                 self.announcement_tries,
             ),
             configured_harness_hook: meta_signal_flow::ConfiguredHarnessHook(self.harness_hook),
+            configured_context_warning_policies: meta_signal_flow::ConfiguredContextWarningPolicies(
+                self.context_warning_policies,
+            ),
+            configured_harness_hook_events: meta_signal_flow::ConfiguredHarnessHookEvents(
+                self.harness_hook_events,
+            ),
         }
     }
 }
@@ -1996,6 +2014,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let runtime_configuration = engine.register_table(runtime_configuration_descriptor)?;
         let delivery_configuration = engine.register_table(delivery_configuration_descriptor)?;
         let meta_configuration_tables = MetaConfigurationTables {
+            context_warnings: ContextWarningConfigurationTables::register(&mut engine)?,
             handover: <handover_configuration::StoredHandoverConfiguration as handover_configuration::UpgradesHandoverConfiguration>::upgrade_or_register(&mut engine)
                 .map_err(StoreError::HandoverConfigurationUpgrade)?,
             nexus: engine.register_table(meta_nexus_descriptor)?,
@@ -2689,6 +2708,8 @@ impl OpensFlowStore for FlowStore {
         }
         let event_tables =
             <events::EventTables as events::RegistersEventTables>::register(&mut engine)?;
+        let warning_progress =
+            engine.register_table(context_warnings::ContextWarningProgress::descriptor())?;
         let context_sizes = engine.register_table(context_sizes_descriptor)?;
         let address_holds = engine.register_table(address_holds_descriptor)?;
         let opened_threads = engine.register_table(opened_threads_descriptor)?;
@@ -2750,6 +2771,7 @@ impl OpensFlowStore for FlowStore {
             delivery_tables,
             event_tables,
             context_sizes,
+            warning_progress,
             address_holds,
             opened_threads,
             send_calls,
@@ -2882,6 +2904,8 @@ impl OpensFlowStore for FlowStore {
         let meta_configuration_tables = MetaConfigurationTables::register(&mut engine)?;
         let event_tables =
             <events::EventTables as events::RegistersEventTables>::register(&mut engine)?;
+        let warning_progress =
+            engine.register_table(context_warnings::ContextWarningProgress::descriptor())?;
         let context_sizes = engine.register_table(
             <context::FlowContextSize as context::DescribesContextSizeTable>::descriptor(),
         )?;
@@ -2967,6 +2991,7 @@ impl OpensFlowStore for FlowStore {
             delivery_tables,
             event_tables,
             context_sizes,
+            warning_progress,
             address_holds,
             opened_threads,
             send_calls,
@@ -5315,6 +5340,17 @@ pub(crate) trait ReadsFlowMemory {
 
     fn current_flow_family_identity(table_name: &str) -> Option<(&'static str, SchemaHash)> {
         let (family, version) = match table_name {
+            context_warnings::POLICY_TABLE => (
+                context_warnings::POLICY_FAMILY,
+                context_warnings::POLICY_SCHEMA,
+            ),
+            context_warnings::HOOK_TABLE => {
+                (context_warnings::HOOK_FAMILY, context_warnings::HOOK_SCHEMA)
+            }
+            context_warnings::PROGRESS_TABLE => (
+                context_warnings::PROGRESS_FAMILY,
+                context_warnings::PROGRESS_SCHEMA,
+            ),
             "flow_nexus_flows" => return Some(("flow-nexus-flow", FlowRecord::schema_hash())),
             "flow_nexus_state" => ("flow-nexus-state", "flow-nexus-state-v2"),
             "flow_nexus_configuration" => {
@@ -5669,6 +5705,9 @@ pub(crate) trait ReadsFlowMemory {
         let is = |tables: &[&str]| {
             actual.iter().all(|name| {
                 tables.contains(&name.as_str())
+                    || name == context_warnings::POLICY_TABLE
+                    || name == context_warnings::HOOK_TABLE
+                    || name == context_warnings::PROGRESS_TABLE
                     || *name == RETIRED_LEAVE_OUT_TABLE
                     || *name == OPTIONAL_HANDOVER_TABLE
                     || *name == OPTIONAL_HANDOVER_RUNTIME_TABLE
@@ -5907,6 +5946,9 @@ pub(crate) trait ReadsFlowMemory {
         engine: &Engine,
         tables: &MetaConfigurationTables,
     ) -> Result<Option<ConfiguredFamilies>, StoreError> {
+        let policy_rows = engine.match_records(QueryPlan::all(tables.context_warnings.policies))?;
+        let hook_event_rows =
+            engine.match_records(QueryPlan::all(tables.context_warnings.hooks))?;
         let nexus_rows = engine.match_records(QueryPlan::all(tables.nexus))?;
         let handover_rows = engine.match_records(QueryPlan::all(tables.handover))?;
         let marker = nexus_rows.database_marker();
@@ -5945,6 +5987,8 @@ pub(crate) trait ReadsFlowMemory {
             || heartbeat_rows.database_marker() != marker
             || protected_address_rows.database_marker() != marker
             || harness_hook_rows.database_marker() != marker
+            || policy_rows.database_marker() != marker
+            || hook_event_rows.database_marker() != marker
             || engine.current_database_marker()? != marker
         {
             return Err(StoreError::ConfigurationReadViewChanged);
@@ -6020,6 +6064,17 @@ pub(crate) trait ReadsFlowMemory {
             .map(|stored| stored.address.clone())
             .collect::<Vec<_>>();
         protected_addresses.sort_by_key(FlowStore::address_record_key);
+        let mut context_warning_policies = policy_rows
+            .records()
+            .iter()
+            .map(ProjectsWarningPolicy::policy)
+            .collect::<Vec<_>>();
+        context_warning_policies.sort_by(|left, right| left.model_name.cmp(&right.model_name));
+        let harness_hook_events = match hook_event_rows.records() {
+            [] => Vec::new(),
+            [row] => row.0.clone(),
+            _ => return Err(StoreError::StateInvariant),
+        };
         Ok(Some(ConfiguredFamilies {
             nexus,
             models,
@@ -6032,6 +6087,8 @@ pub(crate) trait ReadsFlowMemory {
             heartbeat,
             protected_addresses,
             harness_hook,
+            context_warning_policies,
+            harness_hook_events,
             handover_policies: handover.handover_policies_configuration,
             handover_archive: handover.handover_archive_configuration,
             handover_count: handover.handover_count_configuration,
@@ -6214,6 +6271,11 @@ pub(crate) trait ReadsFlowMemory {
         removal: meta_signal_flow::Removal,
     ) -> Result<ConfigurationCommit, StoreError> {
         match removal {
+            meta_signal_flow::Removal::ContextWarning(model) => Self::remove_configuration_entry(
+                engine,
+                tables.context_warnings.policies,
+                RecordKey::new(model.0),
+            ),
             meta_signal_flow::Removal::Permaflow(address) => FlowStore::remove_configuration_entry(
                 engine,
                 tables.metaflows,
@@ -6420,6 +6482,12 @@ pub(crate) trait ReadsFlowMemory {
             return Err(StoreError::TopicRefused(refused.topic.clone().0));
         }
         match change {
+            ConfigurationChange::ContextWarningPolicy(policy) => {
+                Self::configure_policy(engine, &tables.context_warnings, policy)
+            }
+            ConfigurationChange::HarnessHookEvents(events) => {
+                Self::configure_hooks(engine, &tables.context_warnings, events)
+            }
             ConfigurationChange::HandoverPolicies(policies) => {
                 if policies
                     .iter()

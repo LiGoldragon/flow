@@ -194,7 +194,7 @@ impl TracksContextWarnings for ContextWarningProgress {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use meta_signal_flow::{
         BoundaryIdentity, ContextBoundaryEvidence, ContextUsageProjection, ContextWarningLimit,
@@ -202,7 +202,7 @@ mod tests {
         WarningTokens,
     };
 
-    fn fixture_policy() -> ContextWarningPolicy {
+    pub(crate) fn fixture_policy() -> ContextWarningPolicy {
         ContextWarningPolicy {
             model_name: meta_signal_flow::ModelName("fixture-model".into()),
             context_warning_limit: ContextWarningLimit {

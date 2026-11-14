@@ -5,7 +5,7 @@
 
 use crate::RunningNexus;
 use crate::store::{AnnouncesLaunchChanges, ManagesMetaflowState};
-use meta_signal_flow::{Output, StoreRefusal};
+use meta_signal_flow::{Output, StoreFailure};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub trait ObservesConfiguration {
@@ -24,7 +24,7 @@ impl ObservesConfiguration for RunningNexus {
         match self.store.configuration_snapshot() {
             Ok(Some(snapshot)) => Output::Configuration(snapshot),
             Ok(None) => Output::Unconfigured,
-            Err(error) => Output::Refused(StoreRefusal::Store(error.to_string())),
+            Err(error) => Output::Refused(StoreFailure(error.to_string())),
         }
     }
 

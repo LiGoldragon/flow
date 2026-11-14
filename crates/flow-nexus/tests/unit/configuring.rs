@@ -652,6 +652,10 @@ fn each_family_is_its_last_declaration() {
             configured_announcement_tries: meta_signal_flow::ConfiguredAnnouncementTries(
                 meta_signal_flow::TryBound(3)
             ),
+            configured_context_warning_policies: meta_signal_flow::ConfiguredContextWarningPolicies(
+                vec![]
+            ),
+            configured_harness_hook_events: meta_signal_flow::ConfiguredHarnessHookEvents(vec![]),
             configured_harness_hook: meta_signal_flow::ConfiguredHarnessHook(
                 meta_signal_flow::HarnessHookConfiguration::Unconfigured
             ),
@@ -1894,4 +1898,90 @@ fn the_configuration_open_upgrades_a_v6_store_too() {
     );
     drop(configuration);
     assert_eq!(retired_rows(fixture.path()), 0);
+}
+
+#[test]
+fn warning_configuration_is_validated_persisted_and_removed_per_model() {
+    use crate::context_warnings::tests::fixture_policy;
+    use meta_signal_flow::{ContextWarningConfigurationRefusal, HarnessHookEvent, Removal};
+
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let initial = snapshot(&nexus);
+    assert!(initial.configured_context_warning_policies.0.is_empty());
+    assert!(initial.configured_harness_hook_events.0.is_empty());
+    let policy = fixture_policy();
+    configures(
+        &nexus,
+        ConfigurationChange::ContextWarningPolicy(policy.clone()),
+    );
+    let mut other = policy.clone();
+    other.model_name = signal_flow::ModelName("another-model".into());
+    configures(
+        &nexus,
+        ConfigurationChange::ContextWarningPolicy(other.clone()),
+    );
+    let mut replacement = policy.clone();
+    replacement.context_warning_limit.warning_tokens.0 += 1;
+    configures(
+        &nexus,
+        ConfigurationChange::ContextWarningPolicy(replacement.clone()),
+    );
+    let before_refusal = snapshot(&nexus);
+    let mut invalid = policy.clone();
+    invalid.context_warning_limit.warning_tokens.0 = 0;
+    assert_eq!(
+        configure(&nexus, ConfigurationChange::ContextWarningPolicy(invalid)),
+        MetaResponse::ConfigureRefused(ConfigureRefusal::ContextWarningConfigurationRefused(
+            ContextWarningConfigurationRefusal::InvalidWarningTokens,
+        )),
+    );
+    assert_eq!(snapshot(&nexus), before_refusal);
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::HarnessHookEvents(vec![
+                HarnessHookEvent::Stop,
+                HarnessHookEvent::Stop
+            ])
+        ),
+        MetaResponse::ConfigureRefused(ConfigureRefusal::ContextWarningConfigurationRefused(
+            ContextWarningConfigurationRefusal::DuplicateHookEvent,
+        )),
+    );
+    assert_eq!(snapshot(&nexus), before_refusal);
+    let hooks = vec![HarnessHookEvent::PostToolUse, HarnessHookEvent::Stop];
+    configures(
+        &nexus,
+        ConfigurationChange::HarnessHookEvents(hooks.clone()),
+    );
+    let expected = snapshot(&nexus);
+    assert_eq!(
+        expected.configured_context_warning_policies.0,
+        vec![other.clone(), replacement]
+    );
+    assert_eq!(expected.configured_harness_hook_events.0, hooks);
+    drop(nexus);
+    let reopened = fixture.open();
+    assert_eq!(snapshot(&reopened), expected);
+    assert!(matches!(
+        reopened.dispatch_meta(meta_signal_flow::Input::Remove(Removal::ContextWarning(
+            policy.model_name
+        ))),
+        MetaResponse::Removed(_),
+    ));
+    assert_eq!(
+        snapshot(&reopened).configured_context_warning_policies.0,
+        vec![other]
+    );
+    configures(
+        &reopened,
+        ConfigurationChange::HarnessHookEvents(Vec::new()),
+    );
+    assert!(
+        snapshot(&reopened)
+            .configured_harness_hook_events
+            .0
+            .is_empty()
+    );
 }

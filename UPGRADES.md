@@ -62,7 +62,7 @@ daemon's and the CLIs' start change.**
   from `XDG_RUNTIME_DIR` or `XDG_STATE_HOME`. The place file is compiled from
   datom by translator's `nexus-configure`, the same tool for every Nexus, and
   in Nix is its own derivation, translator's `lib.<system>.mkPlaceFile`.
-- **The CLIs read the same place file.** `flow-nexus` and `flow-nexus-meta`
+- **The CLIs read the same place file.** `flow` and `flow-meta`
   take the place name from their configuration, `flow-nexus.datom`
   (`CliConfiguration.{ PlaceName }`), as before, and find the sockets in the
   Runtime of that place's place file, `$XDG_CONFIG_HOME/nexus/<place-name>/flow-nexus.signal`.
@@ -79,10 +79,33 @@ daemon's and the CLIs' start change.**
   are gone; `packages.default` is Flow, built once. A new memory is made empty
   and the Nexus starts unconfigured: it binds, announces readiness, answers
   `Unconfigured`, and refuses what needs a configuration until the meta socket
-  configures it. A release replays the configuration through `flow-nexus-meta`,
+  configures it. A release replays the configuration through `flow-meta`,
   `Configure.Nexus` first; a memory that exists keeps its configuration.
 - Flow's own Place (`crates/flow-nexus/ethos/library.ethos`) is gone: the
   Place is translator's.
+
+# Unreleased (branch w0f8-90d453): the Flow clients are `flow` and `flow-meta`
+
+The clients' and the hook's names change; **neither the wire nor the stored
+format changes** by this. The version is not bumped here; the release that
+carries this change sets it.
+
+- **The ordinary client is `flow`, the meta client `flow-meta`.** The Nexus is
+  `flow-nexus`, its CLI the component name alone and its meta CLI the component
+  name with `-meta`. Before, the clients were `flow-nexus` and
+  `flow-nexus-meta`. The binaries, the usage line the clients print, the
+  `--version` answer (`flow <version>`), the capsule, the tests and the README
+  carry the new names, and no old name is left as an alias.
+- **Hook:** the hook client `flow-nexus-hook` is `flow-hook`, and the hook
+  command Flow writes into every Claude flow's settings names it; no alias.
+- **Unchanged:** the daemon `flow-nexus-daemon`, the sockets, and the CLI configuration file
+  `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`.
+- **To deploy:** everything that runs `flow-nexus` or `flow-nexus-meta` by name
+  moves in the same switch: Home's `~/.local/bin` links and its versioned
+  clients (`flow-<version>`, `flow-meta-<version>`), the generated skills and
+  agent definitions (a Curriculum regeneration), CriomOS's notify command, and
+  the Flow program the Energy Nexus is configured with
+  (`Configure.Program.{ Flow /home/li/.local/bin/flow }`).
 
 # Flow 0.56.2: Flow's external calls are typed Emissions generated from Ethos
 

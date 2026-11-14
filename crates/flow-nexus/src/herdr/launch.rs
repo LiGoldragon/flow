@@ -462,7 +462,7 @@ pub(crate) trait PreparesClaudePane {
     /// user settings name a non-auto default mode and no other settings
     /// source names one. Flag settings are such a source: naming the mode the
     /// launch already runs in suppresses the offer without touching any
-    /// settings file. They carry the hook command on exactly the configured
+    /// settings file. They carry `flow-hook` on exactly the configured
     /// native events, each reaching Flow as a Report: a Stop is
     /// the flow's turn end, a submitted prompt the receipt of a queued
     /// request, and a session's end the flow's exit.

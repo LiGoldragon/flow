@@ -1,5 +1,5 @@
 //! How Flow finds its place. A Flow Nexus and its translator, the CLIs
-//! `flow-nexus` and `flow-nexus-meta`, read nothing at start but the Place,
+//! `flow` and `flow-meta`, read nothing at start but the Place,
 //! and the Place is read from the place file alone:
 //! `$XDG_CONFIG_HOME/nexus/<place-name>/flow-nexus.signal`
 //! (`$HOME/.config` when the variable is unset or empty), found by the place

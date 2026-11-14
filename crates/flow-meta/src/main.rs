@@ -12,9 +12,9 @@ use std::{
 
 struct FlowMetaClient;
 
-/// The CLI is `flow-nexus-meta '<Input>'`: it takes the datom and nothing
+/// The CLI is `flow-meta '<Input>'`: it takes the datom and nothing
 /// else. The place name is the Flow configuration's,
-/// `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`, the same file `flow-nexus`
+/// `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`, the same file `flow`
 /// reads; the place is read from that place's place file,
 /// `$XDG_CONFIG_HOME/nexus/<place>/flow-nexus.signal`, and the meta socket
 /// lies in the Runtime it holds. With no place file the CLI is refused,
@@ -62,7 +62,7 @@ impl ParsesMetaCommand for FlowMetaClient {
         place: &dyn ResolvesCliPlace,
     ) -> Result<Invocation, String> {
         let usage = || {
-            "usage: flow-nexus-meta '<one inline Input datom>'; the place is the one $XDG_CONFIG_HOME/nexus/flow-nexus.datom names, read from its place file".to_owned()
+            "usage: flow-meta '<one inline Input datom>'; the place is the one $XDG_CONFIG_HOME/nexus/flow-nexus.datom names, read from its place file".to_owned()
         };
         let (Some(source), None) = (arguments.next(), arguments.next()) else {
             return Err(usage());

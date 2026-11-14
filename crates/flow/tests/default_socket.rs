@@ -1,4 +1,4 @@
-//! The CLI is `flow-nexus '<Input>'`: it takes the datom and nothing else.
+//! The CLI is `flow '<Input>'`: it takes the datom and nothing else.
 //! The place is its configuration's,
 //! `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`; the place itself is read from
 //! that place's place file, `$XDG_CONFIG_HOME/nexus/<place>/flow-nexus.signal`,
@@ -35,7 +35,7 @@ fn write_place_file(configuration_home: &Path, place_name: &str, runtime: &Path)
 }
 
 fn client(runtime: &Path, configuration_home: &Path, other: &Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_flow-nexus"))
+    Command::new(env!("CARGO_BIN_EXE_flow"))
         .env_clear()
         .env("XDG_RUNTIME_DIR", runtime)
         .env("XDG_CONFIG_HOME", configuration_home)
@@ -125,7 +125,7 @@ fn the_client_reaches_only_the_socket_of_the_place_its_configuration_names() {
         let refused = client(runtime.path(), configuration.path(), &other, typed);
         assert_eq!(refused.status.code(), Some(2), "{typed:?}: {refused:?}");
         assert!(
-            String::from_utf8_lossy(&refused.stderr).starts_with("usage: flow-nexus '"),
+            String::from_utf8_lossy(&refused.stderr).starts_with("usage: flow '"),
             "{typed:?}: {refused:?}"
         );
     }
@@ -162,7 +162,7 @@ fn a_missing_configuration_is_refused_naming_its_path() {
 
     // With no XDG_CONFIG_HOME the file is ~/.config/nexus/flow-nexus.datom.
     let home = tempfile::tempdir().expect("temporary home");
-    let refused = Command::new(env!("CARGO_BIN_EXE_flow-nexus"))
+    let refused = Command::new(env!("CARGO_BIN_EXE_flow"))
         .env_clear()
         .env("XDG_RUNTIME_DIR", runtime.path())
         .env("HOME", home.path())
@@ -227,7 +227,7 @@ fn a_missing_place_file_is_refused_naming_it_and_the_default_runtime_is_not_trie
         "{stderr}"
     );
     // Nor does the process need XDG_RUNTIME_DIR at all.
-    let refused = Command::new(env!("CARGO_BIN_EXE_flow-nexus"))
+    let refused = Command::new(env!("CARGO_BIN_EXE_flow"))
         .env_clear()
         .env("XDG_CONFIG_HOME", configuration.path())
         .arg("Metaflows")

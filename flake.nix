@@ -107,7 +107,7 @@
             };
           };
           # The binaries of builds copied into one bin directory: the daemon,
-          # flow-nexus-daemon, finds flow-nexus-hook beside its own resolved
+          # flow-nexus-daemon, finds flow-hook beside its own resolved
           # executable.
           binaries =
             name: builds: attributes:
@@ -158,15 +158,15 @@
           checkEnvironments = {
             # The approval pipeline's and the handover archive's tests read a
             # real git repository, one holds a pipe in a session of its own
-            # (setsid), and two drive the flow-nexus and flow-nexus-meta CLIs.
+            # (setsid), and two drive the flow and flow-meta CLIs.
             flow-nexus = {
               inputs = [
                 pkgs.git
                 pkgs.util-linux
               ];
               beside = [
-                "${members.flow}/bin/flow-nexus"
-                "${members.flow-meta}/bin/flow-nexus-meta"
+                "${members.flow}/bin/flow"
+                "${members.flow-meta}/bin/flow-meta"
               ];
             };
           };
@@ -464,7 +464,7 @@
           # Flow, built once: its binaries hold no configuration. The
           # daemon reads its place from its place file at start, and a new
           # memory is configured by replaying the configuration through
-          # flow-nexus-meta; the place file is its own derivation
+          # flow-meta; the place file is its own derivation
           # (translator's lib.<system>.mkPlaceFile).
           default = context.workspaceBinaries;
           # translator's nexus-configure, built as this flake's own crates are

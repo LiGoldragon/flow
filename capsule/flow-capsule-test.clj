@@ -236,7 +236,7 @@
          (= {:pane "w2:p1" :flow-id "0a1b2c" :address "{ Psyche test Opus }"}
             (dissoc (nth lines 2) :line)))
   (check "the typed line gives the new client the query alone; the pane's configuration names main"
-         (= (str "! " flow-package "/bin/flow-nexus 'BindSeat.{ Psyche test Opus }'")
+         (= (str "! " flow-package "/bin/flow 'BindSeat.{ Psyche test Opus }'")
             (:line (nth lines 2))))
   (check "a client of the new package takes the query alone"
          (= ["Metaflows"]

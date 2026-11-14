@@ -1,4 +1,4 @@
-//! The CLI is `flow-nexus-meta '<Input>'`: it takes the datom and nothing
+//! The CLI is `flow-meta '<Input>'`: it takes the datom and nothing
 //! else. The place is the Flow configuration's,
 //! `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`; the place itself is read from
 //! that place's place file, `$XDG_CONFIG_HOME/nexus/<place>/flow-nexus.signal`,
@@ -35,7 +35,7 @@ fn write_place_file(configuration_home: &Path, place_name: &str, runtime: &Path)
 }
 
 fn client(runtime: &Path, configuration_home: &Path, other: &Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_flow-nexus-meta"))
+    Command::new(env!("CARGO_BIN_EXE_flow-meta"))
         .env_clear()
         .env("XDG_RUNTIME_DIR", runtime)
         .env("XDG_CONFIG_HOME", configuration_home)
@@ -121,7 +121,7 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
     );
     assert_eq!(refused.status.code(), Some(2), "{refused:?}");
     assert!(
-        String::from_utf8_lossy(&refused.stderr).starts_with("usage: flow-nexus-meta '"),
+        String::from_utf8_lossy(&refused.stderr).starts_with("usage: flow-meta '"),
         "{refused:?}"
     );
 
@@ -156,7 +156,7 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
     std::fs::create_dir_all(unplaced.path().join("nexus")).expect("nexus configuration");
     std::fs::write(unplaced.path().join("nexus/flow-nexus.datom"), "{ main }\n")
         .expect("the configuration names main");
-    let refused = Command::new(env!("CARGO_BIN_EXE_flow-nexus-meta"))
+    let refused = Command::new(env!("CARGO_BIN_EXE_flow-meta"))
         .env_clear()
         .env("XDG_CONFIG_HOME", unplaced.path())
         .arg("Retire.fac697")

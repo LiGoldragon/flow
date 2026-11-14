@@ -5,7 +5,7 @@
 //! no send outcome, and never below a counter as it stands; the
 //! Configuration snapshot ends with the counters, so an operator reads an
 //! old store's before carrying them to a new one. Read and written as
-//! datom text, as flow-nexus-meta does.
+//! datom text, as flow-meta does.
 
 use super::NexusFixture;
 use super::waking::{CLAUDE_SEAT, address, claude_seat};

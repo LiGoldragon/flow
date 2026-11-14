@@ -6119,6 +6119,7 @@ mod tests {
             |profile: &LaunchProfile, root_option| meta_signal_flow::ConfigureMetaflow {
                 address: profile.address.clone(),
                 root_option,
+                leave_outs: signal_flow::LeaveOuts(Vec::new()),
                 system_modules: profile.system_modules.clone(),
                 user_modules: profile.user_modules.clone(),
                 flow_kind: profile.flow_kind.clone(),

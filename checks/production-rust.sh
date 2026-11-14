@@ -3,7 +3,7 @@
 # flow keeps production Rust in its four workspace members' `src/`. `tests/`
 # is not production source, and neither are the `#[cfg(test)]` items inside
 # production files nor the files that only a `#[cfg(test)]` module declares
-# (`flow-nexus/src/tests/`, `flow-nexus/src/fixture_executable.rs`,
+# (`flow-nexus/src/fixture_executable.rs`,
 # `flow-nexus/src/test_faults.rs` and
 # `flow-nexus/src/store/request_id_migration_process.rs`), nor the fixture the
 # predecessor's build declares (`flow-nexus/src/store/
@@ -51,7 +51,6 @@ strip_test_items() {
 
 production_rust_files() {
   find $(production_sources) -name '*.rs' -type f \
-    -not -path '*/flow-nexus/src/tests/*' \
     -not -path '*/flow-nexus/src/fixture_executable.rs' \
     -not -path '*/flow-nexus/src/test_faults.rs' \
     -not -path '*/flow-nexus/src/store/request_id_migration_process.rs' \

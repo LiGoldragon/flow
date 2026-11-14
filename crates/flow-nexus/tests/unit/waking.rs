@@ -1364,8 +1364,9 @@ fn last_launch_context() -> WakePlan {
     })
 }
 
-/// Every wake is fresh: a metaflow whose last flow Stopped, Exited or was
-/// Retired wakes as a new flow composed from that flow's launch.
+/// With no resumption configured for its model, every wake is fresh: a
+/// metaflow whose last flow Stopped, Exited or was Retired wakes as a new
+/// flow composed from that flow's launch.
 #[test]
 fn every_wake_composes_a_fresh_flow_from_the_last_launch_whatever_its_end() {
     let asleep = metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]);

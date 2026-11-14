@@ -65,7 +65,10 @@
 //! closed by the living, its harness crashed, or the flow replaced. Work queued for an
 //! Awake seat whose pane Herdr shows gone records that flow Exited, which
 //! puts its metaflow Asleep. A request queued for an Asleep metaflow wakes
-//! it (`Operation::Wake`): a fresh flow is launched from the native model
+//! it (`Operation::Wake`): its last flow is resumed on its own session when
+//! its model's resumption finds that flow warm and below its ceiling
+//! (`crate::resuming`), and its queue handed to it by the drain that
+//! follows; otherwise a fresh flow is launched from the native model
 //! configured for its Model and the module identities the metaflow's last launch named,
 //! composed again as any Start is, with the whole queue, oldest first, as
 //! its brief. The requests leave the queue only in the write that records

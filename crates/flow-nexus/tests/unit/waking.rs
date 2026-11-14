@@ -8276,3 +8276,5 @@ fn a_letter_steered_into_a_codex_turn_sleeps_its_seat_at_that_turn_end() {
     );
     assert!(closes(&fixture));
 }
+
+// Nix identity oracle: a test-only source edit.

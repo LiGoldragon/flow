@@ -1,3 +1,4 @@
+pub(crate) use crate::generated::memory::StoredHandoverConfiguration;
 use meta_signal_flow::{
     Duration, HandoverArchiveConfiguration, HandoverCountConfiguration,
     HandoverPoliciesConfiguration,
@@ -30,21 +31,14 @@ impl MemoryDefinition for StoredHandoverConfigurationV1 {
     }
 }
 
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredHandoverConfiguration {
-    pub policies: HandoverPoliciesConfiguration,
-    pub archive: HandoverArchiveConfiguration,
-    pub count: HandoverCountConfiguration,
-    pub publication_deadline: Duration,
-}
 impl UpgradeFrom<StoredHandoverConfigurationV1> for StoredHandoverConfiguration {
     type Refusal = std::convert::Infallible;
     fn upgrade_from(predecessor: StoredHandoverConfigurationV1) -> Decision<Self, Self::Refusal> {
         Decision::Ready(Self {
-            policies: predecessor.policies,
-            archive: predecessor.archive,
-            count: predecessor.count,
-            publication_deadline: meta_signal_flow::Duration(60_000),
+            handover_policies_configuration: predecessor.policies,
+            handover_archive_configuration: predecessor.archive,
+            handover_count_configuration: predecessor.count,
+            duration: meta_signal_flow::Duration(60_000),
         })
     }
 }
@@ -81,10 +75,10 @@ pub(crate) trait DefaultsToUnconfigured {
 impl DefaultsToUnconfigured for StoredHandoverConfiguration {
     fn unconfigured() -> Self {
         StoredHandoverConfiguration {
-            policies: HandoverPoliciesConfiguration::Unconfigured,
-            archive: HandoverArchiveConfiguration::Unconfigured,
-            count: HandoverCountConfiguration::Unconfigured,
-            publication_deadline: meta_signal_flow::Duration(60_000),
+            handover_policies_configuration: HandoverPoliciesConfiguration::Unconfigured,
+            handover_archive_configuration: HandoverArchiveConfiguration::Unconfigured,
+            handover_count_configuration: HandoverCountConfiguration::Unconfigured,
+            duration: meta_signal_flow::Duration(60_000),
         }
     }
 }
@@ -109,7 +103,7 @@ impl ReadsHandoverConfiguration for super::FlowStore {
             .to_vec();
         Ok(rows
             .first()
-            .map(|row| row.policies.clone())
+            .map(|row| row.handover_policies_configuration.clone())
             .unwrap_or(HandoverPoliciesConfiguration::Unconfigured))
     }
 
@@ -125,7 +119,7 @@ impl ReadsHandoverConfiguration for super::FlowStore {
             .to_vec();
         Ok(rows
             .first()
-            .map(|row| row.archive.clone())
+            .map(|row| row.handover_archive_configuration.clone())
             .unwrap_or(HandoverArchiveConfiguration::Unconfigured))
     }
 
@@ -141,7 +135,7 @@ impl ReadsHandoverConfiguration for super::FlowStore {
             .to_vec();
         Ok(rows
             .first()
-            .map(|row| row.count.clone())
+            .map(|row| row.handover_count_configuration.clone())
             .unwrap_or(HandoverCountConfiguration::Unconfigured))
     }
     fn publication_deadline(&self) -> Result<Duration, super::StoreError> {
@@ -156,7 +150,7 @@ impl ReadsHandoverConfiguration for super::FlowStore {
             .to_vec();
         Ok(rows
             .first()
-            .map(|row| row.publication_deadline)
+            .map(|row| row.duration)
             .unwrap_or(meta_signal_flow::Duration(60_000)))
     }
 }
@@ -206,16 +200,16 @@ mod tests {
         };
         let Decision::Ready(current) = StoredHandoverConfiguration::upgrade_from(old);
         assert_eq!(
-            current.archive,
+            current.handover_archive_configuration,
             HandoverArchiveConfiguration::Configured(meta_signal_flow::generated::signal::Path(
                 "/archive".into()
             ))
         );
-        assert_eq!(current.count, HandoverCountConfiguration::Configured(3));
         assert_eq!(
-            current.publication_deadline,
-            meta_signal_flow::Duration(60_000)
+            current.handover_count_configuration,
+            HandoverCountConfiguration::Configured(3)
         );
+        assert_eq!(current.duration, meta_signal_flow::Duration(60_000));
     }
 
     #[test]
@@ -292,13 +286,13 @@ mod tests {
                     .unwrap()
                     .records()[0]
                     .clone();
-                assert_eq!(current.policies, predecessor.policies);
-                assert_eq!(current.archive, predecessor.archive);
-                assert_eq!(current.count, predecessor.count);
                 assert_eq!(
-                    current.publication_deadline,
-                    meta_signal_flow::Duration(60_000)
+                    current.handover_policies_configuration,
+                    predecessor.policies
                 );
+                assert_eq!(current.handover_archive_configuration, predecessor.archive);
+                assert_eq!(current.handover_count_configuration, predecessor.count);
+                assert_eq!(current.duration, meta_signal_flow::Duration(60_000));
                 assert_eq!(
                     engine
                         .match_records(QueryPlan::key(handovers, sibling.record_key()))

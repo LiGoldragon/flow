@@ -22,7 +22,7 @@ impl NamesCodexAppServers for FlowStore {
             .records()
             .iter()
             .filter_map(|stored| {
-                fs::canonicalize(&stored.send_server.codex_app_server_binary.0).ok()
+                fs::canonicalize(&stored.configure_send_server.codex_app_server_binary.0).ok()
             })
             .collect())
     }

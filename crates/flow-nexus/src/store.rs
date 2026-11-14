@@ -24,6 +24,8 @@ pub(crate) mod leave_out_upgrade;
 pub(crate) mod living_upgrade;
 pub(crate) mod logical_delivery;
 #[cfg(test)]
+mod memory_bytes;
+#[cfg(test)]
 mod memory_digest;
 pub(crate) mod metaflow;
 pub(crate) mod metaflow_declaration;
@@ -50,6 +52,14 @@ mod staged_open;
 pub(crate) mod successor;
 pub(crate) mod turn_end;
 pub(crate) mod undecodable_frame;
+pub(crate) use crate::generated::memory::{
+    FlowStoreConfiguration, FlowStoreState, NextFlowNumber, StoredLaunchAttempt,
+    StoredMetaDefaultMinutesConfiguration, StoredMetaHarnessFlagsConfiguration,
+    StoredMetaHarnessHookConfiguration, StoredMetaHeartbeatConfiguration,
+    StoredMetaInvestigationConfiguration, StoredMetaModelConfiguration,
+    StoredMetaProtectedAddressConfiguration, StoredMetaRequestPolicyConfiguration,
+    StoredMetaThresholdConfiguration, StoredMetaflow, StoredMetaflowLock, StoredRole,
+};
 use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
@@ -347,8 +357,12 @@ impl SeedsConfiguration for DefaultConfiguration {
 
     fn socket_configuration(&self) -> FlowStoreConfiguration {
         FlowStoreConfiguration {
-            ordinary_socket_path: self.ordinary_socket_path().to_string_lossy().into_owned(),
-            meta_socket_path: self.meta_socket_path().to_string_lossy().into_owned(),
+            ordinary_socket_path: signal_flow::OrdinarySocketPath(
+                self.ordinary_socket_path().to_string_lossy().into_owned(),
+            ),
+            meta_socket_path: signal_flow::MetaSocketPath(
+                self.meta_socket_path().to_string_lossy().into_owned(),
+            ),
         }
     }
 
@@ -687,14 +701,6 @@ impl ReadsNativeOwnerEnvironment for FlowStore {
     }
 }
 
-/// The durable address-indexed Metaflow defined by `flow_ethos::Metaflow`.
-/// Its state and queue are separate from native Flow launch records: an
-/// address remains asleep after the process it named is gone.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredMetaflow {
-    pub(crate) metaflow: Metaflow,
-}
-
 impl EngineRecord for StoredMetaflow {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
@@ -753,12 +759,6 @@ impl MemoryDefinition for StoredMetaflowProcess {
     }
 }
 
-/// At most one lock is held for a recipient address.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredMetaflowLock {
-    lock: Lock,
-}
-
 impl EngineRecord for StoredMetaflowLock {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(FlowStore::address_record_key(&self.lock.second_address))
@@ -775,15 +775,9 @@ impl MemoryDefinition for StoredMetaflowLock {
     }
 }
 
-/// The native model one Model runs, keyed by the Model.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredMetaModelConfiguration {
-    model: ConfigureModel,
-}
-
 impl EngineRecord for StoredMetaModelConfiguration {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::model_record_key(&self.model.model))
+        RecordKey::new(FlowStore::model_record_key(&self.configure_model.model))
     }
 }
 
@@ -812,15 +806,9 @@ impl DescribesModelTable for StoredMetaModelConfiguration {
     }
 }
 
-/// One model's refresh threshold, keyed by the model's name.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredMetaThresholdConfiguration {
-    threshold: ConfigureThreshold,
-}
-
 impl EngineRecord for StoredMetaThresholdConfiguration {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.threshold.model_name.clone().0)
+        RecordKey::new(self.configure_threshold.model_name.clone().0)
     }
 }
 
@@ -836,12 +824,6 @@ impl DescribesThresholdTable for StoredMetaThresholdConfiguration {
             SchemaHash::for_label(META_THRESHOLD_CONFIGURATION_SCHEMA),
         )
     }
-}
-
-/// The Address of the Investigation seat, one row.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredMetaInvestigationConfiguration {
-    investigation: Address,
 }
 
 impl EngineRecord for StoredMetaInvestigationConfiguration {
@@ -874,12 +856,6 @@ impl DescribesInvestigationTable for StoredMetaInvestigationConfiguration {
     }
 }
 
-/// The default Minutes, one row; absent until Configure declares one.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredMetaDefaultMinutesConfiguration {
-    default_minutes: i64,
-}
-
 impl EngineRecord for StoredMetaDefaultMinutesConfiguration {
     fn record_key(&self) -> RecordKey {
         RecordKey::new("default-minutes")
@@ -898,12 +874,6 @@ impl DescribesDefaultMinutesTable for StoredMetaDefaultMinutesConfiguration {
             SchemaHash::for_label(META_DEFAULT_MINUTES_CONFIGURATION_SCHEMA),
         )
     }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredMetaRequestPolicyConfiguration {
-    pub(crate) request_id_draws: meta_signal_flow::DrawBound,
-    pub(crate) announcement_tries: meta_signal_flow::TryBound,
 }
 
 impl EngineRecord for StoredMetaRequestPolicyConfiguration {
@@ -936,16 +906,11 @@ impl DescribesRequestPolicyTable for StoredMetaRequestPolicyConfiguration {
     }
 }
 
-/// Extra native harness arguments for one metaflow, keyed by Address. An
-/// absent row means the empty argument string.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredMetaHarnessFlagsConfiguration {
-    configured: ConfigureHarnessFlags,
-}
-
 impl EngineRecord for StoredMetaHarnessFlagsConfiguration {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.configured.address))
+        RecordKey::new(FlowStore::address_record_key(
+            &self.configure_harness_flags.address,
+        ))
     }
 }
 
@@ -971,12 +936,6 @@ impl DescribesHarnessFlagsTable for StoredMetaHarnessFlagsConfiguration {
             Self::schema_hash(),
         )
     }
-}
-
-/// The configured sampling heartbeat; no row means disabled.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredMetaHeartbeatConfiguration {
-    heartbeat: HeartbeatConfig,
 }
 
 impl EngineRecord for StoredMetaHeartbeatConfiguration {
@@ -1009,13 +968,6 @@ impl DescribesHeartbeatTable for StoredMetaHeartbeatConfiguration {
     }
 }
 
-/// The hook command a Claude flow is launched with, one row; none until a
-/// HarnessHook is declared.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredMetaHarnessHookConfiguration {
-    harness_hook: String,
-}
-
 impl EngineRecord for StoredMetaHarnessHookConfiguration {
     fn record_key(&self) -> RecordKey {
         RecordKey::new("harness-hook")
@@ -1044,12 +996,6 @@ impl DescribesHarnessHookTable for StoredMetaHarnessHookConfiguration {
             SchemaHash::for_label(META_HARNESS_HOOK_CONFIGURATION_SCHEMA),
         )
     }
-}
-
-/// One protected Address, one row per Address; none by default.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredMetaProtectedAddressConfiguration {
-    address: Address,
 }
 
 impl EngineRecord for StoredMetaProtectedAddressConfiguration {
@@ -1149,7 +1095,7 @@ impl NamesConfiguredModel for FlowStore {
             .match_records(QueryPlan::key(self.meta_configuration_tables.models, key))?
             .records()
             .first()
-            .map(|stored| stored.model.native.clone()))
+            .map(|stored| stored.configure_model.native.clone()))
         .map(|value| value.0))
     }
 }
@@ -1205,16 +1151,9 @@ impl MemoryDefinition for FlowRecord {
     }
 }
 
-/// A flow's role: its aspect and model, keyed by its FlowId. It is
-/// exactly what ResolveCaller answers, so the CallerIdentity is stored as it is.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredRole {
-    caller: CallerIdentity,
-}
-
 impl EngineRecord for StoredRole {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.caller.flow_id.clone().0)
+        RecordKey::new(self.caller_identity.flow_id.clone().0)
     }
 }
 
@@ -1228,7 +1167,12 @@ pub(crate) trait SeedsRole {
 impl SeedsRole for FlowStore {
     fn seed_role(&self, role: CallerIdentity) {
         self.engine
-            .assert(Assertion::new(self.roles, StoredRole { caller: role }))
+            .assert(Assertion::new(
+                self.roles,
+                StoredRole {
+                    caller_identity: role,
+                },
+            ))
             .expect("role seeded");
     }
 }
@@ -1243,12 +1187,6 @@ impl EngineRecord for FlowHerdrRouteRecord {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.flow_id.clone())
     }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-#[rkyv(derive(Debug))]
-struct FlowStoreState {
-    next_flow_number: u64,
 }
 
 impl MemoryDefinition for FlowStoreState {
@@ -1267,13 +1205,6 @@ impl EngineRecord for FlowStoreState {
     }
 }
 
-/// The socket half of the meta `Configuration`.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct FlowStoreConfiguration {
-    ordinary_socket_path: String,
-    meta_socket_path: String,
-}
-
 trait CompletesConfiguration {
     fn with_runtime(
         self,
@@ -1289,8 +1220,8 @@ impl CompletesConfiguration for FlowStoreConfiguration {
         delivery: &DeliveryConfiguration,
     ) -> Configuration {
         Configuration {
-            ordinary_socket_path: self.ordinary_socket_path,
-            meta_socket_path: self.meta_socket_path,
+            ordinary_socket_path: self.ordinary_socket_path.0,
+            meta_socket_path: self.meta_socket_path.0,
             source_root: runtime.source_root.clone(),
             stable_codex: meta_signal_flow::CodexEndpoint::from(&runtime.stable_codex),
             next_codex: meta_signal_flow::CodexEndpoint::from(&runtime.next_codex),
@@ -1308,8 +1239,10 @@ impl CompletesConfiguration for FlowStoreConfiguration {
 impl From<&Configuration> for FlowStoreConfiguration {
     fn from(configuration: &Configuration) -> Self {
         Self {
-            ordinary_socket_path: configuration.ordinary_socket_path.clone(),
-            meta_socket_path: configuration.meta_socket_path.clone(),
+            ordinary_socket_path: signal_flow::OrdinarySocketPath(
+                configuration.ordinary_socket_path.clone(),
+            ),
+            meta_socket_path: signal_flow::MetaSocketPath(configuration.meta_socket_path.clone()),
         }
     }
 }
@@ -1320,16 +1253,9 @@ impl EngineRecord for FlowStoreConfiguration {
     }
 }
 
-/// A launch attempt; its profile names its seat's context by module
-/// identity.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredLaunchAttempt {
-    attempt: LaunchAttempt,
-}
-
 impl EngineRecord for StoredLaunchAttempt {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.attempt.launch_request_id.clone().0)
+        RecordKey::new(self.launch_attempt.launch_request_id.clone().0)
     }
 }
 
@@ -1903,15 +1829,15 @@ impl ReadsRequestPolicy for FlowStore {
                 .assert(Assertion::new(
                     self.meta_configuration_tables.request_policy,
                     StoredMetaRequestPolicyConfiguration {
-                        request_id_draws: meta_signal_flow::DrawBound(SEEDED_REQUEST_ID_DRAWS),
-                        announcement_tries: meta_signal_flow::TryBound(SEEDED_ANNOUNCEMENT_TRIES),
+                        draw_bound: meta_signal_flow::DrawBound(SEEDED_REQUEST_ID_DRAWS),
+                        try_bound: meta_signal_flow::TryBound(SEEDED_ANNOUNCEMENT_TRIES),
                     },
                 ))
                 .map(drop)
                 .map_err(StoreError::from),
             [stored]
-                if stored.request_id_draws >= meta_signal_flow::DrawBound(1)
-                    && stored.announcement_tries >= meta_signal_flow::TryBound(1) =>
+                if stored.draw_bound >= meta_signal_flow::DrawBound(1)
+                    && stored.try_bound >= meta_signal_flow::TryBound(1) =>
             {
                 Ok(())
             }
@@ -1924,8 +1850,8 @@ impl ReadsRequestPolicy for FlowStore {
             self.meta_configuration_tables.request_policy,
         ))?;
         match rows.records() {
-            [stored] if stored.request_id_draws >= meta_signal_flow::DrawBound(1) => {
-                usize::try_from(stored.request_id_draws.0).map_err(|_| StoreError::StateInvariant)
+            [stored] if stored.draw_bound >= meta_signal_flow::DrawBound(1) => {
+                usize::try_from(stored.draw_bound.0).map_err(|_| StoreError::StateInvariant)
             }
             _ => Err(StoreError::StateInvariant),
         }
@@ -2207,7 +2133,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             engine.assert(Assertion::new(
                 state,
                 FlowStoreState {
-                    next_flow_number: 1,
+                    next_flow_number: NextFlowNumber(1),
                 },
             ))?;
             engine.assert(Assertion::new(
@@ -2222,14 +2148,14 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 engine.assert(Assertion::new(
                     meta_configuration_tables.request_policy,
                     StoredMetaRequestPolicyConfiguration {
-                        request_id_draws: meta_signal_flow::DrawBound(SEEDED_REQUEST_ID_DRAWS),
-                        announcement_tries: meta_signal_flow::TryBound(SEEDED_ANNOUNCEMENT_TRIES),
+                        draw_bound: meta_signal_flow::DrawBound(SEEDED_REQUEST_ID_DRAWS),
+                        try_bound: meta_signal_flow::TryBound(SEEDED_ANNOUNCEMENT_TRIES),
                     },
                 ))?;
             }
             [stored]
-                if stored.request_id_draws >= meta_signal_flow::DrawBound(1)
-                    && stored.announcement_tries >= meta_signal_flow::TryBound(1) => {}
+                if stored.draw_bound >= meta_signal_flow::DrawBound(1)
+                    && stored.try_bound >= meta_signal_flow::TryBound(1) => {}
             _ => return Err(StoreError::StateInvariant),
         }
         Ok(Self {
@@ -3208,7 +3134,7 @@ impl OpensFlowStore for FlowStore {
             store.engine.assert(Assertion::new(
                 store.state,
                 FlowStoreState {
-                    next_flow_number: 1,
+                    next_flow_number: NextFlowNumber(1),
                 },
             ))?;
         }
@@ -3433,7 +3359,7 @@ impl ManagesMetaflowState for FlowStore {
         ))?;
         match rows.records() {
             [] => Ok(None),
-            [stored] => Ok(Some(stored.threshold.clone())),
+            [stored] => Ok(Some(stored.configure_threshold.clone())),
             _ => Err(StoreError::StateInvariant),
         }
     }
@@ -3453,8 +3379,8 @@ impl ManagesMetaflowState for FlowStore {
         ))?;
         match rows.records() {
             [] => Ok(String::new()),
-            [stored] if stored.configured.address == *address => {
-                Ok(stored.configured.harness_flag_text.clone().0)
+            [stored] if stored.configure_harness_flags.address == *address => {
+                Ok(stored.configure_harness_flags.harness_flag_text.clone().0)
             }
             _ => Err(StoreError::StateInvariant),
         }
@@ -3858,8 +3784,12 @@ impl RegistersBindings for FlowStore {
                     }
                     Some(_) => {}
                     None => {
-                        self.engine
-                            .assert(Assertion::new(self.roles, StoredRole { caller: role }))?;
+                        self.engine.assert(Assertion::new(
+                            self.roles,
+                            StoredRole {
+                                caller_identity: role,
+                            },
+                        ))?;
                     }
                 }
             }
@@ -3894,7 +3824,12 @@ impl RegistersBindings for FlowStore {
                 },
             );
         let commit = match role {
-            Some(role) => commit.assert(self.roles, StoredRole { caller: role }),
+            Some(role) => commit.assert(
+                self.roles,
+                StoredRole {
+                    caller_identity: role,
+                },
+            ),
             None => commit,
         };
         self.engine.commit_atomic(commit)?;
@@ -4071,7 +4006,12 @@ impl RegistersExistingFlow for FlowStore {
             ),
         };
         if existing_role.is_none() {
-            commit = commit.assert(self.roles, StoredRole { caller: role });
+            commit = commit.assert(
+                self.roles,
+                StoredRole {
+                    caller_identity: role,
+                },
+            );
         }
         commit = match existing_owner_proof {
             Some(_) => commit.mutate(self.native_owner_proofs, owner_proof),
@@ -4124,7 +4064,7 @@ impl ReadsFlowRoles for FlowStore {
             .to_vec();
         match records.as_slice() {
             [] => Ok(None),
-            [role] => Ok(Some(role.caller.clone())),
+            [role] => Ok(Some(role.caller_identity.clone())),
             _ => Err(StoreError::StateInvariant),
         }
     }
@@ -4166,11 +4106,11 @@ impl ReservesLaunchAttempt for FlowStore {
         let prompt_sha256 = launch.first_prompt_payload.prompt_sha256.clone();
         if let Some(existing) = self.stored_launch_attempt(&launch_request_id.0)? {
             return Ok(
-                if existing.attempt.prompt_sha256 == prompt_sha256
-                    && existing.attempt.launch_profile == launch.launch_profile
-                    && existing.attempt.origin == origin
+                if existing.launch_attempt.prompt_sha256 == prompt_sha256
+                    && existing.launch_attempt.launch_profile == launch.launch_profile
+                    && existing.launch_attempt.origin == origin
                 {
-                    LaunchAttemptReservation::Existing(existing.attempt)
+                    LaunchAttemptReservation::Existing(existing.launch_attempt)
                 } else {
                     LaunchAttemptReservation::Conflict
                 },
@@ -4191,7 +4131,7 @@ impl ReservesLaunchAttempt for FlowStore {
         self.engine.assert(Assertion::new(
             self.launch_attempts,
             StoredLaunchAttempt {
-                attempt: attempt.clone(),
+                launch_attempt: attempt.clone(),
             },
         ))?;
         self.launch_changes.announce();
@@ -4206,20 +4146,20 @@ impl RecordsNativeLaunchIntent for FlowStore {
             return Ok(false);
         };
         let empty_simplified_start = intent.prompt_sha256_vector.is_empty()
-            && stored.attempt.launch_profile.flow_kind == signal_flow::FlowKind::Simplified
-            && matches!(&stored.attempt.launch_profile.tool_set,
+            && stored.launch_attempt.launch_profile.flow_kind == signal_flow::FlowKind::Simplified
+            && matches!(&stored.launch_attempt.launch_profile.tool_set,
                 signal_flow::ToolSet::Explicit(tools) if tools.is_empty())
             && stored
-                .attempt
+                .launch_attempt
                 .launch_profile
                 .instruction_prompt
                 .0
                 .is_empty()
             && intent.prompt_sha256.0 == format!("{:x}", Sha256::digest([]));
-        if stored.attempt.launch_attempt_phase != LaunchAttemptPhase::Reserved
-            || stored.attempt.prompt_sha256 != intent.prompt_sha256
-            || stored.attempt.launch_profile.model_name != intent.model_name
-            || stored.attempt.launch_profile.effort != intent.effort
+        if stored.launch_attempt.launch_attempt_phase != LaunchAttemptPhase::Reserved
+            || stored.launch_attempt.prompt_sha256 != intent.prompt_sha256
+            || stored.launch_attempt.launch_profile.model_name != intent.model_name
+            || stored.launch_attempt.launch_profile.effort != intent.effort
             || (intent.prompt_sha256_vector.is_empty() && !empty_simplified_start)
             || !intent
                 .prompt_sha256_vector
@@ -4232,12 +4172,12 @@ impl RecordsNativeLaunchIntent for FlowStore {
                             .bytes()
                             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
                 })
-            || stored.attempt.native_launch_intent_option.is_some()
+            || stored.launch_attempt.native_launch_intent_option.is_some()
         {
             return Ok(false);
         }
-        stored.attempt.launch_attempt_phase = LaunchAttemptPhase::NativeLaunchIntentRecorded;
-        stored.attempt.native_launch_intent_option = Some(intent);
+        stored.launch_attempt.launch_attempt_phase = LaunchAttemptPhase::NativeLaunchIntentRecorded;
+        stored.launch_attempt.native_launch_intent_option = Some(intent);
         self.mutate_launch_attempt(stored)?;
         Ok(true)
     }
@@ -4251,19 +4191,20 @@ impl RecordsNativeLaunchBinding for FlowStore {
         let Some(mut stored) = self.stored_launch_attempt(&binding.launch_request_id.0)? else {
             return Ok(false);
         };
-        let Some(intent) = stored.attempt.native_launch_intent_option.as_ref() else {
+        let Some(intent) = stored.launch_attempt.native_launch_intent_option.as_ref() else {
             return Ok(false);
         };
-        if stored.attempt.launch_attempt_phase != LaunchAttemptPhase::NativeLaunchIntentRecorded
+        if stored.launch_attempt.launch_attempt_phase
+            != LaunchAttemptPhase::NativeLaunchIntentRecorded
             || intent.launch_request_id != binding.launch_request_id
             || intent.harness_kind != binding.harness_kind
             || binding.herdr_pane_binding.launch_request_id != binding.launch_request_id
-            || stored.attempt.native_launch_binding_option.is_some()
+            || stored.launch_attempt.native_launch_binding_option.is_some()
         {
             return Ok(false);
         }
-        stored.attempt.launch_attempt_phase = LaunchAttemptPhase::NativeBound;
-        stored.attempt.native_launch_binding_option = Some(binding);
+        stored.launch_attempt.launch_attempt_phase = LaunchAttemptPhase::NativeBound;
+        stored.launch_attempt.native_launch_binding_option = Some(binding);
         self.mutate_launch_attempt(stored)?;
         Ok(true)
     }
@@ -4278,15 +4219,18 @@ impl RecordsRegistrationAcknowledgement for FlowStore {
         else {
             return Ok(false);
         };
-        let Some(binding) = stored.attempt.native_launch_binding_option.as_ref() else {
+        let Some(binding) = stored.launch_attempt.native_launch_binding_option.as_ref() else {
             return Ok(false);
         };
-        if stored.attempt.launch_attempt_phase != LaunchAttemptPhase::NativeBound
+        if stored.launch_attempt.launch_attempt_phase != LaunchAttemptPhase::NativeBound
             || acknowledgement.launch_request_id != binding.launch_request_id
             || acknowledgement.flow_id != binding.flow_id
             || acknowledgement.native_session_id != binding.native_session_id
             || acknowledgement.herdr_pane_binding != binding.herdr_pane_binding
-            || stored.attempt.registration_acknowledgement_option.is_some()
+            || stored
+                .launch_attempt
+                .registration_acknowledgement_option
+                .is_some()
         {
             return Ok(false);
         }
@@ -4296,15 +4240,15 @@ impl RecordsRegistrationAcknowledgement for FlowStore {
         // the acknowledgement.
         let flow_id = acknowledgement.flow_id.clone();
         let commit = match self.held(
-            &stored.attempt.launch_profile,
+            &stored.launch_attempt.launch_profile,
             &flow_id.0,
             self.engine.begin_atomic_commit(),
         )? {
             Ok(commit) => commit,
             Err(_) => return Ok(false),
         };
-        stored.attempt.launch_attempt_phase = LaunchAttemptPhase::RegistrationAcknowledged;
-        stored.attempt.registration_acknowledgement_option = Some(acknowledgement);
+        stored.launch_attempt.launch_attempt_phase = LaunchAttemptPhase::RegistrationAcknowledged;
+        stored.launch_attempt.registration_acknowledgement_option = Some(acknowledgement);
         self.engine
             .commit_atomic(commit.mutate(self.launch_attempts, stored))?;
         #[cfg(test)]
@@ -4326,14 +4270,17 @@ impl RecordsPromptDeliveryIntent for FlowStore {
         let Some(mut stored) = self.stored_launch_attempt(&intent.launch_request_id.0)? else {
             return Ok(false);
         };
-        let Some(acknowledgement) = stored.attempt.registration_acknowledgement_option.as_ref()
+        let Some(acknowledgement) = stored
+            .launch_attempt
+            .registration_acknowledgement_option
+            .as_ref()
         else {
             return Ok(false);
         };
-        let Some(binding) = stored.attempt.native_launch_binding_option.as_ref() else {
+        let Some(binding) = stored.launch_attempt.native_launch_binding_option.as_ref() else {
             return Ok(false);
         };
-        let Some(native_intent) = stored.attempt.native_launch_intent_option.as_ref() else {
+        let Some(native_intent) = stored.launch_attempt.native_launch_intent_option.as_ref() else {
             return Ok(false);
         };
         // The first part is the one about to be submitted; no Stop count
@@ -4341,11 +4288,11 @@ impl RecordsPromptDeliveryIntent for FlowStore {
         let empty_simplified_start = native_intent.prompt_sha256_vector.is_empty()
             && native_intent.prompt_sha256.0 == format!("{:x}", Sha256::digest([]))
             && intent.prompt_sha256 == native_intent.prompt_sha256
-            && stored.attempt.launch_profile.flow_kind == signal_flow::FlowKind::Simplified
-            && matches!(&stored.attempt.launch_profile.tool_set,
+            && stored.launch_attempt.launch_profile.flow_kind == signal_flow::FlowKind::Simplified
+            && matches!(&stored.launch_attempt.launch_profile.tool_set,
                 signal_flow::ToolSet::Explicit(tools) if tools.is_empty())
             && stored
-                .attempt
+                .launch_attempt
                 .launch_profile
                 .instruction_prompt
                 .0
@@ -4398,8 +4345,9 @@ impl RecordsPromptDeliveryIntent for FlowStore {
                         .all(|byte| byte.is_ascii_digit())
             }
         };
-        if stored.attempt.launch_attempt_phase != LaunchAttemptPhase::RegistrationAcknowledged
-            || intent.prompt_sha256 != stored.attempt.prompt_sha256
+        if stored.launch_attempt.launch_attempt_phase
+            != LaunchAttemptPhase::RegistrationAcknowledged
+            || intent.prompt_sha256 != stored.launch_attempt.prompt_sha256
             || intent.launch_request_id != acknowledgement.launch_request_id
             || intent.flow_id != acknowledgement.flow_id
             || intent.native_session_id != acknowledgement.native_session_id
@@ -4409,12 +4357,15 @@ impl RecordsPromptDeliveryIntent for FlowStore {
             || !valid_parts
             || intent.herdr_pane_binding != acknowledgement.herdr_pane_binding
             || !valid_boundary
-            || stored.attempt.prompt_delivery_intent_option.is_some()
+            || stored
+                .launch_attempt
+                .prompt_delivery_intent_option
+                .is_some()
         {
             return Ok(false);
         }
-        stored.attempt.launch_attempt_phase = LaunchAttemptPhase::PromptIntentRecorded;
-        stored.attempt.prompt_delivery_intent_option = Some(intent);
+        stored.launch_attempt.launch_attempt_phase = LaunchAttemptPhase::PromptIntentRecorded;
+        stored.launch_attempt.prompt_delivery_intent_option = Some(intent);
         self.mutate_launch_attempt(stored)?;
         Ok(true)
     }
@@ -4432,24 +4383,27 @@ impl RecordsPromptDeliveryResult for FlowStore {
         let Some(mut stored) = self.stored_launch_attempt(&launch_request_id.0)? else {
             return Ok(false);
         };
-        let Some(intent) = stored.attempt.prompt_delivery_intent_option.as_ref() else {
+        let Some(intent) = stored.launch_attempt.prompt_delivery_intent_option.as_ref() else {
             return Ok(false);
         };
-        let first_result = stored.attempt.launch_attempt_phase
+        let first_result = stored.launch_attempt.launch_attempt_phase
             == LaunchAttemptPhase::PromptIntentRecorded
-            && stored.attempt.prompt_delivery_result_option.is_none();
-        let ambiguity_promotion = stored.attempt.launch_attempt_phase
+            && stored
+                .launch_attempt
+                .prompt_delivery_result_option
+                .is_none();
+        let ambiguity_promotion = stored.launch_attempt.launch_attempt_phase
             == LaunchAttemptPhase::PromptAmbiguous
             && matches!(
-                stored.attempt.prompt_delivery_result_option,
+                stored.launch_attempt.prompt_delivery_result_option,
                 Some(PromptDeliveryResult::Ambiguous(_))
             )
             && matches!(&result, PromptDeliveryResult::Observed(_));
-        let boundary_advancement = if stored.attempt.launch_attempt_phase
+        let boundary_advancement = if stored.launch_attempt.launch_attempt_phase
             == LaunchAttemptPhase::PromptAmbiguous
         {
             match (
-                stored.attempt.prompt_delivery_result_option.as_ref(),
+                stored.launch_attempt.prompt_delivery_result_option.as_ref(),
                 &result,
             ) {
                 (
@@ -4491,10 +4445,10 @@ impl RecordsPromptDeliveryResult for FlowStore {
         // The next part of a split first message is recorded before it is
         // typed: one more part submitted, the Stop count it waited on, and
         // nothing else changed.
-        let part_advancement = stored.attempt.launch_attempt_phase
+        let part_advancement = stored.launch_attempt.launch_attempt_phase
             == LaunchAttemptPhase::PromptAmbiguous
             && match (
-                stored.attempt.prompt_delivery_result_option.as_ref(),
+                stored.launch_attempt.prompt_delivery_result_option.as_ref(),
                 &result,
             ) {
                 (
@@ -4521,7 +4475,7 @@ impl RecordsPromptDeliveryResult for FlowStore {
             PromptDeliveryResult::Ambiguous(observed_intent)
                 if boundary_advancement || part_advancement =>
             {
-                stored.attempt.prompt_delivery_intent_option = Some(observed_intent.clone());
+                stored.launch_attempt.prompt_delivery_intent_option = Some(observed_intent.clone());
                 LaunchAttemptPhase::PromptAmbiguous
             }
             PromptDeliveryResult::Observed(receipt)
@@ -4548,8 +4502,8 @@ impl RecordsPromptDeliveryResult for FlowStore {
                 return Ok(false);
             }
         };
-        stored.attempt.launch_attempt_phase = phase;
-        stored.attempt.prompt_delivery_result_option = Some(result);
+        stored.launch_attempt.launch_attempt_phase = phase;
+        stored.launch_attempt.prompt_delivery_result_option = Some(result);
         self.mutate_launch_attempt(stored)?;
         Ok(true)
     }
@@ -4743,7 +4697,7 @@ impl ReadsLaunchAttempt for FlowStore {
     fn launch_attempt(&self, launch_request_id: &str) -> Result<Option<LaunchAttempt>, StoreError> {
         Ok(self
             .stored_launch_attempt(launch_request_id)?
-            .map(|stored| stored.attempt))
+            .map(|stored| stored.launch_attempt))
     }
 
     fn composable_launch_profile(
@@ -4752,7 +4706,7 @@ impl ReadsLaunchAttempt for FlowStore {
     ) -> Result<Option<LaunchProfile>, StoreError> {
         Ok(self
             .stored_launch_attempt(launch_request_id)?
-            .map(|stored| stored.attempt.launch_profile))
+            .map(|stored| stored.launch_attempt.launch_profile))
     }
 
     fn launch_requests_bound_to(&self, flow_id: &str) -> Result<Vec<String>, StoreError> {
@@ -4763,12 +4717,12 @@ impl ReadsLaunchAttempt for FlowStore {
             .iter()
             .filter(|stored| {
                 stored
-                    .attempt
+                    .launch_attempt
                     .native_launch_binding_option
                     .as_ref()
                     .is_some_and(|binding| binding.flow_id.0 == flow_id)
             })
-            .map(|stored| stored.attempt.launch_request_id.0.clone())
+            .map(|stored| stored.launch_attempt.launch_request_id.0.clone())
             .collect())
     }
 
@@ -4779,10 +4733,10 @@ impl ReadsLaunchAttempt for FlowStore {
             .match_records(QueryPlan::all(self.launch_attempts))?
             .records()
         {
-            if stored.attempt.launch_attempt_phase == LaunchAttemptPhase::PromptAmbiguous
-                && self.launch_attempt_unsettled(&stored.attempt)?
+            if stored.launch_attempt.launch_attempt_phase == LaunchAttemptPhase::PromptAmbiguous
+                && self.launch_attempt_unsettled(&stored.launch_attempt)?
             {
-                ambiguous.push(stored.attempt.clone());
+                ambiguous.push(stored.launch_attempt.clone());
             }
         }
         Ok(ambiguous)
@@ -4942,7 +4896,7 @@ impl ReadsLaunchInspectionRecords for FlowStore {
             };
         };
 
-        let launch_attempt = stored_attempt.attempt.clone();
+        let launch_attempt = stored_attempt.launch_attempt.clone();
         if launch_attempt.launch_request_id.0 != launch_request_id
             || launch_attempt.launch_profile.launch_request_id.0 != launch_request_id
         {
@@ -5220,7 +5174,7 @@ impl WritesFlowStore for FlowStore {
     fn mutate_launch_attempt(&self, stored: StoredLaunchAttempt) -> Result<(), StoreError> {
         self.engine.mutate_keyed(KeyedMutation::new(
             self.launch_attempts,
-            RecordKey::new(stored.attempt.launch_request_id.clone().0),
+            RecordKey::new(stored.launch_attempt.launch_request_id.clone().0),
             stored,
         ))?;
         self.launch_changes.announce();
@@ -5234,7 +5188,7 @@ impl WritesFlowStore for FlowStore {
     ) -> Result<PendingLaunch, StoreError> {
         let state = self.state()?;
         let stable_socket = self.runtime_configuration()?.stable_codex.socket;
-        let flow_id = format!("flow-{:016x}", state.next_flow_number);
+        let flow_id = format!("flow-{:016x}", state.next_flow_number.0);
         self.engine.commit_atomic(
             self.engine
                 .begin_atomic_commit()
@@ -5259,7 +5213,7 @@ impl WritesFlowStore for FlowStore {
                 .mutate(
                     self.state,
                     FlowStoreState {
-                        next_flow_number: state.next_flow_number + 1,
+                        next_flow_number: NextFlowNumber(state.next_flow_number.0 + 1),
                     },
                 ),
         )?;
@@ -6045,7 +5999,7 @@ pub(crate) trait ReadsFlowMemory {
                 .ok_or_else(|| reject("Flow state identity record is absent".into()))?;
             let state = rkyv::from_bytes::<FlowStoreState, rkyv::rancor::Error>(bytes.value())
                 .map_err(|error| reject(format!("Flow state identity cannot be read: {error}")))?;
-            state.next_flow_number > 0
+            state.next_flow_number.0 > 0
         };
         if !state_is_recognized {
             return Err(reject("Flow state identity is invalid".into()));
@@ -6063,7 +6017,7 @@ pub(crate) trait ReadsFlowMemory {
         let nexus = match nexus_rows.records() {
             [] => None,
             [stored] if stored.record_key() == RecordKey::new("nexus") => {
-                Some(stored.nexus.clone())
+                Some(stored.configure_nexus.clone())
             }
             _ => return Err(StoreError::StateInvariant),
         };
@@ -6105,49 +6059,47 @@ pub(crate) trait ReadsFlowMemory {
         let mut models = models_rows
             .records()
             .iter()
-            .map(|stored| stored.model.clone())
+            .map(|stored| stored.configure_model.clone())
             .collect::<Vec<_>>();
         models.sort_by_key(|model| FlowStore::model_record_key(&model.model));
         let mut thresholds = thresholds_rows
             .records()
             .iter()
-            .map(|stored| stored.threshold.clone())
+            .map(|stored| stored.configure_threshold.clone())
             .collect::<Vec<_>>();
         thresholds.sort_by(|left, right| left.model_name.cmp(&right.model_name));
         let investigation = match investigation_rows.records() {
             [] => None,
-            [stored] => Some(stored.investigation.clone()),
+            [stored] => Some(stored.address.clone()),
             _ => return Err(StoreError::StateInvariant),
         };
         let harness_hook = match harness_hook_rows.records() {
             [] => meta_signal_flow::HarnessHookConfiguration::Unconfigured,
-            [stored] => meta_signal_flow::HarnessHookConfiguration::Configured(
-                meta_signal_flow::generated::signal::Path(stored.harness_hook.clone()),
-            ),
+            [stored] => meta_signal_flow::HarnessHookConfiguration::Configured(stored.path.clone()),
             _ => return Err(StoreError::StateInvariant),
         };
         // A Memory no DefaultMinutes was declared in holds the seed.
         let default_minutes = match default_minutes_rows.records() {
             [] => SEEDED_DEFAULT_MINUTES,
-            [stored] => stored.default_minutes,
+            [stored] => stored.minutes.0,
             _ => return Err(StoreError::StateInvariant),
         };
         let (request_id_draws, announcement_tries) = match request_policy_rows.records() {
             [] => (SEEDED_REQUEST_ID_DRAWS, SEEDED_ANNOUNCEMENT_TRIES),
-            [stored] if stored.request_id_draws.0 >= 1 && stored.announcement_tries.0 >= 1 => {
-                (stored.request_id_draws.0, stored.announcement_tries.0)
+            [stored] if stored.draw_bound.0 >= 1 && stored.try_bound.0 >= 1 => {
+                (stored.draw_bound.0, stored.try_bound.0)
             }
             _ => return Err(StoreError::StateInvariant),
         };
         let heartbeat = match heartbeat_rows.records() {
             [] => None,
-            [stored] => Some(stored.heartbeat.clone()),
+            [stored] => Some(stored.heartbeat_config.clone()),
             _ => return Err(StoreError::StateInvariant),
         };
         let mut send_servers = send_server_rows
             .records()
             .iter()
-            .map(|stored| stored.send_server.clone())
+            .map(|stored| stored.configure_send_server.clone())
             .collect::<Vec<_>>();
         send_servers.sort_by(|left, right| {
             left.codex_app_server_binary
@@ -6156,13 +6108,13 @@ pub(crate) trait ReadsFlowMemory {
         let mut metaflows = metaflow_rows
             .records()
             .iter()
-            .map(|stored| stored.metaflow.clone())
+            .map(|stored| stored.configure_metaflow.clone())
             .collect::<Vec<_>>();
         metaflows.sort_by_key(|metaflow| FlowStore::address_record_key(&metaflow.address));
         let mut configured_harness_flags = harness_flags_rows
             .records()
             .iter()
-            .map(|stored| stored.configured.clone())
+            .map(|stored| stored.configure_harness_flags.clone())
             .collect::<Vec<_>>();
         configured_harness_flags
             .sort_by_key(|configured| FlowStore::address_record_key(&configured.address));
@@ -6184,10 +6136,10 @@ pub(crate) trait ReadsFlowMemory {
             heartbeat,
             protected_addresses,
             harness_hook,
-            handover_policies: handover.policies,
-            handover_archive: handover.archive,
-            handover_count: handover.count,
-            publication_deadline: handover.publication_deadline,
+            handover_policies: handover.handover_policies_configuration,
+            handover_archive: handover.handover_archive_configuration,
+            handover_count: handover.handover_count_configuration,
+            publication_deadline: handover.duration,
             request_id_draws: meta_signal_flow::DrawBound(request_id_draws),
             announcement_tries: meta_signal_flow::TryBound(announcement_tries),
         }))
@@ -6340,7 +6292,12 @@ pub(crate) trait ReadsFlowMemory {
             .match_records(QueryPlan::all(tables.nexus))?
             .records()
             .to_vec();
-        let [StoredMetaNexusConfiguration { nexus }] = rows.as_slice() else {
+        let [
+            StoredMetaNexusConfiguration {
+                configure_nexus: nexus,
+            },
+        ] = rows.as_slice()
+        else {
             return Err(StoreError::NexusUnconfigured);
         };
         let mut nexus = nexus.clone();
@@ -6348,7 +6305,9 @@ pub(crate) trait ReadsFlowMemory {
         FlowStore::replace_configuration_family(
             engine,
             tables.nexus,
-            vec![StoredMetaNexusConfiguration { nexus }],
+            vec![StoredMetaNexusConfiguration {
+                configure_nexus: nexus,
+            }],
         )
     }
 
@@ -6394,7 +6353,7 @@ pub(crate) trait ReadsFlowMemory {
             .match_records(QueryPlan::all(tables.nexus))?
             .records()
             .first()
-            .map(|stored| stored.nexus.clone());
+            .map(|stored| stored.configure_nexus.clone());
         let native = engine
             .match_records(QueryPlan::key(
                 tables.models,
@@ -6402,7 +6361,7 @@ pub(crate) trait ReadsFlowMemory {
             ))?
             .records()
             .first()
-            .map(|stored| stored.model.native.0.clone());
+            .map(|stored| stored.configure_model.native.0.clone());
         Ok(match (nexus, native) {
             (Some(nexus), Some(native)) => Some(
                 crate::codex::CodexEndpoints::from(&RuntimeConfiguration::from(&nexus))
@@ -6461,7 +6420,7 @@ pub(crate) trait ReadsFlowMemory {
             .to_vec();
         let mut metaflow = match stored.as_slice() {
             [] => return Err(StoreError::UnknownPermaflow(address)),
-            [stored] => stored.metaflow.clone(),
+            [stored] => stored.configure_metaflow.clone(),
             _ => return Err(StoreError::StateInvariant),
         };
         let committed = metaflow.clone();
@@ -6521,7 +6480,9 @@ pub(crate) trait ReadsFlowMemory {
         FlowStore::declare_configuration_entry(
             engine,
             tables.metaflows,
-            metaflow_declaration::StoredMetaMetaflowConfiguration { metaflow },
+            metaflow_declaration::StoredMetaMetaflowConfiguration {
+                configure_metaflow: metaflow,
+            },
         )
     }
 
@@ -6599,12 +6560,11 @@ pub(crate) trait ReadsFlowMemory {
                     engine,
                     tables.handover,
                     vec![handover_configuration::StoredHandoverConfiguration {
-                        policies: meta_signal_flow::HandoverPoliciesConfiguration::Configured(
-                            policies,
-                        ),
-                        archive: old.archive,
-                        count: old.count,
-                        publication_deadline: old.publication_deadline,
+                        handover_policies_configuration:
+                            meta_signal_flow::HandoverPoliciesConfiguration::Configured(policies),
+                        handover_archive_configuration: old.handover_archive_configuration,
+                        handover_count_configuration: old.handover_count_configuration,
+                        duration: old.duration,
                     }],
                 )
             }
@@ -6619,10 +6579,11 @@ pub(crate) trait ReadsFlowMemory {
                     engine,
                     tables.handover,
                     vec![handover_configuration::StoredHandoverConfiguration {
-                        policies: old.policies,
-                        archive: meta_signal_flow::HandoverArchiveConfiguration::Configured(path),
-                        count: old.count,
-                        publication_deadline: old.publication_deadline,
+                        handover_policies_configuration: old.handover_policies_configuration,
+                        handover_archive_configuration:
+                            meta_signal_flow::HandoverArchiveConfiguration::Configured(path),
+                        handover_count_configuration: old.handover_count_configuration,
+                        duration: old.duration,
                     }],
                 )
             }
@@ -6642,10 +6603,11 @@ pub(crate) trait ReadsFlowMemory {
                     engine,
                     tables.handover,
                     vec![handover_configuration::StoredHandoverConfiguration {
-                        policies: old.policies,
-                        archive: old.archive,
-                        count: meta_signal_flow::HandoverCountConfiguration::Configured(count),
-                        publication_deadline: old.publication_deadline,
+                        handover_policies_configuration: old.handover_policies_configuration,
+                        handover_archive_configuration: old.handover_archive_configuration,
+                        handover_count_configuration:
+                            meta_signal_flow::HandoverCountConfiguration::Configured(count),
+                        duration: old.duration,
                     }],
                 )
             }
@@ -6665,10 +6627,10 @@ pub(crate) trait ReadsFlowMemory {
                     engine,
                     tables.handover,
                     vec![handover_configuration::StoredHandoverConfiguration {
-                        policies: old.policies,
-                        archive: old.archive,
-                        count: old.count,
-                        publication_deadline: duration,
+                        handover_policies_configuration: old.handover_policies_configuration,
+                        handover_archive_configuration: old.handover_archive_configuration,
+                        handover_count_configuration: old.handover_count_configuration,
+                        duration,
                     }],
                 )
             }
@@ -6689,7 +6651,9 @@ pub(crate) trait ReadsFlowMemory {
                 FlowStore::replace_configuration_family(
                     engine,
                     tables.nexus,
-                    vec![StoredMetaNexusConfiguration { nexus }],
+                    vec![StoredMetaNexusConfiguration {
+                        configure_nexus: nexus,
+                    }],
                 )
             }
             ConfigurationChange::Models(models) => FlowStore::replace_configuration_family(
@@ -6697,7 +6661,9 @@ pub(crate) trait ReadsFlowMemory {
                 tables.models,
                 models
                     .into_iter()
-                    .map(|model| StoredMetaModelConfiguration { model })
+                    .map(|model| StoredMetaModelConfiguration {
+                        configure_model: model,
+                    })
                     .collect(),
             ),
             ConfigurationChange::Thresholds(thresholds) => FlowStore::replace_configuration_family(
@@ -6705,7 +6671,9 @@ pub(crate) trait ReadsFlowMemory {
                 tables.thresholds,
                 thresholds
                     .into_iter()
-                    .map(|threshold| StoredMetaThresholdConfiguration { threshold })
+                    .map(|threshold| StoredMetaThresholdConfiguration {
+                        configure_threshold: threshold,
+                    })
                     .collect(),
             ),
             ConfigurationChange::Permaflow(metaflow) => {
@@ -6718,7 +6686,9 @@ pub(crate) trait ReadsFlowMemory {
                 FlowStore::declare_configuration_entry(
                     engine,
                     tables.metaflows,
-                    metaflow_declaration::StoredMetaMetaflowConfiguration { metaflow },
+                    metaflow_declaration::StoredMetaMetaflowConfiguration {
+                        configure_metaflow: metaflow,
+                    },
                 )
             }
             ConfigurationChange::Amend(amendment) => {
@@ -6727,7 +6697,9 @@ pub(crate) trait ReadsFlowMemory {
             ConfigurationChange::Refresh(threshold) => FlowStore::declare_configuration_entry(
                 engine,
                 tables.thresholds,
-                StoredMetaThresholdConfiguration { threshold },
+                StoredMetaThresholdConfiguration {
+                    configure_threshold: threshold,
+                },
             ),
             ConfigurationChange::Harness(declared) => {
                 FlowStore::edit_harness_profiles(engine, tables, |profiles| {
@@ -6756,7 +6728,7 @@ pub(crate) trait ReadsFlowMemory {
                         .into_iter()
                         .map(
                             |metaflow| metaflow_declaration::StoredMetaMetaflowConfiguration {
-                                metaflow,
+                                configure_metaflow: metaflow,
                             },
                         )
                         .collect(),
@@ -6768,7 +6740,9 @@ pub(crate) trait ReadsFlowMemory {
                     tables.harness_flags,
                     configured
                         .into_iter()
-                        .map(|configured| StoredMetaHarnessFlagsConfiguration { configured })
+                        .map(|configured| StoredMetaHarnessFlagsConfiguration {
+                            configure_harness_flags: configured,
+                        })
                         .collect(),
                 )
             }
@@ -6780,7 +6754,7 @@ pub(crate) trait ReadsFlowMemory {
                         .into_iter()
                         .map(
                             |send_server| send_server::StoredMetaSendServerConfiguration {
-                                send_server,
+                                configure_send_server: send_server,
                             },
                         )
                         .collect(),
@@ -6790,16 +6764,16 @@ pub(crate) trait ReadsFlowMemory {
                 FlowStore::replace_configuration_family(
                     engine,
                     tables.investigation,
-                    vec![StoredMetaInvestigationConfiguration { investigation }],
+                    vec![StoredMetaInvestigationConfiguration {
+                        address: investigation,
+                    }],
                 )
             }
             ConfigurationChange::HarnessHook(harness_hook) => {
                 FlowStore::replace_configuration_family(
                     engine,
                     tables.harness_hook,
-                    vec![StoredMetaHarnessHookConfiguration {
-                        harness_hook: harness_hook.0,
-                    }],
+                    vec![StoredMetaHarnessHookConfiguration { path: harness_hook }],
                 )
             }
             // The default Minutes meets the rule a Task's Minutes meets at
@@ -6815,7 +6789,7 @@ pub(crate) trait ReadsFlowMemory {
                     engine,
                     tables.default_minutes,
                     vec![StoredMetaDefaultMinutesConfiguration {
-                        default_minutes: default_minutes.0,
+                        minutes: default_minutes,
                     }],
                 )
             }
@@ -6839,7 +6813,9 @@ pub(crate) trait ReadsFlowMemory {
                     tables.heartbeat,
                     heartbeat
                         .into_iter()
-                        .map(|heartbeat| StoredMetaHeartbeatConfiguration { heartbeat })
+                        .map(|heartbeat| StoredMetaHeartbeatConfiguration {
+                            heartbeat_config: heartbeat,
+                        })
                         .collect(),
                 )
             }
@@ -6865,8 +6841,8 @@ pub(crate) trait ReadsFlowMemory {
                 let sibling = engine.match_records(QueryPlan::all(tables.request_policy))?;
                 let announcement_tries = match sibling.records() {
                     [] => SEEDED_ANNOUNCEMENT_TRIES,
-                    [stored] if stored.announcement_tries >= meta_signal_flow::TryBound(1) => {
-                        stored.announcement_tries.0
+                    [stored] if stored.try_bound >= meta_signal_flow::TryBound(1) => {
+                        stored.try_bound.0
                     }
                     _ => return Err(StoreError::StateInvariant),
                 };
@@ -6874,8 +6850,8 @@ pub(crate) trait ReadsFlowMemory {
                     engine,
                     tables.request_policy,
                     vec![StoredMetaRequestPolicyConfiguration {
-                        request_id_draws: value,
-                        announcement_tries: meta_signal_flow::TryBound(announcement_tries),
+                        draw_bound: value,
+                        try_bound: meta_signal_flow::TryBound(announcement_tries),
                     }],
                 )
             }
@@ -6886,8 +6862,8 @@ pub(crate) trait ReadsFlowMemory {
                 let sibling = engine.match_records(QueryPlan::all(tables.request_policy))?;
                 let request_id_draws = match sibling.records() {
                     [] => SEEDED_REQUEST_ID_DRAWS,
-                    [stored] if stored.request_id_draws >= meta_signal_flow::DrawBound(1) => {
-                        stored.request_id_draws.0
+                    [stored] if stored.draw_bound >= meta_signal_flow::DrawBound(1) => {
+                        stored.draw_bound.0
                     }
                     _ => return Err(StoreError::StateInvariant),
                 };
@@ -6895,8 +6871,8 @@ pub(crate) trait ReadsFlowMemory {
                     engine,
                     tables.request_policy,
                     vec![StoredMetaRequestPolicyConfiguration {
-                        request_id_draws: meta_signal_flow::DrawBound(request_id_draws),
-                        announcement_tries: value,
+                        draw_bound: meta_signal_flow::DrawBound(request_id_draws),
+                        try_bound: value,
                     }],
                 )
             }
@@ -9174,7 +9150,7 @@ mod tests {
                 .expect("handover configuration reads");
             assert_eq!(rows.records().len(), 1, "open {open} has one durable row");
             assert_eq!(
-                rows.records()[0].publication_deadline,
+                rows.records()[0].duration,
                 meta_signal_flow::Duration(60_000)
             );
             drop(store);

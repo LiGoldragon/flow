@@ -6,8 +6,8 @@
 //! carries the leave-outs; v6 is upgraded on open (`leave_out_upgrade`).
 
 use super::{FlowStore, ReadsFlowMemory, StoreError};
+pub(crate) use crate::generated::memory::StoredMetaMetaflowConfiguration;
 use meta_signal_flow::ConfigureMetaflow;
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan, RecordKey, SchemaHash,
     TableDescriptor, TableName,
@@ -21,15 +21,11 @@ pub(super) const META_METAFLOW_CONFIGURATION_FAMILY: &str =
 pub(super) const META_METAFLOW_CONFIGURATION_SCHEMA: &str =
     "flow-nexus-meta-metaflow-configuration-v7";
 
-/// One declared metaflow, keyed by its Address.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredMetaMetaflowConfiguration {
-    pub metaflow: ConfigureMetaflow,
-}
-
 impl EngineRecord for StoredMetaMetaflowConfiguration {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
+        RecordKey::new(FlowStore::address_record_key(
+            &self.configure_metaflow.address,
+        ))
     }
 }
 
@@ -82,7 +78,7 @@ impl ReadsMetaflowDeclarations for FlowStore {
             .to_vec();
         match records.as_slice() {
             [] => Ok(None),
-            [stored] => Ok(Some(stored.metaflow.clone())),
+            [stored] => Ok(Some(stored.configure_metaflow.clone())),
             _ => Err(StoreError::StateInvariant),
         }
     }

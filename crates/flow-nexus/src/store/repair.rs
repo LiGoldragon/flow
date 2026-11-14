@@ -152,10 +152,10 @@ impl RepairsMetaflows for FlowStore {
             .match_records(QueryPlan::all(self.launch_attempts))?
             .records()
         {
-            if stored.attempt.launch_profile.address == *address
-                && self.launch_attempt_unsettled(&stored.attempt)?
+            if stored.launch_attempt.launch_profile.address == *address
+                && self.launch_attempt_unsettled(&stored.launch_attempt)?
             {
-                attempt_vector.push(Attempt::Launch(stored.attempt.clone()));
+                attempt_vector.push(Attempt::Launch(stored.launch_attempt.clone()));
             }
         }
         attempt_vector.extend(self.obligations_at(address)?);

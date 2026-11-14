@@ -167,7 +167,7 @@ impl UpgradeFrom<StoredMetaMetaflowConfigurationV6> for StoredMetaMetaflowConfig
 
     fn upgrade_from(before: StoredMetaMetaflowConfigurationV6) -> Decision<Self, Self::Refusal> {
         Decision::Ready(Self {
-            metaflow: before.metaflow.with_leave_outs(LeaveOuts(Vec::new())),
+            configure_metaflow: before.metaflow.with_leave_outs(LeaveOuts(Vec::new())),
         })
     }
 }
@@ -294,14 +294,14 @@ impl UpgradesLeaveOutMemory for FlowStore {
             .match_records(QueryPlan::all(nexus))?
             .records()
             .first()
-            .map(|stored| stored.nexus.clone());
+            .map(|stored| stored.configure_nexus.clone());
         let harness_of = |address: &Address| -> Option<HarnessKind> {
             use crate::generated::starter::DerivesHarness as _;
             let nexus = nexus.as_ref()?;
             let native = models
                 .iter()
-                .find(|stored| stored.model.model == address.model)?
-                .model
+                .find(|stored| stored.configure_model.model == address.model)?
+                .configure_model
                 .native
                 .0
                 .clone();
@@ -329,7 +329,7 @@ impl UpgradesLeaveOutMemory for FlowStore {
                 ));
             }
             rows.push(StoredMetaMetaflowConfiguration {
-                metaflow: row.metaflow.clone().with_leave_outs(
+                configure_metaflow: row.metaflow.clone().with_leave_outs(
                     taken
                         .map(|entry| entry.leave_out.leave_outs.clone())
                         .unwrap_or(LeaveOuts(Vec::new())),

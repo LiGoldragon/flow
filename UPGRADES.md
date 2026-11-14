@@ -1,3 +1,55 @@
+# Flow 0.55.0: a permaflow carries its leave-outs; one value of one permaflow changed alone
+
+Contracts: signal-flow 61.0.0 (4871bb8) and meta-signal-flow 78.0.0
+(3d4cf0a). **The stored format changes.**
+
+- **A permaflow is one definition.** `ConfigureMetaflow` carries its
+  leave-outs after its workspace, and the leave-out family is gone:
+  `Configure.LeaveOuts`, `ConfigureLeaveOut` and the snapshot's
+  `DefaultLeaveOuts`. A Start naming no leave-outs takes its permaflow's,
+  read from the declaration as it stands at its composition; a Start naming
+  its own replaces them, as before; a Start on another harness than they
+  are of is refused `LeaveOutRefused.NotForHarness`, where it took none.
+- **A leave-out of another harness is an unknown feature.** A `Permaflow`,
+  a `Metaflows` entry or an `Amend` naming a leave-out of another harness
+  than its Address's Model runs on is refused
+  `ConfigureRejected.UnknownFeature.<leave-out>`, nothing written. The
+  harness is derived as a launch derives it: the native model `Models`
+  names for the Model, on Codex when a declared Codex endpoint lists it, on
+  Claude otherwise. While no native model is configured for the Model, or
+  no Nexus is declared, the leave-outs are taken as declared and the launch
+  checks them. `LeaveOutNotForHarness` is gone.
+- **Configure.Amend.** `Configure.Amend.{ <Address> <Change> }` changes one
+  value of one permaflow: `Workspace`, `Purpose`, `Kind` or `Continuity`
+  replaced, or one `SystemModule`, `PromptModule` or `LeaveOut` appended
+  (`Add`) or taken out (`Remove`). The permaflow is read by its key and
+  written back by the single-entry commit `Configure.Permaflow` takes, so
+  nothing else in the store changes; the read and the write are one turn
+  of the meta socket, which serves one dispatch at a time under the
+  dispatch gate. A change that changes nothing answers `Configured.Unchanged`
+  and writes nothing. Refusals: `UnknownPermaflow.<Address>`,
+  `TopicRefused`, `UnknownFeature`, and for a module added,
+  `UnknownModule.<identity>` (not `type:subject:version`, or Curriculum
+  does not hold it, asked by `ResolveSources` through the configured
+  Curriculum socket) or `CurriculumUnavailable`. A whole `Permaflow` or
+  `Metaflows` is not module-checked. The change takes effect at the
+  permaflow's next flow: a launch, a wake, a restart and a successor read
+  the declaration at their composition; no running flow is touched.
+- **Memory.** The permaflow family v6 -> v7, upgraded on both opens in one
+  atomic evolution: each permaflow takes the retired entry of its Address
+  for the harness its Model runs on; an entry with no permaflow, for the
+  other harness, or whose permaflow's harness cannot be derived is dropped
+  and named in the daemon's log (`flow-nexus: store upgrade: …`). The same
+  commit retracts every row of the retired family, which stays in the
+  catalog, empty and read by nothing; a new store never has it. 0.54.7
+  refuses the upgraded store at open (the v7 identity); rollback is the
+  restore of the pre-deploy copy.
+- **Deployment.** The datom moves each `Configure.LeaveOuts` entry into its
+  permaflow's declaration, the entry for the harness its Model runs on,
+  and declares no LeaveOuts family. The capsule's `configure.datom` does so.
+- The meta greeting test refuses a meta-signal-flow 77 peer (dev-dependency
+  `meta-signal-flow-77` replaces `-76`).
+
 # Flow 0.54.7: every Codex rest settles; routing follows the succession; a reap is owed at once and finished outside the dispatch gate; every connection greets
 
 Contracts: signal-flow 61.0.0 (4871bb8) and meta-signal-flow 77.0.0

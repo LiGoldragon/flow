@@ -209,6 +209,20 @@ dependencies = [
 
 [[package]]
 name = "ethos-zero"
+version = "28.0.0"
+source = "git+https://github.com/LiGoldragon/ethos-zero?rev=970459d#970459d100ddee5f62a76c05642ecfabefba6329"
+dependencies = [
+ "datom-codec",
+ "prettyplease",
+ "proc-macro2",
+ "protos",
+ "quote",
+ "rkyv",
+ "syn 3.0.5",
+]
+
+[[package]]
+name = "ethos-zero"
 version = "29.0.0"
 source = "git+https://github.com/LiGoldragon/ethos-zero?rev=f23eacf#f23eacf338a90ce4a6dea011554724fa6488fcc9"
 dependencies = [
@@ -899,10 +913,10 @@ dependencies = [
 [[package]]
 name = "signal-curriculum-nexus"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-curriculum-nexus?rev=4358aa1#4358aa1c2bcba273fe18037ab7e99ebb117a9a47"
+source = "git+https://github.com/LiGoldragon/signal-curriculum-nexus?rev=4202d8b#4202d8bade73179be646b588498ae55e5687d1e8"
 dependencies = [
  "datom-codec",
- "ethos-zero 27.0.0",
+ "ethos-zero 28.0.0",
  "protos",
  "rkyv",
 ]

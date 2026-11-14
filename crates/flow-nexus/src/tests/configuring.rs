@@ -14,7 +14,7 @@ use crate::store::{
 };
 use crate::{Dispatches, OpensRunningNexus, RunningNexus};
 use meta_signal_flow::{
-    ConfigurationChange, ConfigurationSnapshot, ConfigureHarnessFlags, ConfigureLeaveOut,
+    ConfigurationChange, ConfigurationSnapshot, ConfigureHarnessFlags, ConfigureMetaflow,
     ConfigureModel, ConfigureNexus, ConfigureOutcome, ConfigureRejection, ConfigureThreshold,
     HeartbeatConfig, Response as MetaResponse,
 };
@@ -344,6 +344,28 @@ fn configure(nexus: &RunningNexus, change: ConfigurationChange) -> MetaResponse 
     nexus.dispatch_meta(meta_signal_flow::Query::Configure(change))
 }
 
+/// A permaflow at `address` with `leave_outs`, a versioned system module
+/// and nothing else.
+pub(crate) fn permaflow(
+    address: Address,
+    leave_outs: Vec<signal_flow::LeaveOut>,
+) -> ConfigureMetaflow {
+    ConfigureMetaflow {
+        address,
+        root_option: None,
+        leave_outs: signal_flow::LeaveOuts(leave_outs),
+        system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
+            "spirit:core:0".into(),
+        )]),
+        user_modules: signal_flow::UserModules(Vec::new()),
+        flow_kind: signal_flow::FlowKind::Regular,
+        tool_set: signal_flow::ToolSet::Default,
+        continuity: meta_signal_flow::Continuity::OnDemand,
+        purpose: meta_signal_flow::Purpose(String::new()),
+        records: meta_signal_flow::Records(Vec::new()),
+    }
+}
+
 fn quaternary_field() -> Address {
     Address {
         aspect: Aspect::Field,
@@ -527,39 +549,36 @@ fn each_family_is_its_last_declaration() {
     );
     assert_eq!(snapshot(&nexus).configured_thresholds.0, thresholds);
 
+    // A permaflow carries its leave-outs: the Metaflows family declared
+    // again replaces each permaflow whole, and one it leaves out is gone
+    // with its leave-outs.
     let first = vec![
-        ConfigureLeaveOut {
-            address: quaternary_field(),
-            harness_kind: HarnessKind::Claude,
-            leave_outs: signal_flow::LeaveOuts(vec![signal_flow::LeaveOut::SkillTool]),
-        },
-        ConfigureLeaveOut {
-            address: ConfiguredStore::message(),
-            harness_kind: HarnessKind::Claude,
-            leave_outs: signal_flow::LeaveOuts(vec![signal_flow::LeaveOut::ClaudeMd]),
-        },
+        permaflow(quaternary_field(), vec![signal_flow::LeaveOut::SkillTool]),
+        permaflow(
+            ConfiguredStore::message(),
+            vec![signal_flow::LeaveOut::ClaudeMd],
+        ),
     ];
     assert_eq!(
-        configure(&nexus, ConfigurationChange::LeaveOuts(first)),
+        configure(&nexus, ConfigurationChange::Metaflows(first)),
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
-    let second = vec![ConfigureLeaveOut {
-        address: quaternary_field(),
-        harness_kind: HarnessKind::Claude,
-        leave_outs: signal_flow::LeaveOuts(vec![
+    let second = vec![permaflow(
+        quaternary_field(),
+        vec![
             signal_flow::LeaveOut::SkillTool,
             signal_flow::LeaveOut::WorkflowTool,
-        ]),
-    }];
+        ],
+    )];
     assert_eq!(
-        configure(&nexus, ConfigurationChange::LeaveOuts(second.clone())),
+        configure(&nexus, ConfigurationChange::Metaflows(second.clone())),
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
-    assert_eq!(snapshot(&nexus).default_leave_outs.0, second);
+    assert_eq!(snapshot(&nexus).configured_metaflows.0, second);
     assert!(
         nexus
             .store
-            .default_leave_outs(&ConfiguredStore::message(), &HarnessKind::Claude)
+            .declared_leave_outs(&ConfiguredStore::message())
             .unwrap()
             .is_empty()
     );
@@ -591,9 +610,8 @@ fn each_family_is_its_last_declaration() {
             configured_nexus: nexus_before,
             configured_models: meta_signal_flow::ConfiguredModels(models),
             configured_thresholds: meta_signal_flow::ConfiguredThresholds(thresholds),
-            default_leave_outs: meta_signal_flow::DefaultLeaveOuts(second),
             configured_send_servers: meta_signal_flow::ConfiguredSendServers(send_servers),
-            configured_metaflows: meta_signal_flow::ConfiguredMetaflows(Vec::new()),
+            configured_metaflows: meta_signal_flow::ConfiguredMetaflows(second),
             configured_harness_flags: meta_signal_flow::ConfiguredHarnessFlags(Vec::new()),
             configured_investigation: meta_signal_flow::ConfiguredInvestigation(None),
             configured_default_minutes: meta_signal_flow::ConfiguredDefaultMinutes(
@@ -633,12 +651,12 @@ fn each_family_is_its_last_declaration() {
     );
     // An empty declaration empties the family.
     assert_eq!(
-        configure(&reopened, ConfigurationChange::LeaveOuts(Vec::new())),
+        configure(&reopened, ConfigurationChange::Metaflows(Vec::new())),
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
-    assert!(snapshot(&reopened).default_leave_outs.0.is_empty());
+    assert!(snapshot(&reopened).configured_metaflows.0.is_empty());
     assert_eq!(
-        configure(&reopened, ConfigurationChange::LeaveOuts(Vec::new())),
+        configure(&reopened, ConfigurationChange::Metaflows(Vec::new())),
         MetaResponse::Configured(ConfigureOutcome::Unchanged)
     );
 }
@@ -659,37 +677,38 @@ fn a_launch_after_a_replaced_declaration_takes_the_new_defaults() {
             Outcome::Composed(launch) => launch.leave_outs.0,
             outcome => panic!("launch not composed: {outcome:?}"),
         };
-    let declare = |nexus: &RunningNexus, leave_outs: Vec<signal_flow::LeaveOut>| {
-        configure(
-            nexus,
-            ConfigurationChange::LeaveOuts(vec![ConfigureLeaveOut {
-                address: quaternary_field(),
-                harness_kind: HarnessKind::Claude,
-                leave_outs: signal_flow::LeaveOuts(leave_outs),
-            }]),
-        )
-    };
     assert_eq!(
-        declare(&nexus, vec![signal_flow::LeaveOut::WorkflowTool]),
+        configure(
+            &nexus,
+            ConfigurationChange::Permaflow(permaflow(
+                quaternary_field(),
+                vec![signal_flow::LeaveOut::WorkflowTool]
+            ))
+        ),
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
     assert_eq!(
         composed_leave_outs(&nexus),
         [signal_flow::LeaveOut::WorkflowTool]
     );
-    // The changed default the deployment declares is the one the next launch
-    // takes.
-    assert_eq!(
-        declare(
-            &nexus,
-            vec![
-                signal_flow::LeaveOut::WorkflowTool,
-                signal_flow::LeaveOut::SkillTool,
-                signal_flow::LeaveOut::ClaudeMd
-            ]
-        ),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
-    );
+    // The leave-outs an Amend adds are the ones the next launch takes.
+    for leave_out in [
+        signal_flow::LeaveOut::SkillTool,
+        signal_flow::LeaveOut::ClaudeMd,
+    ] {
+        assert_eq!(
+            configure(
+                &nexus,
+                ConfigurationChange::Amend(meta_signal_flow::Amend_Data {
+                    address: quaternary_field(),
+                    change: meta_signal_flow::Change::Add(meta_signal_flow::Element::LeaveOut(
+                        leave_out
+                    )),
+                })
+            ),
+            MetaResponse::Configured(ConfigureOutcome::Replaced)
+        );
+    }
     assert_eq!(
         composed_leave_outs(&nexus),
         [
@@ -752,95 +771,135 @@ fn a_launch_naming_a_claude_alias_is_not_composed_and_its_full_name_is() {
     );
 }
 
-/// An entry naming a leave-out of another harness than its own is refused
-/// whole: the declaration writes nothing, and the committed family stands.
+/// A permaflow naming a leave-out of another harness than its Model runs
+/// on is refused UnknownFeature, naming it, whether declared whole, in the
+/// Metaflows family or added by an Amend: nothing is written. While the
+/// Model has no native model configured the harness is not known and the
+/// leave-outs are taken as declared.
 #[test]
-fn a_leave_out_default_naming_another_harness_is_refused_and_writes_nothing() {
+fn a_leave_out_of_another_harness_is_an_unknown_feature_and_writes_nothing() {
     let fixture = ConfiguredStore::new();
     let nexus = fixture.open();
-    let committed = vec![ConfigureLeaveOut {
-        address: quaternary_field(),
-        harness_kind: HarnessKind::Claude,
-        leave_outs: signal_flow::LeaveOuts(vec![signal_flow::LeaveOut::ClaudeMd]),
-    }];
+    // Sol runs a model the stable Codex endpoint lists: on Codex.
     assert_eq!(
-        configure(&nexus, ConfigurationChange::LeaveOuts(committed.clone())),
+        configure(
+            &nexus,
+            ConfigurationChange::Models(vec![
+                ConfigureModel {
+                    model: Model::Astra,
+                    native: meta_signal_flow::Native("gpt-6-astra".into()),
+                },
+                ConfigureModel {
+                    model: Model::Sol,
+                    native: meta_signal_flow::Native(SOL.into()),
+                },
+            ])
+        ),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    let codex = Address {
+        aspect: Aspect::Mind,
+        topic: flow_ethos::Topic("codexSeat".into()),
+        model: Model::Sol,
+    };
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::Permaflow(permaflow(
+                codex.clone(),
+                vec![signal_flow::LeaveOut::CodexAgentsMd]
+            ))
+        ),
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
     let before = snapshot(&nexus);
     let rows = other_rows(&nexus);
-    for crossed in [
-        ConfigureLeaveOut {
-            address: ConfiguredStore::message(),
-            harness_kind: HarnessKind::Codex,
-            leave_outs: signal_flow::LeaveOuts(vec![
+    for refused in [
+        ConfigurationChange::Permaflow(permaflow(
+            codex.clone(),
+            vec![
                 signal_flow::LeaveOut::CodexAgentsMd,
                 signal_flow::LeaveOut::ClaudeMd,
-            ]),
-        },
-        ConfigureLeaveOut {
-            address: ConfiguredStore::message(),
-            harness_kind: HarnessKind::Claude,
-            leave_outs: signal_flow::LeaveOuts(vec![signal_flow::LeaveOut::CodexSkillListing]),
-        },
+            ],
+        )),
+        ConfigurationChange::Metaflows(vec![
+            permaflow(quaternary_field(), vec![signal_flow::LeaveOut::SkillTool]),
+            permaflow(codex.clone(), vec![signal_flow::LeaveOut::ClaudeMd]),
+        ]),
+        ConfigurationChange::Amend(meta_signal_flow::Amend_Data {
+            address: codex.clone(),
+            change: meta_signal_flow::Change::Add(meta_signal_flow::Element::LeaveOut(
+                signal_flow::LeaveOut::ClaudeMd,
+            )),
+        }),
     ] {
-        let declaration = vec![
-            ConfigureLeaveOut {
-                address: quaternary_field(),
-                harness_kind: HarnessKind::Codex,
-                leave_outs: signal_flow::LeaveOuts(vec![signal_flow::LeaveOut::CodexAgentsMd]),
-            },
-            crossed,
-        ];
         assert_eq!(
-            configure(&nexus, ConfigurationChange::LeaveOuts(declaration)),
-            MetaResponse::ConfigureRejected(ConfigureRejection::LeaveOutNotForHarness)
+            configure(&nexus, refused),
+            MetaResponse::ConfigureRejected(ConfigureRejection::UnknownFeature(
+                signal_flow::LeaveOut::ClaudeMd
+            ))
         );
         assert_eq!(snapshot(&nexus), before);
         assert_eq!(other_rows(&nexus), rows);
     }
+    // Terra has no native model: its harness is not known yet.
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::Permaflow(permaflow(
+                quaternary_field(),
+                vec![signal_flow::LeaveOut::ClaudeMd]
+            ))
+        ),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
     // The configuration-only listener refuses the same entry the same way.
     drop(nexus);
     let configuration = ConfigurationOnlyStore::open(std::path::Path::new(&fixture.store_path))
         .expect("stopped store reopens");
+    let committed = configuration
+        .configuration_snapshot()
+        .expect("reads")
+        .expect("configured")
+        .metaflows;
     assert!(matches!(
-        configuration.configure_change(ConfigurationChange::LeaveOuts(vec![ConfigureLeaveOut {
-            address: quaternary_field(),
-            harness_kind: HarnessKind::Codex,
-            leave_outs: signal_flow::LeaveOuts(vec![signal_flow::LeaveOut::SkillTool]),
-        }])),
-        Err(crate::store::StoreError::LeaveOutNotForHarness)
+        configuration.configure_change(ConfigurationChange::Permaflow(permaflow(
+            codex.clone(),
+            vec![signal_flow::LeaveOut::SkillTool]
+        ))),
+        Err(crate::store::StoreError::UnknownFeature(
+            signal_flow::LeaveOut::SkillTool
+        ))
     ));
     assert_eq!(
         configuration
             .configuration_snapshot()
             .expect("reads")
             .expect("configured")
-            .default_leave_outs,
+            .metaflows,
         committed
     );
 }
 
-/// A Start naming no leave-outs takes its metaflow's default for the
-/// harness it starts on: a Codex Start whose metaflow has only a Claude
-/// default takes none, and a Claude Start of the same metaflow takes that
-/// default.
+/// A Start naming no leave-outs takes its permaflow's, which are of the
+/// harness its Model runs on. A Start on the other harness, which only a
+/// Models or Nexus change since the declaration makes, is refused rather
+/// than started without them; a Start naming its own replaces them.
 #[test]
-fn a_codex_start_naming_none_takes_no_claude_default() {
+fn a_start_takes_its_permaflow_s_leave_outs_and_another_harness_refuses_them() {
     let fixture = ConfiguredStore::new();
     let mut nexus = fixture.open();
     *nexus.composer.edit() = crate::composition::tests::fixture_composer();
     assert_eq!(
         configure(
             &nexus,
-            ConfigurationChange::LeaveOuts(vec![ConfigureLeaveOut {
-                address: quaternary_field(),
-                harness_kind: HarnessKind::Claude,
-                leave_outs: signal_flow::LeaveOuts(vec![
+            ConfigurationChange::Permaflow(permaflow(
+                quaternary_field(),
+                vec![
                     signal_flow::LeaveOut::WorkflowTool,
                     signal_flow::LeaveOut::ClaudeMd,
-                ]),
-            }]),
+                ]
+            ))
         ),
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
@@ -851,10 +910,20 @@ fn a_codex_start_naming_none_takes_no_claude_default() {
     profile.flow_id_option = None;
     profile.leave_outs_option = None;
     profile.model_name = flow_ethos::ModelName(SOL.into());
-    match nexus.perform(Operation::Compose(profile.clone())) {
+    assert_eq!(
+        nexus.perform(Operation::Compose(profile.clone())),
+        Outcome::Failed(crate::generated::operation::Failed_Data::LeaveOutRefused(
+            signal_flow::LeaveOutRefusal::NotForHarness(signal_flow::LeaveOut::WorkflowTool)
+        ))
+    );
+    let mut own = profile.clone();
+    own.leave_outs_option = Some(signal_flow::LeaveOuts(vec![
+        signal_flow::LeaveOut::CodexAgentsMd,
+    ]));
+    match nexus.perform(Operation::Compose(own)) {
         Outcome::Composed(launch) => {
             assert_eq!(launch.harness_kind, HarnessKind::Codex);
-            assert!(launch.leave_outs.0.is_empty(), "{:?}", launch.leave_outs);
+            assert_eq!(launch.leave_outs.0, [signal_flow::LeaveOut::CodexAgentsMd]);
         }
         outcome => panic!("Codex launch not composed: {outcome:?}"),
     }
@@ -1186,4 +1255,654 @@ fn request_policy_fields_replace_independently_validate_and_survive_reopen() {
         opposite.configured_announcement_tries,
         meta_signal_flow::ConfiguredAnnouncementTries(meta_signal_flow::TryBound(5))
     );
+}
+
+/// The two permaflows the Amend tests change one value of and keep: Alpha
+/// on Codex (Sol runs a model the stable Codex endpoint lists), Beta on
+/// Claude (Opus runs a Claude model). Models declared to say so.
+fn amend_world() -> (
+    ConfiguredStore,
+    RunningNexus,
+    ConfigureMetaflow,
+    ConfigureMetaflow,
+) {
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::Models(vec![
+                ConfigureModel {
+                    model: Model::Astra,
+                    native: meta_signal_flow::Native("gpt-6-astra".into()),
+                },
+                ConfigureModel {
+                    model: Model::Opus,
+                    native: meta_signal_flow::Native("claude-opus-5-5".into()),
+                },
+                ConfigureModel {
+                    model: Model::Sol,
+                    native: meta_signal_flow::Native(SOL.into()),
+                },
+            ])
+        ),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    let mut alpha = permaflow(
+        Address {
+            aspect: Aspect::Mind,
+            topic: flow_ethos::Topic("atomicTrialAlpha".into()),
+            model: Model::Sol,
+        },
+        vec![signal_flow::LeaveOut::CodexAgentsMd],
+    );
+    alpha.purpose = meta_signal_flow::Purpose("Alpha before".into());
+    alpha.user_modules =
+        signal_flow::UserModules(vec![signal_flow::ModuleIdentity("knowledge:flow:0".into())]);
+    let mut beta = permaflow(
+        Address {
+            aspect: Aspect::Psyche,
+            topic: flow_ethos::Topic("atomicTrialBeta".into()),
+            model: Model::Opus,
+        },
+        vec![signal_flow::LeaveOut::ClaudeMd],
+    );
+    beta.purpose = meta_signal_flow::Purpose("Beta fixed".into());
+    for declared in [&alpha, &beta] {
+        assert_eq!(
+            configure(&nexus, ConfigurationChange::Permaflow(declared.clone())),
+            MetaResponse::Configured(ConfigureOutcome::Replaced)
+        );
+    }
+    (fixture, nexus, alpha, beta)
+}
+
+fn amend(address: &Address, change: meta_signal_flow::Change) -> ConfigurationChange {
+    ConfigurationChange::Amend(meta_signal_flow::Amend_Data {
+        address: address.clone(),
+        change,
+    })
+}
+
+/// The snapshot `before` with one permaflow replaced by `changed`.
+fn with_permaflow(
+    before: &ConfigurationSnapshot,
+    changed: &ConfigureMetaflow,
+) -> ConfigurationSnapshot {
+    let mut expected = before.clone();
+    let row = expected
+        .configured_metaflows
+        .0
+        .iter_mut()
+        .find(|row| row.address == changed.address)
+        .expect("the permaflow is declared");
+    *row = changed.clone();
+    expected
+}
+
+/// Configure.Amend changes one value of one permaflow alone: each Change
+/// changes exactly its one field of that permaflow, and the whole rest of
+/// the store, the other permaflow, every other family and the running
+/// rows, reads as it did. The change is the declaration a next flow reads.
+#[test]
+fn each_amend_changes_exactly_its_one_value_and_nothing_else() {
+    use meta_signal_flow::{Change, Element};
+    let (_fixture, mut nexus, alpha, beta) = amend_world();
+    *nexus.composer.edit() = crate::composition::tests::fixture_composer();
+    let mut expected = alpha.clone();
+    let steps: Vec<(Change, Box<dyn Fn(&mut ConfigureMetaflow)>)> = vec![
+        (
+            Change::Purpose(meta_signal_flow::Purpose("Alpha after".into())),
+            Box::new(|row| row.purpose = meta_signal_flow::Purpose("Alpha after".into())),
+        ),
+        (
+            Change::Workspace(Some(meta_signal_flow::Root("/srv/alpha".into()))),
+            Box::new(|row| row.root_option = Some(meta_signal_flow::Root("/srv/alpha".into()))),
+        ),
+        (
+            Change::Kind(signal_flow::FlowKind::Simplified),
+            Box::new(|row| row.flow_kind = signal_flow::FlowKind::Simplified),
+        ),
+        (
+            Change::Continuity(meta_signal_flow::Continuity::Maintained),
+            Box::new(|row| row.continuity = meta_signal_flow::Continuity::Maintained),
+        ),
+        (
+            Change::Add(Element::SystemModule(signal_flow::ModuleIdentity(
+                "intent:flow:0".into(),
+            ))),
+            Box::new(|row| {
+                row.system_modules
+                    .0
+                    .push(signal_flow::ModuleIdentity("intent:flow:0".into()))
+            }),
+        ),
+        (
+            Change::Add(Element::PromptModule(signal_flow::ModuleIdentity(
+                "operation:main-flow:0".into(),
+            ))),
+            Box::new(|row| {
+                row.user_modules
+                    .0
+                    .push(signal_flow::ModuleIdentity("operation:main-flow:0".into()))
+            }),
+        ),
+        (
+            Change::Add(Element::LeaveOut(signal_flow::LeaveOut::CodexSkillListing)),
+            Box::new(|row| {
+                row.leave_outs
+                    .0
+                    .push(signal_flow::LeaveOut::CodexSkillListing)
+            }),
+        ),
+        (
+            Change::Remove(Element::PromptModule(signal_flow::ModuleIdentity(
+                "knowledge:flow:0".into(),
+            ))),
+            Box::new(|row| {
+                row.user_modules
+                    .0
+                    .retain(|held| held.0 != "knowledge:flow:0")
+            }),
+        ),
+        (
+            Change::Remove(Element::SystemModule(signal_flow::ModuleIdentity(
+                "spirit:core:0".into(),
+            ))),
+            Box::new(|row| {
+                row.system_modules
+                    .0
+                    .retain(|held| held.0 != "spirit:core:0")
+            }),
+        ),
+        (
+            Change::Remove(Element::LeaveOut(signal_flow::LeaveOut::CodexAgentsMd)),
+            Box::new(|row| {
+                row.leave_outs
+                    .0
+                    .retain(|held| held != &signal_flow::LeaveOut::CodexAgentsMd)
+            }),
+        ),
+        (
+            Change::Workspace(None),
+            Box::new(|row| row.root_option = None),
+        ),
+    ];
+    for (change, apply) in steps {
+        let before = snapshot(&nexus);
+        let rows = other_rows(&nexus);
+        assert_eq!(
+            configure(&nexus, amend(&alpha.address, change.clone())),
+            MetaResponse::Configured(ConfigureOutcome::Replaced),
+            "{change:?}"
+        );
+        apply(&mut expected);
+        let after = snapshot(&nexus);
+        assert_eq!(after, with_permaflow(&before, &expected), "{change:?}");
+        assert_eq!(other_rows(&nexus), rows, "{change:?}");
+        // The other permaflow, byte for byte as it was declared.
+        let beta_after = after
+            .configured_metaflows
+            .0
+            .iter()
+            .find(|row| row.address == beta.address)
+            .expect("beta stays");
+        assert_eq!(
+            rkyv::to_bytes::<rkyv::rancor::Error>(beta_after)
+                .unwrap()
+                .as_slice(),
+            rkyv::to_bytes::<rkyv::rancor::Error>(&beta)
+                .unwrap()
+                .as_slice()
+        );
+        // The declaration a next flow of Alpha starts from is the amended one.
+        {
+            use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
+            assert_eq!(
+                nexus.store.metaflow_declaration(&alpha.address).unwrap(),
+                Some(expected.clone())
+            );
+        }
+        assert_eq!(
+            nexus.store.declared_leave_outs(&alpha.address).unwrap(),
+            expected.leave_outs.0
+        );
+    }
+}
+
+/// An Amend that would change nothing writes nothing and answers
+/// Unchanged: a value the permaflow already holds, an element added that it
+/// holds, an element removed that it does not.
+#[test]
+fn an_amend_that_changes_nothing_answers_unchanged_and_writes_nothing() {
+    use meta_signal_flow::{Change, Element};
+    let (_fixture, nexus, alpha, _beta) = amend_world();
+    let before = snapshot(&nexus);
+    let rows = other_rows(&nexus);
+    for change in [
+        Change::Purpose(alpha.purpose.clone()),
+        Change::Workspace(None),
+        Change::Kind(signal_flow::FlowKind::Regular),
+        Change::Continuity(meta_signal_flow::Continuity::OnDemand),
+        // Held already: Curriculum is not asked (none is reachable here).
+        Change::Add(Element::SystemModule(signal_flow::ModuleIdentity(
+            "spirit:core:0".into(),
+        ))),
+        Change::Add(Element::PromptModule(signal_flow::ModuleIdentity(
+            "knowledge:flow:0".into(),
+        ))),
+        Change::Add(Element::LeaveOut(signal_flow::LeaveOut::CodexAgentsMd)),
+        Change::Remove(Element::SystemModule(signal_flow::ModuleIdentity(
+            "vision:absent:0".into(),
+        ))),
+        Change::Remove(Element::PromptModule(signal_flow::ModuleIdentity(
+            "vision:absent:0".into(),
+        ))),
+        Change::Remove(Element::LeaveOut(signal_flow::LeaveOut::CodexPermissions)),
+    ] {
+        assert_eq!(
+            configure(&nexus, amend(&alpha.address, change.clone())),
+            MetaResponse::Configured(ConfigureOutcome::Unchanged),
+            "{change:?}"
+        );
+        assert_eq!(snapshot(&nexus), before, "{change:?}");
+        assert_eq!(other_rows(&nexus), rows, "{change:?}");
+    }
+}
+
+/// Each refusal of an Amend changes nothing: no permaflow at the Address,
+/// a topic that is not camelCase, a module Curriculum does not hold or an
+/// identity without its version, a Curriculum that cannot be asked, a
+/// leave-out of another harness.
+#[test]
+fn each_amend_refusal_changes_nothing() {
+    use meta_signal_flow::{Change, Element};
+    let (_fixture, mut nexus, alpha, _beta) = amend_world();
+    let before = snapshot(&nexus);
+    let rows = other_rows(&nexus);
+    let absent = signal_flow::ModuleIdentity("vision:absent:0".into());
+    let refusals = || {
+        vec![
+            (
+                amend(
+                    &Address {
+                        aspect: Aspect::Mind,
+                        topic: flow_ethos::Topic("atomicTrialGamma".into()),
+                        model: Model::Luna,
+                    },
+                    Change::Purpose(meta_signal_flow::Purpose("Gamma".into())),
+                ),
+                ConfigureRejection::UnknownPermaflow(Address {
+                    aspect: Aspect::Mind,
+                    topic: flow_ethos::Topic("atomicTrialGamma".into()),
+                    model: Model::Luna,
+                }),
+            ),
+            (
+                amend(
+                    &Address {
+                        aspect: Aspect::Mind,
+                        topic: flow_ethos::Topic("Atomic_trial".into()),
+                        model: Model::Luna,
+                    },
+                    Change::Purpose(meta_signal_flow::Purpose("Gamma".into())),
+                ),
+                ConfigureRejection::TopicRefused(flow_ethos::Topic("Atomic_trial".into())),
+            ),
+            (
+                amend(
+                    &alpha.address,
+                    Change::Add(Element::LeaveOut(signal_flow::LeaveOut::GitInstructions)),
+                ),
+                ConfigureRejection::UnknownFeature(signal_flow::LeaveOut::GitInstructions),
+            ),
+            (
+                amend(
+                    &alpha.address,
+                    Change::Add(Element::PromptModule(signal_flow::ModuleIdentity(
+                        "knowledge:flow".into(),
+                    ))),
+                ),
+                ConfigureRejection::UnknownModule(signal_flow::ModuleIdentity(
+                    "knowledge:flow".into(),
+                )),
+            ),
+        ]
+    };
+    let refuse_each = |nexus: &RunningNexus| {
+        for (change, rejection) in refusals() {
+            assert_eq!(
+                configure(nexus, change),
+                MetaResponse::ConfigureRejected(rejection)
+            );
+        }
+    };
+    refuse_each(&nexus);
+    // The Curriculum socket the fixture configures cannot be reached.
+    assert_eq!(
+        configure(
+            &nexus,
+            amend(
+                &alpha.address,
+                Change::Add(Element::SystemModule(absent.clone()))
+            )
+        ),
+        MetaResponse::ConfigureRejected(ConfigureRejection::CurriculumUnavailable)
+    );
+    // A Curriculum that answers, but does not hold the module.
+    *nexus.composer.edit() = crate::composition::tests::fixture_composer();
+    for change in [
+        Change::Add(Element::SystemModule(absent.clone())),
+        Change::Add(Element::PromptModule(absent.clone())),
+    ] {
+        assert_eq!(
+            configure(&nexus, amend(&alpha.address, change)),
+            MetaResponse::ConfigureRejected(ConfigureRejection::UnknownModule(absent.clone()))
+        );
+    }
+    refuse_each(&nexus);
+    assert_eq!(snapshot(&nexus), before);
+    assert_eq!(other_rows(&nexus), rows);
+    // The store asked with no composer cannot resolve a module either.
+    assert!(matches!(
+        nexus.store.configure_change(amend(
+            &alpha.address,
+            Change::Add(Element::SystemModule(signal_flow::ModuleIdentity(
+                "intent:flow:0".into()
+            )))
+        )),
+        Err(crate::store::StoreError::CurriculumUnavailable)
+    ));
+    assert_eq!(snapshot(&nexus), before);
+}
+
+use crate::store::leave_out_upgrade::{
+    ConfigureLeaveOutV3, ConfigureMetaflowV6, DescribesLeaveOutUpgrade, LeaveOutDropped,
+    StoredMetaLeaveOutConfigurationV3, StoredMetaMetaflowConfigurationV6, UpgradesLeaveOutMemory,
+};
+
+/// The permaflows of the upgrade test, as 0.54.7 declared them: Alpha on
+/// Codex, Beta on Claude, Delta on Terra, whose Model has no native model.
+fn v6_permaflows() -> Vec<ConfigureMetaflowV6> {
+    [
+        (Aspect::Mind, "atomicTrialAlpha", Model::Sol),
+        (Aspect::Psyche, "atomicTrialBeta", Model::Opus),
+        (Aspect::Field, "atomicTrialDelta", Model::Terra),
+    ]
+    .into_iter()
+    .map(|(aspect, topic, model)| ConfigureMetaflowV6 {
+        address: Address {
+            aspect,
+            topic: flow_ethos::Topic(topic.into()),
+            model,
+        },
+        root_option: None,
+        system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
+            "spirit:core:0".into(),
+        )]),
+        user_modules: signal_flow::UserModules(Vec::new()),
+        flow_kind: signal_flow::FlowKind::Regular,
+        tool_set: signal_flow::ToolSet::Default,
+        continuity: meta_signal_flow::Continuity::OnDemand,
+        purpose: meta_signal_flow::Purpose(format!("{topic} as 0.54.7 declared it")),
+        records: meta_signal_flow::Records(Vec::new()),
+    })
+    .collect()
+}
+
+/// The leave-out family as 0.54.7 held it for those permaflows.
+fn v3_leave_outs() -> Vec<ConfigureLeaveOutV3> {
+    let address = |aspect, topic: &str, model| Address {
+        aspect,
+        topic: flow_ethos::Topic(topic.into()),
+        model,
+    };
+    vec![
+        ConfigureLeaveOutV3 {
+            address: address(Aspect::Mind, "atomicTrialAlpha", Model::Sol),
+            harness_kind: HarnessKind::Codex,
+            leave_outs: signal_flow::LeaveOuts(vec![
+                signal_flow::LeaveOut::CodexAgentsMd,
+                signal_flow::LeaveOut::CodexSkillListing,
+            ]),
+        },
+        ConfigureLeaveOutV3 {
+            address: address(Aspect::Mind, "atomicTrialAlpha", Model::Sol),
+            harness_kind: HarnessKind::Claude,
+            leave_outs: signal_flow::LeaveOuts(vec![signal_flow::LeaveOut::ClaudeMd]),
+        },
+        ConfigureLeaveOutV3 {
+            address: address(Aspect::Psyche, "atomicTrialBeta", Model::Opus),
+            harness_kind: HarnessKind::Claude,
+            leave_outs: signal_flow::LeaveOuts(vec![
+                signal_flow::LeaveOut::ClaudeMd,
+                signal_flow::LeaveOut::GitInstructions,
+            ]),
+        },
+        ConfigureLeaveOutV3 {
+            address: address(Aspect::Psyche, "atomicTrialGone", Model::Opus),
+            harness_kind: HarnessKind::Claude,
+            leave_outs: signal_flow::LeaveOuts(vec![signal_flow::LeaveOut::ClaudeMd]),
+        },
+        ConfigureLeaveOutV3 {
+            address: address(Aspect::Field, "atomicTrialDelta", Model::Terra),
+            harness_kind: HarnessKind::Claude,
+            leave_outs: signal_flow::LeaveOuts(vec![signal_flow::LeaveOut::ClaudeMd]),
+        },
+    ]
+}
+
+/// A configured store, closed and rewritten as 0.54.7 left it: its
+/// permaflow family at v6 holding `v6_permaflows`, and the leave-out family
+/// at v3 holding `v3_leave_outs`. Models name Sol a Codex model and Opus a
+/// Claude one; Terra none.
+fn v6_store() -> ConfiguredStore {
+    use sema_engine::{Assertion, Engine, EngineOpen, SchemaVersion};
+    let fixture = ConfiguredStore::new();
+    {
+        let configuration = ConfigurationOnlyStore::open(fixture.path()).expect("store opens");
+        configuration
+            .configure_change(ConfigurationChange::Models(vec![
+                ConfigureModel {
+                    model: Model::Opus,
+                    native: meta_signal_flow::Native("claude-opus-5-5".into()),
+                },
+                ConfigureModel {
+                    model: Model::Sol,
+                    native: meta_signal_flow::Native(SOL.into()),
+                },
+            ]))
+            .expect("models declared");
+    }
+    {
+        let database = redb::Database::open(fixture.path()).expect("the store opens raw");
+        let write = database.begin_write().unwrap();
+        {
+            let mut catalog = write
+                .open_table(redb::TableDefinition::<&str, &[u8]>::new(
+                    "__sema_engine_catalog",
+                ))
+                .unwrap();
+            catalog
+                .remove("flow_nexus_meta_metaflow_configuration")
+                .unwrap();
+        }
+        let _ = write.delete_table(redb::TableDefinition::<String, &[u8]>::new(
+            "flow_nexus_meta_metaflow_configuration",
+        ));
+        write.commit().unwrap();
+    }
+    let mut engine = Engine::open(EngineOpen::new(
+        fixture.path(),
+        SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION),
+    ))
+    .unwrap();
+    let permaflows = engine
+        .register_table(sema_engine::TableDescriptor::<
+            StoredMetaMetaflowConfigurationV6,
+        >::new(
+            sema_engine::TableName::new("flow_nexus_meta_metaflow_configuration"),
+            sema_engine::FamilyName::new("flow-nexus-meta-metaflow-configuration"),
+            <StoredMetaMetaflowConfigurationV6 as sema_engine::MemoryDefinition>::schema_hash(),
+        ))
+        .unwrap();
+    for metaflow in v6_permaflows() {
+        engine
+            .assert(Assertion::new(
+                permaflows,
+                StoredMetaMetaflowConfigurationV6 { metaflow },
+            ))
+            .unwrap();
+    }
+    let leave_outs = engine
+        .register_table(
+            <crate::store::FlowStore as DescribesLeaveOutUpgrade>::retired_leave_out_descriptor(),
+        )
+        .unwrap();
+    for leave_out in v3_leave_outs() {
+        engine
+            .assert(Assertion::new(
+                leave_outs,
+                StoredMetaLeaveOutConfigurationV3 { leave_out },
+            ))
+            .unwrap();
+    }
+    fixture
+}
+
+/// The retired leave-out family's rows, read from the closed store.
+fn retired_rows(path: &std::path::Path) -> usize {
+    use sema_engine::{Engine, EngineOpen, QueryPlan, SchemaVersion};
+    let mut engine = Engine::open(EngineOpen::new(
+        path,
+        SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION),
+    ))
+    .unwrap();
+    let table = engine
+        .register_table(
+            <crate::store::FlowStore as DescribesLeaveOutUpgrade>::retired_leave_out_descriptor(),
+        )
+        .unwrap();
+    engine
+        .match_records(QueryPlan::all(table))
+        .unwrap()
+        .records()
+        .len()
+}
+
+/// The 0.54.7-to-0.55.0 upgrade, from a store holding the old shape: each
+/// permaflow takes the leave-out entry of its Address for the harness its
+/// Model runs on; an entry with no permaflow, one for the other harness,
+/// and one whose permaflow's harness cannot be derived are dropped and
+/// named; the retired family is emptied in the same commit; a second open
+/// changes nothing.
+#[test]
+fn a_v6_store_folds_each_permaflow_s_leave_outs_and_names_what_it_drops() {
+    use sema_engine::{Engine, EngineOpen, SchemaVersion};
+    let fixture = v6_store();
+    let fold = {
+        let mut engine = Engine::open(
+            EngineOpen::new(
+                fixture.path(),
+                SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION),
+            )
+            .with_family(
+                &<crate::store::FlowStore as DescribesLeaveOutUpgrade>::evolving_metaflow_descriptor(),
+            ),
+        )
+        .expect("the v6 store opens with the v7 family declared");
+        <crate::store::FlowStore as UpgradesLeaveOutMemory>::upgrade_leave_out_memory(&mut engine)
+            .expect("the upgrade commits")
+    };
+    let alpha = v6_permaflows()[0].address.clone();
+    let beta = v6_permaflows()[1].address.clone();
+    let delta = v6_permaflows()[2].address.clone();
+    let gone = v3_leave_outs()[3].address.clone();
+    assert_eq!(
+        fold.folded,
+        vec![
+            (alpha.clone(), HarnessKind::Codex),
+            (beta.clone(), HarnessKind::Claude)
+        ]
+    );
+    // In the retired family's key order.
+    assert_eq!(
+        fold.dropped,
+        vec![
+            (
+                delta.clone(),
+                HarnessKind::Claude,
+                LeaveOutDropped::HarnessUnknown
+            ),
+            (
+                alpha.clone(),
+                HarnessKind::Claude,
+                LeaveOutDropped::OtherHarness(HarnessKind::Codex)
+            ),
+            (gone, HarnessKind::Claude, LeaveOutDropped::NoPermaflow),
+        ]
+    );
+    assert_eq!(retired_rows(fixture.path()), 0);
+    let nexus = fixture.open();
+    let leave_outs = |address: &Address| nexus.store.declared_leave_outs(address).unwrap();
+    assert_eq!(
+        leave_outs(&alpha),
+        [
+            signal_flow::LeaveOut::CodexAgentsMd,
+            signal_flow::LeaveOut::CodexSkillListing
+        ]
+    );
+    assert_eq!(
+        leave_outs(&beta),
+        [
+            signal_flow::LeaveOut::ClaudeMd,
+            signal_flow::LeaveOut::GitInstructions
+        ]
+    );
+    assert!(leave_outs(&delta).is_empty());
+    // Every other field of every permaflow is as 0.54.7 declared it.
+    let metaflows = snapshot(&nexus).configured_metaflows.0;
+    for declared in v6_permaflows() {
+        let mut upgraded = metaflows
+            .iter()
+            .find(|row| row.address == declared.address)
+            .expect("each permaflow stays")
+            .clone();
+        upgraded.leave_outs = signal_flow::LeaveOuts(Vec::new());
+        assert_eq!(upgraded.purpose, declared.purpose);
+        assert_eq!(upgraded.system_modules, declared.system_modules);
+        assert_eq!(upgraded.records, declared.records);
+    }
+    drop(nexus);
+    // A second open finds the store current and changes nothing.
+    let reopened = fixture.open();
+    assert_eq!(snapshot(&reopened).configured_metaflows.0, metaflows);
+}
+
+/// The configuration-only open upgrades the same store by itself, before
+/// any declaration is replayed.
+#[test]
+fn the_configuration_open_upgrades_a_v6_store_too() {
+    let fixture = v6_store();
+    let configuration =
+        ConfigurationOnlyStore::open(fixture.path()).expect("the v6 store opens and upgrades");
+    let metaflows = configuration
+        .configuration_snapshot()
+        .expect("reads")
+        .expect("configured")
+        .metaflows;
+    assert_eq!(metaflows.len(), 3);
+    let alpha = metaflows
+        .iter()
+        .find(|row| row.address.topic.0 == "atomicTrialAlpha")
+        .unwrap();
+    assert_eq!(
+        alpha.leave_outs.0,
+        [
+            signal_flow::LeaveOut::CodexAgentsMd,
+            signal_flow::LeaveOut::CodexSkillListing
+        ]
+    );
+    drop(configuration);
+    assert_eq!(retired_rows(fixture.path()), 0);
 }

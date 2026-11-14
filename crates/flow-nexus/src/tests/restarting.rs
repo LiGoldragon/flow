@@ -1435,6 +1435,7 @@ fn declared(fixture: &NexusFixture, system_modules: &[&str], root_option: Option
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
             meta_signal_flow::ConfigureMetaflow {
+                leave_outs: signal_flow::LeaveOuts(Vec::new()),
                 root_option: root_option.map(meta_signal_flow::Root),
                 address: address(Model::Sol),
                 system_modules: signal_flow::SystemModules(
@@ -2655,6 +2656,7 @@ impl OpensSecondNexus for NexusFixture {
         opened
             .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
                 meta_signal_flow::ConfigureMetaflow {
+                    leave_outs: signal_flow::LeaveOuts(Vec::new()),
                     root_option: None,
                     address: address(Model::Sol),
                     system_modules: signal_flow::SystemModules(vec![

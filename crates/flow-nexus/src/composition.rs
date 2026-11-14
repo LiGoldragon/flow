@@ -66,6 +66,17 @@ pub struct LaunchComposer {
     handover: Arc<dyn YieldsHandover>,
 }
 
+/// A launch composer resolves a module through the context composer it
+/// composes with.
+impl crate::context::ResolvesModule for LaunchComposer {
+    fn resolve_module(
+        &self,
+        identity: &signal_flow::ModuleIdentity,
+    ) -> crate::context::ModuleStanding {
+        self.context.resolve_module(identity)
+    }
+}
+
 trait ComposesPresentationRole {
     fn presentation_prompt(&self, address: &Address) -> Result<Option<String>, CompositionError>;
     fn compose_system_prompt<N: Profiled, O: ReadsVerifiedContext, P: SegmentListing>(
@@ -407,21 +418,8 @@ impl ValidatesLaunchProfile for LaunchProfile {
         }
         let identities_valid = |identities: &[signal_flow::ModuleIdentity]| {
             let mut seen = HashSet::new();
-            // An identity names its kind, topic and explicit canonical decimal version.
-            let part = |part: &str| {
-                !part.is_empty()
-                    && part.bytes().all(|byte| {
-                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
-                    })
-            };
             identities.iter().all(|identity| {
-                let fields = identity.0.split(':').collect::<Vec<_>>();
-                let well_formed = matches!(fields.as_slice(), [kind, topic, version]
-                    if part(kind) && part(topic)
-                        && !version.is_empty()
-                        && (*version == "0" || !version.starts_with('0'))
-                        && version.bytes().all(|byte| byte.is_ascii_digit()));
-                well_formed && seen.insert(identity)
+                identity.0.as_str().is_versioned_module_identity() && seen.insert(identity)
             })
         };
         if profile.system_modules.0.is_empty() || !identities_valid(&profile.system_modules.0) {
@@ -836,6 +834,30 @@ pub struct FreshSeat {
     pub flow_kind: signal_flow::FlowKind,
     pub tool_set: signal_flow::ToolSet,
     pub prompt: String,
+}
+
+/// A module identity names its kind, topic and explicit canonical decimal
+/// version, `kind:topic:number`: lowercase letters, digits and hyphens on
+/// either side of the first two colons, and a number with no leading zero.
+pub(crate) trait NamesVersionedModule {
+    fn is_versioned_module_identity(&self) -> bool;
+}
+
+impl NamesVersionedModule for str {
+    fn is_versioned_module_identity(&self) -> bool {
+        let part = |part: &str| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        };
+        let fields = self.split(':').collect::<Vec<_>>();
+        matches!(fields.as_slice(), [kind, topic, version]
+            if part(kind) && part(topic)
+                && !version.is_empty()
+                && (*version == "0" || !version.starts_with('0'))
+                && version.bytes().all(|byte| byte.is_ascii_digit()))
+    }
 }
 
 /// Where a context module goes, by the kind of its explicit

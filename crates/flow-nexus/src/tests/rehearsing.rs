@@ -219,6 +219,7 @@ fn production_rehearse_success_and_refusal_create_nothing() {
     };
     let declaration = meta_signal_flow::ConfigureMetaflow {
         address: address.clone(),
+        leave_outs: signal_flow::LeaveOuts(Vec::new()),
         root_option: None,
         system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
             "spirit:core:0".into(),

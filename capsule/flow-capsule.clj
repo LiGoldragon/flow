@@ -1154,7 +1154,7 @@
   [metaflows-line addr]
   (let [want (map str (address-items addr))]
     (some (fn [entry]
-            (let [[a _root _ _ kind _ wake] (items entry)]
+            (let [[a _root _leave-outs _ _ kind _ wake] (items entry)]
               (when (= (map str (items a)) want)
                 [(str kind) (str wake)])))
           (items (loop [d (read-datom metaflows-line)] (if (head d) (recur (body d)) d))))))
@@ -1857,33 +1857,55 @@
   [line entries]
   (str/replace line #"\s*\]\s*$" (java.util.regex.Matcher/quoteReplacement (str " " (str/join " " entries) " ]"))))
 
+(def permaflow-leave-outs
+  "A permaflow entry's head up to its leave-outs: its Address, its
+  workspace, then the leave-out vector 0.55.0 places after it."
+  #"(\{ \{ ((?:Psyche|Mind|Field) [^}]+) \} (?:None|Some\.\S+) )\[([^\]]*)\] ")
+
+(defn split-leave-outs
+  "A Metaflows line as a Nexus before 0.55.0 reads it: each entry's
+  leave-outs taken out into a LeaveOuts line of their own, under the
+  harness they are of (Codex for a Codex leave-out, Claude otherwise).
+  Answers the LeaveOuts line, then the Metaflows line without them."
+  [line]
+  (let [entries (for [[_ _ address names] (re-seq permaflow-leave-outs line)
+                      :let [names (str/trim names)]
+                      :when (seq names)]
+                  (str "{ { " address " } "
+                       (if (str/starts-with? names "Codex") "Codex" "Claude")
+                       " [ " names " ] }"))]
+    [(str "Configure.LeaveOuts.[ " (apply str (map #(str % " ") entries)) "]")
+     (str/replace line permaflow-leave-outs "$1")]))
+
 (defn takeover-configuration
   "The takeover's declarations from the capsule's Configure lines: every
   seat it keeps Awake is Maintained, a Codex Sol on the Codex
-  Haiku's model and an OnDemand Fable that stays asleep are added.
-  :old omits DefaultMinutes, which the old Nexus does not know; :replay is
-  every line, in the file's order."
+  Haiku's model, leaving out what the Codex Terra does, and an OnDemand
+  Fable that stays asleep are added. :old omits DefaultMinutes, which the
+  old Nexus does not know, and gives it the leave-outs as a LeaveOuts
+  family of their own; :replay is every line, in the file's order."
   [lines]
   (let [codex-model (some #(second (re-find #"\{ Terra (\S+) \}" %)) lines)
+        terra-leave-outs (or (some #(second (re-find #"\{ \{ Mind test Terra \} None (\[[^\]]*\])" %)) lines)
+                             "[]")
         line-of (fn [line]
                   (cond
                     (str/starts-with? line "Configure.Metaflows.")
                     (append-entries (str/replace line " OnDemand «" " Maintained «")
-                                    [(str "{ " codex-secondary " None [ spirit:core intent:models ] [] Simplified Explicit.[] Maintained «» [] }")
-                                     (str "{ " asleep-primary " None [ spirit:core intent:models ] [] Regular Default OnDemand «» [] }")])
+                                    [(str "{ " codex-secondary " None " terra-leave-outs " [ spirit:core intent:models ] [] Simplified Explicit.[] Maintained «» [] }")
+                                     (str "{ " asleep-primary " None [] [ spirit:core intent:models ] [] Regular Default OnDemand «» [] }")])
                     (and codex-model (str/starts-with? line "Configure.Models."))
                     (append-entries line [(str "{ Sol " codex-model " }")])
-                    (str/starts-with? line "Configure.LeaveOuts.")
-                    (if-let [entry (re-find #"\{ \{ Mind test Terra \} Codex \[[^\]]*\] \}" line)]
-                      (append-entries line [(str/replace entry "Terra" "Sol")])
-                      line)
                     :else line))
         replay (mapv line-of lines)]
     {:old (->> replay
                (remove #(str/starts-with? % "Configure.DefaultMinutes."))
-               (mapv #(if (str/starts-with? % "Configure.Metaflows.")
-                        (str/replace % #"(\{ \{ (?:Psyche|Mind|Field) [^}]+ \}) None " "$1 ")
-                        %)))
+               (mapcat #(if (str/starts-with? % "Configure.Metaflows.")
+                          (let [[leave-outs metaflows] (split-leave-outs %)]
+                            [leave-outs
+                             (str/replace metaflows #"(\{ \{ (?:Psyche|Mind|Field) [^}]+ \}) None " "$1 ")])
+                          [%]))
+               vec)
      :replay replay}))
 
 (def id-pattern #"logical-delivery-\d{20}|queue-attempt-[0-9a-f]{16}|send-outcome-[0-9a-f]{16}")

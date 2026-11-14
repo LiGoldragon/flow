@@ -298,13 +298,13 @@ their one home):
 
 A new store persists these; a populated store resumes what it holds; meta
 `Configure` is the only way to change them. Each `Configure` declares one
-family whole, `Nexus`, `Models`, `Thresholds` or `LeaveOuts`, and replaces
+family whole, `Nexus`, `Models`, `Thresholds` or `Metaflows`, and replaces
 the committed family in one commit, so the effective configuration is always
 the last declaration of each family: an entry the declaration leaves out is
 removed. It answers `Configured.Replaced`, or `Configured.Unchanged` when
-nothing differs; `ConfigureRejected.DuplicateEntry` (one Model, or one Address and harness, named twice),
+nothing differs; `ConfigureRejected.DuplicateEntry` (one Model, or one Address, named twice),
 `ConfigureRejected.CodexModelsOverlap` and
-`ConfigureRejected.LeaveOutNotForHarness` change nothing. `Models` holds one
+`ConfigureRejected.UnknownFeature` change nothing. `Models` holds one
 native model per Model, `{ Sol gpt-6-sol }`; a Start or
 Replace naming any other model than the one configured for its Address's
 Model, compared name for name, is
@@ -315,11 +315,24 @@ declared or named by a launch, is the exact native model: a Codex model a
 configured endpoint lists, or a Claude model's full name as its transcript
 records it (`claude-haiku-5-5`); a launch naming an alias (`haiku`) or a
 suffixed name (`claude-opus-5-5[1m]`) is `StartRejected.CompositionRefused`.
-A `LeaveOuts` entry names one metaflow's default leave-outs on one harness,
-`{ { Psyche flow Opus } Claude [ SkillTool WorkflowTool ] }`, and is
-refused `LeaveOutNotForHarness` when it names a leave-out of the other
-harness. A Start takes its own leave-outs, otherwise the default for its
-Address and the harness its model derives, otherwise none. A
+A permaflow is one definition: its declaration (`Configure.Permaflow`, or
+an entry of `Metaflows`) carries, after its workspace, the leave-outs its
+flows start without, of the harness its Model runs on,
+`{ { Psyche flow Opus } None [ SkillTool WorkflowTool ] [ spirit:core:0 ] [] Regular Default OnDemand «» [] }`;
+one naming a leave-out of the other harness is refused
+`UnknownFeature.<leave-out>` while that harness is known (the Model's
+native model configured, a Nexus declared). A Start takes its own
+leave-outs, otherwise its permaflow's; a Start on another harness than
+those are of is refused `LeaveOutRefused.NotForHarness`.
+`Configure.Amend.{ <Address> <Change> }` changes one value of one
+permaflow alone: `Workspace`, `Purpose`, `Kind` or `Continuity` replaced, or
+one `SystemModule`, `PromptModule` or `LeaveOut` added with `Add` or taken
+out with `Remove`, `Configure.Amend.{ { Psyche core Fable } Add.PromptModule.vision:energy-nexus:1 }`.
+It is read and written back in one single-entry commit, the rest of the
+store kept; a change that changes nothing answers `Configured.Unchanged`.
+An Address with no permaflow is refused `UnknownPermaflow`; a module added
+is resolved by Curriculum first (`UnknownModule`, `CurriculumUnavailable`).
+Every declaration takes effect at the permaflow's next flow. A
 running Nexus serves replaced Codex endpoints from its next start. No `FLOW_` variable reaches the
 Nexus's configuration. The source root selects the bounded root used for
 exact-byte composition, the Codex native skill catalog working directory, the

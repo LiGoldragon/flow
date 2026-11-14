@@ -640,9 +640,11 @@ rename only once the whole open has succeeded.
 
 Fresh stores persist default sockets, source root, and Codex endpoints. Meta
 `Configure` declares one configuration family whole (`Nexus`, `Models`,
-`Thresholds`, `LeaveOuts`, `SendServers`, `Metaflows`, `Investigation`),
+`Thresholds`, `SendServers`, `Metaflows`, `Investigation`),
 replaces the committed family in one commit, and
-answers `Configured.Replaced` or `Configured.Unchanged`; rebinding live
+answers `Configured.Replaced` or `Configured.Unchanged`; one permaflow is
+declared alone (`Permaflow`) or one value of it changed alone (`Amend`), and
+a permaflow carries its own leave-outs (0.55.0); rebinding live
 sockets and adapters is deferred to a Nexus restart. A launch's receipt compares
 the model its native transcript records with the model it named, string for
 string, so a launch names only an exact native model: a Codex model a

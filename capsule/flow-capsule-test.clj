@@ -126,23 +126,30 @@
 
 ;; The takeover's declarations: every seat it keeps Awake is Maintained, a
 ;; Codex Sol and an asleep OnDemand Fable are declared, and the old
-;; Nexus is not given DefaultMinutes, which it does not know; the replay to
-;; the new Nexus is the same declarations with it.
+;; Nexus is not given DefaultMinutes, which it does not know, and takes the
+;; permaflows' leave-outs as a LeaveOuts family; the replay to the new Nexus
+;; is the same declarations with DefaultMinutes and the leave-outs in place.
 (let [lines ["Configure.Nexus.{ /src 60 }"
              "Configure.Models.[ { Opus haiku } { Terra luna } ]"
              "Configure.DefaultMinutes.30"
-             "Configure.LeaveOuts.[ { { Mind test Terra } Codex [ CodexAgentsMd ] } ]"
-             (str "Configure.Metaflows.[ { { Psyche test Opus } None [ spirit:core ] [] Simplified Explicit.[] Maintained «» [] }"
-                  " { { Psyche test Sonnet } None [ spirit:core ] [] Regular Default OnDemand «» [] }"
-                  " { { Psyche test Haiku } None [ spirit:core ] [] Simplified Explicit.[] OnDemand «» [] }"
-                  " { { Mind test Terra } None [ spirit:core ] [] Simplified Explicit.[] OnDemand «» [] } ]")]
+             (str "Configure.Metaflows.[ { { Psyche test Opus } None [ ClaudeMd ] [ spirit:core ] [] Simplified Explicit.[] Maintained «» [] }"
+                  " { { Psyche test Sonnet } None [] [ spirit:core ] [] Regular Default OnDemand «» [] }"
+                  " { { Psyche test Haiku } None [] [ spirit:core ] [] Simplified Explicit.[] OnDemand «» [] }"
+                  " { { Mind test Terra } None [ CodexAgentsMd ] [ spirit:core ] [] Simplified Explicit.[] OnDemand «» [] } ]")]
       {:keys [old replay]} (flow-capsule/takeover-configuration lines)
       metaflows (first (filter #(clojure.string/starts-with? % "Configure.Metaflows.") old))]
   (check "the old Nexus is not given DefaultMinutes"
          (not-any? #(clojure.string/starts-with? % "Configure.DefaultMinutes.") old))
   (check "the replay carries every old declaration and DefaultMinutes, in the file's order"
          (= (map #(subs % 0 14) replay)
-            ["Configure.Nexu" "Configure.Mode" "Configure.Defa" "Configure.Leav" "Configure.Meta"]))
+            ["Configure.Nexu" "Configure.Mode" "Configure.Defa" "Configure.Meta"]))
+  (check "the old Nexus takes the leave-outs as a family, before the metaflows"
+         (= (map #(subs % 0 14) old)
+            ["Configure.Nexu" "Configure.Mode" "Configure.Leav" "Configure.Meta"]))
+  (check "the replay's Codex Sol leaves out what the Codex Terra does, in place"
+         (clojure.string/includes?
+          (first (filter #(clojure.string/starts-with? % "Configure.Metaflows.") replay))
+          "{ { Mind test Sol } None [ CodexAgentsMd ] [ spirit:core intent:models ] [] Simplified Explicit.[] Maintained «» [] }"))
   (check "the old declarations omit the new workspace position and the replay keeps it"
          (and (not (clojure.string/includes? metaflows "} None ["))
               (clojure.string/includes?
@@ -159,7 +166,12 @@
                                    "{ Sol luna }"))
   (check "the Codex Sol leaves out what the Codex Terra does"
          (clojure.string/includes? (first (filter #(clojure.string/starts-with? % "Configure.LeaveOuts.") old))
-                                   "{ { Mind test Sol } Codex [ CodexAgentsMd ] }")))
+                                   "{ { Mind test Sol } Codex [ CodexAgentsMd ] }"))
+  (check "the old LeaveOuts names each seat's leave-outs under its harness, and none for a seat without"
+         (= (first (filter #(clojure.string/starts-with? % "Configure.LeaveOuts.") old))
+            (str "Configure.LeaveOuts.[ { { Psyche test Opus } Claude [ ClaudeMd ] }"
+                 " { { Mind test Terra } Codex [ CodexAgentsMd ] }"
+                 " { { Mind test Sol } Codex [ CodexAgentsMd ] } ]"))))
 
 ;; Ids: the three families the counters seed, read from any reply text.
 (let [text (str "SendOutcomes.[ { send-outcome-000000000000056e logical-delivery-00000000000000014574 } ]"

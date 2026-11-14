@@ -1797,7 +1797,10 @@ pub trait ConfiguresFromMeta {
 impl ConfiguresFromMeta for RunningNexus {
     fn configure_meta(&self, edit: store::ConfigurationEdit) -> meta_signal_flow::Response {
         let before = self.store.configuration_snapshot().ok().flatten();
-        match self.store.edit_configuration(edit) {
+        // A module an Amend adds is resolved by the composer this Nexus
+        // launches with, through its configured Curriculum socket.
+        let composer = self.composer.current();
+        match self.store.edit_configuration(edit, &*composer) {
             Ok(outcome) => {
                 if outcome == meta_signal_flow::ConfigureOutcome::Replaced {
                     if let Err(error) = self.apply_configuration(before.as_ref()) {
@@ -1818,9 +1821,24 @@ impl ConfiguresFromMeta for RunningNexus {
                     meta_signal_flow::ConfigureRejection::CodexModelsOverlap,
                 )
             }
-            Err(store::StoreError::LeaveOutNotForHarness) => {
+            Err(store::StoreError::UnknownFeature(leave_out)) => {
                 meta_signal_flow::Response::ConfigureRejected(
-                    meta_signal_flow::ConfigureRejection::LeaveOutNotForHarness,
+                    meta_signal_flow::ConfigureRejection::UnknownFeature(leave_out),
+                )
+            }
+            Err(store::StoreError::UnknownPermaflow(address)) => {
+                meta_signal_flow::Response::ConfigureRejected(
+                    meta_signal_flow::ConfigureRejection::UnknownPermaflow(address),
+                )
+            }
+            Err(store::StoreError::UnknownModule(identity)) => {
+                meta_signal_flow::Response::ConfigureRejected(
+                    meta_signal_flow::ConfigureRejection::UnknownModule(identity),
+                )
+            }
+            Err(store::StoreError::CurriculumUnavailable) => {
+                meta_signal_flow::Response::ConfigureRejected(
+                    meta_signal_flow::ConfigureRejection::CurriculumUnavailable,
                 )
             }
             Err(store::StoreError::TopicRefused(topic)) => {
@@ -6140,6 +6158,7 @@ mod tests {
             .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
                 meta_signal_flow::ConfigureMetaflow {
                     address: staged.profile.address.clone(),
+                    leave_outs: signal_flow::LeaveOuts(Vec::new()),
                     root_option: Some(meta_signal_flow::Root(
                         invalid.to_string_lossy().into_owned(),
                     )),
@@ -7479,6 +7498,7 @@ mod tests {
                 .nexus
                 .dispatch_meta(meta_signal_flow::Query::Configure(
                     ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+                        leave_outs: signal_flow::LeaveOuts(Vec::new()),
                         root_option: None,
                         address: declared.clone(),
                         system_modules: signal_flow::SystemModules(vec![
@@ -7803,7 +7823,7 @@ mod tests {
         use signal::Contracted;
         for greeting in [
             meta_signal_flow::Query::greeting(),
-            meta_signal_flow_76::Query::greeting(),
+            meta_signal_flow_77::Query::greeting(),
             // The ordinary 61 greeting is no meta greeting either.
             signal_flow::Query::greeting(),
         ] {
@@ -7887,7 +7907,7 @@ mod tests {
         let (peer, mut client) = UnixStream::pair().unwrap();
         client
             .write_frame(
-                &rkyv::to_bytes::<rkyv::rancor::Error>(&meta_signal_flow_76::Query::Retire(
+                &rkyv::to_bytes::<rkyv::rancor::Error>(&meta_signal_flow_77::Query::Retire(
                     flow_ethos::FlowId("a001".into()),
                 ))
                 .unwrap(),

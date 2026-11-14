@@ -1,7 +1,9 @@
-//! The metaflows declared in Flow's configuration: the meta Metaflows
-//! family, one row per Address, each naming the belief modules an ordinary
-//! Launch of that Address composes into the system prompt and into the first
-//! user message.
+//! The permaflows declared in Flow's configuration: the meta Metaflows
+//! family, one row per Address, each the whole definition of that Address:
+//! its workspace, its leave-outs, the belief modules an ordinary Launch of
+//! that Address composes into the system prompt and into the first user
+//! message, its kind, tool set, continuity, purpose and records. v7 (0.55.0)
+//! carries the leave-outs; v6 is upgraded on open (`leave_out_upgrade`).
 
 use super::{FlowStore, ReadsFlowMemory, StoreError};
 use meta_signal_flow::ConfigureMetaflow;
@@ -17,7 +19,7 @@ pub(super) const META_METAFLOW_CONFIGURATION_TABLE_NAME: TableName =
 pub(super) const META_METAFLOW_CONFIGURATION_FAMILY: &str =
     "flow-nexus-meta-metaflow-configuration";
 pub(super) const META_METAFLOW_CONFIGURATION_SCHEMA: &str =
-    "flow-nexus-meta-metaflow-configuration-v6";
+    "flow-nexus-meta-metaflow-configuration-v7";
 
 /// One declared metaflow, keyed by its Address.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -33,7 +35,7 @@ impl EngineRecord for StoredMetaMetaflowConfiguration {
 
 impl MemoryDefinition for StoredMetaMetaflowConfiguration {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(6)
+        MemoryVersion::new(7)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -52,6 +54,7 @@ impl DescribesMetaflowDeclarationTable for StoredMetaMetaflowConfiguration {
             FamilyName::new(META_METAFLOW_CONFIGURATION_FAMILY),
             SchemaHash::for_label(META_METAFLOW_CONFIGURATION_SCHEMA),
         )
+        .with_predecessor::<super::leave_out_upgrade::StoredMetaMetaflowConfigurationV6>()
     }
 }
 

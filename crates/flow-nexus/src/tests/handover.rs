@@ -181,6 +181,7 @@ fn declare(fixture: &NexusFixture, root_option: Option<String>) {
         .nexus
         .store
         .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+            leave_outs: signal_flow::LeaveOuts(Vec::new()),
             root_option: root_option.map(meta_signal_flow::Root),
             address: address(Model::Sol),
             system_modules: signal_flow::SystemModules(vec![
@@ -403,6 +404,7 @@ fn a_launch_whose_root_cannot_be_resolved_is_refused_naming_its_predecessor() {
         .nexus
         .store
         .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+            leave_outs: signal_flow::LeaveOuts(Vec::new()),
             root_option: Some(meta_signal_flow::Root(root.clone())),
             address: profile.address.clone(),
             system_modules: profile.system_modules.clone(),
@@ -844,6 +846,7 @@ fn an_on_demand_seat_whose_successor_is_refused_its_handover_is_not_closed() {
                 .nexus
                 .store
                 .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+                    leave_outs: signal_flow::LeaveOuts(Vec::new()),
                     root_option: Some(meta_signal_flow::Root(root)),
                     address: address(Model::Sol),
                     system_modules: signal_flow::SystemModules(vec![

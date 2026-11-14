@@ -159,6 +159,7 @@ pub(super) fn declare_seat(
         .nexus
         .store
         .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+            leave_outs: signal_flow::LeaveOuts(Vec::new()),
             root_option: None,
             address: seat_address(),
             system_modules: signal_flow::SystemModules(
@@ -1212,6 +1213,7 @@ fn fable_seat_past_its_threshold(fixture: &NexusFixture, protected: Vec<Address>
             refresh_threshold: meta_signal_flow::RefreshThreshold(200_000),
         }]),
         ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+            leave_outs: signal_flow::LeaveOuts(Vec::new()),
             root_option: None,
             address: fable_address("core"),
             system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(

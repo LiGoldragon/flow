@@ -2,24 +2,24 @@
 # when it opens a new, unconfigured Memory.  The generated Rust is compiled
 # with Flow; a malformed value therefore fails before a package exists.
 #
-# Only flow-nexus is compiled again, per crate, with the
-# executable-default-configuration feature and the generated module; every
-# other member is its ordinary build.  The package exists only once the
-# configured flow-nexus's tests and every other member's check have passed.
+# Only flow-nexus's daemon binary is compiled again, with the
+# executable-default-configuration feature and the generated module, against
+# the one flow-nexus library every build links; every other binary and
+# member is its ordinary build, and no test is compiled again.  The package
+# exists only once every member's check has passed and the configured daemon
+# has seeded a fresh memory with what it carries.
 {
   lib,
   pkgs,
-  # The flow-nexus member build and test build, as the build base makes them.
+  # The flow-nexus member build, as the build base makes it.
   flowNexus,
-  flowNexusTests,
   # The other members' builds, whose binaries the package carries.
   members,
-  # The other members' checks, which the package waits on.
+  # Every member's check, flow-nexus's among them, which the package waits on.
   memberChecks,
-  # Runs one member's test build: name, test build, environment.
-  crateCheck,
-  # The check environment flow-nexus's tests need.
-  flowNexusEnvironment,
+  # Runs one ignored test of the flow-nexus test build: name, test name,
+  # the shell that sets its environment.
+  processCheck,
   # Copies the binaries of builds into one bin directory.
   binaries,
   version,
@@ -229,22 +229,41 @@ let
           FLOW_NEXUS_DEFAULT_CONFIGURATION_RS = generatedModule;
         };
     };
-  # The feature enables no dependency, so the dependency graph is the
-  # unconfigured one and only flow-nexus is compiled again.
-  configuredNexus = flowNexus.override (old: {
+  daemon = "flow-nexus-daemon";
+  # The feature is read by the daemon's main alone, so the daemon is
+  # compiled again, linking the library the unconfigured build made.
+  configuredDaemon = flowNexus.overrideBinaries (old: {
     features = old.features ++ [ configured ];
     crateOverrides = withModule old.crateOverrides;
+    crateBin = lib.filter (binary: binary.name == daemon) old.crateBin;
   });
-  configuredNexusTests = flowNexusTests.override (old: {
-    features = old.features ++ [ configured ];
-    crateOverrides = withModule old.crateOverrides;
-  });
-  configuredNexusCheck = crateCheck "flow-nexus-configured" configuredNexusTests flowNexusEnvironment;
+  # flow-nexus's other binaries, as its build makes them.
+  otherNexusBinaries = pkgs.runCommand "flow-nexus-${version}-unconfigured-binaries" { } ''
+    mkdir -p "$out/bin"
+    for binary in ${flowNexus}/bin/*; do
+      if [ "$(basename "$binary")" != ${daemon} ]; then
+        ln -s "$binary" "$out/bin/"
+      fi
+    done
+  '';
+  configuredNexusCheck =
+    processCheck "configured-daemon-seeds" "configured_executable_seeds_only_its_fresh_typed_nexus_row"
+      ''
+        export FLOW_NEXUS_CONFIGURED_DAEMON=${configuredDaemon}/bin/${daemon}
+      '';
 in
-binaries "flow-configured-${version}" ([ configuredNexus ] ++ members) {
-  checked = [ configuredNexusCheck ] ++ memberChecks;
-  passthru = {
-    inherit generatedModule configuredNexusCheck;
-    configured = true;
-  };
-}
+binaries "flow-configured-${version}"
+  (
+    [
+      configuredDaemon
+      otherNexusBinaries
+    ]
+    ++ members
+  )
+  {
+    checked = [ configuredNexusCheck ] ++ memberChecks;
+    passthru = {
+      inherit generatedModule configuredNexusCheck;
+      configured = true;
+    };
+  }

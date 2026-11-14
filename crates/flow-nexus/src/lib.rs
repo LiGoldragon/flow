@@ -60,13 +60,6 @@ mod fixture_executable;
 /// both outputs fresh. The `datom` feature enables their textual CLI surface.
 #[allow(unexpected_cfgs, clippy::large_enum_variant)]
 pub mod generated;
-pub mod reaping;
-#[cfg(test)]
-mod test_faults;
-#[cfg(feature = "executable-default-configuration")]
-mod executable_default_configuration {
-    include!(env!("FLOW_NEXUS_DEFAULT_CONFIGURATION_RS"));
-}
 pub mod handover;
 pub mod handover_archive;
 mod handover_observation;
@@ -83,12 +76,15 @@ pub mod peer;
 pub mod performing;
 pub mod place;
 pub mod placed_socket;
+pub mod reaping;
 pub mod reporting;
 pub mod send_tool;
 pub mod sending;
 pub mod store;
 pub mod store_check;
 pub mod submission;
+#[cfg(test)]
+mod test_faults;
 pub mod title;
 pub mod turn_ends;
 pub mod undecodable;
@@ -130,7 +126,6 @@ use std::{
     },
     time::Duration,
 };
-#[cfg(feature = "executable-default-configuration")]
 use store::ConfiguresOnlyStore;
 use store::logical_delivery::RecordsLogicalDeliveries;
 use store::{
@@ -1030,12 +1025,10 @@ impl Dispatches for RunningNexus {
     }
 }
 
-#[cfg(feature = "executable-default-configuration")]
 trait ChecksExecutableDefault {
     fn validate_executable_default_configuration(&self) -> Result<(), store::StoreError>;
 }
 
-#[cfg(feature = "executable-default-configuration")]
 impl ChecksExecutableDefault for meta_signal_flow::ConfigureNexus {
     fn validate_executable_default_configuration(&self) -> Result<(), store::StoreError> {
         let configuration = self;
@@ -1066,6 +1059,32 @@ impl ChecksExecutableDefault for meta_signal_flow::ConfigureNexus {
     }
 }
 
+/// The configuration an executable carries, built into its daemon binary
+/// alone, so the library is one build whatever configuration a package
+/// carries: a fresh memory starts with it, and a memory that exists is
+/// left as it is.
+pub trait SeedsExecutableDefault {
+    fn seed_executable_default(self, place: &place::Place) -> Result<(), store::StoreError>;
+}
+
+impl SeedsExecutableDefault for meta_signal_flow::ConfigureNexus {
+    fn seed_executable_default(self, place: &place::Place) -> Result<(), store::StoreError> {
+        use place::LaysOutPlace;
+        let store_path = place.store();
+        let store_path = store_path.as_path();
+        if store_path.exists() {
+            return Ok(());
+        }
+        self.validate_executable_default_configuration()?;
+        let configuration_store = store::ConfigurationOnlyStore::open(store_path)?;
+        if configuration_store.configuration_snapshot()?.is_none() {
+            configuration_store
+                .configure_change(meta_signal_flow::ConfigurationChange::Nexus(self))?;
+        }
+        Ok(())
+    }
+}
+
 pub trait OpensRunningNexus {
     /// Opens the Nexus in its place: the memory in State, the socket its
     /// flows report to in Runtime. Durable runner values come from the
@@ -1081,17 +1100,6 @@ impl OpensRunningNexus for RunningNexus {
         use place::LaysOutPlace;
         let store_path = place.store();
         let store_path = store_path.as_path();
-        #[cfg(feature = "executable-default-configuration")]
-        if !store_path.exists() {
-            let default = executable_default_configuration::executable_default_configuration();
-            default.validate_executable_default_configuration()?;
-            let configuration_store = store::ConfigurationOnlyStore::open(store_path)?;
-            if configuration_store.configuration_snapshot()?.is_none() {
-                configuration_store
-                    .configure_change(meta_signal_flow::ConfigurationChange::Nexus(default))?;
-            }
-            drop(configuration_store);
-        }
         // The configured opener checks the typed store path read-only first,
         // reads the committed snapshot, and only then registers runtime tables.
         // It never seeds defaults or settles work, and refuses a store an

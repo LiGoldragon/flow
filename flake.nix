@@ -452,12 +452,10 @@
         {
           mkFlowPackage = import ./nix/mk-flow-package.nix {
             inherit lib version;
-            inherit (context) pkgs crateCheck binaries;
+            inherit (context) pkgs processCheck binaries;
             flowNexus = context.members.flow-nexus;
-            flowNexusTests = context.testBuilds.flow-nexus;
             members = lib.attrValues (removeAttrs context.commands [ "flow-nexus" ]);
-            memberChecks = lib.attrValues (removeAttrs context.memberChecks [ "flow-nexus" ]);
-            flowNexusEnvironment = context.checkEnvironments.flow-nexus;
+            memberChecks = lib.attrValues context.memberChecks;
           };
         }
       );
@@ -554,7 +552,7 @@
               ];
               metaAspects = [ "Psyche" ];
               presentationPrompt = null;
-                herdrSession = "default";
+              herdrSession = "default";
             };
           };
         }

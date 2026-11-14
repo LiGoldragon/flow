@@ -6081,6 +6081,12 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
         if !state_is_recognized {
             return Err(reject("Flow state identity is invalid".into()));
         }
+        // Recognition is read-only and precedes both running and
+        // configuration-only opens, including staged registration. Refuse
+        // callerless historical refreshes before any earlier upgrade writes.
+        <FlowStore as refresh_caller_upgrade::PreflightsRefreshCallers>::preflight_refresh_callers(
+            &read,
+        )?;
         Ok(catalog_era)
     }
 

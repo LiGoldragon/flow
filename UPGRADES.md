@@ -28,11 +28,15 @@ Not a release: no version is chosen and nothing is deployed.
     (`AddressFlow.FlowId` or `Elsewhere.Origin`), and never defaulted; it is
     carried from the queued Refresh to its succession and across a restart.
     **The step refuses while a Refresh is open**: no caller can be invented
-    for a queued Refresh (v1) or an ordered succession (v4), so the open
+    for a queued Refresh (v1) or an ordered succession (v3 or v4), so the open
     refuses at once, before writing anything, naming each such row (its
     Address and predecessor, and for a succession its launch request). Close
     or settle every open Refresh before deploying; with none open the step
     upgrades and every other row carries over unchanged.
+    The validated read-only recognition transaction performs this preflight
+    before either configuration-only or running opens can register families,
+    migrate earlier formats, or stage and clean up copies. A refusal leaves
+    the whole store byte for byte unchanged, including on repeated opens.
   - handover configuration: v1 to v2 (the 60 s publication deadline seeded),
     then v2 to v3 (the approved recovery text seeded once; a configured text,
     the empty one included, is kept across reopens and other setters).

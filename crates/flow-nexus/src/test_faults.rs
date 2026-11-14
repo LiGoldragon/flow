@@ -81,6 +81,8 @@ pub(crate) enum RefusedWrite {
     PassRead,
     /// The superseding read of the Address's current receiver.
     SupersedingRead,
+    /// The preparing of the queue's oldest request for its hand-over.
+    DeliveryPrepare,
 }
 
 /// The armed switches of one store, each fired once.

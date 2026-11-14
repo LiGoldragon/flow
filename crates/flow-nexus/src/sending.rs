@@ -1345,6 +1345,12 @@ impl CompletesDirectSends for RunningNexus {
             .live_awake_flow(address)
             .is_none()
             .then(|| self.wake(address.clone()));
+        // A wake refused after it left its seat Awake started that seat and
+        // could not record what the seat's first prompt carried: the prompt
+        // was submitted, carrying the queue.
+        let started_unsettled =
+            matches!(woken, Some(crate::generated::operation::Outcome::Failed(_)))
+                && self.live_awake_flow(address).is_some();
         // Subscribe before input. File events only schedule the existing
         // exact session/inode/cursor/content correlation, never delivery.
         let _receipt_watch = self.direct_receipt_watch(address);
@@ -1430,6 +1436,17 @@ impl CompletesDirectSends for RunningNexus {
             }))
         ) && self.carrying_attempt(address, &logical_id.0).is_none()
         {
+            // The wake started its seat and could not record what the
+            // seat's first prompt carried: this request was placed without
+            // its receipt. Nothing failed before the native submission, so
+            // no retry cause is written; the request is accepted Uncertain.
+            if started_unsettled {
+                return PrivateSendResponse::SendAccepted(signal_flow::SendAcceptance {
+                    delivery_state: DeliveryState::Uncertain,
+                    ..acceptance
+                })
+                .into();
+            }
             // Starting the next flow failed before any native submission.
             // The existing metaflow still owns the same admitted request;
             // report this attempt truthfully without parking or discarding

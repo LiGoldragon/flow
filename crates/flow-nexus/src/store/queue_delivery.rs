@@ -730,6 +730,13 @@ impl AccountsQueueDelivery for FlowStore {
     ) -> Result<PrepareQueueDelivery, StoreError> {
         // Also protects callers that encounter migrated data after opening.
         self.archive_legacy_queue()?;
+        #[cfg(test)]
+        {
+            use crate::test_faults::{InjectsCrashes, RefusedWrite};
+            if self.faults.refused_now(RefusedWrite::DeliveryPrepare) {
+                return Err(StoreError::StateInvariant);
+            }
+        }
         if let Some(attempt) = self.outstanding_for(address)? {
             return Ok(PrepareQueueDelivery::Outstanding(attempt));
         }

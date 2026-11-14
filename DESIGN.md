@@ -599,7 +599,10 @@ session reports or the transcript showing the prompt and the flow's first
 answer, settles every request the prompt carried, at the first event that
 reads it. A direct Send that woke its
 recipient waits for that receipt and is never typed into the new pane a
-second time.
+second time. A wake that started its seat and could not record what the
+first prompt carried answers that Send `SendAccepted` with its delivery
+`Uncertain`, the request placed without its receipt, and writes no retry
+cause on the queue: nothing failed before the native submission.
 
 A Codex seat runs no hook and reports no Stop; its turn ends are its
 app-server's. Every connection Flow keeps on a Codex thread (the launch's

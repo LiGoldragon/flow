@@ -2117,6 +2117,89 @@ fn a_direct_send_its_wake_carried_is_sent_on_the_receipt_that_lands_after_the_wa
     peer.end();
 }
 
+/// A direct Order to an asleep Claude metaflow wakes it, and the woken
+/// flow's first prompt carries the Order, its receipt not yet written. The
+/// store refuses the batch's hand-over record, so the wake started its seat
+/// and could not settle the batch. The Send was placed without its
+/// receipt: it is accepted Uncertain, no retry cause is written to the
+/// queue, and nothing is typed into the new pane after its first prompt.
+#[test]
+fn a_direct_send_whose_wake_started_its_seat_and_kept_its_batch_is_accepted_uncertain() {
+    use crate::sending::SendsRequests;
+    use crate::test_faults::{InjectsCrashes, RefusedWrite};
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let world = fixture.fresh_claude_world();
+    fs::write(world.state.join("startup-rows-later"), "").unwrap();
+    let sender = psyche_core_opus();
+    let peer = BoundPeer::spawn();
+    peer.bind(&fixture, sender.clone());
+    fixture
+        .nexus
+        .store
+        .faults
+        .refuse_next(RefusedWrite::DeliveryPrepare);
+
+    let answer = fixture.nexus.send_request(
+        signal_flow::SendRequest {
+            address: at.clone(),
+            sendable_message: super::sendable_message(Message::MiddleAbrupt(Request::Order(
+                "Carry it.".into(),
+            ))),
+        },
+        Some(&peer.process()),
+    );
+
+    let signal_flow::PrivateSendResponse::SendAccepted(accepted) = &answer.private_response else {
+        panic!(
+            "the Send its wake's first prompt carried is accepted: {:?}; Herdr calls: {}",
+            answer.private_response,
+            world.calls()
+        );
+    };
+    assert_eq!(
+        accepted.delivery_state,
+        signal_flow::DeliveryState::Uncertain,
+        "{accepted:?}"
+    );
+    assert!(
+        matches!(
+            &answer.response,
+            signal_flow::Output::SendAccepted(visible)
+                if visible.visible_delivery_state == signal_flow::VisibleDeliveryState::Uncertain
+        ),
+        "{:?}",
+        answer.response
+    );
+    assert!(answer.pending.is_none(), "nothing is scheduled to type it");
+    let woken = stored(&fixture, Model::Sol);
+    assert!(
+        matches!(&woken.state, State::Awake(flow_id) if flow_id.0 != "abc123"),
+        "the wake started its seat: {woken:?}"
+    );
+    let snapshot = fixture
+        .nexus
+        .store
+        .logical_delivery_snapshot(&accepted.logical_delivery_id)
+        .unwrap()
+        .expect("the request is held");
+    assert!(
+        !matches!(
+            snapshot.delivery_state,
+            signal_flow::DeliveryState::Retryable(_) | signal_flow::DeliveryState::Failed(_)
+        ),
+        "no retry cause and no failure is written: {snapshot:?}"
+    );
+    assert_eq!(startup_prompts(&world), 1, "{}", world.calls());
+    assert!(later_prompts(&world).is_empty(), "{}", world.calls());
+    peer.end();
+}
+
 /// A wake a queued request makes due, whose first prompt's receipt lands
 /// after the wake looked for it, leaves the request it carried out of the
 /// queue: the turn end after it types only what arrived since, and the

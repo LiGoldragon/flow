@@ -121,10 +121,6 @@ pub trait StartupComposing {
     fn composition(&self) -> flow_nexus::StartupComposition;
 }
 #[rustfmt::skip]
-pub trait CurriculumQuerying {
-    fn query(&self) -> flow_nexus::CurriculumQuery;
-}
-#[rustfmt::skip]
 pub trait ProvenanceListing {
     fn provenance(&self) -> std::vec::Vec<flow_nexus::ContextProvenance>;
 }
@@ -188,13 +184,6 @@ pub trait OpensCurriculumComposer {
 #[rustfmt::skip]
 pub trait SelectsStartup {
     fn startup_selection(&self) -> flow_nexus::StartupSelection;
-}
-#[rustfmt::skip]
-pub trait ExchangesCurriculumFrames {
-    fn exchange<N: CurriculumQuerying>(
-        &self,
-        input: N,
-    ) -> std::result::Result<flow_nexus::CurriculumOutcome, String>;
 }
 #[rustfmt::skip]
 pub trait VerifiesContext {

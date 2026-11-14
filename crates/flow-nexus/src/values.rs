@@ -6,12 +6,12 @@
 use crate::caller::CallerProcess;
 use crate::generated::operation::Outcome;
 use crate::generated::starter::{
-    CallerProcessing, ContextRequest, ContextRequesting, CurriculumQuerying, DeliveryIntended,
-    HarnessedProfile, JsonRow, LaunchedRecord, LaunchedRecording, LeaveOutListing, OutcomeCarrying,
-    PaneBound, PartNumbering, Profiled, Progressing, ProvenanceListing, RememberedFlows,
-    SegmentListing, StartupComposing, StartupProgress, SystemPrompted, Textual,
+    CallerProcessing, ContextRequest, ContextRequesting, DeliveryIntended, HarnessedProfile,
+    JsonRow, LaunchedRecord, LaunchedRecording, LeaveOutListing, OutcomeCarrying, PaneBound,
+    PartNumbering, Profiled, Progressing, ProvenanceListing, RememberedFlows, SegmentListing,
+    StartupComposing, StartupProgress, SystemPrompted, Textual,
 };
-use signal_curriculum_nexus::{ContextProvenance, Input as CurriculumQuery, StartupComposition};
+use signal_curriculum_nexus::{ContextProvenance, StartupComposition};
 use signal_flow::{
     HarnessKind, HerdrPaneBinding, LaunchProfile, LeaveOut, PromptDeliveryIntent, SystemPrompt,
 };
@@ -107,18 +107,6 @@ impl StartupComposing for StartupComposition {
 impl<T: StartupComposing + ?Sized> StartupComposing for &T {
     fn composition(&self) -> StartupComposition {
         (**self).composition()
-    }
-}
-
-impl CurriculumQuerying for CurriculumQuery {
-    fn query(&self) -> CurriculumQuery {
-        self.clone()
-    }
-}
-
-impl<T: CurriculumQuerying + ?Sized> CurriculumQuerying for &T {
-    fn query(&self) -> CurriculumQuery {
-        (**self).query()
     }
 }
 

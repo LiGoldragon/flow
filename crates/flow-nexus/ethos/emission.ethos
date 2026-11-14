@@ -8,11 +8,16 @@
 Emission
 [ signal_flow:[ HerdrSessionName HerdrAgentName HerdrWorkspaceId HerdrPaneId
                 HarnessKind LaunchRequestId ]
-  flow_ethos:[ KeyName ] ]
+  flow_ethos:[ KeyName ]
+  flow_nexus:[ CurriculumQuery CurriculumOutcome ] ]
 [ ; Herdr's command line: one `herdr` process.
-  Herdr.HerdrCommand ]
+  Herdr.HerdrCommand
+  ; One query to the Curriculum Nexus, on a connection of its own.
+  Curriculum.CurriculumQuery ]
 [ ; What the process printed, and whether it ran and succeeded.
-  Herdr.ProcessReply ]
+  Herdr.ProcessReply
+  ; Curriculum's answer, or why none was read.
+  Curriculum.CurriculumExchange ]
 [ HerdrCommand.[ ListSessions
                  InSession.{ HerdrSessionName HerdrSessionCommand } ]
   ; A command addressed to one Herdr session.
@@ -51,4 +56,7 @@ Emission
   Printout.{ Stdout.String Stderr.String }
   ; Unstarted: the process could not be run. Cancelled: the observation
   ; it served was cancelled while it ran, and the process was ended.
-  ProcessReply.[ Unstarted.String Succeeded.Printout Failed.Printout Cancelled ] ]
+  ProcessReply.[ Unstarted.String Succeeded.Printout Failed.Printout Cancelled ]
+  ; Unexchanged: the socket could not be reached, or the query written or
+  ; the answer read; the String is the transport's own account.
+  CurriculumExchange.[ Answered.CurriculumOutcome Unexchanged.String ] ]

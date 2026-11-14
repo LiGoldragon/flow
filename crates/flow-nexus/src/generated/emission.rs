@@ -245,14 +245,23 @@ pub enum ProcessReply {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum CurriculumExchange {
+    Answered(flow_nexus::CurriculumOutcome),
+    Unexchanged(String),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Emission {
     Herdr(HerdrCommand),
+    Curriculum(flow_nexus::CurriculumQuery),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Outcome {
     Herdr(ProcessReply),
+    Curriculum(CurriculumExchange),
 }
 #[rustfmt::skip]
 pub trait Emitted {
@@ -265,4 +274,8 @@ pub trait Emittable<Translator>: Emitted {
 #[rustfmt::skip]
 impl Emitted for HerdrCommand {
     type Outcome = ProcessReply;
+}
+#[rustfmt::skip]
+impl Emitted for flow_nexus::CurriculumQuery {
+    type Outcome = CurriculumExchange;
 }

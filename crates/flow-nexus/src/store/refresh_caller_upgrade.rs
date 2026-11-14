@@ -468,6 +468,15 @@ mod tests {
         write.commit().unwrap();
     }
 
+    type FlowMemoryOpener = fn(&std::path::Path) -> Result<(), StoreError>;
+
+    #[derive(Debug, Clone, Copy)]
+    enum HistoricalRefreshInventory {
+        QueuedOnly,
+        OrderedOnly,
+        Combined,
+    }
+
     /// Before recovery, Ordered was already a callerless refresh. The real
     /// open must inventory it and queued v1 refreshes before any migration
     /// or staging cleanup, not merely before the final caller upgrade.
@@ -479,91 +488,110 @@ mod tests {
             SuccessorIntentV3::schema_hash(),
             SuccessorIntentV4::schema_hash(),
         ] {
-            let fixture = crate::tests::configuring::ConfiguredStore::new();
-            let directory = tempfile::tempdir().unwrap();
-            let predecessor = directory.path().join("predecessor.sema");
-            let orders = [
-                order_v1("queuedFirst", "flow-q1", ReplacementOrderV1::Refresh),
-                order_v1("queuedSecond", "flow-q2", ReplacementOrderV1::Refresh),
-            ];
-            let intent = intent_v4(
-                "owedOrdered",
-                "flow-s1",
-                "launch-s1",
-                SuccessionCauseV4::Ordered,
-            );
-            if schema == SuccessorIntentV3::schema_hash() {
-                let mut engine =
-                    Engine::open(EngineOpen::new(&predecessor, SchemaVersion::new(1))).unwrap();
-                let order_table = engine.register_table(orders_v1_descriptor()).unwrap();
-                for order in &orders {
-                    engine
-                        .assert(Assertion::new(order_table, order.clone()))
+            for inventory in [
+                HistoricalRefreshInventory::QueuedOnly,
+                HistoricalRefreshInventory::OrderedOnly,
+                HistoricalRefreshInventory::Combined,
+            ] {
+                let fixture = crate::tests::configuring::ConfiguredStore::new();
+                let directory = tempfile::tempdir().unwrap();
+                let predecessor = directory.path().join("predecessor.sema");
+                let orders = match inventory {
+                    HistoricalRefreshInventory::QueuedOnly
+                    | HistoricalRefreshInventory::Combined => vec![
+                        order_v1("queuedFirst", "flow-q1", ReplacementOrderV1::Refresh),
+                        order_v1("queuedSecond", "flow-q2", ReplacementOrderV1::Refresh),
+                    ],
+                    HistoricalRefreshInventory::OrderedOnly => Vec::new(),
+                };
+                let intent = intent_v4(
+                    "owedOrdered",
+                    "flow-s1",
+                    "launch-s1",
+                    SuccessionCauseV4::Ordered,
+                );
+                let intents = match inventory {
+                    HistoricalRefreshInventory::OrderedOnly
+                    | HistoricalRefreshInventory::Combined => {
+                        vec![intent]
+                    }
+                    HistoricalRefreshInventory::QueuedOnly => Vec::new(),
+                };
+                if schema == SuccessorIntentV3::schema_hash() {
+                    let mut engine =
+                        Engine::open(EngineOpen::new(&predecessor, SchemaVersion::new(1))).unwrap();
+                    let order_table = engine.register_table(orders_v1_descriptor()).unwrap();
+                    for order in &orders {
+                        engine
+                            .assert(Assertion::new(order_table, order.clone()))
+                            .unwrap();
+                    }
+                    let intent_table = engine
+                        .register_table(TableDescriptor::<SuccessorIntentV3>::new(
+                            super::super::successor::SUCCESSOR_INTENT_TABLE_NAME,
+                            FamilyName::new(super::super::successor::SUCCESSOR_INTENT_FAMILY),
+                            schema,
+                        ))
                         .unwrap();
+                    for intent in &intents {
+                        engine
+                            .assert(Assertion::new(
+                                intent_table,
+                                SuccessorIntentV3 {
+                                    address: intent.address.clone(),
+                                    predecessor: intent.predecessor.clone(),
+                                    succession_cause: SuccessionCauseV3::Ordered,
+                                    launch_request_id: intent.launch_request_id.clone(),
+                                },
+                            ))
+                            .unwrap();
+                    }
+                } else {
+                    store_before(&predecessor, &orders, &intents);
                 }
-                let intent_table = engine
-                    .register_table(TableDescriptor::<SuccessorIntentV3>::new(
-                        super::super::successor::SUCCESSOR_INTENT_TABLE_NAME,
-                        FamilyName::new(super::super::successor::SUCCESSOR_INTENT_FAMILY),
-                        schema,
-                    ))
-                    .unwrap();
-                engine
-                    .assert(Assertion::new(
-                        intent_table,
-                        SuccessorIntentV3 {
+                graft_predecessor_families(&predecessor, fixture.path());
+                let sentinel = fixture.path().with_file_name(format!(
+                    "{}preflight-sentinel",
+                    StagedOpen::copy_prefix(fixture.path()).unwrap()
+                ));
+                std::fs::write(&sentinel, b"preflight precedes staging cleanup").unwrap();
+                let before = std::fs::read(fixture.path()).unwrap();
+                let expected = orders
+                    .iter()
+                    .map(|order| OpenRefreshWithoutCaller::QueuedRefresh {
+                        address: order.address.clone(),
+                        predecessor: order.predecessor.clone(),
+                    })
+                    .chain(intents.iter().map(|intent| {
+                        OpenRefreshWithoutCaller::OrderedSuccession {
                             address: intent.address.clone(),
                             predecessor: intent.predecessor.clone(),
-                            succession_cause: SuccessionCauseV3::Ordered,
                             launch_request_id: intent.launch_request_id.clone(),
-                        },
-                    ))
-                    .unwrap();
-            } else {
-                store_before(&predecessor, &orders, std::slice::from_ref(&intent));
-            }
-            graft_predecessor_families(&predecessor, fixture.path());
-            let sentinel = fixture.path().with_file_name(format!(
-                "{}preflight-sentinel",
-                StagedOpen::copy_prefix(fixture.path()).unwrap()
-            ));
-            std::fs::write(&sentinel, b"preflight precedes staging cleanup").unwrap();
-            let before = std::fs::read(fixture.path()).unwrap();
-            let expected = vec![
-                OpenRefreshWithoutCaller::QueuedRefresh {
-                    address: orders[0].address.clone(),
-                    predecessor: orders[0].predecessor.clone(),
-                },
-                OpenRefreshWithoutCaller::QueuedRefresh {
-                    address: orders[1].address.clone(),
-                    predecessor: orders[1].predecessor.clone(),
-                },
-                OpenRefreshWithoutCaller::OrderedSuccession {
-                    address: intent.address.clone(),
-                    predecessor: intent.predecessor.clone(),
-                    launch_request_id: intent.launch_request_id.clone(),
-                },
-            ];
-            let openers: [fn(&std::path::Path) -> Result<(), StoreError>; 3] = [
-                |path| FlowStore::open_configured(path).map(drop),
-                |path| FlowStore::open_configured_in_place(path).map(drop),
-                |path| ConfigurationOnlyStore::open(path).map(drop),
-            ];
-            for open in openers {
-                for _ in 0..2 {
-                    let Err(StoreError::RefreshCallerUpgrade(found)) = open(fixture.path()) else {
-                        panic!("the real opener must refuse before writing");
-                    };
-                    assert_eq!(found, expected);
-                    assert_eq!(
-                        std::fs::read(fixture.path()).unwrap(),
-                        before,
-                        "every catalog registration, row and marker stays byte for byte unchanged"
-                    );
-                    assert_eq!(
-                        std::fs::read(&sentinel).unwrap(),
-                        b"preflight precedes staging cleanup"
-                    );
+                        }
+                    }))
+                    .collect::<Vec<_>>();
+                let openers: [FlowMemoryOpener; 3] = [
+                    |path| FlowStore::open_configured(path).map(drop),
+                    |path| FlowStore::open_configured_in_place(path).map(drop),
+                    |path| ConfigurationOnlyStore::open(path).map(drop),
+                ];
+                for open in openers {
+                    for _ in 0..2 {
+                        let Err(StoreError::RefreshCallerUpgrade(found)) = open(fixture.path())
+                        else {
+                            panic!("the real opener must refuse before writing");
+                        };
+                        assert_eq!(found, expected, "{inventory:?}, {schema:?}");
+                        assert_eq!(
+                            std::fs::read(fixture.path()).unwrap(),
+                            before,
+                            "every catalog registration, row and marker stays byte for byte unchanged"
+                        );
+                        assert_eq!(
+                            std::fs::read(&sentinel).unwrap(),
+                            b"preflight precedes staging cleanup"
+                        );
+                    }
                 }
             }
         }

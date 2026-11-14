@@ -165,9 +165,7 @@ impl ConfiguredStore {
         let place = crate::place::Place {
             place_name: crate::place::PlaceName("main".into()),
             runtime: crate::place::Runtime(path("runtime/nexus/main")),
-            state: crate::place::State(
-                directory.path().to_string_lossy().into_owned(),
-            ),
+            state: crate::place::State(directory.path().to_string_lossy().into_owned()),
         };
         let store_path = path("flow.sema");
         let configuration = ConfigurationOnlyStore::open(std::path::Path::new(&store_path))

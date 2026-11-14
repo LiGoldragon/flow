@@ -717,6 +717,9 @@ pub(crate) trait AwaitsAppServerSocket {
 /// The responder of one thread: its subscribed connection, kept, and each
 /// call it brings handled and answered.
 pub(crate) trait RespondsToSendCalls {
+    /// The request id of the `thread/backgroundTerminals/list` a responder
+    /// reads after its subscription's cut.
+    const BACKGROUND_TERMINALS: u64 = 3;
     /// Keeps a connection subscribed to `thread` until told to stop,
     /// reconnecting whenever it closes.
     fn respond_for(
@@ -767,6 +770,31 @@ impl RespondsToSendCalls for RunningNexus {
                 }
                 Ok(mut subscription) => {
                     drop(watch);
+                    // The processes the app-server keeps for the thread,
+                    // read on the subscribing connection after its cut.
+                    let terminals = match subscription.exchange(
+                        &inbox,
+                        Self::BACKGROUND_TERMINALS,
+                        "thread/backgroundTerminals/list",
+                        serde_json::json!({ "threadId": thread }),
+                    ) {
+                        Ok(terminals) => terminals,
+                        Err(SubscriptionEnd::Stopped) => {
+                            subscription.close();
+                            return;
+                        }
+                        Err(SubscriptionEnd::WorkEnded) => {
+                            subscription.close();
+                            continue;
+                        }
+                        Err(SubscriptionEnd::Failed(error)) => {
+                            eprintln!(
+                                "flow-nexus: send tool for thread {thread}: terminals unread: {error}"
+                            );
+                            subscription.close();
+                            continue;
+                        }
+                    };
                     let early = std::mem::take(&mut subscription.early);
                     let mut open = early.into_iter().all(|request| {
                         self.answer_request(&mut subscription, request)
@@ -787,11 +815,9 @@ impl RespondsToSendCalls for RunningNexus {
                     {
                         cut.push(LedgerEvent::Cut(resumed));
                     }
-                    if let Some(terminals) = subscription.terminals.take() {
-                        cut.push(LedgerEvent::BackgroundTerminals(
-                            terminals.background_terminals(),
-                        ));
-                    }
+                    cut.push(LedgerEvent::BackgroundTerminals(
+                        terminals.background_terminals(),
+                    ));
                     self.codex_events(thread, cut);
                     while open {
                         match subscription.next_event(&inbox, None) {

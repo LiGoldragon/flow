@@ -1626,15 +1626,13 @@ pub(crate) enum SubscriptionEnd {
 /// notifications that arrived while a request of its own was answered.
 /// `thread` is the one thread it is subscribed to, once known; `resumed`
 /// is the app-server's `thread/resume` answer with the thread's newest
-/// turn, the cut its turn ledger is established by, and `terminals` the
-/// `thread/backgroundTerminals/list` answer read right after it.
+/// turn, the cut its turn ledger is established by.
 pub(crate) struct ThreadSubscription {
     pub(crate) proxy: ProxyChild,
     pub(crate) generation: u64,
     pub(crate) early: Vec<serde_json::Value>,
     pub(crate) thread: Option<String>,
     pub(crate) resumed: Option<serde_json::Value>,
-    pub(crate) terminals: Option<serde_json::Value>,
     timeout: Duration,
 }
 
@@ -1805,7 +1803,6 @@ impl SubscribesThread for CodexAdapter {
             early: Vec::new(),
             thread: None,
             resumed: None,
-            terminals: None,
             timeout: self.timeout,
         };
         let connected = (|| {
@@ -1854,33 +1851,19 @@ impl SubscribesThread for CodexAdapter {
         let mut subscription = self.connect_experimental(generation, signals, inbox, notes)?;
         // The answer is the thread as its listener holds it when it
         // subscribes this connection, with its newest turn whole: the cut.
-        // The processes the app-server keeps for the thread are read after
-        // it on the same connection.
-        let subscribed = subscription
-            .exchange(
-                inbox,
-                2,
-                "thread/resume",
-                serde_json::json!({
-                    "threadId": thread,
-                    "excludeTurns": true,
-                    "initialTurnsPage": { "limit": 1, "sortDirection": "desc", "itemsView": "full" }
-                }),
-            )
-            .and_then(|resumed| {
-                let terminals = subscription.exchange(
-                    inbox,
-                    3,
-                    "thread/backgroundTerminals/list",
-                    serde_json::json!({ "threadId": thread }),
-                )?;
-                Ok((resumed, terminals))
-            });
-        match subscribed {
-            Ok((resumed, terminals)) => {
+        match subscription.exchange(
+            inbox,
+            2,
+            "thread/resume",
+            serde_json::json!({
+                "threadId": thread,
+                "excludeTurns": true,
+                "initialTurnsPage": { "limit": 1, "sortDirection": "desc", "itemsView": "full" }
+            }),
+        ) {
+            Ok(resumed) => {
                 subscription.thread = Some(thread.to_owned());
                 subscription.resumed = Some(resumed);
-                subscription.terminals = Some(terminals);
                 Ok(subscription)
             }
             Err(end) => {

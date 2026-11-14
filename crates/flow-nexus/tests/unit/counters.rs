@@ -89,9 +89,11 @@ fn counters(fixture: &NexusFixture) -> String {
     let open = snapshot
         .rfind(" { ")
         .expect("the snapshot ends with a struct");
-    // The counters and the two request bounds; the HarnessHook follows.
+    // The counters and the two request bounds; the HarnessHook, the
+    // warning lane's two empty families, its empty recovery text and the
+    // ended-turn retention follow.
     snapshot[open + 1..snapshot.len() - 2]
-        .trim_end_matches(" Unconfigured")
+        .trim_end_matches(" Unconfigured [] [] «» 64")
         .to_owned()
 }
 

@@ -156,6 +156,8 @@ pub(super) fn tool_call(thread: &str, call: &str, body: &str) -> ToolCall {
 pub(super) struct FakeConnection {
     requests: Vec<serde_json::Value>,
     closes: bool,
+    /// The turn the subscription's cut shows running, if any.
+    running: Option<String>,
 }
 
 pub(super) struct FakeAppServer {
@@ -201,11 +203,20 @@ impl RunsFakeAppServer for FakeAppServer {
         for (index, connection) in connections.iter().enumerate() {
             let run = 2 * index + 1;
             std::fs::write(root.join(format!("frames-{run}")), &probe).unwrap();
-            // The resume answers the cut, a thread with no turn; the
-            // terminal list after it names no process.
+            // The resume answers the cut: a thread with no turn, or in the
+            // one turn the connection names running; the terminal list
+            // after it names no process.
+            let page = connection
+                .running
+                .iter()
+                .map(|turn| serde_json::json!({ "id": turn, "status": "inProgress", "items": [] }))
+                .collect::<Vec<_>>();
             let frames = [
                 initialized.clone(),
-                frame(&serde_json::json!({ "id": 2, "result": { "thread": {} } })),
+                frame(&serde_json::json!({ "id": 2, "result": {
+                    "thread": {},
+                    "initialTurnsPage": { "data": page }
+                } })),
                 frame(&serde_json::json!({ "id": 3, "result": { "data": [] } })),
             ];
             std::fs::write(root.join(format!("frames-{}", run + 1)), frames.concat()).unwrap();
@@ -533,10 +544,12 @@ fn two_threads_are_each_attributed_to_their_own_metaflow() {
     let fake_a = FakeAppServer::install(vec![FakeConnection {
         requests: vec![tool_call_request(10, THREAD_A, "call-a", "from a")],
         closes: false,
+        running: None,
     }]);
     let fake_b = FakeAppServer::install(vec![FakeConnection {
         requests: vec![tool_call_request(11, THREAD_B, "call-b", "from b")],
         closes: false,
+        running: None,
     }]);
     let adapter_a = fixture.adapter("gpt-sol", &fake_a);
     let adapter_b = fixture.adapter("gpt-6-sol", &fake_b);
@@ -590,6 +603,7 @@ fn a_call_from_a_thread_no_flow_holds_is_sent_as_unbound() {
     let fake = FakeAppServer::install(vec![FakeConnection {
         requests: vec![tool_call_request(12, foreign, "call-x", "intruder")],
         closes: false,
+        running: None,
     }]);
     let adapter = fixture.adapter("gpt-sol", &fake);
     let answer = responding(&fixture, THREAD_A, &adapter, || {
@@ -687,6 +701,7 @@ fn a_call_queued_before_a_crash_is_answered_from_its_record_when_replayed() {
     let fake = FakeAppServer::install(vec![FakeConnection {
         requests: vec![tool_call_request(13, THREAD_A, "call-a", "exactly once")],
         closes: false,
+        running: None,
     }]);
     let adapter = fixture.adapter("gpt-sol", &fake);
     let answer = responding(&fixture, THREAD_A, &adapter, || {
@@ -965,10 +980,12 @@ fn a_pending_call_is_answered_after_start_and_reconnect() {
         FakeConnection {
             requests: vec![],
             closes: true,
+            running: None,
         },
         FakeConnection {
             requests: vec![tool_call_request(14, THREAD_A, "call-a", "after restart")],
             closes: false,
+            running: None,
         },
     ]);
     fixture.adapter("gpt-sol", &fake);
@@ -2213,11 +2230,20 @@ fn seat_responding(
     notices: Vec<serde_json::Value>,
     fence_id: u64,
 ) -> FakeAppServer {
+    // The seat was in the turn its first notice starts when the responder
+    // subscribed: the cut shows that turn running.
+    let running = notices
+        .first()
+        .filter(|notice| notice["method"] == "turn/started")
+        .and_then(|notice| notice.pointer("/params/turn/id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
     let mut requests = notices;
     requests.push(fence(fence_id));
     let fake = FakeAppServer::install(vec![FakeConnection {
         requests,
         closes: false,
+        running,
     }]);
     fake.accept_queued_turns(SEAT_THREAD, 3..=12);
     let adapter = fixture.adapter("gpt-sol", &fake);

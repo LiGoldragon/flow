@@ -302,7 +302,9 @@ pub enum ProcessReply {
     Unstarted(String),
     Succeeded(Printout),
     Failed(Printout),
+    Unreadable(String),
     Cancelled,
+    TimedOut,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -326,10 +328,49 @@ pub struct FlowIdentityClaim {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum GitCommand {
+    ShowsWorkTree,
+    ResolveRevision(GitRevision),
+    ShowBlob(GitBlob),
+    ListTracked(ArchivePath),
+    ShortStatus(ArchivePath),
+    Add(ArchivePath),
+    CommitOnly(ArchivePath),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ArchivedAt_Data {
+    pub git_commit: GitCommit,
+    pub archive_path: ArchivePath,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum GitRevision {
+    Head,
+    ArchivedAt(ArchivedAt_Data),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct GitCommit(pub String);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct GitBlob(pub String);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ArchivePath(pub String);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Emission {
     Herdr(HerdrCommand),
     Curriculum(flow_nexus::CurriculumQuery),
     FlowIdentity(FlowIdentityClaim),
+    Git(GitCommand),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -338,6 +379,7 @@ pub enum Outcome {
     Herdr(ProcessReply),
     Curriculum(CurriculumExchange),
     FlowIdentity(ProcessReply),
+    Git(ProcessReply),
 }
 #[rustfmt::skip]
 pub trait Emitted {
@@ -357,5 +399,9 @@ impl Emitted for flow_nexus::CurriculumQuery {
 }
 #[rustfmt::skip]
 impl Emitted for FlowIdentityClaim {
+    type Outcome = ProcessReply;
+}
+#[rustfmt::skip]
+impl Emitted for GitCommand {
     type Outcome = ProcessReply;
 }

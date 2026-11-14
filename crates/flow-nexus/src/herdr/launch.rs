@@ -10,20 +10,20 @@
 use super::{DecodesFlowClaim, FlowClaim, HerdrCli, claude_paste};
 use crate::codex::NamesBoundCodexThread;
 use crate::codex::SelectsCodexEndpoint;
-use crate::composition::HERDR_REQUEST_LINE_LIMIT;
 use crate::emission::{AddressesHerdrSession, ReadsProcessReply, SpeaksHarness};
 use crate::generated::emission::{
     AgentStatus, AgentTarget, AgentWait, ClaudeCommandLine, ClaudeSessionStart, ClaudeSettings,
     CodexCommandLine, CodexExecutable, CodexSocket, CodexTitle, ConfiguredHarnessArguments,
     CreateWorkspace_Data, Emittable, FlowIdentityClaim, FlowsRoot, Focus, HarnessCommandLine,
-    HerdrCommand, HerdrSessionCommand, Label, LineCount, MetadataSource, Milliseconds, OutputMatch,
-    OutputSource, ProcessReply, RenamePane_Data, RenameWorkspace_Data, ReportPaneMetadata_Data,
-    RunInPane_Data, SessionTitle, ShellLine, StartAgent_Data, SystemPromptFile, WaitForAgent_Data,
-    WaitForPaneOutput_Data, WorkingDirectory,
+    HerdrCommand, HerdrSessionCommand, HerdrSocketCall, HerdrSocketReply, HerdrSocketRequest,
+    Label, LineCount, MetadataSource, Milliseconds, OutputMatch, OutputSource, ProcessReply,
+    PromptAgentByName_Data, PromptText, RenamePane_Data, RenameWorkspace_Data,
+    ReportPaneMetadata_Data, RunInPane_Data, SessionTitle, ShellLine, StartAgent_Data,
+    SystemPromptFile, WaitForAgent_Data, WaitForPaneOutput_Data, WorkingDirectory,
 };
 pub use crate::generated::starter::StartupProgress;
 use crate::generated::starter::{
-    DeliveryIntended, JsonRow, LeanStart, PaneBound, PromptsThroughHerdrSocket, ReadsStartupRecord,
+    DeliveryIntended, JsonRow, LeanStart, PromptsThroughHerdrSocket, ReadsStartupRecord,
     ReadsTypedUserText, RendersLeanStart, StartupReading, Textual,
 };
 use crate::harness_command::HarnessCommandResources;
@@ -43,7 +43,7 @@ use signal_flow::{
 use std::{
     fs::{self, File, Metadata},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
-    os::unix::{fs::MetadataExt, net::UnixStream},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -425,13 +425,6 @@ const CODEX_LEFT_OUT_OPENINGS: &[(signal_flow::LeaveOut, &str)] = &[
     ),
 ];
 
-/// Herdr's socket API, spoken directly: one JSON request line out, one JSON
-/// reply line back, on the socket `herdr session list` names for the pane's
-/// session. Herdr 0.8.2 reads a request line up to 1 MiB.
-/// Herdr's `agent.prompt` for the pane's agent types the text, then Enter;
-/// its reply is the JSON value Herdr answered with a result.
-const PROMPT_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
-
 impl PromptsThroughHerdrSocket for HerdrCli {
     fn herdr_session_socket<N: Textual>(&self, input: N) -> Result<String, String> {
         use crate::caller::KnowsHerdrServers;
@@ -442,50 +435,6 @@ impl PromptsThroughHerdrSocket for HerdrCli {
             .find(|session| session.name == herdr_session_name)
             .map(|session| session.socket.display().to_string())
             .ok_or_else(|| "Herdr lists no socket for the pane's session".to_owned())
-    }
-
-    fn prompt_through_socket<N: PaneBound, O: Textual>(
-        &self,
-        input_0: N,
-        input_1: O,
-    ) -> Result<serde_json::Value, String> {
-        let pane = input_0.pane();
-        let text = input_1.text();
-        let request = serde_json::json!({
-            "id": format!("flow:prompt:{}", pane.launch_request_id.0),
-            "method": "agent.prompt",
-            "params": { "target": pane.herdr_agent_name.0, "text": text }
-        });
-        let mut line = serde_json::to_string(&request)
-            .map_err(|error| format!("Herdr prompt request not encoded: {error}"))?;
-        line.push('\n');
-        if line.len() > HERDR_REQUEST_LINE_LIMIT {
-            return Err("Herdr prompt request exceeds its line limit".into());
-        }
-        let socket = self.herdr_session_socket(&pane.herdr_session_name.0)?;
-        let mut stream = UnixStream::connect(&socket)
-            .map_err(|error| format!("Herdr socket unreachable: {error}"))?;
-        stream
-            .set_read_timeout(Some(PROMPT_REPLY_TIMEOUT))
-            .and_then(|_| stream.set_write_timeout(Some(PROMPT_REPLY_TIMEOUT)))
-            .map_err(|error| error.to_string())?;
-        stream
-            .write_all(line.as_bytes())
-            .and_then(|_| stream.flush())
-            .map_err(|error| format!("Herdr prompt request not written: {error}"))?;
-        let mut reply = String::new();
-        BufReader::new(&stream)
-            .read_line(&mut reply)
-            .map_err(|error| format!("Herdr prompt reply not read: {error}"))?;
-        let reply: serde_json::Value = serde_json::from_str(reply.trim())
-            .map_err(|error| format!("Herdr returned unreadable JSON: {error}"))?;
-        if let Some(error) = reply.get("error") {
-            return Err(format!("Herdr refused the prompt: {error}"));
-        }
-        if reply.get("result").is_none() {
-            return Err("Herdr prompt reply carries no result".into());
-        }
-        Ok(reply)
     }
 }
 
@@ -2705,7 +2654,23 @@ impl SubmitsStartupPart for HerdrCli {
         // The started harness (for the first part) or the answer to the
         // part before has come to rest; nothing is typed when it has not.
         self.await_pane_rest(&durable_intent.herdr_pane_binding)?;
-        self.prompt_through_socket(&durable_intent.herdr_pane_binding, &part.prompt_part_text.0)?;
+        let pane = &durable_intent.herdr_pane_binding;
+        match (HerdrSocketCall {
+            herdr_session_name: pane.herdr_session_name.clone(),
+            herdr_socket_request: HerdrSocketRequest::PromptAgentByName(PromptAgentByName_Data {
+                launch_request_id: pane.launch_request_id.clone(),
+                herdr_agent_name: pane.herdr_agent_name.clone(),
+                prompt_text: PromptText(part.prompt_part_text.0.clone()),
+            }),
+        })
+        .emit(self)
+        {
+            HerdrSocketReply::Answered(_) => {}
+            HerdrSocketReply::Refused(error) => {
+                return Err(format!("Herdr refused the prompt: {error}"));
+            }
+            HerdrSocketReply::Unexchanged(error) => return Err(error),
+        }
         Ok(PromptDeliveryResult::Ambiguous(durable_intent.clone()))
     }
 }

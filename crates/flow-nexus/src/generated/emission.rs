@@ -366,11 +366,41 @@ pub struct ArchivePath(pub String);
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct HerdrSocketCall {
+    pub herdr_session_name: signal_flow::HerdrSessionName,
+    pub herdr_socket_request: HerdrSocketRequest,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct PromptAgentByName_Data {
+    pub launch_request_id: signal_flow::LaunchRequestId,
+    pub herdr_agent_name: signal_flow::HerdrAgentName,
+    pub prompt_text: PromptText,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum HerdrSocketRequest {
+    PromptAgentByName(PromptAgentByName_Data),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum HerdrSocketReply {
+    Answered(String),
+    Refused(String),
+    Unexchanged(String),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Emission {
     Herdr(HerdrCommand),
     Curriculum(flow_nexus::CurriculumQuery),
     FlowIdentity(FlowIdentityClaim),
     Git(GitCommand),
+    HerdrSocket(HerdrSocketCall),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -380,6 +410,7 @@ pub enum Outcome {
     Curriculum(CurriculumExchange),
     FlowIdentity(ProcessReply),
     Git(ProcessReply),
+    HerdrSocket(HerdrSocketReply),
 }
 #[rustfmt::skip]
 pub trait Emitted {
@@ -404,4 +435,8 @@ impl Emitted for FlowIdentityClaim {
 #[rustfmt::skip]
 impl Emitted for GitCommand {
     type Outcome = ProcessReply;
+}
+#[rustfmt::skip]
+impl Emitted for HerdrSocketCall {
+    type Outcome = HerdrSocketReply;
 }

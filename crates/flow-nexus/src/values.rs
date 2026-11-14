@@ -8,13 +8,11 @@ use crate::generated::curriculum::{ContextProvenance, StartupComposition};
 use crate::generated::operation::Outcome;
 use crate::generated::starter::{
     CallerProcessing, ContextRequest, ContextRequesting, DeliveryIntended, HarnessedProfile,
-    JsonRow, LaunchedRecord, LaunchedRecording, LeaveOutListing, OutcomeCarrying, PaneBound,
-    PartNumbering, Profiled, Progressing, ProvenanceListing, RememberedFlows, SegmentListing,
-    StartupComposing, StartupProgress, SystemPrompted, Textual,
+    JsonRow, LaunchedRecord, LaunchedRecording, LeaveOutListing, OutcomeCarrying, PartNumbering,
+    Profiled, Progressing, ProvenanceListing, RememberedFlows, SegmentListing, StartupComposing,
+    StartupProgress, SystemPrompted, Textual,
 };
-use signal_flow::{
-    HarnessKind, HerdrPaneBinding, LaunchProfile, LeaveOut, PromptDeliveryIntent, SystemPrompt,
-};
+use signal_flow::{HarnessKind, LaunchProfile, LeaveOut, PromptDeliveryIntent, SystemPrompt};
 
 impl Textual for str {
     fn text(&self) -> String {
@@ -160,18 +158,6 @@ impl SystemPrompted for SystemPrompt {
 impl<T: SystemPrompted + ?Sized> SystemPrompted for &T {
     fn system_prompt(&self) -> SystemPrompt {
         (**self).system_prompt()
-    }
-}
-
-impl PaneBound for HerdrPaneBinding {
-    fn pane(&self) -> HerdrPaneBinding {
-        self.clone()
-    }
-}
-
-impl<T: PaneBound + ?Sized> PaneBound for &T {
-    fn pane(&self) -> HerdrPaneBinding {
-        (**self).pane()
     }
 }
 

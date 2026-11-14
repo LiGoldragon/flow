@@ -23,7 +23,7 @@ Library
                  SessionId Origin SystemModules PromptModules
                  HerdrSessionName LeaveOuts FlowKind ToolSet
                  LeaveOutRefusal ComposedLaunch
-                 ContextRefusal SystemPrompt HerdrPaneBinding
+                 ContextRefusal SystemPrompt
                  PromptDeliveryResult Output Launched
                  NativeLaunchFailure ]
   flow_nexus:[ StartupSelection StartupComposition ContextProvenance CompositionError VerifiedContext OperationOutcome CallerProcess ]
@@ -71,7 +71,6 @@ Library
   PartNumbering.[ part_number.[ Integer ]
                   part_count.[ Integer ] ]
   SystemPrompted.[ system_prompt.[ SystemPrompt ] ]
-  PaneBound.[ pane.[ HerdrPaneBinding ] ]
   JsonRow.[ row.[ JsonValue ] ]
   DeliveryIntended.[ intent.[ PromptDeliveryIntent ] ]
   Progressing.[ progress.[ StartupProgress ] ]
@@ -102,8 +101,7 @@ Library
   ; exact Address and FlowId in one inherited system-prompt fact.
   CarriesFlowId.[ carrying_flow_id.{ [ Textual ] [ ComposedLaunch ] } ]
   ProfilesFreshSeat.[ fresh_profile.[ LaunchProfile ] ]
-  PromptsThroughHerdrSocket.[ herdr_session_socket.{ [ Textual ] [ Result<String String> ] }
-                              prompt_through_socket.{ [ PaneBound Textual ] [ Result<JsonValue String> ] } ]
+  PromptsThroughHerdrSocket.[ herdr_session_socket.{ [ Textual ] [ Result<String String> ] } ]
   ReadsStartupRecord.[ read_record!{ [ JsonRow DeliveryIntended ] [ Result<Option<String> NativeLaunchFailure> ] }
                        read_part!{ [ Textual DeliveryIntended ] [ Result<Integer NativeLaunchFailure> ] } ]
   ReadsTypedUserText.[ claude_typed_text.[ Option<String> ] ]

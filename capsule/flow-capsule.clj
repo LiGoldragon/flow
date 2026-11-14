@@ -765,11 +765,33 @@
   the Opus as its sender."
   [] (bound-pane (inspect secondary)))
 
+(defn sendable
+  "The message as Flow 0.55 sends it, `Send.{ <Address> <message> }`: its
+  priority decides delivery, so a Wake of Soft work is MiddleAbrupt, which
+  wakes an asleep recipient, and a Queue keeps the priority it names."
+  [delivery message]
+  (if (and (= delivery "Wake") (str/starts-with? message "Soft."))
+    (str "MiddleAbrupt." (subs message (count "Soft.")))
+    message))
+
+(defn sent?
+  "Whether a Send's reply admits it: Sent, or SendAccepted."
+  [reply]
+  (boolean (re-find #"^(Sent|SendAccepted)\." (str reply))))
+
 (defn send [delivery message pane]
-  (flow (str "Send.{ " quaternary " " delivery " " message " }") pane))
+  (flow (str "Send.{ " quaternary " " (sendable delivery message) " }") pane))
 
 (defn send-to [addr delivery message pane]
-  (flow (str "Send.{ " addr " " delivery " " message " }") pane))
+  (flow (str "Send.{ " addr " " (sendable delivery message) " }") pane))
+
+(defn only-scenarios
+  "The scenarios whose number, the first word of the name, is in numbers;
+  every scenario when numbers is empty."
+  [scenarios numbers]
+  (if (seq numbers)
+    (filterv #(contains? numbers (first (str/split (first %) #" "))) scenarios)
+    scenarios))
 
 (declare nexus nexus-log start-nexus!)
 
@@ -1792,6 +1814,9 @@
       ;; Warm for an hour, so the scenarios before leave it warm; the
       ;; ceiling is configure.datom's.
       (let [warm (flow-meta "Configure.Resumptions.[ { claude-haiku-5-5 60 150000 } ]")
+            ;; A seat never launched is launched first, to sleep once.
+            launched (when-not (or (seq (:past (current waking-seat))) (awake-flow waking-seat))
+                       (launch waking-seat))
             asleep (watch 150 #(let [m (current waking-seat)]
                                  (when (and (= :asleep (:state m)) (empty? (:queue m))) m)))
             last-flow (some-> asleep :past last str)
@@ -1804,9 +1829,9 @@
             typed (transcript-holds waking-seat "Tag r1" 90)
             _ (keep-text! "scenario-21-command-lines.txt" (str/join "\n" command-lines))
             restored (restore-configuration!)]
-        {:reply (str "Resumptions: " warm " / Wake: " sent " / restore: " restored)
-         :pass (boolean (and (str/starts-with? warm "Configured.") asleep last-flow
-                             (str/starts-with? sent "SendAccepted.")
+        {:reply (str "Resumptions: " warm (when launched (str " / Launch: " launched))
+                     " / Wake: " sent " / restore: " restored)
+         :pass (boolean (and (str/starts-with? warm "Configured.") asleep last-flow (sent? sent)
                              (= woke last-flow) resumed logged typed))
          :watched (str waking-seat " Asleep after flow " last-flow ", woken as " woke
                        (if (= woke last-flow) " (the same FlowId)" " (another FlowId)")
@@ -1831,8 +1856,7 @@
             m (current waking-seat)
             restored (restore-configuration!)]
         {:reply (str "Resumptions: " ceiling " / Wake: " sent " / restore: " restored)
-         :pass (boolean (and (str/starts-with? ceiling "Configured.") asleep last-flow
-                             (str/starts-with? sent "SendAccepted.")
+         :pass (boolean (and (str/starts-with? ceiling "Configured.") asleep last-flow (sent? sent)
                              woke (not= woke last-flow) (some #{last-flow} (map str (:past m)))
                              (not (resumed-on? command-lines native)) fresh-line))
          :watched (str waking-seat " Asleep after flow " last-flow ", woken as " woke
@@ -2716,12 +2740,13 @@
     (apply takeover-main (rest args)))
   (let [[pkg & options] args]
     (when-not (and pkg (not (str/starts-with? pkg "--")))
-      (refuse "usage: flow-capsule <flow-package> [--keep-going] [--log <path>]"))
+      (refuse "usage: flow-capsule <flow-package> [--keep-going] [--log <path>] [--only <number>,...]"))
     (reset! package (str (fs/canonicalize pkg)))
     (reset! package-interface {@package :place})
     (reset! keep-going (boolean (some #{"--keep-going"} options)))
     (let [workspace-only (boolean (some #{"--workspace-only"} options))
-          selected-scenarios (if workspace-only (subvec base-scenarios 0 2) scenarios)
+          only (some-> (second (drop-while #(not= % "--only") options)) (str/split #",") set)
+          selected-scenarios (only-scenarios (if workspace-only (subvec base-scenarios 0 2) scenarios) only)
           log (or (second (drop-while #(not= % "--log") options)) (str state-root "/nexus.log"))
           wall (System/currentTimeMillis)
           passed (atom true)

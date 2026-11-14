@@ -438,6 +438,22 @@
        (and (not (flow-capsule/resumed-on? ["/bin/claude --session-id 1f2e-77"] "1f2e-77"))
             (not (flow-capsule/resumed-on? ["/bin/claude --resume 9a9a-00"] "1f2e-77"))
             (not (flow-capsule/resumed-on? ["/bin/claude --resume 1f2e-77"] nil))))
+;; A Send names its recipient and its message, whose priority decides its
+;; delivery: a Wake of Soft work is MiddleAbrupt.
+(check "a Wake of Soft work is sent MiddleAbrupt"
+       (= "MiddleAbrupt.Order.«x»" (flow-capsule/sendable "Wake" "Soft.Order.«x»")))
+(check "a Queue keeps its priority, and a Wake of abrupt work is as named"
+       (and (= "Soft.Notice.«x»" (flow-capsule/sendable "Queue" "Soft.Notice.«x»"))
+            (= "HardAbrupt.Order.«x»" (flow-capsule/sendable "Wake" "HardAbrupt.Order.«x»"))))
+(check "Sent and SendAccepted admit a Send; a refusal does not"
+       (and (flow-capsule/sent? "Sent.k7ph") (flow-capsule/sent? "SendAccepted.{ k7ph 116 Queued }")
+            (not (flow-capsule/sent? "SendRefused.Unresolved")) (not (flow-capsule/sent? nil))))
+;; --only selects scenarios by their number.
+(let [named [["0 a" :a] ["21 b" :b] ["22 c" :c] ["2 d" :d]]]
+  (check "--only selects the scenarios it numbers, in their order"
+         (= [:a :b :c] (mapv second (flow-capsule/only-scenarios named #{"0" "21" "22"}))))
+  (check "no --only selects every scenario"
+         (= 4 (count (flow-capsule/only-scenarios named nil)))))
 ;; configure.datom declares the Haiku model's resumption, where the file is
 ;; beside this one.
 (let [datoms (fs/file (fs/parent (fs/canonicalize *file*)) "configure.datom")]

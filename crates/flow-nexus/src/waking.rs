@@ -840,6 +840,37 @@ trait WakesInParts {
     fn successor_refused(&self, flow_id: &str);
 }
 
+/// The start of a Claude session's history: before its transcript holds
+/// anything, whichever file it is written to. Input anchored here is read
+/// for in the whole transcript.
+pub(crate) trait StartsSessionHistory {
+    fn session_start() -> Self;
+}
+
+impl StartsSessionHistory for NativeTranscriptCursor {
+    fn session_start() -> Self {
+        NativeTranscriptCursor {
+            device: 0,
+            inode: 0,
+            offset: 0,
+        }
+    }
+}
+
+/// Whether a launch opens its seat with no first prompt: a Simplified seat
+/// with no instruction, whose first model turn is the queued request a
+/// drain types.
+pub(crate) trait OpensWithoutPrompt {
+    fn opens_without_prompt(&self) -> bool;
+}
+
+impl OpensWithoutPrompt for LaunchProfile {
+    fn opens_without_prompt(&self) -> bool {
+        self.flow_kind == signal_flow::FlowKind::Simplified
+            && self.instruction_prompt.0.trim().is_empty()
+    }
+}
+
 pub(crate) trait ReadsClaudeDelivery {
     fn simplified_first_input_ready(&self, node: &FlowNode) -> bool;
     fn claude_transcript(&self, node: &FlowNode) -> Option<std::path::PathBuf>;
@@ -861,10 +892,7 @@ impl ReadsClaudeDelivery for RunningNexus {
             || node.flow_lifecycle != signal_flow::FlowLifecycle::Active
             || !self
                 .last_launch_profile(&node.flow_id.0)
-                .is_some_and(|profile| {
-                    profile.flow_kind == signal_flow::FlowKind::Simplified
-                        && profile.instruction_prompt.0.trim().is_empty()
-                })
+                .is_some_and(|profile| profile.opens_without_prompt())
         {
             return false;
         }
@@ -901,11 +929,9 @@ impl ReadsClaudeDelivery for RunningNexus {
     fn claude_delivery_cursor(&self, node: &FlowNode) -> Option<NativeTranscriptCursor> {
         let cursor = match self.claude_transcript(node) {
             Some(transcript) => transcript.claude_cursor()?,
-            None if self.simplified_first_input_ready(node) => ClaudeTranscriptCursor {
-                device: 0,
-                inode: 0,
-                offset: 0,
-            },
+            None if self.simplified_first_input_ready(node) => {
+                return Some(NativeTranscriptCursor::session_start());
+            }
             None => return None,
         };
         Some(NativeTranscriptCursor {
@@ -1308,7 +1334,7 @@ impl ReconcilesQueueDelivery for RunningNexus {
         let Ok(attempts) = self.store.unsettled_deliveries(&metaflow.address) else {
             return;
         };
-        let attempt = attempts.into_iter().find(|attempt| {
+        let own = |attempt: &QueueDeliveryAttempt| {
             attempt.flow_id == flow_id
                 && attempt.harness_kind == HarnessKind::Claude
                 && prompt
@@ -1320,15 +1346,24 @@ impl ReconcilesQueueDelivery for RunningNexus {
                     attempt.phase,
                     QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_)
                 )
+        };
+        // The batch a fresh session's first prompt carried settles on that
+        // prompt's receipt, the first prompt its session reported.
+        if let Some(carried) = attempts
+            .iter()
+            .find(|attempt| own(attempt) && self.startup_launch(attempt).is_some())
+        {
+            let _ = self.reconcile_delivery(carried);
+        }
+        let attempt = attempts.into_iter().find(|attempt| {
+            own(attempt)
+                && self.startup_launch(attempt).is_none()
                 && self
                     .cohort_runs(attempt)
                     .iter()
                     .any(|(_, text)| text.prompt_sha256() == prompt.prompt_sha256.0)
         });
         let Some(attempt) = attempt else {
-            // The correlated hook is durable launch evidence. The logical
-            // input becomes Delivered only when confirm_wake atomically
-            // applies that exact receipt and removes its startup prefix.
             return;
         };
         // A native hook proves that a submission was observed, not that an
@@ -2795,6 +2830,23 @@ impl ParksCohort for RunningNexus {
     }
 
     fn find_receipt(&self, attempt: &QueueDeliveryAttempt) -> Result<Receipted, Undecided> {
+        // A request a launch's first prompt carried is received when that
+        // prompt is: the whole batch it carried settles on its receipt.
+        if let Some(launch_request_id) = self.startup_launch(attempt) {
+            return match self.startup_receipt(&attempt.flow_id, &launch_request_id) {
+                Some(receipt) if receipt.native_session_id.0 == attempt.thread_id => Ok((
+                    self.typed_group(attempt),
+                    receipt.native_prompt_id.0.clone(),
+                    format!(
+                        "first prompt of launch {launch_request_id}, native prompt {}",
+                        receipt.native_prompt_id.0
+                    ),
+                    SeatAfter::Resting,
+                )),
+                // Typed and not yet seen taken: absence is never proven.
+                _ => Err(Undecided::AbsenceUnprovable),
+            };
+        }
         // One payload may have carried this attempt with the others typed
         // with it: each run of them is looked for, the longest first.
         let mut found = Undecided::AbsenceUnprovable;
@@ -3018,6 +3070,149 @@ impl ParksCohort for RunningNexus {
     }
 }
 
+/// A fresh wake's first prompt carries the queued batch. `Started` proves
+/// that prompt was submitted; the receipt that proves Claude took it can
+/// land after `Started`. Until it does, the batch is typed input awaiting
+/// its receipt: each request leaves the queue as an Uncertain attempt
+/// anchored at the start of the woken session, so it is never typed again,
+/// and the launch's own receipt settles it.
+pub(crate) trait CarriesStartup {
+    /// The receipt of the first prompt launch `launch_request_id` typed
+    /// into flow `flow_id`: the launch's recorded observation, else the
+    /// transcript showing that prompt and the flow's first answer, else the
+    /// first prompt the flow's own session reported submitted.
+    fn startup_receipt(
+        &self,
+        flow_id: &str,
+        launch_request_id: &str,
+    ) -> Option<signal_flow::NativeReceipt>;
+    /// Under the dispatch gate the caller holds: parks the batch, oldest
+    /// first, as Uncertain attempts of the woken Claude session anchored at
+    /// its start. False when the store refused, the seat is no Claude seat,
+    /// or the batch is not the queue's head.
+    fn carry_startup(&self, address: &Address, flow_id: &str, startup: &[QueueEntry]) -> bool;
+    /// The launch whose first prompt carried `attempt`, when one did: a
+    /// Claude attempt anchored at its session's start, in a flow whose
+    /// launch typed a first prompt. A request typed by a drain is anchored
+    /// at the transcript as it stood, and at the session's start only in a
+    /// flow that opened with no prompt.
+    fn startup_launch(&self, attempt: &QueueDeliveryAttempt) -> Option<String>;
+}
+
+impl CarriesStartup for RunningNexus {
+    fn startup_receipt(
+        &self,
+        flow_id: &str,
+        launch_request_id: &str,
+    ) -> Option<signal_flow::NativeReceipt> {
+        use crate::generated::starter::StartupProgress;
+        use crate::herdr::launch::ObservesNativeTargetReceipt;
+        let node = self.store.flow_node(flow_id).ok().flatten()?;
+        let attempt = self
+            .store
+            .launch_attempt(launch_request_id)
+            .ok()
+            .flatten()?;
+        let receipt = |native_session_id, native_turn_id: signal_flow::NativeTurnId| {
+            signal_flow::NativeReceipt {
+                harness_kind: node.harness_kind.clone(),
+                native_session_id,
+                native_prompt_id: signal_flow::NativePromptId(native_turn_id.0),
+            }
+        };
+        if let Some(signal_flow::PromptDeliveryResult::Observed(observed)) =
+            &attempt.prompt_delivery_result_option
+        {
+            return Some(receipt(
+                observed.native_session_id.clone(),
+                observed.native_turn_id.clone(),
+            ));
+        }
+        if let Some(intent) = &attempt.prompt_delivery_intent_option
+            && let Ok(StartupProgress::Received(observed)) =
+                self.herdr.observe_native_target_receipt(intent)
+        {
+            return Some(receipt(observed.native_session_id, observed.native_turn_id));
+        }
+        // A fresh session's first submitted prompt is its launch's: nothing
+        // else is typed into it before its launch answers Started.
+        self.store
+            .events(flow_id)
+            .ok()
+            .flatten()?
+            .into_iter()
+            .find_map(|event| match event {
+                RecordedHarnessEvent::PromptSubmitted(prompt)
+                    if self.correlated_prompt(flow_id, &prompt) =>
+                {
+                    Some(signal_flow::NativeReceipt {
+                        harness_kind: node.harness_kind.clone(),
+                        native_session_id: prompt.native_session_id_option?,
+                        native_prompt_id: signal_flow::NativePromptId(prompt.prompt_id_option?.0),
+                    })
+                }
+                _ => None,
+            })
+    }
+
+    fn carry_startup(&self, address: &Address, flow_id: &str, startup: &[QueueEntry]) -> bool {
+        let Some(first) = startup.first() else {
+            return true;
+        };
+        let node = match self.store.flow_node(flow_id) {
+            Ok(Some(node)) if node.harness_kind == HarnessKind::Claude => node,
+            _ => return false,
+        };
+        let head = match self.store.prepare_oldest_delivery(
+            address,
+            flow_id,
+            &node.session_id.0,
+            HarnessKind::Claude,
+            NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor::session_start()),
+        ) {
+            Ok(PrepareQueueDelivery::Prepared(head))
+                if head.queue_evidence
+                    == meta_signal_flow::QueueEvidence::Logical(first.clone()) =>
+            {
+                head
+            }
+            _ => return false,
+        };
+        if !self
+            .store
+            .mark_delivery_uncertain(&head.attempt_id)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        let carried = self.park_cohort(&head, startup);
+        eprintln!(
+            "flow-nexus: flow {flow_id} woke; its first prompt carried {} requests, their receipt awaited",
+            carried.len()
+        );
+        carried.len() == startup.len()
+    }
+
+    fn startup_launch(&self, attempt: &QueueDeliveryAttempt) -> Option<String> {
+        if attempt.harness_kind != HarnessKind::Claude
+            || attempt.history_anchor
+                != NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor::session_start())
+        {
+            return None;
+        }
+        let launch_request_id = self
+            .store
+            .launch_requests_bound_to(&attempt.flow_id)
+            .ok()?
+            .pop()?;
+        let profile = self
+            .store
+            .composable_launch_profile(&launch_request_id)
+            .ok()??;
+        (!profile.opens_without_prompt()).then_some(launch_request_id)
+    }
+}
+
 impl WakesInParts for RunningNexus {
     fn settle_startup(
         &self,
@@ -3027,70 +3222,7 @@ impl WakesInParts for RunningNexus {
         startup: &[QueueEntry],
         simplified: bool,
     ) -> bool {
-        let harness_kind = self
-            .store
-            .flow_node(flow_id)
-            .ok()
-            .flatten()
-            .map(|node| node.harness_kind);
-        let harness_kind_for_attempt = harness_kind.clone();
-        let receipt = self
-            .store
-            .launch_attempt(launch_request_id)
-            .ok()
-            .flatten()
-            .and_then(|attempt| {
-                let signal_flow::PromptDeliveryResult::Observed(observed) =
-                    attempt.prompt_delivery_result_option?
-                else {
-                    return None;
-                };
-                Some(signal_flow::NativeReceipt {
-                    harness_kind: harness_kind_for_attempt.clone()?,
-                    native_session_id: observed.native_session_id,
-                    native_prompt_id: signal_flow::NativePromptId(observed.native_turn_id.0),
-                })
-            })
-            .or_else(|| {
-                use crate::generated::starter::StartupProgress;
-                use crate::herdr::launch::ObservesNativeTargetReceipt;
-                let intent = self
-                    .store
-                    .launch_attempt(launch_request_id)
-                    .ok()
-                    .flatten()?
-                    .prompt_delivery_intent_option?;
-                let StartupProgress::Received(observed) =
-                    self.herdr.observe_native_target_receipt(&intent).ok()?
-                else {
-                    return None;
-                };
-                Some(signal_flow::NativeReceipt {
-                    harness_kind: harness_kind_for_attempt.clone()?,
-                    native_session_id: observed.native_session_id,
-                    native_prompt_id: signal_flow::NativePromptId(observed.native_turn_id.0),
-                })
-            })
-            .or_else(|| {
-                self.store
-                    .events(flow_id)
-                    .ok()
-                    .flatten()?
-                    .into_iter()
-                    .rev()
-                    .find_map(|event| match event {
-                        RecordedHarnessEvent::PromptSubmitted(prompt) => {
-                            Some(signal_flow::NativeReceipt {
-                                harness_kind: harness_kind.clone()?,
-                                native_session_id: prompt.native_session_id_option?,
-                                native_prompt_id: signal_flow::NativePromptId(
-                                    prompt.prompt_id_option?.0,
-                                ),
-                            })
-                        }
-                        _ => None,
-                    })
-            });
+        let receipt = self.startup_receipt(flow_id, launch_request_id);
         let has_logical = startup.iter().any(|entry| {
             self.store
                 .logical_delivery_snapshot(&entry.logical_delivery_id)
@@ -3098,12 +3230,6 @@ impl WakesInParts for RunningNexus {
                 .flatten()
                 .is_some()
         });
-        // A Started response proves the run, while the transcript receipt
-        // proves the queued payload. If that second witness is unavailable,
-        // preserve the exact queue prefix rather than guessing it delivered.
-        if has_logical && receipt.is_none() {
-            return false;
-        }
         if simplified
             && let Some(oldest) = startup.first()
             && let signal_flow::SentBy::Sender(recipient) = &oldest.sent_by
@@ -3119,9 +3245,18 @@ impl WakesInParts for RunningNexus {
                 return false;
             }
         }
-        self.store
-            .settle_wake_startup_receipts(address, flow_id, startup, receipt.as_ref())
-            .unwrap_or(false)
+        // A Started response proves the first prompt was submitted, and the
+        // first prompt carried the batch; the receipt proves it was taken.
+        // A receipt not yet observed leaves the batch typed input awaiting
+        // its receipt: it leaves the queue, is never typed again, and
+        // settles when the receipt is observed (`find_receipt`).
+        match receipt {
+            None if has_logical => self.carry_startup(address, flow_id, startup),
+            receipt => self
+                .store
+                .settle_wake_startup_receipts(address, flow_id, startup, receipt.as_ref())
+                .unwrap_or(false),
+        }
     }
 
     fn waken(&self, address: &Address) -> Result<FlowId, WakeRefusal> {

@@ -473,14 +473,23 @@ impl ReadsUsageLines for str {
             if entry.get("isSidechain").and_then(Value::as_bool) == Some(true) {
                 return None;
             }
+            if entry.get("type").and_then(Value::as_str) != Some("assistant") {
+                return None;
+            }
             let usage = entry.get("message")?.get("usage")?;
-            let tokens = |key: &str| usage.get(key).and_then(Value::as_i64).unwrap_or(0);
-            usage.get("input_tokens")?;
-            Some(
-                tokens("input_tokens")
-                    + tokens("cache_read_input_tokens")
-                    + tokens("cache_creation_input_tokens"),
-            )
+            let input = usage.get("input_tokens")?.as_i64()?;
+            let cache_read = match usage.get("cache_read_input_tokens") {
+                None => 0,
+                Some(value) => value.as_i64()?,
+            };
+            let cache_creation = match usage.get("cache_creation_input_tokens") {
+                None => 0,
+                Some(value) => value.as_i64()?,
+            };
+            if input < 0 || cache_read < 0 || cache_creation < 0 {
+                return None;
+            }
+            input.checked_add(cache_read)?.checked_add(cache_creation)
         })
     }
 }

@@ -37,7 +37,6 @@ pub(crate) trait ReadsContextWarningConfiguration {
         &self,
         model: &str,
     ) -> Result<Option<ContextWarningPolicy>, StoreError>;
-    fn configured_hook_events(&self) -> Result<Vec<HarnessHookEvent>, StoreError>;
 }
 
 pub(crate) trait ReadsContextWarningProgress {
@@ -239,18 +238,6 @@ impl ReadsContextWarningConfiguration for FlowStore {
             _ => Err(StoreError::StateInvariant),
         }
     }
-
-    fn configured_hook_events(&self) -> Result<Vec<HarnessHookEvent>, StoreError> {
-        let rows = self.engine.match_records(QueryPlan::key(
-            self.meta_configuration_tables.context_warnings.hooks,
-            RecordKey::new("hooks"),
-        ))?;
-        match rows.records() {
-            [] => Ok(Vec::new()),
-            [row] => Ok(row.0.clone()),
-            _ => Err(StoreError::StateInvariant),
-        }
-    }
 }
 
 impl ReadsContextWarningProgress for FlowStore {
@@ -410,7 +397,7 @@ impl AdmitsContextWarnings for FlowStore {
             &metaflow,
             ContextWarningAdmission {
                 flow_id: observation.flow_id.clone(),
-                tokens: observation.tokens.clone(),
+                tokens: observation.tokens,
             },
         )?
         else {

@@ -460,7 +460,9 @@ fn a_subscription_sees_the_configuration_as_it_changes() {
     let disconnected = AtomicBool::new(false);
     let (frames, received) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
-        let observer = scope.spawn(|| {
+        let nexus = &nexus;
+        let node = &node;
+        let observer = scope.spawn(move || {
             nexus.observe_configuration(&disconnected, &mut |response| {
                 frames
                     .send(response.clone())
@@ -2128,5 +2130,141 @@ fn warning_admission_binds_actual_delivery_and_survives_reopen_and_policy_remova
             .0
             .len(),
         1
+    );
+}
+
+#[test]
+fn dispatch_orders_rebind_and_transport_free_warning_admission_both_ways() {
+    use crate::context_warnings::{ObservesContextWithDispatch, tests::fixture_policy};
+    use crate::store::SeedsRole;
+    use crate::store::context::RecordsContextSize;
+    use crate::store::context_warnings::ReadsContextWarningProgress;
+    use crate::store::metaflow::SleepsMetaflows;
+    use crate::store::repair::RepairsMetaflows;
+
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let node = ConfiguredStore::flow_node();
+    let mut policy = fixture_policy();
+    policy.context_usage_projection =
+        meta_signal_flow::ContextUsageProjection::ClaudeCompletedInputWithCache;
+    policy
+        .context_warning_limit
+        .context_boundary_evidence
+        .harness_kind = HarnessKind::Claude;
+    nexus.store.seed_role(signal_flow::CallerIdentity {
+        flow_id: node.flow_id.clone(),
+        aspect: Aspect::Field,
+        model_name: policy.model_name.clone(),
+    });
+    configures(&nexus, ConfigurationChange::ContextWarningPolicy(policy));
+    let mut successor = node.clone();
+    successor.flow_id = flow_ethos::FlowId("fresh-warning-flow".into());
+    successor.session_id = signal_flow::SessionId("fresh-warning-session".into());
+    successor.herdr_route_selection = HerdrRouteSelection::Unavailable;
+    successor.origin = Origin::Flow(FlowOrigin {
+        flow_id: successor.flow_id.clone(),
+        session_id: successor.session_id.clone(),
+    });
+    nexus.store.register_flow(successor.clone()).unwrap();
+    assert_eq!(
+        nexus
+            .store
+            .rebind_current_flow(&ConfiguredStore::message(), &node.flow_id.0)
+            .unwrap(),
+        Ok(())
+    );
+
+    // Rebind owns dispatch first. The observation has already captured the
+    // old native node, then waits for that turn; it records and admits nothing.
+    std::thread::scope(|scope| {
+        let dispatch = nexus.dispatch_gate.lock().unwrap();
+        let (entered, ready) = std::sync::mpsc::channel();
+        let nexus = &nexus;
+        let node = &node;
+        let observer = scope.spawn(move || {
+            entered.send(()).unwrap();
+            let _dispatch = nexus.dispatch_gate.lock().unwrap();
+            nexus.observe_context_with_dispatch(node, 180_000);
+        });
+        ready.recv().unwrap();
+        assert_eq!(
+            nexus
+                .store
+                .rebind_current_flow(&ConfiguredStore::message(), &successor.flow_id.0)
+                .unwrap(),
+            Ok(())
+        );
+        drop(dispatch);
+        observer.join().unwrap();
+    });
+    assert_eq!(nexus.store.context_size(&node.flow_id.0).unwrap(), None);
+    assert_eq!(nexus.store.warning_progress(&node.flow_id.0).unwrap(), None);
+    assert!(
+        nexus
+            .store
+            .metaflow(&ConfiguredStore::message())
+            .unwrap()
+            .unwrap()
+            .queue
+            .0
+            .is_empty()
+    );
+
+    // Admission owns dispatch first. Rebind waits, and the single committed
+    // Notice is identified by the old FlowId's terminal stage record.
+    assert_eq!(
+        nexus
+            .store
+            .rebind_current_flow(&ConfiguredStore::message(), &node.flow_id.0)
+            .unwrap(),
+        Ok(())
+    );
+    std::thread::scope(|scope| {
+        let dispatch = nexus.dispatch_gate.lock().unwrap();
+        let (entered, ready) = std::sync::mpsc::channel();
+        let nexus = &nexus;
+        let successor = &successor;
+        let rebind = scope.spawn(move || {
+            entered.send(()).unwrap();
+            let _dispatch = nexus.dispatch_gate.lock().unwrap();
+            assert_eq!(
+                nexus
+                    .store
+                    .rebind_current_flow(&ConfiguredStore::message(), &successor.flow_id.0)
+                    .unwrap(),
+                Ok(())
+            );
+        });
+        ready.recv().unwrap();
+        nexus.observe_context_with_dispatch(&node, 180_000);
+        drop(dispatch);
+        rebind.join().unwrap();
+    });
+    let progress = nexus
+        .store
+        .warning_progress(&node.flow_id.0)
+        .unwrap()
+        .unwrap();
+    let queue = nexus
+        .store
+        .metaflow(&ConfiguredStore::message())
+        .unwrap()
+        .unwrap()
+        .queue
+        .0;
+    assert_eq!(queue.len(), 1);
+    assert!(
+        progress
+            .warning_stage_progress_vector
+            .iter()
+            .any(|row| row.warning_stage_state
+                == crate::generated::memory::WarningStageState::Admitted(
+                    queue[0].logical_delivery_id.clone()
+                ))
+    );
+    assert_eq!(
+        nexus.store.warning_progress(&successor.flow_id.0).unwrap(),
+        None
     );
 }

@@ -92,8 +92,7 @@
 
 use crate::RunningNexus;
 use crate::claude::{
-    ClaudeQueuedHistory, ClaudeTranscriptCursor, LocatesClaudeTranscript, MeasuresClaudeContext,
-    ReadsClaudeTurns,
+    ClaudeQueuedHistory, ClaudeTranscriptCursor, LocatesClaudeTranscript, ReadsClaudeTurns,
 };
 use crate::codex::{CodexTurnHistory, ReadsCodexTurnHistory, SelectsCodexEndpoint};
 use crate::codex_turns::{SettlesRestingCodexSeats, TracksCodexTurns};

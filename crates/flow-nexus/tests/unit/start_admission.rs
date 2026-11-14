@@ -105,7 +105,7 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
             system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
                 "spirit:core:0".into(),
             )]),
-            user_modules: signal_flow::UserModules(vec![]),
+            prompt_modules: signal_flow::PromptModules(vec![]),
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
             continuity: meta_signal_flow::Continuity::OnDemand,
@@ -118,8 +118,8 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
                 .dispatch_meta(meta_signal_flow::Query::Configure(
                     meta_signal_flow::ConfigurationChange::Metaflows(vec![declared])
                 )),
-            meta_signal_flow::Response::ConfigureRejected(
-                meta_signal_flow::ConfigureRejection::TopicRefused(flow_ethos::Topic(topic.into()))
+            meta_signal_flow::Response::ConfigureRefused(
+                meta_signal_flow::ConfigureRefusal::TopicRefused(flow_ethos::Topic(topic.into()))
             ),
             "{topic:?}"
         );

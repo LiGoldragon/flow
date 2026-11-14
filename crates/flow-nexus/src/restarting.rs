@@ -1215,18 +1215,18 @@ impl RestartsInSteps for RunningNexus {
             .metaflow_declaration(&record.address)
             .map_err(|_| refused("StoreRefused"))?;
         let herdr_session_name = self.resume_session_name(record);
-        let (system_modules, user_modules, flow_kind, tool_set, leave_outs_option) =
+        let (system_modules, prompt_modules, flow_kind, tool_set, leave_outs_option) =
             match (declared, last) {
                 (Some(declared), _) => (
                     declared.system_modules,
-                    declared.user_modules,
+                    declared.prompt_modules,
                     declared.flow_kind,
                     declared.tool_set,
                     None,
                 ),
                 (None, Some(profile)) => (
                     profile.system_modules,
-                    profile.user_modules,
+                    profile.prompt_modules,
                     profile.flow_kind,
                     profile.tool_set,
                     profile.leave_outs_option,
@@ -1246,7 +1246,7 @@ impl RestartsInSteps for RunningNexus {
                 record.flow_id.0, record.attempts.0
             )),
             system_modules,
-            user_modules,
+            prompt_modules,
             remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(0)),
             address: record.address.clone(),
             model_name: signal_flow::ModelName(model_name),

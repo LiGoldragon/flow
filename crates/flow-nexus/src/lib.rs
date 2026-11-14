@@ -1804,80 +1804,83 @@ pub trait ConfiguresFromMeta {
 
 impl ConfiguresFromMeta for RunningNexus {
     fn configure_meta(&self, edit: store::ConfigurationEdit) -> meta_signal_flow::Response {
+        use store::EchoesConfigurationEdit;
         let before = self.store.configuration_snapshot().ok().flatten();
+        // A taken edit is answered by its echo, whether or not it wrote.
+        let echo = edit.echo();
         // A module an Amend adds is resolved by the composer this Nexus
         // launches with, through its configured Curriculum socket.
         let composer = self.composer.current();
         match self.store.edit_configuration(edit, &*composer) {
-            Ok(outcome) => {
-                if outcome == meta_signal_flow::ConfigureOutcome::Replaced {
+            Ok(commit) => {
+                if commit == store::ConfigurationCommit::Written {
                     if let Err(error) = self.apply_configuration(before.as_ref()) {
                         eprintln!("flow-nexus: a committed configuration was not applied: {error}");
                     }
                     self.configuration_changes.announce();
                     self.store.reminder_changes.announce();
                 }
-                meta_signal_flow::Response::Configured(outcome)
+                echo
             }
             Err(store::StoreError::DuplicateConfigurationEntry) => {
-                meta_signal_flow::Response::ConfigureRejected(
-                    meta_signal_flow::ConfigureRejection::DuplicateEntry,
+                meta_signal_flow::Response::ConfigureRefused(
+                    meta_signal_flow::ConfigureRefusal::DuplicateEntry,
                 )
             }
             Err(store::StoreError::CodexModelsOverlap) => {
-                meta_signal_flow::Response::ConfigureRejected(
-                    meta_signal_flow::ConfigureRejection::CodexModelsOverlap,
+                meta_signal_flow::Response::ConfigureRefused(
+                    meta_signal_flow::ConfigureRefusal::CodexModelsOverlap,
                 )
             }
             Err(store::StoreError::UnknownFeature(leave_out)) => {
-                meta_signal_flow::Response::ConfigureRejected(
-                    meta_signal_flow::ConfigureRejection::UnknownFeature(leave_out),
+                meta_signal_flow::Response::ConfigureRefused(
+                    meta_signal_flow::ConfigureRefusal::UnknownFeature(leave_out),
                 )
             }
             Err(store::StoreError::UnknownPermaflow(address)) => {
-                meta_signal_flow::Response::ConfigureRejected(
-                    meta_signal_flow::ConfigureRejection::UnknownPermaflow(address),
+                meta_signal_flow::Response::ConfigureRefused(
+                    meta_signal_flow::ConfigureRefusal::UnknownPermaflow(address),
                 )
             }
             Err(store::StoreError::UnknownModule(identity)) => {
-                meta_signal_flow::Response::ConfigureRejected(
-                    meta_signal_flow::ConfigureRejection::UnknownModule(identity),
+                meta_signal_flow::Response::ConfigureRefused(
+                    meta_signal_flow::ConfigureRefusal::UnknownModule(identity),
                 )
             }
             Err(store::StoreError::CurriculumUnavailable) => {
-                meta_signal_flow::Response::ConfigureRejected(
-                    meta_signal_flow::ConfigureRejection::CurriculumUnavailable,
+                meta_signal_flow::Response::ConfigureRefused(
+                    meta_signal_flow::ConfigureRefusal::CurriculumUnavailable,
                 )
             }
             Err(store::StoreError::TopicRefused(topic)) => {
-                meta_signal_flow::Response::ConfigureRejected(
-                    meta_signal_flow::ConfigureRejection::TopicRefused(flow_ethos::Topic(topic)),
+                meta_signal_flow::Response::ConfigureRefused(
+                    meta_signal_flow::ConfigureRefusal::TopicRefused(flow_ethos::Topic(topic)),
                 )
             }
             Err(store::StoreError::MinutesRefused(refusal)) => {
-                meta_signal_flow::Response::ConfigureRejected(
-                    meta_signal_flow::ConfigureRejection::MinutesRefused(refusal),
+                meta_signal_flow::Response::ConfigureRefused(
+                    meta_signal_flow::ConfigureRefusal::MinutesRefused(refusal),
                 )
             }
             Err(store::StoreError::CountersRefused(refusal)) => {
-                meta_signal_flow::Response::ConfigureRejected(
-                    meta_signal_flow::ConfigureRejection::CountersRefused(refusal),
+                meta_signal_flow::Response::ConfigureRefused(
+                    meta_signal_flow::ConfigureRefusal::CountersRefused(refusal),
                 )
             }
             Err(store::StoreError::RequestIdDrawsRefused) => {
-                meta_signal_flow::Response::ConfigureRejected(
-                    meta_signal_flow::ConfigureRejection::RequestIdDrawsRefused,
+                meta_signal_flow::Response::ConfigureRefused(
+                    meta_signal_flow::ConfigureRefusal::RequestIdDrawsRefused,
                 )
             }
             Err(store::StoreError::AnnouncementTriesRefused) => {
-                meta_signal_flow::Response::ConfigureRejected(
-                    meta_signal_flow::ConfigureRejection::AnnouncementTriesRefused,
+                meta_signal_flow::Response::ConfigureRefused(
+                    meta_signal_flow::ConfigureRefusal::AnnouncementTriesRefused,
                 )
             }
             Err(store::StoreError::NexusUnconfigured) => meta_signal_flow::Response::Unconfigured,
             Err(store::StoreError::InvalidHeartbeatPeriod) => {
-                meta_signal_flow::Response::ConfigureRejected(
-                    meta_signal_flow::ConfigureRejection::StoreRefused,
+                meta_signal_flow::Response::ConfigureRefused(
+                    meta_signal_flow::ConfigureRefusal::StoreRefused,
                 )
             }
             Err(error) => meta_signal_flow::Response::Refused(
@@ -5935,7 +5938,7 @@ mod tests {
                     signal_flow::ModuleIdentity("spirit:core:0".into()),
                     signal_flow::ModuleIdentity("intent:flow:0".into()),
                 ]),
-                user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
                     "operation:main-flow:0".into(),
                 )]),
                 flow_kind: signal_flow::FlowKind::Regular,
@@ -6121,7 +6124,7 @@ mod tests {
                 root_option,
                 leave_outs: signal_flow::LeaveOuts(Vec::new()),
                 system_modules: profile.system_modules.clone(),
-                user_modules: profile.user_modules.clone(),
+                prompt_modules: profile.prompt_modules.clone(),
                 flow_kind: profile.flow_kind.clone(),
                 tool_set: profile.tool_set.clone(),
                 continuity: meta_signal_flow::Continuity::OnDemand,
@@ -6175,7 +6178,7 @@ mod tests {
                         invalid.to_string_lossy().into_owned(),
                     )),
                     system_modules: staged.profile.system_modules.clone(),
-                    user_modules: staged.profile.user_modules.clone(),
+                    prompt_modules: staged.profile.prompt_modules.clone(),
                     flow_kind: staged.profile.flow_kind.clone(),
                     tool_set: staged.profile.tool_set.clone(),
                     continuity: meta_signal_flow::Continuity::OnDemand,
@@ -7516,9 +7519,9 @@ mod tests {
                         system_modules: signal_flow::SystemModules(vec![
                             signal_flow::ModuleIdentity("spirit:core:0".into())
                         ]),
-                        user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
-                            "knowledge:flow:0".into()
-                        )]),
+                        prompt_modules: signal_flow::PromptModules(vec![
+                            signal_flow::ModuleIdentity("knowledge:flow:0".into())
+                        ]),
                         flow_kind: signal_flow::FlowKind::Regular,
                         tool_set: signal_flow::ToolSet::Default,
                         continuity: meta_signal_flow::Continuity::OnDemand,
@@ -7558,7 +7561,7 @@ mod tests {
             vec![signal_flow::ModuleIdentity("spirit:core:0".to_owned())]
         );
         assert_eq!(
-            profile.user_modules.0,
+            profile.prompt_modules.0,
             vec![signal_flow::ModuleIdentity("knowledge:flow:0".to_owned())]
         );
         assert_eq!(

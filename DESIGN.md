@@ -245,8 +245,10 @@ On the meta socket one declaration is changed alone:
 Nexus) and `Configure.Refresh.ConfigureThreshold` (by its model name) add or
 replace one row in one atomic commit, the rest of its family kept;
 `Remove.[ Permaflow.Address Harness.HarnessKind Refresh.ModelName ]` takes
-one away. Each answers `Configured.[ Replaced Unchanged ]`, a Harness while no
-Nexus is declared `Unconfigured`. The family-whole `Configure` stays.
+one away. A Configure answers `Configured` with the change it was given,
+a Remove `Removed` with its Removal, each echoed whole whether or not
+anything was written; a Harness while no Nexus is declared answers
+`Unconfigured`, and a refusal `ConfigureRefused`. The family-whole `Configure` stays.
 
 `Replace` carries a `StartRequest` whose profile names the predecessor. The
 successor launches through the one Start path. From the successor's
@@ -642,7 +644,7 @@ Fresh stores persist default sockets, source root, and Codex endpoints. Meta
 `Configure` declares one configuration family whole (`Nexus`, `Models`,
 `Thresholds`, `SendServers`, `Metaflows`, `Investigation`),
 replaces the committed family in one commit, and
-answers `Configured.Replaced` or `Configured.Unchanged`; one permaflow is
+answers `Configured` with the declaration echoed; one permaflow is
 declared alone (`Permaflow`) or one value of it changed alone (`Amend`), and
 a permaflow carries its own leave-outs (0.55.0); rebinding live
 sockets and adapters is deferred to a Nexus restart. A launch's receipt compares
@@ -659,7 +661,7 @@ an uncapitalized camelCase identifier is refused `TopicRefused.Topic`,
 carrying the topic as written, never lowered. No model ranks above another:
 a launch waits for no other model's seat, and nothing starts before it. A
 request already attempted continues the launch already admitted. Configure refuses an
-Address with such a topic `ConfigureRejected.TopicRefused`, a Send
+Address with such a topic `ConfigureRefused.TopicRefused`, a Send
 whose recipient Address names one is refused `Refused.TopicRefused`
 before anything is queued, and a Codex send tool call whose target names
 one is refused `Refused.TopicRefused.«topic»`, its recorded answer. A simplified

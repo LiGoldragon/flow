@@ -72,8 +72,8 @@ use std::{
 
 use meta_signal_flow::{
     ConfigurationChange, ConfigurationSnapshot, ConfigureCounters, ConfigureHarnessFlags,
-    ConfigureMetaflow, ConfigureModel, ConfigureNexus, ConfigureOutcome, ConfigureSendServer,
-    ConfigureThreshold, CountersRefusal, HeartbeatConfig,
+    ConfigureMetaflow, ConfigureModel, ConfigureNexus, ConfigureSendServer, ConfigureThreshold,
+    CountersRefusal, HeartbeatConfig,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -2094,8 +2094,10 @@ pub trait ConfiguresOnlyStore: Sized {
     /// The open itself, on the store at `path` and in its place.
     fn open_in_place(path: &Path) -> Result<Self, StoreError>;
     fn configuration_snapshot(&self) -> Result<Option<ConfiguredFamilies>, StoreError>;
-    fn configure_change(&self, change: ConfigurationChange)
-    -> Result<ConfigureOutcome, StoreError>;
+    fn configure_change(
+        &self,
+        change: ConfigurationChange,
+    ) -> Result<ConfigurationCommit, StoreError>;
     fn configuration(&self, defaults: &DefaultConfiguration) -> Result<Configuration, StoreError>;
     fn configure(&self, configuration: Configuration) -> Result<Configuration, StoreError>;
 }
@@ -2249,7 +2251,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
     fn configure_change(
         &self,
         change: ConfigurationChange,
-    ) -> Result<ConfigureOutcome, StoreError> {
+    ) -> Result<ConfigurationCommit, StoreError> {
         FlowStore::configure_meta_change(
             &self.engine,
             &self.meta_configuration_tables,
@@ -3282,21 +3284,52 @@ pub enum ConfigurationEdit {
     Remove(meta_signal_flow::Removal),
 }
 
+/// Whether a committed configuration edit wrote anything: one equal to
+/// what the store holds writes nothing. The Nexus applies and announces
+/// only a written edit; either way the edit is answered by its echo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigurationCommit {
+    Written,
+    Unchanged,
+}
+
+/// The answer to a configuration edit the store took: the edit it was
+/// given, echoed whole, whether or not anything was written. A Configure
+/// answers Configured with its change, a Remove Removed with its Removal.
+pub trait EchoesConfigurationEdit {
+    fn echo(&self) -> meta_signal_flow::Response;
+}
+
+impl EchoesConfigurationEdit for ConfigurationEdit {
+    fn echo(&self) -> meta_signal_flow::Response {
+        match self {
+            ConfigurationEdit::Declare(change) => {
+                meta_signal_flow::Response::Configured(change.as_ref().clone())
+            }
+            ConfigurationEdit::Remove(removal) => {
+                meta_signal_flow::Response::Removed(removal.clone())
+            }
+        }
+    }
+}
+
 pub(crate) trait ManagesMetaflowState: Sized {
     fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError>;
     /// Replace one configuration family whole with its declaration, or
     /// change one declaration alone, with no context composer: the tests'
     /// declaration. The meta socket declares through `edit_configuration`.
     #[cfg(test)]
-    fn configure_change(&self, change: ConfigurationChange)
-    -> Result<ConfigureOutcome, StoreError>;
+    fn configure_change(
+        &self,
+        change: ConfigurationChange,
+    ) -> Result<ConfigurationCommit, StoreError>;
     /// A Configure or a Remove, committed. A module an Amend adds is first
     /// resolved by `modules`, the context composer the Nexus runs with.
     fn edit_configuration(
         &self,
         edit: ConfigurationEdit,
         modules: &dyn crate::context::ResolvesModule,
-    ) -> Result<ConfigureOutcome, StoreError>;
+    ) -> Result<ConfigurationCommit, StoreError>;
     /// Whether ProtectedAddresses names `address`.
     fn protects(&self, address: &Address) -> Result<bool, StoreError>;
     /// The refresh threshold configured for one model, if any.
@@ -3348,7 +3381,7 @@ impl ManagesMetaflowState for FlowStore {
     fn configure_change(
         &self,
         change: ConfigurationChange,
-    ) -> Result<ConfigureOutcome, StoreError> {
+    ) -> Result<ConfigurationCommit, StoreError> {
         self.edit_configuration(
             ConfigurationEdit::Declare(Box::new(change)),
             &crate::context::NoContextComposer,
@@ -3361,7 +3394,7 @@ impl ManagesMetaflowState for FlowStore {
         &self,
         edit: ConfigurationEdit,
         modules: &dyn crate::context::ResolvesModule,
-    ) -> Result<ConfigureOutcome, StoreError> {
+    ) -> Result<ConfigurationCommit, StoreError> {
         use counters::ConfiguresCounters;
         match edit {
             ConfigurationEdit::Declare(change) => match *change {
@@ -6170,7 +6203,7 @@ pub(crate) trait ReadsFlowMemory {
         engine: &Engine,
         table: TableReference<T>,
         declared: Vec<T>,
-    ) -> Result<ConfigureOutcome, StoreError>
+    ) -> Result<ConfigurationCommit, StoreError>
     where
         T: sema_engine::EngineStoredRecord + PartialEq + Clone + Send + Sync + 'static,
         <T as rkyv::Archive>::Archived: rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>
@@ -6224,10 +6257,10 @@ pub(crate) trait ReadsFlowMemory {
             }
         }
         if !changed {
-            return Ok(ConfigureOutcome::Unchanged);
+            return Ok(ConfigurationCommit::Unchanged);
         }
         engine.commit_atomic(commit)?;
-        Ok(ConfigureOutcome::Replaced)
+        Ok(ConfigurationCommit::Written)
     }
 
     /// One declaration added or replaced alone, keyed by its record key, in
@@ -6237,7 +6270,7 @@ pub(crate) trait ReadsFlowMemory {
         engine: &Engine,
         table: TableReference<T>,
         declared: T,
-    ) -> Result<ConfigureOutcome, StoreError>
+    ) -> Result<ConfigurationCommit, StoreError>
     where
         T: sema_engine::EngineStoredRecord + PartialEq + Clone + Send + Sync + 'static,
         <T as rkyv::Archive>::Archived: rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>
@@ -6257,12 +6290,12 @@ pub(crate) trait ReadsFlowMemory {
             .to_vec();
         let commit = match committed.as_slice() {
             [] => engine.begin_atomic_commit().assert(table, declared),
-            [stored] if stored == &declared => return Ok(ConfigureOutcome::Unchanged),
+            [stored] if stored == &declared => return Ok(ConfigurationCommit::Unchanged),
             [_] => engine.begin_atomic_commit().mutate(table, declared),
             _ => return Err(StoreError::StateInvariant),
         };
         engine.commit_atomic(commit)?;
-        Ok(ConfigureOutcome::Replaced)
+        Ok(ConfigurationCommit::Written)
     }
 
     /// One declaration taken away by its key; none held under it writes
@@ -6271,7 +6304,7 @@ pub(crate) trait ReadsFlowMemory {
         engine: &Engine,
         table: TableReference<T>,
         key: RecordKey,
-    ) -> Result<ConfigureOutcome, StoreError>
+    ) -> Result<ConfigurationCommit, StoreError>
     where
         T: sema_engine::EngineStoredRecord + PartialEq + Clone + Send + Sync + 'static,
         <T as rkyv::Archive>::Archived: rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>
@@ -6290,10 +6323,10 @@ pub(crate) trait ReadsFlowMemory {
             .records()
             .len();
         if committed == 0 {
-            return Ok(ConfigureOutcome::Unchanged);
+            return Ok(ConfigurationCommit::Unchanged);
         }
         engine.commit_atomic(engine.begin_atomic_commit().retract(table, key))?;
-        Ok(ConfigureOutcome::Replaced)
+        Ok(ConfigurationCommit::Written)
     }
 
     /// The declared Nexus with its harness profiles changed by `change`,
@@ -6303,7 +6336,7 @@ pub(crate) trait ReadsFlowMemory {
         engine: &Engine,
         tables: &MetaConfigurationTables,
         change: impl FnOnce(&mut Vec<flow_ethos::HarnessProfile>),
-    ) -> Result<ConfigureOutcome, StoreError> {
+    ) -> Result<ConfigurationCommit, StoreError> {
         let rows = engine
             .match_records(QueryPlan::all(tables.nexus))?
             .records()
@@ -6325,7 +6358,7 @@ pub(crate) trait ReadsFlowMemory {
         engine: &Engine,
         tables: &MetaConfigurationTables,
         removal: meta_signal_flow::Removal,
-    ) -> Result<ConfigureOutcome, StoreError> {
+    ) -> Result<ConfigurationCommit, StoreError> {
         match removal {
             meta_signal_flow::Removal::Permaflow(address) => FlowStore::remove_configuration_entry(
                 engine,
@@ -6415,7 +6448,7 @@ pub(crate) trait ReadsFlowMemory {
         tables: &MetaConfigurationTables,
         amendment: meta_signal_flow::Amend_Data,
         modules: &dyn crate::context::ResolvesModule,
-    ) -> Result<ConfigureOutcome, StoreError> {
+    ) -> Result<ConfigurationCommit, StoreError> {
         use crate::composition::NamesVersionedModule;
         use crate::context::ModuleStanding;
         use meta_signal_flow::{Change, Element};
@@ -6457,9 +6490,9 @@ pub(crate) trait ReadsFlowMemory {
                 }
             }
             Change::Add(Element::PromptModule(identity)) => {
-                if !metaflow.user_modules.0.contains(&identity) {
+                if !metaflow.prompt_modules.0.contains(&identity) {
                     resolved(&identity)?;
-                    metaflow.user_modules.0.push(identity);
+                    metaflow.prompt_modules.0.push(identity);
                 }
             }
             Change::Add(Element::LeaveOut(leave_out)) => {
@@ -6477,14 +6510,14 @@ pub(crate) trait ReadsFlowMemory {
                 metaflow.system_modules.0.retain(|held| held != &identity)
             }
             Change::Remove(Element::PromptModule(identity)) => {
-                metaflow.user_modules.0.retain(|held| held != &identity)
+                metaflow.prompt_modules.0.retain(|held| held != &identity)
             }
             Change::Remove(Element::LeaveOut(leave_out)) => {
                 metaflow.leave_outs.0.retain(|held| held != &leave_out)
             }
         }
         if metaflow == committed {
-            return Ok(ConfigureOutcome::Unchanged);
+            return Ok(ConfigurationCommit::Unchanged);
         }
         FlowStore::declare_configuration_entry(
             engine,
@@ -6504,7 +6537,7 @@ pub(crate) trait ReadsFlowMemory {
         tables: &MetaConfigurationTables,
         change: ConfigurationChange,
         modules: &dyn crate::context::ResolvesModule,
-    ) -> Result<ConfigureOutcome, StoreError> {
+    ) -> Result<ConfigurationCommit, StoreError> {
         use crate::launching::NamesTopic;
         // Every Address a declaration names has a camelCase topic, checked
         // before anything is written.
@@ -8399,7 +8432,7 @@ mod tests {
                     signal_flow::ModuleIdentity("spirit:core:0".into()),
                     signal_flow::ModuleIdentity("intent:flow:0".into()),
                 ]),
-                user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
                     "operation:main-flow:0".into(),
                 )]),
                 address: signal_flow::Address {
@@ -10977,7 +11010,7 @@ mod tests {
                     send_outcome: meta_signal_flow::SendOutcome(300),
                 })
                 .expect("replacement counters configure"),
-            super::ConfigureOutcome::Replaced
+            super::ConfigurationCommit::Written
         );
         assert_eq!(
             MintsRequestIds::request_binding(&replacement_store, &previous_request.request_id)

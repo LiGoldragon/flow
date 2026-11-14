@@ -35,7 +35,9 @@ use sema_engine::{
     Decision, Engine, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan,
     RecordKey, SchemaHash, TableDescriptor, UpgradeFrom,
 };
-use signal_flow::{Address, FlowKind, HarnessKind, LeaveOuts, SystemModules, ToolSet, UserModules};
+use signal_flow::{
+    Address, FlowKind, HarnessKind, LeaveOuts, PromptModules, SystemModules, ToolSet,
+};
 
 /// The permaflow family's schema label in 0.54.7.
 pub(crate) const META_METAFLOW_CONFIGURATION_SCHEMA_V6: &str =
@@ -52,7 +54,7 @@ pub(crate) struct ConfigureMetaflowV6 {
     pub(crate) address: Address,
     pub(crate) root_option: Option<Root>,
     pub(crate) system_modules: SystemModules,
-    pub(crate) user_modules: UserModules,
+    pub(crate) prompt_modules: PromptModules,
     pub(crate) flow_kind: FlowKind,
     pub(crate) tool_set: ToolSet,
     pub(crate) continuity: Continuity,
@@ -182,7 +184,7 @@ impl TakesLeaveOuts for ConfigureMetaflowV6 {
             root_option: self.root_option,
             leave_outs,
             system_modules: self.system_modules,
-            user_modules: self.user_modules,
+            prompt_modules: self.prompt_modules,
             flow_kind: self.flow_kind,
             tool_set: self.tool_set,
             continuity: self.continuity,

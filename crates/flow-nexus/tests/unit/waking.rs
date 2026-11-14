@@ -142,7 +142,7 @@ pub(super) fn maintain(fixture: &NexusFixture, address: Address) {
                     signal_flow::ModuleIdentity("spirit:core:0".into()),
                     signal_flow::ModuleIdentity("intent:flow:0".into()),
                 ]),
-                user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
                     "operation:main-flow:0".into(),
                 )]),
                 flow_kind: signal_flow::FlowKind::Regular,
@@ -1354,7 +1354,7 @@ fn last_launch_context() -> WakePlan {
             signal_flow::ModuleIdentity("spirit:core:0".into()),
             signal_flow::ModuleIdentity("intent:flow:0".into()),
         ]),
-        user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+        prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
             "operation:main-flow:0".into(),
         )]),
         flow_kind: signal_flow::FlowKind::Regular,
@@ -1404,7 +1404,7 @@ fn a_fresh_wake_composes_modules_and_queued_work_in_the_first_prompt() {
             signal_flow::ModuleIdentity("spirit:core:0".into()),
             signal_flow::ModuleIdentity("intent:flow:0".into()),
         ]),
-        user_modules: signal_flow::UserModules(vec![
+        prompt_modules: signal_flow::PromptModules(vec![
             signal_flow::ModuleIdentity("operation:main-flow:0".into()),
             signal_flow::ModuleIdentity("knowledge:flow:0".into()),
         ]),
@@ -1414,7 +1414,7 @@ fn a_fresh_wake_composes_modules_and_queued_work_in_the_first_prompt() {
     let profile = seat.fresh_profile();
     assert_eq!(profile.address, address(Model::Sol));
     assert_eq!(profile.instruction_prompt.0, text);
-    assert_eq!(profile.user_modules, seat.user_modules);
+    assert_eq!(profile.prompt_modules, seat.prompt_modules);
     let composed = fixture
         .nexus
         .composer
@@ -1631,7 +1631,7 @@ fn launched_claude_ended_by_with(
             signal_flow::ModuleIdentity("spirit:core:0".into()),
             signal_flow::ModuleIdentity("intent:flow:0".into()),
         ]),
-        user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+        prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
             "operation:main-flow:0".into(),
         )]),
         flow_kind: flow_kind.clone(),
@@ -3248,7 +3248,7 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
                 },
             ]))
             .unwrap(),
-        meta_signal_flow::ConfigureOutcome::Replaced
+        crate::store::ConfigurationCommit::Written
     );
 
     // The Codex flow Flow recorded on the thread, Awake at its Address. Its
@@ -4234,7 +4234,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
             signal_flow::ModuleIdentity("spirit:core:0".into()),
             signal_flow::ModuleIdentity("intent:flow:0".into()),
         ]),
-        user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+        prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
             "operation:main-flow:0".into(),
         )]),
         address: address(Model::Sol),
@@ -4341,7 +4341,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
         effort: "medium".into(),
         herdr_session_name: "fixture-session".into(),
         system_modules: profile.system_modules.clone(),
-        user_modules: profile.user_modules.clone(),
+        prompt_modules: profile.prompt_modules.clone(),
         leave_outs_option: None,
         flow_kind: signal_flow::FlowKind::Regular,
         tool_set: signal_flow::ToolSet::Default,
@@ -4659,7 +4659,7 @@ fn a_missing_module_wake_keeps_its_identity_in_the_caller_outcome_and_queue_stat
                 system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
                     "vision:absent:0".into(),
                 )]),
-                user_modules: signal_flow::UserModules(vec![]),
+                prompt_modules: signal_flow::PromptModules(vec![]),
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
                 continuity: meta_signal_flow::Continuity::Maintained,
@@ -4835,7 +4835,7 @@ impl SetsUpFirstTurnSend for NexusFixture {
                 signal_flow::ModuleIdentity("spirit:core:0".into()),
                 signal_flow::ModuleIdentity("intent:flow:0".into()),
             ]),
-            user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+            prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
                 "operation:main-flow:0".into(),
             )]),
             flow_kind: signal_flow::FlowKind::Regular,
@@ -6249,7 +6249,7 @@ fn a_start_starts_no_other_models_seat_first() {
                     signal_flow::ModuleIdentity("spirit:core:0".into()),
                     signal_flow::ModuleIdentity("intent:flow:0".into()),
                 ]),
-                user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
                     "operation:main-flow:0".into(),
                 )]),
                 flow_kind: signal_flow::FlowKind::Regular,

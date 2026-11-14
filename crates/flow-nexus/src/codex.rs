@@ -2214,7 +2214,7 @@ mod tests {
                     signal_flow::ModuleIdentity("spirit:core:0".into()),
                     signal_flow::ModuleIdentity("intent:flow:0".into()),
                 ]),
-                user_modules: signal_flow::UserModules(vec![]),
+                prompt_modules: signal_flow::PromptModules(vec![]),
                 address: signal_flow::Address {
                     aspect: signal_flow::Aspect::Field,
                     topic: flow_ethos::Topic("flow".into()),

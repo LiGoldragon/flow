@@ -298,7 +298,7 @@ mod tests {
         );
         assert_eq!(
             request
-                .user_modules
+                .prompt_modules
                 .0
                 .iter()
                 .map(|identity| identity.0.as_str())

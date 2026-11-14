@@ -592,7 +592,7 @@ impl LaunchesDeclared for RunningNexus {
                 signal_flow::LaunchRequestId("launch".minted_id())
             },
             system_modules: declaration.system_modules,
-            user_modules: declaration.user_modules,
+            prompt_modules: declaration.prompt_modules,
             address: address.clone(),
             model_name: signal_flow::ModelName(model_name),
             effort: signal_flow::Effort(Self::effort_of(&address).to_owned()),

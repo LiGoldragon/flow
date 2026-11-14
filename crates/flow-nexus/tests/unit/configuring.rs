@@ -15,8 +15,8 @@ use crate::store::{
 use crate::{Dispatches, OpensRunningNexus, RunningNexus};
 use meta_signal_flow::{
     ConfigurationChange, ConfigurationSnapshot, ConfigureHarnessFlags, ConfigureMetaflow,
-    ConfigureModel, ConfigureNexus, ConfigureOutcome, ConfigureRejection, ConfigureThreshold,
-    HeartbeatConfig, Response as MetaResponse,
+    ConfigureModel, ConfigureNexus, ConfigureRefusal, ConfigureThreshold, HeartbeatConfig,
+    Response as MetaResponse,
 };
 use signal_flow::{
     Address, Aspect, Bind_Data, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin,
@@ -78,18 +78,15 @@ fn harness_flags_are_per_metaflow_persistent_and_absent_by_default() {
                 },
             ])
         ),
-        MetaResponse::ConfigureRejected(ConfigureRejection::DuplicateEntry)
+        MetaResponse::ConfigureRefused(ConfigureRefusal::DuplicateEntry)
     );
     assert_eq!(nexus.store.harness_flags(&address).unwrap(), "");
-    assert_eq!(
-        configure(
-            &nexus,
-            ConfigurationChange::HarnessFlags(vec![ConfigureHarnessFlags {
-                address: address.clone(),
-                harness_flag_text: meta_signal_flow::HarnessFlagText("--one 'two three'".into()),
-            }])
-        ),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    configures(
+        &nexus,
+        ConfigurationChange::HarnessFlags(vec![ConfigureHarnessFlags {
+            address: address.clone(),
+            harness_flag_text: meta_signal_flow::HarnessFlagText("--one 'two three'".into()),
+        }]),
     );
     assert_eq!(
         nexus.store.harness_flags(&address).unwrap(),
@@ -123,7 +120,7 @@ fn heartbeat_configuration_requires_a_positive_period_and_unique_recipients() {
                 ]),
             }))
         ),
-        MetaResponse::ConfigureRejected(ConfigureRejection::DuplicateEntry),
+        MetaResponse::ConfigureRefused(ConfigureRefusal::DuplicateEntry),
     );
     assert_eq!(
         configure(
@@ -133,7 +130,7 @@ fn heartbeat_configuration_requires_a_positive_period_and_unique_recipients() {
                 heartbeat_recipients: meta_signal_flow::HeartbeatRecipients(vec![]),
             }))
         ),
-        MetaResponse::ConfigureRejected(ConfigureRejection::StoreRefused),
+        MetaResponse::ConfigureRefused(ConfigureRefusal::StoreRefused),
     );
 }
 
@@ -344,6 +341,36 @@ fn configure(nexus: &RunningNexus, change: ConfigurationChange) -> MetaResponse 
     nexus.dispatch_meta(meta_signal_flow::Query::Configure(change))
 }
 
+/// A Configure the Nexus takes is answered Configured with the change it
+/// was given, echoed whole.
+fn configures(nexus: &RunningNexus, change: ConfigurationChange) {
+    assert_eq!(
+        configure(nexus, change.clone()),
+        MetaResponse::Configured(change)
+    );
+}
+
+/// The store's Memory file, byte for byte as it stands.
+fn store_bytes(fixture: &ConfiguredStore) -> Vec<u8> {
+    std::fs::read(fixture.path()).expect("the store file reads")
+}
+
+/// A Configure that changes nothing is answered Configured with its change
+/// echoed, as every Configure is, and writes nothing: the store's file is
+/// byte-identical after it.
+fn configures_nothing(
+    fixture: &ConfiguredStore,
+    nexus: &RunningNexus,
+    change: ConfigurationChange,
+) {
+    let before = store_bytes(fixture);
+    configures(nexus, change);
+    assert!(
+        store_bytes(fixture) == before,
+        "the store is byte-identical"
+    );
+}
+
 /// A permaflow at `address` with `leave_outs`, a versioned system module
 /// and nothing else.
 pub(crate) fn permaflow(
@@ -357,7 +384,7 @@ pub(crate) fn permaflow(
         system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
             "spirit:core:0".into(),
         )]),
-        user_modules: signal_flow::UserModules(Vec::new()),
+        prompt_modules: signal_flow::PromptModules(Vec::new()),
         flow_kind: signal_flow::FlowKind::Regular,
         tool_set: signal_flow::ToolSet::Default,
         continuity: meta_signal_flow::Continuity::OnDemand,
@@ -387,10 +414,7 @@ fn configure_nexus_replaces_only_the_nexus_value_and_takes_effect_without_a_rest
     assert_eq!(before.metaflows.len(), 1);
 
     let replaced = ConfiguredStore::nexus(&fixture.defaults, &[SOL, LUNA], 45);
-    assert_eq!(
-        configure(&nexus, ConfigurationChange::Nexus(replaced.clone())),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
-    );
+    configures(&nexus, ConfigurationChange::Nexus(replaced.clone()));
     assert_eq!(
         snapshot(&nexus).configured_nexus.0,
         replaced,
@@ -398,9 +422,10 @@ fn configure_nexus_replaces_only_the_nexus_value_and_takes_effect_without_a_rest
     );
     assert_eq!(other_rows(&nexus), before, "no other row changed");
     // The same declaration again writes nothing.
-    assert_eq!(
-        configure(&nexus, ConfigurationChange::Nexus(replaced.clone())),
-        MetaResponse::Configured(ConfigureOutcome::Unchanged)
+    configures_nothing(
+        &fixture,
+        &nexus,
+        ConfigurationChange::Nexus(replaced.clone()),
     );
 
     // The running Nexus serves the replaced endpoints at once.
@@ -449,10 +474,7 @@ fn a_subscription_sees_the_configuration_as_it_changes() {
             panic!("a configured store answers its snapshot")
         };
         assert_ne!(first.configured_nexus.0, replaced);
-        assert_eq!(
-            configure(&nexus, ConfigurationChange::Nexus(replaced.clone())),
-            MetaResponse::Configured(ConfigureOutcome::Replaced)
-        );
+        configures(&nexus, ConfigurationChange::Nexus(replaced.clone()));
         let MetaResponse::Configuration(second) = received
             .recv_timeout(Duration::from_secs(10))
             .expect("the configuration as it changed")
@@ -479,7 +501,7 @@ fn a_refused_declaration_changes_nothing() {
         .push(flow_ethos::ModelName(LUNA.to_owned()));
     assert_eq!(
         configure(&nexus, ConfigurationChange::Nexus(overlapping)),
-        MetaResponse::ConfigureRejected(ConfigureRejection::CodexModelsOverlap)
+        MetaResponse::ConfigureRefused(ConfigureRefusal::CodexModelsOverlap)
     );
     // One key named twice is not a family.
     let model = |native: &str| ConfigureModel {
@@ -491,7 +513,7 @@ fn a_refused_declaration_changes_nothing() {
             &nexus,
             ConfigurationChange::Models(vec![model("claude-opus-5-5"), model("claude-sonnet-5-5")])
         ),
-        MetaResponse::ConfigureRejected(ConfigureRejection::DuplicateEntry)
+        MetaResponse::ConfigureRefused(ConfigureRefusal::DuplicateEntry)
     );
     assert_eq!(snapshot(&nexus), before);
     assert_eq!(other_rows(&nexus), rows);
@@ -522,15 +544,13 @@ fn each_family_is_its_last_declaration() {
             native: meta_signal_flow::Native(SOL.into()),
         },
     ];
-    assert_eq!(
-        configure(&nexus, ConfigurationChange::Models(models.clone())),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
-    );
+    configures(&nexus, ConfigurationChange::Models(models.clone()));
     // The Primary model the store held is gone: it is not declared.
     assert_eq!(snapshot(&nexus).configured_models.0, models);
-    assert_eq!(
-        configure(&nexus, ConfigurationChange::Models(models.clone())),
-        MetaResponse::Configured(ConfigureOutcome::Unchanged)
+    configures_nothing(
+        &fixture,
+        &nexus,
+        ConfigurationChange::Models(models.clone()),
     );
 
     let thresholds = vec![
@@ -543,10 +563,7 @@ fn each_family_is_its_last_declaration() {
             refresh_threshold: meta_signal_flow::RefreshThreshold(150_000),
         },
     ];
-    assert_eq!(
-        configure(&nexus, ConfigurationChange::Thresholds(thresholds.clone())),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
-    );
+    configures(&nexus, ConfigurationChange::Thresholds(thresholds.clone()));
     assert_eq!(snapshot(&nexus).configured_thresholds.0, thresholds);
 
     // A permaflow carries its leave-outs: the Metaflows family declared
@@ -559,10 +576,7 @@ fn each_family_is_its_last_declaration() {
             vec![signal_flow::LeaveOut::ClaudeMd],
         ),
     ];
-    assert_eq!(
-        configure(&nexus, ConfigurationChange::Metaflows(first)),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
-    );
+    configures(&nexus, ConfigurationChange::Metaflows(first));
     let second = vec![permaflow(
         quaternary_field(),
         vec![
@@ -570,10 +584,7 @@ fn each_family_is_its_last_declaration() {
             signal_flow::LeaveOut::WorkflowTool,
         ],
     )];
-    assert_eq!(
-        configure(&nexus, ConfigurationChange::Metaflows(second.clone())),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
-    );
+    configures(&nexus, ConfigurationChange::Metaflows(second.clone()));
     assert_eq!(snapshot(&nexus).configured_metaflows.0, second);
     assert!(
         nexus
@@ -592,12 +603,9 @@ fn each_family_is_its_last_declaration() {
             "/nix/store/send/bin/flow-send-mcp".into(),
         ),
     }];
-    assert_eq!(
-        configure(
-            &nexus,
-            ConfigurationChange::SendServers(send_servers.clone())
-        ),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    configures(
+        &nexus,
+        ConfigurationChange::SendServers(send_servers.clone()),
     );
     assert_eq!(snapshot(&nexus).configured_send_servers.0, send_servers);
     // The effective snapshot equals the last declaration of every family,
@@ -650,14 +658,12 @@ fn each_family_is_its_last_declaration() {
         }
     );
     // An empty declaration empties the family.
-    assert_eq!(
-        configure(&reopened, ConfigurationChange::Metaflows(Vec::new())),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
-    );
+    configures(&reopened, ConfigurationChange::Metaflows(Vec::new()));
     assert!(snapshot(&reopened).configured_metaflows.0.is_empty());
-    assert_eq!(
-        configure(&reopened, ConfigurationChange::Metaflows(Vec::new())),
-        MetaResponse::Configured(ConfigureOutcome::Unchanged)
+    configures_nothing(
+        &fixture,
+        &reopened,
+        ConfigurationChange::Metaflows(Vec::new()),
     );
 }
 
@@ -677,15 +683,12 @@ fn a_launch_after_a_replaced_declaration_takes_the_new_defaults() {
             Outcome::Composed(launch) => launch.leave_outs.0,
             outcome => panic!("launch not composed: {outcome:?}"),
         };
-    assert_eq!(
-        configure(
-            &nexus,
-            ConfigurationChange::Permaflow(permaflow(
-                quaternary_field(),
-                vec![signal_flow::LeaveOut::WorkflowTool]
-            ))
-        ),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    configures(
+        &nexus,
+        ConfigurationChange::Permaflow(permaflow(
+            quaternary_field(),
+            vec![signal_flow::LeaveOut::WorkflowTool],
+        )),
     );
     assert_eq!(
         composed_leave_outs(&nexus),
@@ -696,17 +699,14 @@ fn a_launch_after_a_replaced_declaration_takes_the_new_defaults() {
         signal_flow::LeaveOut::SkillTool,
         signal_flow::LeaveOut::ClaudeMd,
     ] {
-        assert_eq!(
-            configure(
-                &nexus,
-                ConfigurationChange::Amend(meta_signal_flow::Amend_Data {
-                    address: quaternary_field(),
-                    change: meta_signal_flow::Change::Add(meta_signal_flow::Element::LeaveOut(
-                        leave_out
-                    )),
-                })
-            ),
-            MetaResponse::Configured(ConfigureOutcome::Replaced)
+        configures(
+            &nexus,
+            ConfigurationChange::Amend(meta_signal_flow::Amend_Data {
+                address: quaternary_field(),
+                change: meta_signal_flow::Change::Add(meta_signal_flow::Element::LeaveOut(
+                    leave_out,
+                )),
+            }),
         );
     }
     assert_eq!(
@@ -781,36 +781,30 @@ fn a_leave_out_of_another_harness_is_an_unknown_feature_and_writes_nothing() {
     let fixture = ConfiguredStore::new();
     let nexus = fixture.open();
     // Sol runs a model the stable Codex endpoint lists: on Codex.
-    assert_eq!(
-        configure(
-            &nexus,
-            ConfigurationChange::Models(vec![
-                ConfigureModel {
-                    model: Model::Astra,
-                    native: meta_signal_flow::Native("gpt-6-astra".into()),
-                },
-                ConfigureModel {
-                    model: Model::Sol,
-                    native: meta_signal_flow::Native(SOL.into()),
-                },
-            ])
-        ),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    configures(
+        &nexus,
+        ConfigurationChange::Models(vec![
+            ConfigureModel {
+                model: Model::Astra,
+                native: meta_signal_flow::Native("gpt-6-astra".into()),
+            },
+            ConfigureModel {
+                model: Model::Sol,
+                native: meta_signal_flow::Native(SOL.into()),
+            },
+        ]),
     );
     let codex = Address {
         aspect: Aspect::Mind,
         topic: flow_ethos::Topic("codexSeat".into()),
         model: Model::Sol,
     };
-    assert_eq!(
-        configure(
-            &nexus,
-            ConfigurationChange::Permaflow(permaflow(
-                codex.clone(),
-                vec![signal_flow::LeaveOut::CodexAgentsMd]
-            ))
-        ),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    configures(
+        &nexus,
+        ConfigurationChange::Permaflow(permaflow(
+            codex.clone(),
+            vec![signal_flow::LeaveOut::CodexAgentsMd],
+        )),
     );
     let before = snapshot(&nexus);
     let rows = other_rows(&nexus);
@@ -835,7 +829,7 @@ fn a_leave_out_of_another_harness_is_an_unknown_feature_and_writes_nothing() {
     ] {
         assert_eq!(
             configure(&nexus, refused),
-            MetaResponse::ConfigureRejected(ConfigureRejection::UnknownFeature(
+            MetaResponse::ConfigureRefused(ConfigureRefusal::UnknownFeature(
                 signal_flow::LeaveOut::ClaudeMd
             ))
         );
@@ -843,15 +837,12 @@ fn a_leave_out_of_another_harness_is_an_unknown_feature_and_writes_nothing() {
         assert_eq!(other_rows(&nexus), rows);
     }
     // Terra has no native model: its harness is not known yet.
-    assert_eq!(
-        configure(
-            &nexus,
-            ConfigurationChange::Permaflow(permaflow(
-                quaternary_field(),
-                vec![signal_flow::LeaveOut::ClaudeMd]
-            ))
-        ),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    configures(
+        &nexus,
+        ConfigurationChange::Permaflow(permaflow(
+            quaternary_field(),
+            vec![signal_flow::LeaveOut::ClaudeMd],
+        )),
     );
     // The configuration-only listener refuses the same entry the same way.
     drop(nexus);
@@ -890,18 +881,15 @@ fn a_start_takes_its_permaflow_s_leave_outs_and_another_harness_refuses_them() {
     let fixture = ConfiguredStore::new();
     let mut nexus = fixture.open();
     *nexus.composer.edit() = crate::composition::tests::fixture_composer();
-    assert_eq!(
-        configure(
-            &nexus,
-            ConfigurationChange::Permaflow(permaflow(
-                quaternary_field(),
-                vec![
-                    signal_flow::LeaveOut::WorkflowTool,
-                    signal_flow::LeaveOut::ClaudeMd,
-                ]
-            ))
-        ),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    configures(
+        &nexus,
+        ConfigurationChange::Permaflow(permaflow(
+            quaternary_field(),
+            vec![
+                signal_flow::LeaveOut::WorkflowTool,
+                signal_flow::LeaveOut::ClaudeMd,
+            ],
+        )),
     );
     let mut profile = crate::composition::tests::fixture_profile();
     profile.address = quaternary_field();
@@ -955,7 +943,7 @@ fn a_fresh_store_takes_its_first_nexus_declaration() {
         store
             .configure_change(ConfigurationChange::Nexus(declared.clone()))
             .expect("first declaration commits"),
-        ConfigureOutcome::Replaced
+        crate::store::ConfigurationCommit::Written
     );
     assert_eq!(
         store
@@ -977,7 +965,7 @@ fn a_store_configured_while_stopped_opens_with_the_replaced_value() {
         configuration
             .configure_change(ConfigurationChange::Nexus(replaced.clone()))
             .expect("stopped store takes the declaration"),
-        ConfigureOutcome::Replaced
+        crate::store::ConfigurationCommit::Written
     );
     drop(configuration);
     let nexus = fixture.open();
@@ -1020,11 +1008,17 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     );
     assert_eq!(
         ask(&nexus, "Configure.DefaultMinutes.45"),
-        "Configured.Replaced"
+        "Configured.DefaultMinutes.45"
     );
+    // The same declaration again answers the same echo and writes nothing.
+    let stored = store_bytes(&fixture);
     assert_eq!(
         ask(&nexus, "Configure.DefaultMinutes.45"),
-        "Configured.Unchanged"
+        "Configured.DefaultMinutes.45"
+    );
+    assert!(
+        store_bytes(&fixture) == stored,
+        "the store is byte-identical"
     );
     for (declared, refused) in [
         ("0", "Zero"),
@@ -1033,7 +1027,7 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     ] {
         assert_eq!(
             ask(&nexus, &format!("Configure.DefaultMinutes.{declared}")),
-            format!("ConfigureRejected.MinutesRefused.{refused}")
+            format!("ConfigureRefused.MinutesRefused.{refused}")
         );
     }
     let declared = ask(&nexus, "Configuration");
@@ -1076,7 +1070,7 @@ fn configured_counters_are_kept_across_a_reopen() {
     let nexus = fixture.open();
     assert_eq!(
         ask(&nexus, "Configure.Counters.{ 120 45 300 }"),
-        "Configured.Replaced"
+        "Configured.Counters.{ 120 45 300 }"
     );
     drop(nexus);
     let reopened = fixture.open();
@@ -1087,7 +1081,7 @@ fn configured_counters_are_kept_across_a_reopen() {
     );
     assert_eq!(
         ask(&reopened, "Configure.Counters.{ 119 45 300 }"),
-        "ConfigureRejected.CountersRefused.Lowered.{ 120 45 300 }"
+        "ConfigureRefused.CountersRefused.Lowered.{ 120 45 300 }"
     );
 }
 
@@ -1113,26 +1107,21 @@ fn protected_addresses_persist_across_reopen() {
         snapshot(&nexus).configured_protected_addresses,
         meta_signal_flow::ConfiguredProtectedAddresses(Vec::<Address>::new())
     );
-    assert_eq!(
-        configure(
-            &nexus,
-            ConfigurationChange::ProtectedAddresses(vec![fable.clone(), other.clone()])
-        ),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    configures(
+        &nexus,
+        ConfigurationChange::ProtectedAddresses(vec![fable.clone(), other.clone()]),
     );
-    assert_eq!(
-        configure(
-            &nexus,
-            ConfigurationChange::ProtectedAddresses(vec![other.clone(), fable.clone()])
-        ),
-        MetaResponse::Configured(ConfigureOutcome::Unchanged)
+    configures_nothing(
+        &fixture,
+        &nexus,
+        ConfigurationChange::ProtectedAddresses(vec![other.clone(), fable.clone()]),
     );
     assert_eq!(
         configure(
             &nexus,
             ConfigurationChange::ProtectedAddresses(vec![fable.clone(), fable.clone()])
         ),
-        MetaResponse::ConfigureRejected(ConfigureRejection::DuplicateEntry)
+        MetaResponse::ConfigureRefused(ConfigureRefusal::DuplicateEntry)
     );
     assert_eq!(
         configure(
@@ -1142,7 +1131,7 @@ fn protected_addresses_persist_across_reopen() {
                 ..fable.clone()
             }])
         ),
-        MetaResponse::ConfigureRejected(ConfigureRejection::TopicRefused(flow_ethos::Topic(
+        MetaResponse::ConfigureRefused(ConfigureRefusal::TopicRefused(flow_ethos::Topic(
             "Not-camel".into()
         )))
     );
@@ -1152,12 +1141,9 @@ fn protected_addresses_persist_across_reopen() {
     drop(nexus);
     let reopened = fixture.open();
     assert_eq!(snapshot(&reopened).configured_protected_addresses, declared);
-    assert_eq!(
-        configure(
-            &reopened,
-            ConfigurationChange::ProtectedAddresses(vec![fable.clone()])
-        ),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    configures(
+        &reopened,
+        ConfigurationChange::ProtectedAddresses(vec![fable.clone()]),
     );
     drop(reopened);
     assert_eq!(
@@ -1180,12 +1166,9 @@ fn request_policy_fields_replace_independently_validate_and_survive_reopen() {
         meta_signal_flow::ConfiguredAnnouncementTries(meta_signal_flow::TryBound(3))
     );
 
-    assert_eq!(
-        configure(
-            &nexus,
-            ConfigurationChange::AnnouncementTries(meta_signal_flow::TryBound(7))
-        ),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    configures(
+        &nexus,
+        ConfigurationChange::AnnouncementTries(meta_signal_flow::TryBound(7)),
     );
     let after_tries = snapshot(&nexus);
     assert_eq!(
@@ -1197,12 +1180,9 @@ fn request_policy_fields_replace_independently_validate_and_survive_reopen() {
         meta_signal_flow::ConfiguredAnnouncementTries(meta_signal_flow::TryBound(7))
     );
 
-    assert_eq!(
-        configure(
-            &nexus,
-            ConfigurationChange::RequestIdDraws(meta_signal_flow::DrawBound(19))
-        ),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    configures(
+        &nexus,
+        ConfigurationChange::RequestIdDraws(meta_signal_flow::DrawBound(19)),
     );
     let after_draws = snapshot(&nexus);
     assert_eq!(
@@ -1218,33 +1198,27 @@ fn request_policy_fields_replace_independently_validate_and_survive_reopen() {
             &nexus,
             ConfigurationChange::RequestIdDraws(meta_signal_flow::DrawBound(0))
         ),
-        MetaResponse::ConfigureRejected(ConfigureRejection::RequestIdDrawsRefused)
+        MetaResponse::ConfigureRefused(ConfigureRefusal::RequestIdDrawsRefused)
     );
     assert_eq!(
         configure(
             &nexus,
             ConfigurationChange::AnnouncementTries(meta_signal_flow::TryBound(-1))
         ),
-        MetaResponse::ConfigureRejected(ConfigureRejection::AnnouncementTriesRefused)
+        MetaResponse::ConfigureRefused(ConfigureRefusal::AnnouncementTriesRefused)
     );
     assert_eq!(snapshot(&nexus), after_draws);
     drop(nexus);
     let reopened = fixture.open();
     assert_eq!(snapshot(&reopened), after_draws);
 
-    assert_eq!(
-        configure(
-            &reopened,
-            ConfigurationChange::RequestIdDraws(meta_signal_flow::DrawBound(23))
-        ),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    configures(
+        &reopened,
+        ConfigurationChange::RequestIdDraws(meta_signal_flow::DrawBound(23)),
     );
-    assert_eq!(
-        configure(
-            &reopened,
-            ConfigurationChange::AnnouncementTries(meta_signal_flow::TryBound(5))
-        ),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    configures(
+        &reopened,
+        ConfigurationChange::AnnouncementTries(meta_signal_flow::TryBound(5)),
     );
     let opposite = snapshot(&reopened);
     assert_eq!(
@@ -1268,25 +1242,22 @@ fn amend_world() -> (
 ) {
     let fixture = ConfiguredStore::new();
     let nexus = fixture.open();
-    assert_eq!(
-        configure(
-            &nexus,
-            ConfigurationChange::Models(vec![
-                ConfigureModel {
-                    model: Model::Astra,
-                    native: meta_signal_flow::Native("gpt-6-astra".into()),
-                },
-                ConfigureModel {
-                    model: Model::Opus,
-                    native: meta_signal_flow::Native("claude-opus-5-5".into()),
-                },
-                ConfigureModel {
-                    model: Model::Sol,
-                    native: meta_signal_flow::Native(SOL.into()),
-                },
-            ])
-        ),
-        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    configures(
+        &nexus,
+        ConfigurationChange::Models(vec![
+            ConfigureModel {
+                model: Model::Astra,
+                native: meta_signal_flow::Native("gpt-6-astra".into()),
+            },
+            ConfigureModel {
+                model: Model::Opus,
+                native: meta_signal_flow::Native("claude-opus-5-5".into()),
+            },
+            ConfigureModel {
+                model: Model::Sol,
+                native: meta_signal_flow::Native(SOL.into()),
+            },
+        ]),
     );
     let mut alpha = permaflow(
         Address {
@@ -1297,8 +1268,8 @@ fn amend_world() -> (
         vec![signal_flow::LeaveOut::CodexAgentsMd],
     );
     alpha.purpose = meta_signal_flow::Purpose("Alpha before".into());
-    alpha.user_modules =
-        signal_flow::UserModules(vec![signal_flow::ModuleIdentity("knowledge:flow:0".into())]);
+    alpha.prompt_modules =
+        signal_flow::PromptModules(vec![signal_flow::ModuleIdentity("knowledge:flow:0".into())]);
     let mut beta = permaflow(
         Address {
             aspect: Aspect::Psyche,
@@ -1309,10 +1280,7 @@ fn amend_world() -> (
     );
     beta.purpose = meta_signal_flow::Purpose("Beta fixed".into());
     for declared in [&alpha, &beta] {
-        assert_eq!(
-            configure(&nexus, ConfigurationChange::Permaflow(declared.clone())),
-            MetaResponse::Configured(ConfigureOutcome::Replaced)
-        );
+        configures(&nexus, ConfigurationChange::Permaflow(declared.clone()));
     }
     (fixture, nexus, alpha, beta)
 }
@@ -1396,7 +1364,7 @@ fn each_amend_changes_exactly_its_one_value_and_nothing_else() {
                 "operation:main-flow:0".into(),
             ))),
             Box::new(|row: &mut ConfigureMetaflow| {
-                row.user_modules
+                row.prompt_modules
                     .0
                     .push(signal_flow::ModuleIdentity("operation:main-flow:0".into()))
             }),
@@ -1414,7 +1382,7 @@ fn each_amend_changes_exactly_its_one_value_and_nothing_else() {
                 "knowledge:flow:0".into(),
             ))),
             Box::new(|row: &mut ConfigureMetaflow| {
-                row.user_modules
+                row.prompt_modules
                     .0
                     .retain(|held| held.0 != "knowledge:flow:0")
             }),
@@ -1445,9 +1413,10 @@ fn each_amend_changes_exactly_its_one_value_and_nothing_else() {
     for (change, apply) in steps {
         let before = snapshot(&nexus);
         let rows = other_rows(&nexus);
+        let amended = amend(&alpha.address, change.clone());
         assert_eq!(
-            configure(&nexus, amend(&alpha.address, change.clone())),
-            MetaResponse::Configured(ConfigureOutcome::Replaced),
+            configure(&nexus, amended.clone()),
+            MetaResponse::Configured(amended),
             "{change:?}"
         );
         apply(&mut expected);
@@ -1484,13 +1453,14 @@ fn each_amend_changes_exactly_its_one_value_and_nothing_else() {
     }
 }
 
-/// An Amend that would change nothing writes nothing and answers
-/// Unchanged: a value the permaflow already holds, an element added that it
-/// holds, an element removed that it does not.
+/// An Amend that would change nothing writes nothing, leaving the store
+/// byte-identical, and still answers Configured with the Amend echoed: a
+/// value the permaflow already holds, an element added that it holds, an
+/// element removed that it does not.
 #[test]
-fn an_amend_that_changes_nothing_answers_unchanged_and_writes_nothing() {
+fn an_amend_that_changes_nothing_answers_its_echo_and_writes_nothing() {
     use meta_signal_flow::{Change, Element};
-    let (_fixture, nexus, alpha, _beta) = amend_world();
+    let (fixture, nexus, alpha, _beta) = amend_world();
     let before = snapshot(&nexus);
     let rows = other_rows(&nexus);
     for change in [
@@ -1514,10 +1484,16 @@ fn an_amend_that_changes_nothing_answers_unchanged_and_writes_nothing() {
         ))),
         Change::Remove(Element::LeaveOut(signal_flow::LeaveOut::CodexPermissions)),
     ] {
+        let amended = amend(&alpha.address, change.clone());
+        let stored = store_bytes(&fixture);
         assert_eq!(
-            configure(&nexus, amend(&alpha.address, change.clone())),
-            MetaResponse::Configured(ConfigureOutcome::Unchanged),
+            configure(&nexus, amended.clone()),
+            MetaResponse::Configured(amended),
             "{change:?}"
+        );
+        assert!(
+            store_bytes(&fixture) == stored,
+            "{change:?}: the store is byte-identical"
         );
         assert_eq!(snapshot(&nexus), before, "{change:?}");
         assert_eq!(other_rows(&nexus), rows, "{change:?}");
@@ -1546,7 +1522,7 @@ fn each_amend_refusal_changes_nothing() {
                     },
                     Change::Purpose(meta_signal_flow::Purpose("Gamma".into())),
                 ),
-                ConfigureRejection::UnknownPermaflow(Address {
+                ConfigureRefusal::UnknownPermaflow(Address {
                     aspect: Aspect::Mind,
                     topic: flow_ethos::Topic("atomicTrialGamma".into()),
                     model: Model::Luna,
@@ -1561,14 +1537,14 @@ fn each_amend_refusal_changes_nothing() {
                     },
                     Change::Purpose(meta_signal_flow::Purpose("Gamma".into())),
                 ),
-                ConfigureRejection::TopicRefused(flow_ethos::Topic("Atomic_trial".into())),
+                ConfigureRefusal::TopicRefused(flow_ethos::Topic("Atomic_trial".into())),
             ),
             (
                 amend(
                     &alpha.address,
                     Change::Add(Element::LeaveOut(signal_flow::LeaveOut::GitInstructions)),
                 ),
-                ConfigureRejection::UnknownFeature(signal_flow::LeaveOut::GitInstructions),
+                ConfigureRefusal::UnknownFeature(signal_flow::LeaveOut::GitInstructions),
             ),
             (
                 amend(
@@ -1577,7 +1553,7 @@ fn each_amend_refusal_changes_nothing() {
                         "knowledge:flow".into(),
                     ))),
                 ),
-                ConfigureRejection::UnknownModule(signal_flow::ModuleIdentity(
+                ConfigureRefusal::UnknownModule(signal_flow::ModuleIdentity(
                     "knowledge:flow".into(),
                 )),
             ),
@@ -1587,7 +1563,7 @@ fn each_amend_refusal_changes_nothing() {
         for (change, rejection) in refusals() {
             assert_eq!(
                 configure(nexus, change),
-                MetaResponse::ConfigureRejected(rejection)
+                MetaResponse::ConfigureRefused(rejection)
             );
         }
     };
@@ -1601,7 +1577,7 @@ fn each_amend_refusal_changes_nothing() {
                 Change::Add(Element::SystemModule(absent.clone()))
             )
         ),
-        MetaResponse::ConfigureRejected(ConfigureRejection::CurriculumUnavailable)
+        MetaResponse::ConfigureRefused(ConfigureRefusal::CurriculumUnavailable)
     );
     // A Curriculum that answers, but does not hold the module.
     *nexus.composer.edit() = crate::composition::tests::fixture_composer();
@@ -1611,7 +1587,7 @@ fn each_amend_refusal_changes_nothing() {
     ] {
         assert_eq!(
             configure(&nexus, amend(&alpha.address, change)),
-            MetaResponse::ConfigureRejected(ConfigureRejection::UnknownModule(absent.clone()))
+            MetaResponse::ConfigureRefused(ConfigureRefusal::UnknownModule(absent.clone()))
         );
     }
     refuse_each(&nexus);
@@ -1654,7 +1630,7 @@ fn v6_permaflows() -> Vec<ConfigureMetaflowV6> {
         system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
             "spirit:core:0".into(),
         )]),
-        user_modules: signal_flow::UserModules(Vec::new()),
+        prompt_modules: signal_flow::PromptModules(Vec::new()),
         flow_kind: signal_flow::FlowKind::Regular,
         tool_set: signal_flow::ToolSet::Default,
         continuity: meta_signal_flow::Continuity::OnDemand,

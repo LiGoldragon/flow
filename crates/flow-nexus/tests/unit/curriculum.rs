@@ -37,7 +37,7 @@ fn request(address: Address, system: &[&str], user: &[&str]) -> ContextRequest {
                 .map(|module| signal_flow::ModuleIdentity((*module).into()))
                 .collect(),
         ),
-        user_modules: signal_flow::UserModules(
+        prompt_modules: signal_flow::PromptModules(
             user.iter()
                 .map(|module| signal_flow::ModuleIdentity((*module).into()))
                 .collect(),

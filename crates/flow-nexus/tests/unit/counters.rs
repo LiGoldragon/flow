@@ -41,6 +41,11 @@ fn ask(fixture: &NexusFixture, text: &str) -> String {
         .compact()
 }
 
+/// The fixture store's Memory file, byte for byte as it stands.
+fn store_bytes(fixture: &NexusFixture) -> Vec<u8> {
+    std::fs::read(fixture.directory.path().join("flow.sema")).expect("the store file reads")
+}
+
 /// The fixture store with its Nexus declared, so Configuration answers.
 fn configured() -> NexusFixture {
     use crate::store::SeedsConfiguration;
@@ -105,31 +110,42 @@ fn counters_are_declared_on_an_empty_store_and_never_lowered() {
     ] {
         assert_eq!(
             ask(&fixture, lowered),
-            "ConfigureRejected.CountersRefused.Lowered.{ 1 3 1 }",
+            "ConfigureRefused.CountersRefused.Lowered.{ 1 3 1 }",
             "{lowered}"
         );
     }
+    // The counters as they stand answer their echo and write nothing.
+    let stored = store_bytes(&fixture);
     assert_eq!(
         ask(&fixture, "Configure.Counters.{ 1 3 1 }"),
-        "Configured.Unchanged"
+        "Configured.Counters.{ 1 3 1 }"
+    );
+    assert!(
+        store_bytes(&fixture) == stored,
+        "the store is byte-identical"
     );
     assert_eq!(
         ask(&fixture, "Configure.Counters.{ 120 45 300 }"),
-        "Configured.Replaced"
+        "Configured.Counters.{ 120 45 300 }"
     );
+    let stored = store_bytes(&fixture);
     assert_eq!(
         ask(&fixture, "Configure.Counters.{ 120 45 300 }"),
-        "Configured.Unchanged"
+        "Configured.Counters.{ 120 45 300 }"
+    );
+    assert!(
+        store_bytes(&fixture) == stored,
+        "the store is byte-identical"
     );
     assert_eq!(
         ask(&fixture, "Configure.Counters.{ 119 45 300 }"),
-        "ConfigureRejected.CountersRefused.Lowered.{ 120 45 300 }"
+        "ConfigureRefused.CountersRefused.Lowered.{ 120 45 300 }"
     );
     assert_eq!(counters(&fixture), "{ 120 45 300 } 64 3");
     // Still empty, a raised declaration is taken again.
     assert_eq!(
         ask(&fixture, "Configure.Counters.{ 130 50 310 }"),
-        "Configured.Replaced"
+        "Configured.Counters.{ 130 50 310 }"
     );
     assert_eq!(counters(&fixture), "{ 130 50 310 } 64 3");
 }
@@ -142,7 +158,7 @@ fn declared_counters_name_the_next_ids_and_a_record_ends_the_empty_store() {
     let fixture = configured();
     assert_eq!(
         ask(&fixture, "Configure.Counters.{ 130 50 310 }"),
-        "Configured.Replaced"
+        "Configured.Counters.{ 130 50 310 }"
     );
 
     let outcome = fixture
@@ -163,7 +179,7 @@ fn declared_counters_name_the_next_ids_and_a_record_ends_the_empty_store() {
     assert_eq!(counters(&fixture), "{ 130 50 311 } 64 3");
     assert_eq!(
         ask(&fixture, "Configure.Counters.{ 500 500 500 }"),
-        "ConfigureRejected.CountersRefused.NotEmpty"
+        "ConfigureRefused.CountersRefused.NotEmpty"
     );
 
     let seat = address(Model::Sol);
@@ -230,7 +246,7 @@ fn declared_counters_name_the_next_ids_and_a_record_ends_the_empty_store() {
     assert_eq!(counters(&fixture), "{ 132 51 311 } 64 3");
     assert_eq!(
         ask(&fixture, "Configure.Counters.{ 500 500 500 }"),
-        "ConfigureRejected.CountersRefused.NotEmpty"
+        "ConfigureRefused.CountersRefused.NotEmpty"
     );
     assert_eq!(counters(&fixture), "{ 132 51 311 } 64 3");
 }

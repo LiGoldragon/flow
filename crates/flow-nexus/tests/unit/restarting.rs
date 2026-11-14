@@ -1444,7 +1444,7 @@ fn declared(fixture: &NexusFixture, system_modules: &[&str], root_option: Option
                         .map(|&module| signal_flow::ModuleIdentity(module.into()))
                         .collect(),
                 ),
-                user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
                     "operation:main-flow:0".into(),
                 )]),
                 flow_kind: signal_flow::FlowKind::Regular,
@@ -2663,7 +2663,7 @@ impl OpensSecondNexus for NexusFixture {
                         signal_flow::ModuleIdentity("spirit:core:0".into()),
                         signal_flow::ModuleIdentity("intent:flow:0".into()),
                     ]),
-                    user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                    prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
                         "operation:main-flow:0".into(),
                     )]),
                     flow_kind: signal_flow::FlowKind::Regular,
@@ -3222,7 +3222,7 @@ impl SocketCurriculum {
                     .map(|identity| signal_flow::ModuleIdentity(identity.0))
                     .collect(),
             ),
-            user_modules: signal_flow::UserModules(
+            prompt_modules: signal_flow::PromptModules(
                 selection
                     .user_modules
                     .0
@@ -3671,7 +3671,7 @@ fn restart_composition_against_curriculum_socket() {
         let profile = signal_flow::LaunchProfile {
             launch_request_id: signal_flow::LaunchRequestId(format!("restart-{flow}-1-proof")),
             system_modules: signal_flow::SystemModules(words(system)),
-            user_modules: signal_flow::UserModules(words(user)),
+            prompt_modules: signal_flow::PromptModules(words(user)),
             remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(0)),
             address: address.clone(),
             model_name: flow_ethos::ModelName(native.to_owned()),
@@ -3687,18 +3687,18 @@ fn restart_composition_against_curriculum_socket() {
         };
         let outcome = fixture.nexus.perform(Operation::Compose(profile.clone()));
         // The same selection, sent raw: the frame Curriculum answers.
-        let (system_modules, user_modules): (Vec<_>, Vec<_>) = profile
+        let (system_modules, prompt_modules): (Vec<_>, Vec<_>) = profile
             .system_modules
             .0
             .iter()
-            .chain(profile.user_modules.0.iter())
+            .chain(profile.prompt_modules.0.iter())
             .cloned()
             .partition(|identity| identity.0.as_str().placed_in_system_prompt());
         let selection = ContextRequest {
             address: address.clone(),
             harness_kind: signal_flow::HarnessKind::Claude,
             system_modules: signal_flow::SystemModules(system_modules),
-            user_modules: signal_flow::UserModules(user_modules),
+            prompt_modules: signal_flow::PromptModules(prompt_modules),
             remembered_flows: crate::generated::starter::RememberedFlows(vec![]),
         }
         .startup_selection();
@@ -3766,7 +3766,7 @@ fn restart_composition_against_curriculum_socket() {
                     .system_modules
                     .0
                     .iter()
-                    .chain(profile.user_modules.0.iter())
+                    .chain(profile.prompt_modules.0.iter())
                 {
                     let marker = format!("<!-- module: {module} -->", module = module.0);
                     assert!(

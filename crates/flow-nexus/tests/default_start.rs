@@ -380,7 +380,9 @@ fn a_configure_applied_to_a_running_nexus_takes_effect_without_a_restart() {
                 replaced.clone()
             ))
         ),
-        meta_signal_flow::Response::Configured(meta_signal_flow::ConfigureOutcome::Replaced)
+        meta_signal_flow::Response::Configured(meta_signal_flow::ConfigurationChange::Nexus(
+            replaced.clone()
+        ))
     );
     let meta_signal_flow::Response::Configuration(second) = read_meta(&mut subscription) else {
         panic!("the subscription sees the change")

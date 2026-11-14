@@ -2,6 +2,7 @@
 
 use super::*;
 pub(crate) use crate::generated::memory::StoredSendOutcome;
+pub(crate) use crate::generated::memory::{NextId, SendOutcomeCounter};
 use meta_signal_flow::{OrdinarySendOutcome, SendOutcomeRecord};
 use signal_flow::{Address, PrivateSendResponse, Process, SentBy};
 
@@ -14,11 +15,6 @@ const COUNTER_KEY: &str = "counter";
 const SEND_OUTCOME_COUNTER_TABLE_NAME: TableName =
     TableName::new("flow_nexus_send_outcome_counter");
 const SEND_OUTCOME_TABLE_NAME: TableName = TableName::new("flow_nexus_send_outcomes");
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SendOutcomeCounter {
-    next_id: u64,
-}
 
 impl EngineRecord for SendOutcomeCounter {
     fn record_key(&self) -> RecordKey {
@@ -150,12 +146,14 @@ impl RecordsSendOutcomes for FlowStore {
         };
         let record_number = existing_counter
             .as_ref()
-            .map(|counter| counter.next_id)
+            .map(|counter| counter.next_id.0)
             .unwrap_or(1);
         let next_counter = SendOutcomeCounter {
-            next_id: record_number
-                .checked_add(1)
-                .ok_or(StoreError::StateInvariant)?,
+            next_id: NextId(
+                record_number
+                    .checked_add(1)
+                    .ok_or(StoreError::StateInvariant)?,
+            ),
         };
         let record = SendOutcomeRecord {
             send_outcome_id: meta_signal_flow::SendOutcomeId(format!(
@@ -218,7 +216,7 @@ impl super::counters::CountsIds for SendOutcomeIds<'_> {
                 written: false,
             }),
             [counter] => Ok(super::counters::IdCounter {
-                next: i64::try_from(counter.next_id).map_err(|_| StoreError::StateInvariant)?,
+                next: counter.next_id.0,
                 written: true,
             }),
             _ => Err(StoreError::StateInvariant),
@@ -240,8 +238,11 @@ impl super::counters::CountsIds for SendOutcomeIds<'_> {
         counter: &super::counters::IdCounter,
         next: i64,
     ) -> Result<sema_engine::AtomicCommit, StoreError> {
+        if next < 0 {
+            return Err(StoreError::StateInvariant);
+        }
         let row = SendOutcomeCounter {
-            next_id: u64::try_from(next).map_err(|_| StoreError::StateInvariant)?,
+            next_id: NextId(next),
         };
         Ok(if counter.written {
             commit.mutate(self.0.send_outcomes.counter, row)
@@ -296,7 +297,7 @@ mod tests {
                 .commit_atomic(
                     engine
                         .begin_atomic_commit()
-                        .assert(tables.counter, SendOutcomeCounter { next_id: 2 })
+                        .assert(tables.counter, SendOutcomeCounter { next_id: NextId(2) })
                         .assert(tables.outcomes, stored),
                 )
                 .expect("seed record commits");

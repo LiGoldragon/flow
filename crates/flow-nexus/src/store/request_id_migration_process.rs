@@ -392,22 +392,22 @@ fn deliver_oldest_migrated(
     assert!(
         store
             .record_delivery_receipt(
-                &attempt.attempt_id,
+                &attempt.queue_attempt_id.0,
                 NativeDeliveryReceipt {
                     native_request_id: attempt.native_request_id,
                     thread_id: attempt.thread_id.clone(),
-                    turn_id: format!("{label}-turn"),
-                    native_receipt: format!(
+                    turn_id: crate::generated::memory::TurnId(format!("{label}-turn")),
+                    native_receipt_text: crate::generated::memory::NativeReceiptText(format!(
                         r#"{{"id":{},"result":{{}}}}"#,
-                        attempt.native_request_id
-                    ),
+                        attempt.native_request_id.0
+                    )),
                 },
             )
             .expect("migrated delivery receipt records")
     );
     assert!(
         store
-            .settle_recorded_delivery(&attempt.attempt_id)
+            .settle_recorded_delivery(&attempt.queue_attempt_id.0)
             .expect("migrated delivered request leaves its queue")
     );
 }
@@ -438,22 +438,24 @@ fn deliver_through_migrated(
         assert!(
             store
                 .record_delivery_receipt(
-                    &attempt.attempt_id,
+                    &attempt.queue_attempt_id.0,
                     NativeDeliveryReceipt {
                         native_request_id: attempt.native_request_id,
                         thread_id: attempt.thread_id.clone(),
-                        turn_id: format!("{label}-{ordinal}-turn"),
-                        native_receipt: format!(
+                        turn_id: crate::generated::memory::TurnId(format!(
+                            "{label}-{ordinal}-turn"
+                        )),
+                        native_receipt_text: crate::generated::memory::NativeReceiptText(format!(
                             r#"{{"id":{},"result":{{}}}}"#,
-                            attempt.native_request_id
-                        ),
+                            attempt.native_request_id.0
+                        )),
                     },
                 )
                 .expect("migrated delivery prefix receipt records")
         );
         assert!(
             store
-                .settle_recorded_delivery(&attempt.attempt_id)
+                .settle_recorded_delivery(&attempt.queue_attempt_id.0)
                 .expect("migrated delivered prefix leaves its queue")
         );
         if delivered_logical_id.0 == expected_logical_id {
@@ -716,7 +718,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     };
     let singleton = request_binding_for(&store, &ids["uncertain_order"]);
     assert_eq!(
-        singleton.closure,
+        singleton.request_closure,
         RequestClosure::Answered(flow_ethos::LogicalDeliveryId(
             ids["historical_result"].clone()
         )),
@@ -955,7 +957,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         .into_iter()
         .filter(|row| {
             row.address == singleton_recipient
-                && row.purpose == crate::heartbeat::DeliveryPurpose::Ordinary
+                && row.delivery_purpose == crate::heartbeat::DeliveryPurpose::Ordinary
         })
         .count() as i64;
     let fresh_request = reopened

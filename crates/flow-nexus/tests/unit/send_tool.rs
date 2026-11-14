@@ -946,7 +946,7 @@ fn soft_dynamic_admission_queues_without_waking() {
     );
     let purposes = fixture.nexus.store.delivery_purposes().unwrap();
     assert_eq!(purposes.len(), 1);
-    assert_eq!(purposes[0].purpose, DeliveryPurpose::Ordinary);
+    assert_eq!(purposes[0].delivery_purpose, DeliveryPurpose::Ordinary);
 }
 
 /// At the Nexus's start the send tool subscribes to every live Codex thread
@@ -2665,7 +2665,7 @@ fn a_start_reading_an_unanswering_codex_history_still_serves_metaflows() {
         fixture
             .nexus
             .store
-            .park_uncertain_delivery(&attempt.attempt_id)
+            .park_uncertain_delivery(&attempt.queue_attempt_id.0)
             .unwrap()
     );
     std::thread::scope(|scope| {

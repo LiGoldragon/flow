@@ -150,7 +150,7 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
                 Ok(None) => return refused(RequestRejection::UnknownRequest),
                 Err(_) => return refused(RequestRejection::StoreRefused),
             };
-            if binding.closure != RequestClosure::Open {
+            if binding.request_closure != RequestClosure::Open {
                 return refused(RequestRejection::Closed);
             }
             let retained = match self.store.retained_logical_requests() {
@@ -229,7 +229,7 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
             Ok(None) => return refused(RequestRejection::UnknownRequest),
             Err(_) => return refused(RequestRejection::StoreRefused),
         };
-        if binding.closure != RequestClosure::Open {
+        if binding.request_closure != RequestClosure::Open {
             return refused(RequestRejection::Closed);
         }
         let task = match self.store.retained_logical_requests() {
@@ -443,12 +443,12 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
         use crate::store::kept_answer::RoutesAnswers;
         let refused = |rejection| Response::AnswerRejected(rejection);
         match self.store.kept_answer(request_id) {
-            Ok(Some(kept)) => return Response::Answered(kept.answer),
+            Ok(Some(kept)) => return Response::Answered(kept.visible_native_input),
             Ok(None) => {}
             Err(_) => return refused(AnswerRejection::StoreRefused),
         }
         match self.store.request_binding(request_id) {
-            Ok(Some(binding)) if binding.closure == RequestClosure::Open => {
+            Ok(Some(binding)) if binding.request_closure == RequestClosure::Open => {
                 refused(AnswerRejection::Open)
             }
             Ok(Some(_)) => refused(AnswerRejection::Routed),

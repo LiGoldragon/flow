@@ -1310,7 +1310,7 @@ impl CompletesDirectSends for RunningNexus {
             .ok()?
             .into_iter()
             .rev()
-            .find(|attempt| attempt.request_id == logical_id)
+            .find(|attempt| attempt.queue_request_id.0 == logical_id)
     }
     fn complete_direct_send(
         &self,

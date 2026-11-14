@@ -101,6 +101,7 @@ use crate::composition::{FreshSeat, JoinsPurpose, RendersQueuedWork};
 use crate::delivery::body::RendersNativeContent;
 use crate::delivery::lease::LeasesPanes;
 use crate::delivery::{DeliversMessages, FindsDeliveryTarget, ReadsLeasedPane};
+use crate::generated::memory::{Device, Inode, Offset};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
     Record_Data_Context_Data,
@@ -908,10 +909,11 @@ impl ReadsClaudeDelivery for RunningNexus {
             },
             None => return None,
         };
+        // The cursor's u64s are kept as the i64s Memory archives, bit for bit.
         Some(NativeTranscriptCursor {
-            device: cursor.device,
-            inode: cursor.inode,
-            offset: cursor.offset,
+            device: Device(cursor.device as i64),
+            inode: Inode(cursor.inode as i64),
+            offset: Offset(cursor.offset as i64),
         })
     }
 
@@ -920,13 +922,13 @@ impl ReadsClaudeDelivery for RunningNexus {
         attempt: &QueueDeliveryAttempt,
         text: &str,
     ) -> ClaudeQueuedHistory {
-        let NativeHistoryAnchor::ClaudeTranscript(cursor) = &attempt.history_anchor else {
+        let NativeHistoryAnchor::ClaudeTranscript(cursor) = &attempt.native_history_anchor else {
             return ClaudeQueuedHistory::Unreadable;
         };
-        let node = match self.store.flow_node(&attempt.flow_id) {
+        let node = match self.store.flow_node(&attempt.flow_id.0) {
             Ok(Some(node))
                 if node.harness_kind == HarnessKind::Claude
-                    && node.session_id.0 == attempt.thread_id =>
+                    && node.session_id.0 == attempt.thread_id.0 =>
             {
                 node
             }
@@ -938,9 +940,9 @@ impl ReadsClaudeDelivery for RunningNexus {
         transcript.queued_history_after(
             &node.session_id.0,
             &ClaudeTranscriptCursor {
-                device: cursor.device,
-                inode: cursor.inode,
-                offset: cursor.offset,
+                device: cursor.device.0 as u64,
+                inode: cursor.inode.0 as u64,
+                offset: cursor.offset.0 as u64,
             },
             text,
         )
@@ -984,13 +986,13 @@ impl QueuesSimplifiedAnswers for RunningNexus {
             Ok(SimplifiedReplyStanding::NoneOwed) => return SimplifiedAnswer::NoneOwed,
             Ok(SimplifiedReplyStanding::Unreceived(binding)) => {
                 return SimplifiedAnswer::InputUnreceived {
-                    input: binding.input_delivery_id,
+                    input: binding.input_delivery_id.0,
                 };
             }
             Ok(SimplifiedReplyStanding::Received(binding, receipt)) => (binding, receipt),
             Err(_) => return SimplifiedAnswer::StoreRefused,
         };
-        let input = binding.input_delivery_id.clone();
+        let input = binding.input_delivery_id.0.clone();
         let answer = self
             .store
             .flow_node(flow_id)
@@ -1021,8 +1023,8 @@ impl QueuesSimplifiedAnswers for RunningNexus {
                 self.defer_wake(recipient.clone());
                 // A core presentation's answer goes to the book Tertiary; its
                 // sender is told by a Notice.
-                if binding.source.is_core_presentation() && binding.recipient != recipient {
-                    self.defer_wake(binding.recipient.clone());
+                if binding.source.0.is_core_presentation() && binding.recipient.0 != recipient {
+                    self.defer_wake(binding.recipient.0.clone());
                 }
                 SimplifiedAnswer::Queued { input, recipient }
             }
@@ -1232,11 +1234,11 @@ impl RendersAttemptInput for QueueDeliveryAttempt {
 
 impl ReconcilesQueueDelivery for RunningNexus {
     fn reconcile_delivery(&self, attempt: &QueueDeliveryAttempt) -> Reconciled {
-        match &attempt.phase {
+        match &attempt.queue_delivery_phase {
             QueueDeliveryPhase::ReceiptRecorded(_) => {
                 return if self
                     .store
-                    .settle_recorded_delivery(&attempt.attempt_id)
+                    .settle_recorded_delivery(&attempt.queue_attempt_id.0)
                     .unwrap_or(false)
                 {
                     attempt.as_settled(SeatAfter::InItsTurn)
@@ -1279,16 +1281,18 @@ impl ReconcilesQueueDelivery for RunningNexus {
             let receipt = NativeDeliveryReceipt {
                 native_request_id: member.native_request_id,
                 thread_id: member.thread_id.clone(),
-                turn_id: turn_id.clone(),
-                native_receipt: native_receipt.clone(),
+                turn_id: crate::generated::memory::TurnId(turn_id.clone()),
+                native_receipt_text: crate::generated::memory::NativeReceiptText(
+                    native_receipt.clone(),
+                ),
             };
             if !(self
                 .store
-                .record_delivery_receipt(&member.attempt_id, receipt)
+                .record_delivery_receipt(&member.queue_attempt_id.0, receipt)
                 .unwrap_or(false)
                 && self
                     .store
-                    .settle_recorded_delivery(&member.attempt_id)
+                    .settle_recorded_delivery(&member.queue_attempt_id.0)
                     .unwrap_or(false))
             {
                 return Reconciled::Refused;
@@ -1309,15 +1313,15 @@ impl ReconcilesQueueDelivery for RunningNexus {
             return;
         };
         let attempt = attempts.into_iter().find(|attempt| {
-            attempt.flow_id == flow_id
+            attempt.flow_id.0 == flow_id
                 && attempt.harness_kind == HarnessKind::Claude
                 && prompt
                     .native_session_id_option
                     .as_ref()
                     .map(|value| value.0.as_str())
-                    == Some(attempt.thread_id.as_str())
+                    == Some(attempt.thread_id.0.as_str())
                 && matches!(
-                    attempt.phase,
+                    attempt.queue_delivery_phase,
                     QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_)
                 )
                 && self
@@ -1367,7 +1371,7 @@ impl ReconcilesQueueDelivery for RunningNexus {
         // harness holds no other request; each answer is settled under it.
         for attempt in outstanding {
             let found = matches!(
-                attempt.phase,
+                attempt.queue_delivery_phase,
                 QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_)
             )
             .then(|| self.find_receipt(&attempt));
@@ -1419,7 +1423,7 @@ impl MarksUndecided for RunningNexus {
     fn undecided(&self, attempt: &QueueDeliveryAttempt, undecided: Undecided) -> Reconciled {
         if self
             .store
-            .mark_delivery_undecided(&attempt.attempt_id, undecided.clone())
+            .mark_delivery_undecided(&attempt.queue_attempt_id.0, undecided.clone())
             .unwrap_or(false)
         {
             Reconciled::Undecided(undecided)
@@ -2438,8 +2442,8 @@ impl DrainsHeldSeats for RunningNexus {
             Ok(Some(attempt)) => match self.reconcile_delivery(&attempt) {
                 Reconciled::Settled(queued, SeatAfter::Resting) => drained.push(queued),
                 Reconciled::Settled(queued, SeatAfter::InItsTurn) => {
-                    if attempt.flow_id == flow_id.0
-                        && attempt.thread_id == node.session_id.0
+                    if attempt.flow_id == flow_id
+                        && attempt.thread_id.0 == node.session_id.0
                         && node.harness_kind == HarnessKind::Codex
                     {
                         // Only this bound seat's turn can hold its work.
@@ -2463,7 +2467,7 @@ impl DrainsHeldSeats for RunningNexus {
                     );
                     if !self
                         .store
-                        .park_uncertain_delivery(&attempt.attempt_id)
+                        .park_uncertain_delivery(&attempt.queue_attempt_id.0)
                         .unwrap_or(false)
                     {
                         return Outcome::Failed(Failed_Data::StoreRefused);
@@ -2529,11 +2533,13 @@ impl DrainsHeldSeats for RunningNexus {
             && let signal_flow::SentBy::Sender(recipient) = &oldest.sent_by
         {
             let binding = SimplifiedReplyBinding {
-                flow_id: flow_id.clone().0,
-                input_delivery_id: oldest.logical_delivery_id.clone().0,
-                source: address.clone(),
-                recipient: recipient.clone(),
-                completed: false,
+                flow_id: flow_id.clone(),
+                input_delivery_id: crate::generated::memory::InputDeliveryId(
+                    oldest.logical_delivery_id.clone().0,
+                ),
+                source: crate::generated::memory::Source(address.clone()),
+                recipient: crate::generated::memory::Recipient(recipient.clone()),
+                completed: crate::generated::memory::Completed(false),
             };
             if self.store.bind_simplified_reply(binding).is_err() {
                 return Outcome::WaitingForTurn(oldest.logical_delivery_id);
@@ -2594,10 +2600,10 @@ impl DrainsHeldSeats for RunningNexus {
         let absent = |observation: String| {
             self.store
                 .mark_delivery_absent(
-                    &attempt.attempt_id,
+                    &attempt.queue_attempt_id.0,
                     AbsenceRecord {
-                        proof: AbsenceProof::HandOverRefused,
-                        observation,
+                        absence_proof: AbsenceProof::HandOverRefused,
+                        observation: crate::generated::memory::Observation(observation),
                     },
                 )
                 .unwrap_or(false)
@@ -2639,7 +2645,7 @@ impl DrainsHeldSeats for RunningNexus {
         };
         let result = self.deliver_while_waking(
             meta_signal_flow::DeliveryRequest {
-                delivery_id: meta_signal_flow::DeliveryId(attempt.attempt_id.clone()),
+                delivery_id: meta_signal_flow::DeliveryId(attempt.queue_attempt_id.0.clone()),
                 flow_id: flow_id.clone(),
                 message,
             },
@@ -2662,7 +2668,9 @@ impl DrainsHeldSeats for RunningNexus {
         // Typed once, never typed again: every message the payload carried
         // leaves the queue as an Uncertain attempt of the same native
         // anchor, and the one receipt of the payload settles them all.
-        let _ = self.store.mark_delivery_uncertain(&attempt.attempt_id);
+        let _ = self
+            .store
+            .mark_delivery_uncertain(&attempt.queue_attempt_id.0);
         let typed = self.park_cohort(&attempt, &cohort);
         let _ = self.reconcile_delivery(&attempt);
         // A payload typed into a Codex pane is work its thread holds, whose
@@ -2753,7 +2761,7 @@ impl ParksCohort for RunningNexus {
         };
         if !self
             .store
-            .park_uncertain_delivery(&head.attempt_id)
+            .park_uncertain_delivery(&head.queue_attempt_id.0)
             .unwrap_or(false)
         {
             eprintln!("flow-nexus: a typed attempt was not parked; it stays outstanding");
@@ -2763,19 +2771,19 @@ impl ParksCohort for RunningNexus {
         for entry in rest {
             match self.store.prepare_oldest_delivery(
                 &head.address,
-                &head.flow_id,
-                &head.thread_id,
+                &head.flow_id.0,
+                &head.thread_id.0,
                 head.harness_kind.clone(),
-                head.history_anchor.clone(),
+                head.native_history_anchor.clone(),
             ) {
                 Ok(PrepareQueueDelivery::Prepared(next))
                     if next.queue_evidence
                         == meta_signal_flow::QueueEvidence::Logical(entry.clone()) =>
                 {
-                    let _ = self.store.mark_delivery_uncertain(&next.attempt_id);
+                    let _ = self.store.mark_delivery_uncertain(&next.queue_attempt_id.0);
                     if !self
                         .store
-                        .park_uncertain_delivery(&next.attempt_id)
+                        .park_uncertain_delivery(&next.queue_attempt_id.0)
                         .unwrap_or(false)
                     {
                         eprintln!(
@@ -2816,12 +2824,13 @@ impl ParksCohort for RunningNexus {
                     ClaudeQueuedHistory::Replaced => Err(Undecided::HistoryReplaced),
                 },
                 HarnessKind::Codex => {
-                    let NativeHistoryAnchor::CodexTurns(anchor) = &attempt.history_anchor else {
+                    let NativeHistoryAnchor::CodexTurns(anchor) = &attempt.native_history_anchor
+                    else {
                         return Err(Undecided::HistoryUnreadable);
                     };
                     let history = self
                         .store
-                        .role(&attempt.flow_id)
+                        .role(&attempt.flow_id.0)
                         .ok()
                         .flatten()
                         .and_then(|role| {
@@ -2832,7 +2841,7 @@ impl ParksCohort for RunningNexus {
                         })
                         .and_then(|adapter| {
                             adapter
-                                .queued_turn_after(&attempt.thread_id, anchor.as_deref(), &text)
+                                .queued_turn_after(&attempt.thread_id.0, anchor.as_deref(), &text)
                                 .ok()
                         });
                     match history {
@@ -2888,13 +2897,13 @@ impl ParksCohort for RunningNexus {
             .filter(|other| {
                 other.flow_id == attempt.flow_id
                     && other.thread_id == attempt.thread_id
-                    && other.history_anchor == attempt.history_anchor
+                    && other.native_history_anchor == attempt.native_history_anchor
                     && matches!(
                         other.queue_evidence,
                         meta_signal_flow::QueueEvidence::Logical(_)
                     )
                     && matches!(
-                        other.phase,
+                        other.queue_delivery_phase,
                         QueueDeliveryPhase::Prepared
                             | QueueDeliveryPhase::Uncertain(_)
                             | QueueDeliveryPhase::ReceiptRecorded(_)
@@ -2904,19 +2913,19 @@ impl ParksCohort for RunningNexus {
         siblings.sort_by_key(|other| other.native_request_id);
         let Some(at) = siblings
             .iter()
-            .position(|other| other.attempt_id == attempt.attempt_id)
+            .position(|other| other.queue_attempt_id == attempt.queue_attempt_id)
         else {
             return vec![attempt.clone()];
         };
         let mut start = at;
         while start > 0
-            && siblings[start - 1].native_request_id + 1 == siblings[start].native_request_id
+            && siblings[start - 1].native_request_id.0 + 1 == siblings[start].native_request_id.0
         {
             start -= 1;
         }
         let mut end = at + 1;
         while end < siblings.len()
-            && siblings[end - 1].native_request_id + 1 == siblings[end].native_request_id
+            && siblings[end - 1].native_request_id.0 + 1 == siblings[end].native_request_id.0
         {
             end += 1;
         }
@@ -2932,14 +2941,14 @@ impl ParksCohort for RunningNexus {
             .outstanding_delivery(address)
             .ok()
             .flatten()
-            .map(|attempt| attempt.attempt_id);
+            .map(|attempt| attempt.queue_attempt_id);
         let mut typed = unsettled
             .into_iter()
             .filter(|attempt| {
-                attempt.flow_id == flow_id
-                    && Some(&attempt.attempt_id) != outstanding.as_ref()
+                attempt.flow_id.0 == flow_id
+                    && Some(&attempt.queue_attempt_id) != outstanding.as_ref()
                     && matches!(
-                        attempt.phase,
+                        attempt.queue_delivery_phase,
                         QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_)
                     )
             })
@@ -3109,11 +3118,13 @@ impl WakesInParts for RunningNexus {
             && let signal_flow::SentBy::Sender(recipient) = &oldest.sent_by
         {
             let binding = SimplifiedReplyBinding {
-                flow_id: flow_id.to_owned(),
-                input_delivery_id: oldest.logical_delivery_id.clone().0,
-                source: address.clone(),
-                recipient: recipient.clone(),
-                completed: false,
+                flow_id: flow_ethos::FlowId(flow_id.to_owned()),
+                input_delivery_id: crate::generated::memory::InputDeliveryId(
+                    oldest.logical_delivery_id.clone().0,
+                ),
+                source: crate::generated::memory::Source(address.clone()),
+                recipient: crate::generated::memory::Recipient(recipient.clone()),
+                completed: crate::generated::memory::Completed(false),
             };
             if self.store.bind_simplified_reply(binding).is_err() {
                 return false;

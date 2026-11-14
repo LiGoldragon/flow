@@ -166,6 +166,144 @@ mod frozen {
         pub(super) latest_queue: i64,
         pub(super) outstanding: Option<String>,
     }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) enum DeliveryPurpose {
+        Ordinary,
+        Heartbeat,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct LogicalDeliveryPurpose {
+        pub(super) logical_delivery_id: String,
+        pub(super) address: Address,
+        pub(super) purpose: DeliveryPurpose,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) enum LeaseStep {
+        Acquired,
+        Interrupted,
+        Placed,
+        Submitted,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct PaneLease {
+        pub(super) delivery_id: meta_signal_flow::DeliveryId,
+        pub(super) flow_id: String,
+        pub(super) herdr_pane_id: String,
+        pub(super) lease_step: LeaseStep,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct LogicalDeliveryCounter {
+        pub(super) next_cursor: i64,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct SimplifiedReplyBinding {
+        pub(super) flow_id: String,
+        pub(super) input_delivery_id: String,
+        pub(super) source: Address,
+        pub(super) recipient: Address,
+        pub(super) completed: bool,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) enum RequestClosure {
+        Open,
+        Answered(flow_ethos::LogicalDeliveryId),
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct RequestIdBinding {
+        pub(super) request_id: flow_ethos::RequestId,
+        pub(super) logical_delivery_id: flow_ethos::LogicalDeliveryId,
+        pub(super) closure: RequestClosure,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct DeliveryCounter {
+        pub(super) next_request: u64,
+        pub(super) next_attempt: u64,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct SendOutcomeCounter {
+        pub(super) next_id: u64,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) enum RequestState {
+        Queued,
+        Settled,
+        Unsent,
+        Parked,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct StoredDeliveryRequest {
+        pub(super) request_id: String,
+        pub(super) address: Address,
+        pub(super) queue_evidence: meta_signal_flow::QueueEvidence,
+        pub(super) state: RequestState,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct NativeDeliveryReceipt {
+        pub(super) native_request_id: u64,
+        pub(super) thread_id: String,
+        pub(super) turn_id: String,
+        pub(super) native_receipt: String,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct NativeTranscriptCursor {
+        pub(super) device: u64,
+        pub(super) inode: u64,
+        pub(super) offset: u64,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) enum NativeHistoryAnchor {
+        ClaudeTranscript(NativeTranscriptCursor),
+        CodexTurns(Option<String>),
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct AbsenceRecord {
+        pub(super) proof: meta_signal_flow::AbsenceProof,
+        pub(super) observation: String,
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) enum QueueDeliveryPhase {
+        Prepared,
+        Uncertain(Option<meta_signal_flow::Undecided>),
+        ReceiptRecorded(NativeDeliveryReceipt),
+        Settled(NativeDeliveryReceipt),
+        Read {
+            answer: String,
+            late_receipt: Option<NativeDeliveryReceipt>,
+        },
+        Absent(AbsenceRecord),
+        Resolved(meta_signal_flow::QueueResolutionRecord),
+    }
+
+    #[derive(Archive, Serialize, Deserialize)]
+    pub(super) struct QueueDeliveryAttempt {
+        pub(super) request_id: String,
+        pub(super) attempt_id: String,
+        pub(super) native_request_id: u64,
+        pub(super) flow_id: String,
+        pub(super) thread_id: String,
+        pub(super) harness_kind: signal_flow::HarnessKind,
+        pub(super) history_anchor: NativeHistoryAnchor,
+        pub(super) address: Address,
+        pub(super) queue_evidence: meta_signal_flow::QueueEvidence,
+        pub(super) phase: QueueDeliveryPhase,
+    }
 }
 
 /// An Address the samples share.
@@ -406,5 +544,309 @@ mod tests {
             latest_queue: generated::LatestQueue(7),
             logical_delivery_id_option: Some(signal_flow::LogicalDeliveryId("logical-9".into())),
         });
+    }
+
+    #[test]
+    fn delivery_records_archive_as_they_did() {
+        use crate::generated::memory as generated;
+        for (frozen_purpose, purpose) in [
+            (
+                frozen::DeliveryPurpose::Ordinary,
+                generated::DeliveryPurpose::Ordinary,
+            ),
+            (
+                frozen::DeliveryPurpose::Heartbeat,
+                generated::DeliveryPurpose::Heartbeat,
+            ),
+        ] {
+            frozen::LogicalDeliveryPurpose {
+                logical_delivery_id: "logical-1".into(),
+                address: Address::sample("purpose"),
+                purpose: frozen_purpose,
+            }
+            .archives_alike(&generated::LogicalDeliveryPurpose {
+                logical_delivery_id: signal_flow::LogicalDeliveryId("logical-1".into()),
+                address: Address::sample("purpose"),
+                delivery_purpose: purpose,
+            });
+        }
+        for (frozen_step, step) in [
+            (frozen::LeaseStep::Acquired, generated::LeaseStep::Acquired),
+            (
+                frozen::LeaseStep::Interrupted,
+                generated::LeaseStep::Interrupted,
+            ),
+            (frozen::LeaseStep::Placed, generated::LeaseStep::Placed),
+            (
+                frozen::LeaseStep::Submitted,
+                generated::LeaseStep::Submitted,
+            ),
+        ] {
+            frozen::PaneLease {
+                delivery_id: meta_signal_flow::DeliveryId("delivery-1".into()),
+                flow_id: "flow-1".into(),
+                herdr_pane_id: "pane-7".into(),
+                lease_step: frozen_step,
+            }
+            .archives_alike(&generated::PaneLease {
+                delivery_id: meta_signal_flow::DeliveryId("delivery-1".into()),
+                flow_id: signal_flow::FlowId("flow-1".into()),
+                herdr_pane_id: signal_flow::HerdrPaneId("pane-7".into()),
+                lease_step: step,
+            });
+        }
+        frozen::LogicalDeliveryCounter { next_cursor: 912 }.archives_alike(
+            &generated::LogicalDeliveryCounter {
+                next_cursor: generated::NextCursor(912),
+            },
+        );
+        frozen::DeliveryCounter {
+            next_request: 77,
+            next_attempt: 78,
+        }
+        .archives_alike(&generated::DeliveryCounter {
+            next_request: generated::NextRequest(77),
+            next_attempt: generated::NextAttempt(78),
+        });
+        frozen::SendOutcomeCounter { next_id: 3_979 }.archives_alike(
+            &generated::SendOutcomeCounter {
+                next_id: generated::NextId(3_979),
+            },
+        );
+        frozen::SimplifiedReplyBinding {
+            flow_id: "flow-s".into(),
+            input_delivery_id: "logical-input".into(),
+            source: Address::sample("source"),
+            recipient: Address::sample("recipient"),
+            completed: true,
+        }
+        .archives_alike(&generated::SimplifiedReplyBinding {
+            flow_id: signal_flow::FlowId("flow-s".into()),
+            input_delivery_id: generated::InputDeliveryId("logical-input".into()),
+            source: generated::Source(Address::sample("source")),
+            recipient: generated::Recipient(Address::sample("recipient")),
+            completed: generated::Completed(true),
+        });
+        for (frozen_closure, closure) in [
+            (
+                frozen::RequestClosure::Open,
+                generated::RequestClosure::Open,
+            ),
+            (
+                frozen::RequestClosure::Answered(flow_ethos::LogicalDeliveryId("answer".into())),
+                generated::RequestClosure::Answered(flow_ethos::LogicalDeliveryId("answer".into())),
+            ),
+        ] {
+            frozen::RequestIdBinding {
+                request_id: flow_ethos::RequestId("k7ph".into()),
+                logical_delivery_id: flow_ethos::LogicalDeliveryId("logical-2".into()),
+                closure: frozen_closure,
+            }
+            .archives_alike(&generated::RequestIdBinding {
+                request_id: flow_ethos::RequestId("k7ph".into()),
+                logical_delivery_id: flow_ethos::LogicalDeliveryId("logical-2".into()),
+                request_closure: closure,
+            });
+        }
+    }
+
+    /// A queued entry the queue samples share.
+    trait SamplesQueueEvidence {
+        fn sample() -> Self;
+    }
+
+    impl SamplesQueueEvidence for meta_signal_flow::QueueEvidence {
+        fn sample() -> Self {
+            meta_signal_flow::QueueEvidence::Logical(flow_ethos::QueueEntry {
+                logical_delivery_id: flow_ethos::LogicalDeliveryId("logical-q".into()),
+                request_id: flow_ethos::RequestId("m2x9".into()),
+                sent_by: signal_flow::SentBy::Sender(Address::sample("sender")),
+                delivery: flow_ethos::Delivery::Wake,
+                message: flow_ethos::Message::Soft(flow_ethos::Request::Notice(
+                    "queued words".into(),
+                )),
+            })
+        }
+    }
+
+    #[test]
+    fn queue_delivery_records_archive_as_they_did() {
+        use crate::generated::memory as generated;
+        use meta_signal_flow::QueueEvidence;
+        for (frozen_state, state) in [
+            (
+                frozen::RequestState::Queued,
+                generated::RequestState::Queued,
+            ),
+            (
+                frozen::RequestState::Settled,
+                generated::RequestState::Settled,
+            ),
+            (
+                frozen::RequestState::Unsent,
+                generated::RequestState::Unsent,
+            ),
+            (
+                frozen::RequestState::Parked,
+                generated::RequestState::Parked,
+            ),
+        ] {
+            frozen::StoredDeliveryRequest {
+                request_id: "logical-q".into(),
+                address: Address::sample("queue"),
+                queue_evidence: QueueEvidence::sample(),
+                state: frozen_state,
+            }
+            .archives_alike(&generated::StoredDeliveryRequest {
+                queue_request_id: meta_signal_flow::QueueRequestId("logical-q".into()),
+                address: Address::sample("queue"),
+                queue_evidence: QueueEvidence::sample(),
+                request_state: state,
+            });
+        }
+        let frozen_receipt = || frozen::NativeDeliveryReceipt {
+            native_request_id: 41,
+            thread_id: "thread".into(),
+            turn_id: "turn".into(),
+            native_receipt: r#"{"id":41,"result":{}}"#.into(),
+        };
+        let receipt = || generated::NativeDeliveryReceipt {
+            native_request_id: generated::NativeRequestId(41),
+            thread_id: generated::ThreadId("thread".into()),
+            turn_id: generated::TurnId("turn".into()),
+            native_receipt_text: generated::NativeReceiptText(r#"{"id":41,"result":{}}"#.into()),
+        };
+        let phases = vec![
+            (
+                frozen::QueueDeliveryPhase::Prepared,
+                generated::QueueDeliveryPhase::Prepared,
+            ),
+            (
+                frozen::QueueDeliveryPhase::Uncertain(None),
+                generated::QueueDeliveryPhase::Uncertain(None),
+            ),
+            (
+                frozen::QueueDeliveryPhase::ReceiptRecorded(frozen_receipt()),
+                generated::QueueDeliveryPhase::ReceiptRecorded(receipt()),
+            ),
+            (
+                frozen::QueueDeliveryPhase::Settled(frozen_receipt()),
+                generated::QueueDeliveryPhase::Settled(receipt()),
+            ),
+            (
+                frozen::QueueDeliveryPhase::Read {
+                    answer: "logical-answer".into(),
+                    late_receipt: None,
+                },
+                generated::QueueDeliveryPhase::Read(generated::Read_Data {
+                    answer: generated::Answer("logical-answer".into()),
+                    late_receipt: generated::LateReceipt(None),
+                }),
+            ),
+            (
+                frozen::QueueDeliveryPhase::Read {
+                    answer: "logical-answer".into(),
+                    late_receipt: Some(frozen_receipt()),
+                },
+                generated::QueueDeliveryPhase::Read(generated::Read_Data {
+                    answer: generated::Answer("logical-answer".into()),
+                    late_receipt: generated::LateReceipt(Some(receipt())),
+                }),
+            ),
+            (
+                frozen::QueueDeliveryPhase::Absent(frozen::AbsenceRecord {
+                    proof: meta_signal_flow::AbsenceProof::HistoryAbsent,
+                    observation: "never reached".into(),
+                }),
+                generated::QueueDeliveryPhase::Absent(generated::AbsenceRecord {
+                    absence_proof: meta_signal_flow::AbsenceProof::HistoryAbsent,
+                    observation: generated::Observation("never reached".into()),
+                }),
+            ),
+        ];
+        let anchors = || {
+            vec![
+                (
+                    frozen::NativeHistoryAnchor::ClaudeTranscript(frozen::NativeTranscriptCursor {
+                        device: 66_311,
+                        inode: u64::MAX - 5,
+                        offset: 1_048_576,
+                    }),
+                    generated::NativeHistoryAnchor::ClaudeTranscript(
+                        generated::NativeTranscriptCursor {
+                            device: generated::Device(66_311),
+                            inode: generated::Inode((u64::MAX - 5) as i64),
+                            offset: generated::Offset(1_048_576),
+                        },
+                    ),
+                ),
+                (
+                    frozen::NativeHistoryAnchor::CodexTurns(Some("turn-0".into())),
+                    generated::NativeHistoryAnchor::CodexTurns(Some("turn-0".into())),
+                ),
+                (
+                    frozen::NativeHistoryAnchor::CodexTurns(None),
+                    generated::NativeHistoryAnchor::CodexTurns(None),
+                ),
+            ]
+        };
+        for (frozen_phase, phase) in phases {
+            for (frozen_anchor, anchor) in anchors() {
+                frozen::QueueDeliveryAttempt {
+                    request_id: "logical-q".into(),
+                    attempt_id: "queue-attempt-0000000000000029".into(),
+                    native_request_id: 41,
+                    flow_id: "flow-q".into(),
+                    thread_id: "thread".into(),
+                    harness_kind: signal_flow::HarnessKind::Claude,
+                    history_anchor: frozen_anchor,
+                    address: Address::sample("queue"),
+                    queue_evidence: QueueEvidence::sample(),
+                    phase: match &frozen_phase {
+                        frozen::QueueDeliveryPhase::Prepared => {
+                            frozen::QueueDeliveryPhase::Prepared
+                        }
+                        frozen::QueueDeliveryPhase::Uncertain(_) => {
+                            frozen::QueueDeliveryPhase::Uncertain(None)
+                        }
+                        frozen::QueueDeliveryPhase::ReceiptRecorded(_) => {
+                            frozen::QueueDeliveryPhase::ReceiptRecorded(frozen_receipt())
+                        }
+                        frozen::QueueDeliveryPhase::Settled(_) => {
+                            frozen::QueueDeliveryPhase::Settled(frozen_receipt())
+                        }
+                        frozen::QueueDeliveryPhase::Read { late_receipt, .. } => {
+                            frozen::QueueDeliveryPhase::Read {
+                                answer: "logical-answer".into(),
+                                late_receipt: late_receipt.as_ref().map(|_| frozen_receipt()),
+                            }
+                        }
+                        frozen::QueueDeliveryPhase::Absent(_) => {
+                            frozen::QueueDeliveryPhase::Absent(frozen::AbsenceRecord {
+                                proof: meta_signal_flow::AbsenceProof::HistoryAbsent,
+                                observation: "never reached".into(),
+                            })
+                        }
+                        frozen::QueueDeliveryPhase::Resolved(record) => {
+                            frozen::QueueDeliveryPhase::Resolved(record.clone())
+                        }
+                    },
+                }
+                .archives_alike(&generated::QueueDeliveryAttempt {
+                    queue_request_id: meta_signal_flow::QueueRequestId("logical-q".into()),
+                    queue_attempt_id: meta_signal_flow::QueueAttemptId(
+                        "queue-attempt-0000000000000029".into(),
+                    ),
+                    native_request_id: generated::NativeRequestId(41),
+                    flow_id: signal_flow::FlowId("flow-q".into()),
+                    thread_id: generated::ThreadId("thread".into()),
+                    harness_kind: signal_flow::HarnessKind::Claude,
+                    native_history_anchor: anchor,
+                    address: Address::sample("queue"),
+                    queue_evidence: QueueEvidence::sample(),
+                    queue_delivery_phase: phase.clone(),
+                });
+            }
+        }
     }
 }

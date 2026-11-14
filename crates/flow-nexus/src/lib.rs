@@ -20,6 +20,7 @@ pub use crate::generated::memory::{
 };
 pub use crate::generated::operation::Outcome as OperationOutcome;
 pub use crate::generated::starter::{LaunchedRecord, ReplacedRecord};
+// The Memory root names the hand-kept transcript cursor by the crate's name.
 use crate::herdr::ConfiguresHerdrCli;
 use crate::herdr::ReadsHerdrPanes;
 use crate::live::{HoldsLiveValue, Live};

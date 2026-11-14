@@ -12,14 +12,15 @@ use crate::codex::NamesBoundCodexThread;
 use crate::codex::SelectsCodexEndpoint;
 use crate::emission::{AddressesHerdrSession, ReadsProcessReply, SpeaksHarness};
 use crate::generated::emission::{
-    AgentStatus, AgentTarget, AgentWait, ClaudeCommandLine, ClaudeSessionStart, ClaudeSettings,
-    CodexCommandLine, CodexExecutable, CodexSocket, CodexTitle, ConfiguredHarnessArguments,
-    CreateWorkspace_Data, Emittable, FlowIdentityClaim, FlowsRoot, Focus, HarnessCommandLine,
-    HerdrCommand, HerdrSessionCommand, HerdrSocketCall, HerdrSocketReply, HerdrSocketRequest,
-    Label, LineCount, MetadataSource, Milliseconds, OutputMatch, OutputSource, ProcessReply,
-    PromptAgentByName_Data, PromptText, RenamePane_Data, RenameWorkspace_Data,
-    ReportPaneMetadata_Data, RunInPane_Data, SessionTitle, ShellLine, StartAgent_Data,
-    SystemPromptFile, WaitForAgent_Data, WaitForPaneOutput_Data, WorkingDirectory,
+    AgentStatus, AgentTarget, AgentWait, ClaudeCommandLine, ClaudeEnvironment, ClaudeSessionStart,
+    ClaudeSettings, CodexCommandLine, CodexExecutable, CodexSocket, CodexTitle,
+    ConfiguredHarnessArguments, CreateWorkspace_Data, Emittable, FlowIdentityClaim, FlowsRoot,
+    Focus, HarnessCommandLine, HerdrCommand, HerdrSessionCommand, HerdrSocketCall,
+    HerdrSocketReply, HerdrSocketRequest, Label, LineCount, MetadataSource, Milliseconds,
+    OutputMatch, OutputSource, ProcessReply, PromptAgentByName_Data, PromptText, ReadinessMarker,
+    RenamePane_Data, RenameWorkspace_Data, ReportPaneMetadata_Data, RunInPane_Data, SessionTitle,
+    ShellLine, StartAgent_Data, SystemPromptFile, WaitForAgent_Data, WaitForPaneOutput_Data,
+    WorkingDirectory,
 };
 pub use crate::generated::starter::StartupProgress;
 use crate::generated::starter::{
@@ -543,12 +544,11 @@ impl PreparesClaudePane for HerdrCli {
             &pane.herdr_session_name,
             HerdrSessionCommand::RunInPane(RunInPane_Data {
                 herdr_pane_id: pane.herdr_pane_id.clone(),
-                shell_line: ShellLine(
-                    marker_suffix.claude_environment_preparation(
-                        reserved,
-                        &launch.lean_start().environment(),
-                    ),
-                ),
+                shell_line: ShellLine::PrepareClaudeEnvironment(ClaudeEnvironment {
+                    flow_id_option: reserved.map(|flow_id| signal_flow::FlowId(flow_id.to_owned())),
+                    lean_start: launch.lean_start(),
+                    readiness_marker: ReadinessMarker(marker_suffix.clone()),
+                }),
             }),
         )
         .emit(self)
@@ -970,41 +970,6 @@ impl CapturesTranscripts for HerdrCli {
                 Ok(Some((file, false)))
             }
         }
-    }
-}
-
-/// The shell line typed into a Claude launch pane before the harness: it
-/// removes inherited Claude identity and, when Reserve gave the launch a
-/// FlowId, exports that FlowId as FLOW_ID. The hook's typed configuration
-/// in Claude's flag settings carries the Nexus socket separately.
-pub(crate) trait PreparesClaudeEnvironment {
-    /// `environment` is the launch's leave-out variables, each NAME=value.
-    fn claude_environment_preparation(
-        &self,
-        reserved: Option<&str>,
-        environment: &[String],
-    ) -> String;
-}
-
-impl PreparesClaudeEnvironment for str {
-    fn claude_environment_preparation(
-        &self,
-        reserved: Option<&str>,
-        environment: &[String],
-    ) -> String {
-        let marker_suffix = self;
-        let flow_id = reserved
-            .map(|flow_id| format!(" && export FLOW_ID={flow_id}"))
-            .unwrap_or_default();
-        let leave_outs = environment
-            .iter()
-            .map(|variable| format!(" && export {}", variable.shell_quoted()))
-            .collect::<String>();
-        format!(
-            "unset {}{flow_id}{leave_outs} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
-            HerdrCli::CLAUDE_INHERITED_ENVIRONMENT.join(" "),
-            marker_suffix
-        )
     }
 }
 
@@ -3034,7 +2999,6 @@ pub(crate) mod tests {
     use crate::herdr::HerdrCli;
     use crate::herdr::launch::ChecksComposedLaunch;
     use crate::herdr::launch::ClaimsNativeIdentity;
-    use crate::herdr::launch::PreparesClaudeEnvironment;
     use crate::herdr::launch::PreparesClaudePane;
     use crate::herdr::launch::ReadsLaunchText;
     use crate::herdr::launch::TitlesClaudeSession;
@@ -3639,6 +3603,31 @@ printf '%s\n' "$alias"
         );
     }
 
+    /// The shell line a Claude launch with no leave-outs types into its
+    /// pane, with the marker `test-marker`.
+    struct EnvironmentLine;
+
+    trait RendersEnvironmentLine {
+        fn environment_preparation(reserved: Option<&str>) -> String;
+    }
+
+    impl RendersEnvironmentLine for EnvironmentLine {
+        fn environment_preparation(reserved: Option<&str>) -> String {
+            use crate::emission::SpeaksShell;
+            use crate::generated::emission::{ClaudeEnvironment, ReadinessMarker, ShellLine};
+            ShellLine::PrepareClaudeEnvironment(ClaudeEnvironment {
+                flow_id_option: reserved.map(|flow_id| signal_flow::FlowId(flow_id.to_owned())),
+                lean_start: crate::generated::starter::LeanStart {
+                    harness_kind: HarnessKind::Claude,
+                    leave_outs: signal_flow::LeaveOuts(Vec::new()),
+                    tool_set: signal_flow::ToolSet::Default,
+                },
+                readiness_marker: ReadinessMarker("test-marker".into()),
+            })
+            .shell_text()
+        }
+    }
+
     #[test]
     fn claude_environment_preparation_removes_inherited_claude_identity() {
         let checks = HerdrCli::CLAUDE_INHERITED_ENVIRONMENT
@@ -3650,7 +3639,7 @@ printf '%s\n' "$alias"
         let mut command = std::process::Command::new("sh");
         command.arg("-c").arg(format!(
             "{}; {checks}",
-            ("test-marker").claude_environment_preparation(None, &[]),
+            EnvironmentLine::environment_preparation(None),
         ));
         for name in HerdrCli::CLAUDE_INHERITED_ENVIRONMENT {
             command.env(name, "/home/li/.claude/jobs/108ab020");
@@ -3677,7 +3666,7 @@ printf '%s\n' "$alias"
             .arg("-c")
             .arg(format!(
                 "{}; sh -c 'printf %s \"$FLOW_ID\"'",
-                ("test-marker").claude_environment_preparation(Some("5a4d0b"), &[]),
+                EnvironmentLine::environment_preparation(Some("5a4d0b")),
             ))
             .env("FLOW_ID", "0a0a0a")
             .output()

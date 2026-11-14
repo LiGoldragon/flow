@@ -6,7 +6,7 @@ use crate::generated::emission::{
     AgentStatus, AgentTarget, AgentWait, ClaudeSessionStart, CodexTitle, CurriculumExchange,
     Emittable, FlowIdentityClaim, Focus, GitCommand, GitRevision, HarnessCommandLine, HerdrCommand,
     HerdrSessionCommand, HerdrSocketCall, HerdrSocketReply, HerdrSocketRequest, MetadataSource,
-    OutputSource, Printout, ProcessReply, ScreenFormat, Stderr, Stdout,
+    OutputSource, Printout, ProcessReply, ScreenFormat, ShellLine, Stderr, Stdout,
 };
 use crate::herdr::HerdrCli;
 use crate::herdr::launch::NamesHerdrHarness;
@@ -53,7 +53,7 @@ impl SpeaksHerdr for HerdrSessionCommand {
                 "pane".into(),
                 "run".into(),
                 run.herdr_pane_id.0.clone(),
-                run.shell_line.0.clone(),
+                run.shell_line.shell_text(),
             ],
             HerdrSessionCommand::WaitForPaneOutput(wait) => vec![
                 "pane".into(),
@@ -244,6 +244,43 @@ impl SpeaksHerdr for AgentWait {
         }
         words.extend(["--timeout".into(), self.milliseconds.0.to_string()]);
         words
+    }
+}
+
+/// The text of a shell line typed into a pane.
+pub(crate) trait SpeaksShell {
+    fn shell_text(&self) -> String;
+}
+
+/// Claude's environment line removes inherited Claude identity and, when
+/// Reserve gave the launch a FlowId, exports it as FLOW_ID; it exports each
+/// variable the lean start sets, then prints its marker. The hook's typed
+/// configuration in Claude's flag settings carries the Nexus socket
+/// separately.
+impl SpeaksShell for ShellLine {
+    fn shell_text(&self) -> String {
+        use crate::generated::starter::RendersLeanStart;
+        use crate::herdr::launch::{PreparesClaudePane, QuotesForShell};
+        match self {
+            ShellLine::PrepareClaudeEnvironment(environment) => {
+                let flow_id = environment
+                    .flow_id_option
+                    .as_ref()
+                    .map(|flow_id| format!(" && export FLOW_ID={}", flow_id.0))
+                    .unwrap_or_default();
+                let leave_outs = environment
+                    .lean_start
+                    .environment()
+                    .iter()
+                    .map(|variable| format!(" && export {}", variable.shell_quoted()))
+                    .collect::<String>();
+                format!(
+                    "unset {}{flow_id}{leave_outs} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
+                    <HerdrCli as PreparesClaudePane>::CLAUDE_INHERITED_ENVIRONMENT.join(" "),
+                    environment.readiness_marker.0
+                )
+            }
+        }
     }
 }
 

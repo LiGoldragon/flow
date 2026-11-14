@@ -72,19 +72,41 @@ flow-nexus 'Observe.Metaflows'
 flow-nexus-meta 'ObserveConfiguration'
 ```
 
-A Nexus starts in its place, the one datom it is started with, and reads
-nothing else for it: `flow-nexus-daemon '{ main /run/user/1001/nexus/main
-/home/li/.local/state/nexus/main }'`, the place name, Runtime (its sockets
-`flow.sock` and `flow-meta.sock`) and State (its memory `flow.sema`). A
-client takes the datom and nothing else: `flow-nexus '<Input>'` or
-`flow-nexus-meta '<Input>'`, both named after the Nexus. The place is their
+A Nexus is started with one datom, its place's name: `flow-nexus-daemon
+main`. Before any socket opens it reads its place from its place file,
+`$XDG_CONFIG_HOME/nexus/main/flow-nexus.signal` (`~/.config` when the
+variable is unset): one framed signal holding the Place every Nexus shares
+(translator's placement), the place name, Runtime (its sockets `flow.sock`
+and `flow-meta.sock`) and State (its memory `flow.sema`). The place file is
+the Place alone, found by the place name and the standard configuration home,
+and nothing else is read to find it: with no file, or one that is not one
+framed Place of this place's or holds a relative directory, the Nexus is
+refused naming the file, and does not start. No default place is resolved
+from `XDG_RUNTIME_DIR` or `XDG_STATE_HOME`. One tool compiles the place file from datom for every Nexus,
+translator's `nexus-configure`:
+
+```sh
+echo '{ main /run/user/1001/nexus/main /home/li/.local/state/nexus/main }' > place.datom
+nexus-configure 'Compile.{ place.datom ~/.config/nexus/main/flow-nexus.signal }'
+```
+
+The executable holds no configuration. A new memory is made empty and the
+Nexus starts unconfigured: it binds, announces readiness and answers
+`Unconfigured`, and a release replays the configuration through
+`flow-nexus-meta`, `Configure.Nexus` first, each family taking effect as it
+commits. A memory that exists keeps its configuration. A
+client takes the datom and nothing else: `flow-nexus '<Query>'` or
+`flow-nexus-meta '<Query>'`, both named after the Nexus. The place is their
 configuration's, one datom at `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`
 (`~/.config/nexus/flow-nexus.datom` when the variable is unset),
-`CliConfiguration.{ PlaceName }`, `{ main }`; the place
-name resolves under `$XDG_RUNTIME_DIR/nexus/` to that place's socket. A
-configuration that is missing, cannot be read or names no place is a typed
-refusal naming the file (`Missing.<path>`, `Unreadable.{ <path> <reason> }`,
-`Invalid.{ <path> <reason> }`, exit 2), and nothing is sent. No place is
+`CliConfiguration.{ PlaceName }`, `{ main }`; the place name locates the
+place file the Nexus reads, `$XDG_CONFIG_HOME/nexus/main/flow-nexus.signal`,
+and the sockets are in the Runtime that file holds (the CLI reads no
+`XDG_RUNTIME_DIR`), so a place whose Runtime is not the default is reached as
+well. A configuration or a place file that is missing, cannot be read or is
+no place is a typed refusal naming the file (`Missing.<path>`,
+`Unreadable.{ <path> <reason> }`, `Invalid.{ <path> <reason> }`, exit 2), and
+nothing is sent. No place is
 ever typed: a second argument is refused. Two places are two names: the
 stable version runs at `main`, a candidate at `next` with its own memory,
 and a version becomes main by being started at `main` once the version

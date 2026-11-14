@@ -1,0 +1,21 @@
+[package]
+name = "flow-place"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+flow-ethos = { path = "../flow-ethos", default-features = false, features = ["datom"] }
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09a0526" }
+protos = { git = "https://github.com/LiGoldragon/protos", rev = "c93b598" }
+# The shared Place every Nexus starts in, read from its place file by the
+# place's name (translator 0.6.0): the one place Flow's daemon and its CLIs
+# share, so the place is held once.
+translator = { git = "https://github.com/LiGoldragon/translator", rev = "6892a15b11653a2ef8932a4390b34f5e81583744", features = ["datom"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"
+unused = { level = "warn", priority = -1 }
+dead_code = "warn"

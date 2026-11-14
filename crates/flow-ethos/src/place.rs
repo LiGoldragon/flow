@@ -1,19 +1,19 @@
-//! Where a Flow Nexus lives: the sockets it makes in its place's Runtime
-//! directory, the root a client resolves a place name under, and the
-//! configuration a client reads the place name from.
+//! Where a Flow Nexus lives: the socket file names it makes in its place's
+//! Runtime directory, and the configuration a client reads the place name
+//! from.
 //!
-//! A Nexus is started with its place and reads nothing from the
-//! environment. A client is named after the Nexus and takes its datom and
-//! nothing else: the place name is its configuration's, one datom at
+//! A client is named after the Nexus and takes its datom and nothing else:
+//! the place name is its configuration's, one datom at
 //! `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`
-//! (`~/.config/nexus/flow-nexus.datom` when the variable is unset), and the
-//! place's Runtime is `$XDG_RUNTIME_DIR/nexus/<place-name>/`, each root taken
-//! from the standard variable and from nothing else. No place is ever typed.
+//! (`~/.config/nexus/flow-nexus.datom` when the variable is unset). The
+//! place itself, and with it the Runtime holding the sockets, is read from
+//! the Nexus's place file by that name (flow-place), so the place is held
+//! once and no client reads `XDG_RUNTIME_DIR`. No place is ever typed.
 
 use crate::generated::library::Reason;
 pub use crate::generated::library::{CliConfiguration, ConfigurationFault, ConfigurationRefusal};
 use std::{
-    ffi::{OsStr, OsString},
+    ffi::OsStr,
     path::{Path, PathBuf},
 };
 
@@ -38,48 +38,22 @@ impl NamesPlaceSockets for PlaceSockets {
     const META: &'static str = "flow-meta.sock";
 }
 
-/// The directory every place's Runtime lies under by default:
-/// `$XDG_RUNTIME_DIR/nexus`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeRoot {
-    pub directory: PathBuf,
+/// What a place name must be to stand in a path.
+#[cfg(feature = "datom")]
+trait ChecksPlaceName {
+    /// A place name is one path component: not empty, not `.` or `..`,
+    /// holding no `/`.
+    fn check(&self) -> Result<(), String>;
 }
 
-pub trait ResolvesPlace: Sized {
-    const NEXUS_DIRECTORY: &'static str = "nexus";
-    /// The root under the given runtime directory: the value of
-    /// `XDG_RUNTIME_DIR`, which must be an absolute path.
-    fn under(runtime_directory: Option<&OsStr>) -> Result<Self, String>;
-    /// The Runtime directory of the named place. A place name is one path
-    /// component: not empty, not `.` or `..`, holding no `/`.
-    fn place(&self, place_name: &str) -> Result<PathBuf, String>;
-}
-
-impl ResolvesPlace for RuntimeRoot {
-    fn under(runtime_directory: Option<&OsStr>) -> Result<Self, String> {
-        let Some(directory) = runtime_directory.map(PathBuf::from) else {
-            return Err("XDG_RUNTIME_DIR is not set: no place can be resolved".into());
-        };
-        if !directory.is_absolute() {
-            return Err(format!(
-                "XDG_RUNTIME_DIR {} is not absolute: no place can be resolved",
-                directory.display()
-            ));
+#[cfg(feature = "datom")]
+impl ChecksPlaceName for crate::generated::library::PlaceName {
+    fn check(&self) -> Result<(), String> {
+        let name = self.0.as_str();
+        if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+            return Err(format!("{name:?} is not a place name"));
         }
-        Ok(Self {
-            directory: directory.join(Self::NEXUS_DIRECTORY),
-        })
-    }
-
-    fn place(&self, place_name: &str) -> Result<PathBuf, String> {
-        if place_name.is_empty()
-            || place_name == "."
-            || place_name == ".."
-            || place_name.contains('/')
-        {
-            return Err(format!("{place_name:?} is not a place name"));
-        }
-        Ok(self.directory.join(place_name))
+        Ok(())
     }
 }
 
@@ -167,83 +141,30 @@ impl ReadsCliConfiguration for ConfigurationFile {
         let configuration = Potential::<CliConfiguration>::from(source.trim().to_owned())
             .actualize(&mut budget)
             .map_err(|error| ConfigurationRefusal::Invalid(fault(format!("{error:?}"))))?;
-        RuntimeRoot {
-            directory: PathBuf::new(),
-        }
-        .place(&configuration.place_name.0)
-        .map_err(|reason| ConfigurationRefusal::Invalid(fault(reason)))?;
+        configuration
+            .place_name
+            .check()
+            .map_err(|reason| ConfigurationRefusal::Invalid(fault(reason)))?;
         Ok(configuration)
-    }
-}
-
-/// The environment a Flow CLI reads, and nothing else of it.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct CliEnvironment {
-    pub runtime_directory: Option<OsString>,
-    pub configuration_home: Option<OsString>,
-    pub home: Option<OsString>,
-}
-
-pub trait ReadsCliEnvironment {
-    /// `XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME` and `HOME` of this process.
-    fn of_process() -> Self;
-}
-
-impl ReadsCliEnvironment for CliEnvironment {
-    fn of_process() -> Self {
-        Self {
-            runtime_directory: std::env::var_os("XDG_RUNTIME_DIR"),
-            configuration_home: std::env::var_os("XDG_CONFIG_HOME"),
-            home: std::env::var_os("HOME"),
-        }
-    }
-}
-
-/// The Runtime directory of the place a CLI reaches.
-pub trait ResolvesCliPlace {
-    /// A refusal is the text the CLI prints: a configuration refusal as its
-    /// datom, naming the file.
-    fn place_runtime(&self) -> Result<PathBuf, String>;
-}
-
-#[cfg(feature = "datom")]
-impl ResolvesCliPlace for CliEnvironment {
-    fn place_runtime(&self) -> Result<PathBuf, String> {
-        use datom_codec::Datomizable;
-        use protos::{Compactable, Protosizable};
-        let printed =
-            |refusal: ConfigurationRefusal| refusal.datomize(vec![]).protosize().compact();
-        let configuration =
-            ConfigurationFile::under(self.configuration_home.as_deref(), self.home.as_deref())
-                .and_then(|file| file.read())
-                .map_err(printed)?;
-        RuntimeRoot::under(self.runtime_directory.as_deref())?.place(&configuration.place_name.0)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{NamesPlaceSockets, PlaceSockets, ResolvesPlace, RuntimeRoot};
+    use super::{NamesPlaceSockets, PlaceSockets};
     use std::{ffi::OsStr, path::Path};
 
     #[test]
-    fn a_place_name_resolves_under_the_runtime_root_to_its_sockets() {
-        let root = RuntimeRoot::under(Some(OsStr::new("/run/user/1001"))).unwrap();
-        let main = root.place("main").unwrap();
-        assert_eq!(main, Path::new("/run/user/1001/nexus/main"));
+    fn a_place_s_sockets_lie_in_its_runtime() {
+        let runtime = Path::new("/run/user/1001/nexus/main");
         assert_eq!(
-            PlaceSockets::ordinary_in(&main),
+            PlaceSockets::ordinary_in(runtime),
             Path::new("/run/user/1001/nexus/main/flow.sock")
         );
         assert_eq!(
-            PlaceSockets::meta_in(&root.place("next").unwrap()),
-            Path::new("/run/user/1001/nexus/next/flow-meta.sock")
+            PlaceSockets::meta_in(runtime),
+            Path::new("/run/user/1001/nexus/main/flow-meta.sock")
         );
-        for refused in ["", ".", "..", "main/../next", "/main"] {
-            assert!(root.place(refused).is_err(), "{refused:?}");
-        }
-        assert!(RuntimeRoot::under(None).is_err());
-        assert!(RuntimeRoot::under(Some(OsStr::new("run/user/1001"))).is_err());
     }
 
     #[test]
@@ -302,8 +223,8 @@ mod tests {
     #[test]
     fn the_configuration_names_the_place_and_a_bad_one_is_refused_naming_its_path() {
         use super::{
-            CliConfiguration, CliEnvironment, ConfigurationFault, ConfigurationFile,
-            ConfigurationRefusal, LocatesConfiguration, ReadsCliConfiguration, ResolvesCliPlace,
+            CliConfiguration, ConfigurationFault, ConfigurationFile, ConfigurationRefusal,
+            LocatesConfiguration, ReadsCliConfiguration,
         };
         use crate::generated::library::{Path as PathText, PlaceName};
         let scratch = Scratch::new("configuration");
@@ -313,26 +234,12 @@ mod tests {
             file.read(),
             Err(ConfigurationRefusal::Missing(path.clone()))
         );
-        let environment = CliEnvironment {
-            runtime_directory: Some("/run/user/1001".into()),
-            configuration_home: Some(scratch.0.clone().into_os_string()),
-            home: None,
-        };
-        let refused = environment.place_runtime().unwrap_err();
-        assert!(
-            refused.starts_with("Missing.") && refused.contains(&path.0),
-            "{refused}"
-        );
         std::fs::write(&file.path, "{ next }\n").unwrap();
         assert_eq!(
             file.read(),
             Ok(CliConfiguration {
                 place_name: PlaceName("next".into())
             })
-        );
-        assert_eq!(
-            environment.place_runtime(),
-            Ok(Path::new("/run/user/1001/nexus/next").to_path_buf())
         );
         for invalid in ["{ next main }", "{ .. }", "{ }", ""] {
             std::fs::write(&file.path, invalid).unwrap();

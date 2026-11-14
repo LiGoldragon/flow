@@ -15,5 +15,6 @@
   "git+https://github.com/LiGoldragon/signal-flow?rev=4871bb8#61.0.0": "0rwx0bj0rw938q4z53f682ad173q8k3vkxn4jy3shcsq24a2zjhl",
   "git+https://github.com/LiGoldragon/signal-flow?rev=83c04fe#64.0.0": "1s1ilckmk2vy8jnyriv9ki7c3cb0r8wgps6n2w3iqipg5qmjnaak",
   "git+https://github.com/LiGoldragon/signal-sema.git?rev=4f3a24e6677ab9d200672851016c4c760c1e36e8#signal-sema@0.2.0": "0q6pgw0ymn5ylqlcnqldn7pf1dpv43vi07vqwf7lj5wd04bm3qac",
-  "git+https://github.com/LiGoldragon/signal?rev=6d4eb74#11.0.0": "0hqy8k58s6sc9wz76k8iq40bv636js5s951zgd01ncrxcy6h776a"
+  "git+https://github.com/LiGoldragon/signal?rev=6d4eb74#11.0.0": "0hqy8k58s6sc9wz76k8iq40bv636js5s951zgd01ncrxcy6h776a",
+  "git+https://github.com/LiGoldragon/translator?rev=6892a15b11653a2ef8932a4390b34f5e81583744#0.6.0": "1q8l8606hf7zxfxy7w3r23l4avj3j9y2kdpapsnskvw3l522yfpy"
 }

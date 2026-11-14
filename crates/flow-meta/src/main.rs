@@ -1,8 +1,7 @@
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
-use flow_ethos::place::{
-    CliEnvironment, NamesPlaceSockets, PlaceSockets, ReadsCliEnvironment, ResolvesCliPlace,
-};
+use flow_ethos::place::{NamesPlaceSockets, PlaceSockets};
 use flow_meta::Invocation;
+use flow_place::{CliEnvironment, ReadsCliEnvironment, ResolvesCliPlace};
 use meta_signal_flow::{Input, Output};
 use protos::{Compactable, Protosizable, ReaderBudget};
 use std::{
@@ -14,10 +13,12 @@ use std::{
 struct FlowMetaClient;
 
 /// The CLI is `flow-nexus-meta '<Input>'`: it takes the datom and nothing
-/// else. The place is the Flow configuration's,
+/// else. The place name is the Flow configuration's,
 /// `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`, the same file `flow-nexus`
-/// reads, resolved under `$XDG_RUNTIME_DIR/nexus/` to the place's meta
-/// socket; no place is typed.
+/// reads; the place is read from that place's place file,
+/// `$XDG_CONFIG_HOME/nexus/<place>/flow-nexus.signal`, and the meta socket
+/// lies in the Runtime it holds. With no place file the CLI is refused,
+/// naming it; no place is typed.
 trait ParsesMetaCommand {
     fn parse_command(
         &self,
@@ -61,7 +62,7 @@ impl ParsesMetaCommand for FlowMetaClient {
         place: &dyn ResolvesCliPlace,
     ) -> Result<Invocation, String> {
         let usage = || {
-            "usage: flow-nexus-meta '<one inline Input datom>'; the place is read from $XDG_CONFIG_HOME/nexus/flow-nexus.datom".to_owned()
+            "usage: flow-nexus-meta '<one inline Input datom>'; the place is the one $XDG_CONFIG_HOME/nexus/flow-nexus.datom names, read from its place file".to_owned()
         };
         let (Some(source), None) = (arguments.next(), arguments.next()) else {
             return Err(usage());
@@ -203,7 +204,7 @@ mod tests {
     /// The place a test's configuration names, read from no file.
     struct FixedPlace;
 
-    impl flow_ethos::place::ResolvesCliPlace for FixedPlace {
+    impl flow_place::ResolvesCliPlace for FixedPlace {
         fn place_runtime(&self) -> Result<std::path::PathBuf, String> {
             Ok("/run/user/test/nexus/main".into())
         }

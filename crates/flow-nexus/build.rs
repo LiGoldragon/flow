@@ -8,7 +8,6 @@ fn main() {
     for name in [
         "operation",
         "startup",
-        "library",
         "starter",
         "send_tool",
         "memory",

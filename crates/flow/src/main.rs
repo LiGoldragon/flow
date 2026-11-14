@@ -1,17 +1,17 @@
 use datom_codec::{Actualizing, Budget, Potential};
 use flow::Invocation;
 use flow::client::{CallsFlowNexus, FlowClient, TextualizesFlowReply};
-use flow_ethos::place::{
-    CliEnvironment, NamesPlaceSockets, PlaceSockets, ReadsCliEnvironment, ResolvesCliPlace,
-};
+use flow_ethos::place::{NamesPlaceSockets, PlaceSockets};
+use flow_place::{CliEnvironment, ReadsCliEnvironment, ResolvesCliPlace};
 use protos::ReaderBudget;
 use std::env;
 
 /// The CLI is `flow-nexus '<Input>'`: named after the Nexus, taking the datom
-/// and nothing else. The place is its configuration's,
-/// `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`, resolved under
-/// `$XDG_RUNTIME_DIR/nexus/` to the place's ordinary socket; no place is
-/// typed.
+/// and nothing else. The place name is its configuration's,
+/// `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`; the place is read from that
+/// place's place file, `$XDG_CONFIG_HOME/nexus/<place>/flow-nexus.signal`, the
+/// file the Nexus reads, and the ordinary socket lies in the Runtime it holds.
+/// With no place file the CLI is refused, naming it; no place is typed.
 trait ParsesFlowCommand {
     fn parse_command(
         &self,
@@ -27,7 +27,7 @@ impl ParsesFlowCommand for FlowClient {
         place: &dyn ResolvesCliPlace,
     ) -> Result<Invocation, String> {
         let usage = || {
-            "usage: flow-nexus '<one inline Input datom>'; the place is read from $XDG_CONFIG_HOME/nexus/flow-nexus.datom".to_owned()
+            "usage: flow-nexus '<one inline Input datom>'; the place is the one $XDG_CONFIG_HOME/nexus/flow-nexus.datom names, read from its place file".to_owned()
         };
         let (Some(value), None) = (arguments.next(), arguments.next()) else {
             return Err(usage());
@@ -127,7 +127,7 @@ mod tests {
     /// The place a test's configuration names, read from no file.
     struct FixedPlace;
 
-    impl flow_ethos::place::ResolvesCliPlace for FixedPlace {
+    impl flow_place::ResolvesCliPlace for FixedPlace {
         fn place_runtime(&self) -> Result<std::path::PathBuf, String> {
             Ok("/run/user/test/nexus/main".into())
         }

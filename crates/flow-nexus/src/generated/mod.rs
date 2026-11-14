@@ -1,5 +1,4 @@
 pub mod emission;
-pub mod library;
 pub mod memory;
 pub mod operation;
 pub mod send_tool;

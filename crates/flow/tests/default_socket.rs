@@ -1,14 +1,38 @@
 //! The CLI is `flow-nexus '<Input>'`: it takes the datom and nothing else.
 //! The place is its configuration's,
-//! `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`, resolved under
-//! `$XDG_RUNTIME_DIR/nexus/` to that place's ordinary socket and to no other,
-//! whatever else the environment names.
+//! `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`; the place itself is read from
+//! that place's place file, `$XDG_CONFIG_HOME/nexus/<place>/flow-nexus.signal`,
+//! and the CLI reaches the ordinary socket in the Runtime that file holds and
+//! no other, whatever else the environment names, `XDG_RUNTIME_DIR` included.
+//! With no place file it is refused, naming the file.
 use std::{
     io::{Read, Write},
     os::unix::net::UnixListener,
     path::Path,
     process::{Command, Output},
 };
+
+/// The place `place_name`, its Runtime `runtime`, written to its place file
+/// under the configuration home: where the Nexus's own place file lies.
+fn write_place_file(configuration_home: &Path, place_name: &str, runtime: &Path) {
+    use translator::place_file::{
+        ConfigurationHome, LocatesConfigurationHome, LocatesPlaceFile, WritesPlaceFile,
+    };
+    use translator::placement::{NexusName, Place, PlaceName, Runtime, State};
+    ConfigurationHome::under(Some(configuration_home.as_os_str()), None)
+        .expect("the configuration home")
+        .place_file(
+            &NexusName("flow-nexus".into()),
+            &PlaceName(place_name.into()),
+        )
+        .expect("the place file")
+        .write_place(&Place {
+            place_name: PlaceName(place_name.into()),
+            runtime: Runtime(runtime.to_string_lossy().into_owned()),
+            state: State(runtime.join("state").to_string_lossy().into_owned()),
+        })
+        .expect("the place file is written");
+}
 
 fn client(runtime: &Path, configuration_home: &Path, other: &Path, arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_flow-nexus"))
@@ -56,16 +80,23 @@ fn the_client_reaches_only_the_socket_of_the_place_its_configuration_names() {
         "{ next }\n",
     )
     .expect("the configuration names next");
-    let next = runtime.path().join("nexus/next");
+    // The Runtime of `next` is not the default under XDG_RUNTIME_DIR: its
+    // place file holds it, and the default is where decoys listen.
+    let next = runtime.path().join("elsewhere/next");
     let main = runtime.path().join("nexus/main");
+    let default_next = runtime.path().join("nexus/next");
     std::fs::create_dir_all(&next).expect("the place's runtime directory");
     std::fs::create_dir_all(&main).expect("another place's runtime directory");
+    std::fs::create_dir_all(&default_next).expect("the default runtime directory");
+    write_place_file(configuration.path(), "next", &next);
     let selected = next.join("flow.sock");
     let other = runtime.path().join("other.sock");
     let listener = UnixListener::bind(&selected).expect("selected fixture binds");
     let main_listener = UnixListener::bind(main.join("flow.sock")).expect("main fixture binds");
+    let default_listener =
+        UnixListener::bind(default_next.join("flow.sock")).expect("default fixture binds");
     let other_listener = UnixListener::bind(&other).expect("other fixture binds");
-    for unreached in [&main_listener, &other_listener] {
+    for unreached in [&main_listener, &default_listener, &other_listener] {
         unreached
             .set_nonblocking(true)
             .expect("nonblocking fixture");
@@ -98,7 +129,7 @@ fn the_client_reaches_only_the_socket_of_the_place_its_configuration_names() {
             "{typed:?}: {refused:?}"
         );
     }
-    for unreached in [&main_listener, &other_listener] {
+    for unreached in [&main_listener, &default_listener, &other_listener] {
         assert_eq!(
             unreached
                 .accept()
@@ -165,6 +196,57 @@ fn a_missing_configuration_is_refused_naming_its_path() {
     );
 }
 
+/// With no place file the CLI is refused, naming it: the place is held by
+/// the place file alone, so the configuration naming a place whose Nexus has
+/// no file reaches nothing, though the default Runtime under XDG_RUNTIME_DIR
+/// has a listening Nexus.
+#[test]
+fn a_missing_place_file_is_refused_naming_it_and_the_default_runtime_is_not_tried() {
+    let runtime = tempfile::tempdir().expect("temporary runtime directory");
+    let configuration = tempfile::tempdir().expect("temporary configuration home");
+    std::fs::create_dir_all(configuration.path().join("nexus")).expect("nexus configuration");
+    std::fs::write(
+        configuration.path().join("nexus/flow-nexus.datom"),
+        "{ main }\n",
+    )
+    .expect("the configuration names main");
+    let main = runtime.path().join("nexus/main");
+    std::fs::create_dir_all(&main).expect("the default runtime directory");
+    let default_listener =
+        UnixListener::bind(main.join("flow.sock")).expect("default fixture binds");
+    default_listener
+        .set_nonblocking(true)
+        .expect("nonblocking fixture");
+    let other = runtime.path().join("other.sock");
+    let file = configuration.path().join("nexus/main/flow-nexus.signal");
+    let refused = client(runtime.path(), configuration.path(), &other, &["Metaflows"]);
+    assert_eq!(refused.status.code(), Some(2), "{refused:?}");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.starts_with("Missing.") && stderr.contains(&*file.to_string_lossy()),
+        "{stderr}"
+    );
+    // Nor does the process need XDG_RUNTIME_DIR at all.
+    let refused = Command::new(env!("CARGO_BIN_EXE_flow-nexus"))
+        .env_clear()
+        .env("XDG_CONFIG_HOME", configuration.path())
+        .arg("Metaflows")
+        .output()
+        .expect("client runs");
+    assert_eq!(refused.status.code(), Some(2), "{refused:?}");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains(&*file.to_string_lossy()),
+        "{refused:?}"
+    );
+    assert_eq!(
+        default_listener
+            .accept()
+            .expect_err("nothing falls back to the default runtime")
+            .kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
 /// O4: against a Nexus that refuses its greeting the CLI writes no Input,
 /// says why and exits 2.
 #[test]
@@ -177,8 +259,9 @@ fn the_flow_cli_stops_at_a_refused_greeting() {
         "{ main }\n",
     )
     .expect("the configuration names main");
-    let main = runtime.path().join("nexus/main");
+    let main = runtime.path().join("places/main");
     std::fs::create_dir_all(&main).expect("the place's runtime directory");
+    write_place_file(configuration.path(), "main", &main);
     let listener = UnixListener::bind(main.join("flow.sock")).expect("fixture binds");
     let other = runtime.path().join("other.sock");
     let refusing = std::thread::spawn(move || {

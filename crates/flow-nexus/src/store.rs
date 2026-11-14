@@ -1603,8 +1603,6 @@ pub enum StoreError {
     InvalidStorePath,
     #[error("meta configuration is not configured")]
     NotConfigured,
-    #[error("the executable default configuration is missing or invalid")]
-    MissingDefaultConfiguration,
     #[error("a Codex model names both the stable and the next endpoint")]
     CodexModelsOverlap,
     #[error("the leave-out {0:?} is not a feature of the harness its permaflow runs on")]
@@ -2270,7 +2268,7 @@ pub trait OpensFlowStore {
     where
         Self: Sized;
 
-    /// Opens an already-configured, recognized Flow Memory store without
+    /// Opens a recognized Flow Memory store, configured or not yet, without
     /// seeding defaults or settling prior work. A store an earlier Flow
     /// wrote is refused, never upgraded.
     fn open_configured(path: &Path) -> Result<Self, StoreError>
@@ -2793,9 +2791,6 @@ impl OpensFlowStore for FlowStore {
         let delivery_tables = DeliveryTables::register(&mut engine)?;
         let meta_configuration_tables =
             MetaConfigurationTables::register(&mut engine, HookConfigurationOrigin::ExistingStore)?;
-        if FlowStore::meta_configuration_snapshot(&engine, &meta_configuration_tables)?.is_none() {
-            return Err(StoreError::NotConfigured);
-        }
         let event_tables =
             <events::EventTables as events::RegistersEventTables>::register(&mut engine)?;
         let warning_progress =
@@ -2899,9 +2894,10 @@ impl OpensFlowStore for FlowStore {
             metaflow_watch: Mutex::new(false),
         };
 
-        // Recognition already checked the authored Memory identity record;
-        // these reads require the complete committed configuration before any
-        // runtime adapter is constructed by RunningNexus.
+        // Recognition already checked the authored Memory identity record. A
+        // memory no configuration has reached yet opens as well: the Nexus
+        // starts unconfigured and takes its configuration over the meta
+        // socket, and each use that needs it is refused until then.
         store.state()?;
         store.seed_request_policy()?;
         store.archive_legacy_queue()?;
@@ -2909,9 +2905,6 @@ impl OpensFlowStore for FlowStore {
         store.seed_store_identity()?;
         store.seed_missing_queued_deliveries()?;
         request_id_upgrade::RunsRequestIdAnnouncements::run_request_id_announcements(&store)?;
-        store
-            .configuration_snapshot()?
-            .ok_or(StoreError::NotConfigured)?;
         Ok(store)
     }
 

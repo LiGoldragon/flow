@@ -7,7 +7,7 @@
 
 Emission
 [ signal_flow:[ HerdrSessionName HerdrAgentName HerdrWorkspaceId HerdrPaneId
-                HarnessKind LaunchRequestId NativeSessionId Effort ]
+                HarnessKind LaunchRequestId NativeSessionId Effort FlowId ]
   flow_ethos:[ KeyName ModelName ]
   :flow_nexus:generated:starter:LeanStart
   flow_nexus:[ CurriculumQuery CurriculumOutcome ] ]
@@ -39,7 +39,7 @@ Emission
                         ClosePane.HerdrPaneId
                         GetPane.HerdrPaneId
                         ReadPaneProcesses.HerdrPaneId
-                        RunInPane.{ HerdrPaneId ShellLine.String }
+                        RunInPane.{ HerdrPaneId ShellLine }
                         WaitForPaneOutput.{ HerdrPaneId OutputMatch.String OutputSource LineCount Milliseconds }
                         RenamePane.{ HerdrPaneId Label }
                         ReportPaneMetadata.{ HerdrPaneId MetadataSource DisplayAgent.String }
@@ -52,6 +52,12 @@ Emission
                         GetAgent.AgentTarget
                         ReadAgent.{ HerdrPaneId OutputSource LineCount ScreenFormat.[ Ansi ] }
                         PromptAgent.{ HerdrPaneId PromptText.String Option<AgentWait> } ]
+  ; The shell line typed into a pane before its harness runs.
+  ShellLine.[ PrepareClaudeEnvironment.ClaudeEnvironment ]
+  ; Claude's environment: the Flow ID Reserve gave the launch, if any, the
+  ; parts its lean start leaves out by environment, and the marker the line
+  ; prints once it has run.
+  ClaudeEnvironment.{ Option<FlowId> LeanStart ReadinessMarker.String }
   ; Which of a pane's output a read or a wait looks at.
   OutputSource.[ Visible RecentUnwrapped ]
   LineCount.Integer

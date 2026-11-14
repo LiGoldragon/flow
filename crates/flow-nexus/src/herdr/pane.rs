@@ -9,12 +9,17 @@
 //! does. A prompt to a working Codex 0.153 lands as a steer "submitted after
 //! next tool call" and is taken in the same turn.
 
-use super::{HerdrCli, PromptReply, VerifiesFlowClaim};
+use super::{HerdrCli, VerifiesFlowClaim};
+use crate::emission::{AddressesHerdrSession, ReadsProcessReply};
+use crate::generated::emission::{
+    AgentStatus, AgentTarget, AgentWait, Emittable, HerdrCommand, HerdrSessionCommand, LineCount,
+    Milliseconds, OutputSource, ProcessReply, PromptAgent_Data, PromptText, ReadAgent_Data,
+    ScreenFormat, SendKeys_Data, WaitForAgent_Data,
+};
 use crate::herdr::ReadsHerdrAgent;
 use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::ReadsPromptReply;
 use signal_flow::{AgentState, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection};
-use std::process::Command;
 
 /// What a fresh Herdr snapshot shows of a flow's bound agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,14 +54,14 @@ pub trait WritesPane {
     const INTERRUPT_PRESSES: usize = 3;
     /// How long each interrupt press is given to show: an interrupted turn
     /// stops within a second or two.
-    const INTERRUPT_WAIT_MILLISECONDS: &'static str = "3000";
+    const INTERRUPT_WAIT_MILLISECONDS: i64 = 3000;
     /// The composer is at the bottom of the screen.
-    const COMPOSER_LINES: &'static str = "12";
+    const COMPOSER_LINES: i64 = 12;
     /// How long a Stopped seat is given to show resting. Claude runs its
     /// Stop hook while its spinner is still on screen, and Herdr reads its
     /// state from the screen, so Herdr shows it working for a moment after
     /// the turn has ended.
-    const REST_WAIT_MILLISECONDS: &'static str = "15000";
+    const REST_WAIT_MILLISECONDS: i64 = 15000;
 
     fn pane_agent(&self, node: &FlowNode) -> PaneAgent;
     /// Whether the composer holds no text of its own: `None` when the screen
@@ -232,63 +237,52 @@ impl WritesPane for HerdrCli {
     }
 
     fn composer_text(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Option<String> {
-        let output = Command::new(&self.executable)
-            .args([
-                "--session",
-                route.herdr_session_name.0.as_str(),
-                "agent",
-                "read",
-                route.herdr_pane_id.0.as_str(),
-                "--source",
-                "visible",
-                "--lines",
-                Self::COMPOSER_LINES,
-                "--format",
-                "ansi",
-            ])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        Composer::of(harness_kind).text(&String::from_utf8_lossy(&output.stdout))
+        let reply = HerdrCommand::in_session(
+            &route.herdr_session_name,
+            HerdrSessionCommand::ReadAgent(ReadAgent_Data {
+                herdr_pane_id: route.herdr_pane_id.clone(),
+                output_source: OutputSource::Visible,
+                line_count: LineCount(Self::COMPOSER_LINES),
+                screen_format: ScreenFormat::Ansi,
+            }),
+        )
+        .emit(self);
+        Composer::of(harness_kind).text(reply.printed()?)
     }
 
     fn press(&self, route: &HerdrRoute, keys: &[String]) -> bool {
         if keys.is_empty() {
             return true;
         }
-        let mut command = Command::new(&self.executable);
-        command.args([
-            "--session",
-            route.herdr_session_name.0.as_str(),
-            "pane",
-            "send-keys",
-            route.herdr_pane_id.0.as_str(),
-        ]);
-        command.args(keys);
         // Herdr's reply is read for its status only; it never reaches the
         // Nexus's own output.
-        command.output().is_ok_and(|output| output.status.success())
+        HerdrCommand::in_session(
+            &route.herdr_session_name,
+            HerdrSessionCommand::SendKeys(SendKeys_Data {
+                herdr_pane_id: route.herdr_pane_id.clone(),
+                key_name_vector: keys
+                    .iter()
+                    .map(|key| flow_ethos::KeyName(key.clone()))
+                    .collect(),
+            }),
+        )
+        .emit(self)
+        .succeeded()
     }
 
     fn place(&self, route: &HerdrRoute, text: &str, observe: bool) -> Placement {
-        let mut command = Command::new(&self.executable);
-        command.args([
-            "--session",
-            route.herdr_session_name.0.as_str(),
-            "agent",
-            "prompt",
-            route.herdr_pane_id.0.as_str(),
-            text,
-        ]);
-        if observe {
-            command.args(PromptReply::OBSERVATION);
-        }
-        let Ok(output) = command.output() else {
+        let reply = HerdrCommand::in_session(
+            &route.herdr_session_name,
+            HerdrSessionCommand::PromptAgent(PromptAgent_Data {
+                herdr_pane_id: route.herdr_pane_id.clone(),
+                prompt_text: PromptText(text.to_owned()),
+                agent_wait_option: observe.then(ProcessReply::observation),
+            }),
+        )
+        .emit(self);
+        if matches!(reply, ProcessReply::Unstarted(_)) {
             return Placement::Refused;
-        };
-        let reply = PromptReply { output };
+        }
         if reply.refused_before_input() {
             return Placement::Refused;
         }
@@ -299,43 +293,37 @@ impl WritesPane for HerdrCli {
     }
 
     fn left_working(&self, route: &HerdrRoute) -> bool {
-        Command::new(&self.executable)
-            .args([
-                "--session",
-                route.herdr_session_name.0.as_str(),
-                "agent",
-                "wait",
-                route.herdr_pane_id.0.as_str(),
-                "--until",
-                "idle",
-                "--until",
-                "done",
-                "--until",
-                "blocked",
-                "--timeout",
-                Self::INTERRUPT_WAIT_MILLISECONDS,
-            ])
-            .output()
-            .is_ok_and(|output| output.status.success())
+        HerdrCommand::in_session(
+            &route.herdr_session_name,
+            HerdrSessionCommand::WaitForAgent(WaitForAgent_Data {
+                agent_target: AgentTarget::Pane(route.herdr_pane_id.clone()),
+                agent_wait: AgentWait {
+                    agent_status_vector: vec![
+                        AgentStatus::Idle,
+                        AgentStatus::Done,
+                        AgentStatus::Blocked,
+                    ],
+                    milliseconds: Milliseconds(Self::INTERRUPT_WAIT_MILLISECONDS),
+                },
+            }),
+        )
+        .emit(self)
+        .succeeded()
     }
 
     fn rested(&self, route: &HerdrRoute) -> bool {
-        Command::new(&self.executable)
-            .args([
-                "--session",
-                route.herdr_session_name.0.as_str(),
-                "agent",
-                "wait",
-                route.herdr_pane_id.0.as_str(),
-                "--until",
-                "idle",
-                "--until",
-                "done",
-                "--timeout",
-                Self::REST_WAIT_MILLISECONDS,
-            ])
-            .output()
-            .is_ok_and(|output| output.status.success())
+        HerdrCommand::in_session(
+            &route.herdr_session_name,
+            HerdrSessionCommand::WaitForAgent(WaitForAgent_Data {
+                agent_target: AgentTarget::Pane(route.herdr_pane_id.clone()),
+                agent_wait: AgentWait {
+                    agent_status_vector: vec![AgentStatus::Idle, AgentStatus::Done],
+                    milliseconds: Milliseconds(Self::REST_WAIT_MILLISECONDS),
+                },
+            }),
+        )
+        .emit(self)
+        .succeeded()
     }
 }
 

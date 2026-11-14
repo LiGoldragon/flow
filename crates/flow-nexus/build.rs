@@ -14,6 +14,7 @@ fn main() {
         "send_tool",
         "landing",
         "memory",
+        "emission",
     ] {
         let source_path = format!("ethos/{name}.ethos");
         let generated_path = format!("src/generated/{name}.rs");

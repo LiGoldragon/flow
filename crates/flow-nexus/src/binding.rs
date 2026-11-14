@@ -228,8 +228,10 @@ impl VerifiesExistingBinding for crate::herdr::HerdrCli {
         herdr_session_name: &str,
         binding: &FlowBinding,
     ) -> Result<(), FlowBindingRefusalReason> {
+        use crate::emission::{AddressesHerdrSession, ReadsProcessReply};
+        use crate::generated::emission::{Emittable, HerdrCommand, HerdrSessionCommand};
         use crate::herdr::launch::{
-            ClaimsNativeIdentity, NamesCodexThread, NamesHerdrHarness, ReadsLaunchFiles, RunsHerdr,
+            ClaimsNativeIdentity, NamesCodexThread, NamesHerdrHarness, ReadsLaunchFiles,
         };
         use crate::herdr::{LocatesNativeTranscripts, ReadsHerdrPanes};
         use signal_flow::HarnessKind;
@@ -268,16 +270,13 @@ impl VerifiesExistingBinding for crate::herdr::HerdrCli {
         {
             return Err(FlowBindingRefusalReason::NativeIdentityMismatch);
         }
-        let processes = self
-            .run_json(&[
-                "--session".into(),
-                herdr_session_name.into(),
-                "pane".into(),
-                "process-info".into(),
-                "--pane".into(),
-                binding.herdr_pane_id.clone().0,
-            ])
-            .map_err(|_| FlowBindingRefusalReason::HerdrUnreadable)?;
+        let processes = HerdrCommand::in_session(
+            &signal_flow::HerdrSessionName(herdr_session_name.into()),
+            HerdrSessionCommand::ReadPaneProcesses(binding.herdr_pane_id.clone()),
+        )
+        .emit(self)
+        .json()
+        .map_err(|_| FlowBindingRefusalReason::HerdrUnreadable)?;
         let information = processes
             .pointer("/result/process_info")
             .ok_or(FlowBindingRefusalReason::HerdrUnreadable)?;

@@ -8,7 +8,7 @@
 ; its leave-outs, after its workspace, of the harness its Model runs on.
 ; A Regular seat on claude-haiku-5-5 woken within five minutes of its last
 ; turn, its context under 150000 tokens, resumes its last flow.
-Configure.Nexus.{ @SOURCE_ROOT@ { @CODEX_CLIENT@ @CODEX_HOME@ @CODEX_SOCKET@ [ @CODEX_MODEL@ ] } { @CAPSULE_RUNTIME@/no-codex-client @CAPSULE_RUNTIME@/codex-next @CAPSULE_RUNTIME@/codex-next.sock [] } [ { Claude [ / «!» # ] [ esc esc ] [ enter ] } { Codex [ / «!» ] [ esc ] [] } ] [ Psyche ] Some.@CAPSULE_RUNTIME@/message.sock Some.@CAPSULE_RUNTIME@/no-message-nexus @CURRICULUM_SOCKET@ 60 None default }
+Configure.Nexus.{ @SOURCE_ROOT@ { @CODEX_CLIENT@ @CODEX_HOME@ @CODEX_SOCKET@ [ @CODEX_MODEL@ ] } { @CAPSULE_RUNTIME@/no-codex-client @CAPSULE_RUNTIME@/codex-next @CAPSULE_RUNTIME@/codex-next.sock [] } [ { Claude [ / «!» # ] [ esc esc ] [ enter ] } { Codex [ / «!» ] [ esc ] [] } ] [ Psyche ] Some.@CAPSULE_RUNTIME@/message.sock Some.@CAPSULE_RUNTIME@/no-message-nexus @CURRICULUM_SOCKET@ 60 None flow-testing }
 Configure.Models.[ { Fable claude-haiku-5-5 } { Opus claude-haiku-5-5 } { Sonnet claude-haiku-5-5 } { Haiku claude-haiku-5-5 } { Terra @CODEX_MODEL@ } ]
 Configure.Thresholds.[ { claude-haiku-5-5 200000 } { @CODEX_MODEL@ 200000 } ]
 Configure.Resumptions.[ { claude-haiku-5-5 5 150000 } ]

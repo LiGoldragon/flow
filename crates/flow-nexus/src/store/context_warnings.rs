@@ -18,13 +18,18 @@ pub(super) const PROGRESS_TABLE: &str = "flow_nexus_context_warning_progress";
 pub(super) const PROGRESS_FAMILY: &str = "flow-nexus-context-warning-progress";
 pub(super) const PROGRESS_SCHEMA: &str = "flow-nexus-context-warning-progress-v1";
 
+pub(crate) enum HookConfigurationOrigin {
+    ExistingStore,
+    NewStore,
+}
+
 pub(crate) struct ContextWarningConfigurationTables {
     pub(super) policies: TableReference<StoredContextWarningPolicy>,
     pub(super) hooks: TableReference<StoredHarnessHookEvents>,
 }
 
 pub(crate) trait RegistersContextWarningConfiguration: Sized {
-    fn register(engine: &mut Engine) -> Result<Self, StoreError>;
+    fn register(engine: &mut Engine, origin: HookConfigurationOrigin) -> Result<Self, StoreError>;
 }
 
 pub(crate) trait ReadsContextWarningConfiguration {
@@ -139,11 +144,33 @@ impl DescribesWarningRecord for ContextWarningProgress {
 }
 
 impl RegistersContextWarningConfiguration for ContextWarningConfigurationTables {
-    fn register(engine: &mut Engine) -> Result<Self, StoreError> {
-        Ok(Self {
-            policies: engine.register_table(StoredContextWarningPolicy::descriptor())?,
-            hooks: engine.register_table(StoredHarnessHookEvents::descriptor())?,
-        })
+    fn register(engine: &mut Engine, origin: HookConfigurationOrigin) -> Result<Self, StoreError> {
+        let policies = engine.register_table(StoredContextWarningPolicy::descriptor())?;
+        let hooks = engine.register_table(StoredHarnessHookEvents::descriptor())?;
+        if engine
+            .match_records(QueryPlan::all(hooks))?
+            .records()
+            .is_empty()
+        {
+            // A pre-vector configuration installed exactly these five hooks.
+            // Persist that historical value once; a new store persists none.
+            let events = match origin {
+                HookConfigurationOrigin::NewStore => Vec::new(),
+                HookConfigurationOrigin::ExistingStore => vec![
+                    HarnessHookEvent::SessionStart,
+                    HarnessHookEvent::PostToolUse,
+                    HarnessHookEvent::UserPromptSubmit,
+                    HarnessHookEvent::Stop,
+                    HarnessHookEvent::SessionEnd,
+                ],
+            };
+            engine.commit_atomic(
+                engine
+                    .begin_atomic_commit()
+                    .assert(hooks, StoredHarnessHookEvents(events)),
+            )?;
+        }
+        Ok(Self { policies, hooks })
     }
 }
 
@@ -240,5 +267,90 @@ impl ReadsContextWarningProgress for FlowStore {
             [row] => Ok(Some(row.clone())),
             _ => Err(StoreError::StateInvariant),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_existing_store_without_a_vector_gets_its_historical_hooks_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("old-configuration.sema");
+        // A pre-vector engine has no hook-event record. This is a migration
+        // fixture, not a historical binary execution or a native hook proof.
+        drop(Engine::open(EngineOpen::new(&path, SchemaVersion::new(1))).unwrap());
+        let selected = vec![HarnessHookEvent::PostToolUse, HarnessHookEvent::Stop];
+        {
+            let mut engine = Engine::open(EngineOpen::new(&path, SchemaVersion::new(1))).unwrap();
+            let tables = ContextWarningConfigurationTables::register(
+                &mut engine,
+                HookConfigurationOrigin::ExistingStore,
+            )
+            .unwrap();
+            assert_eq!(
+                engine
+                    .match_records(QueryPlan::all(tables.hooks))
+                    .unwrap()
+                    .records(),
+                &[StoredHarnessHookEvents(vec![
+                    HarnessHookEvent::SessionStart,
+                    HarnessHookEvent::PostToolUse,
+                    HarnessHookEvent::UserPromptSubmit,
+                    HarnessHookEvent::Stop,
+                    HarnessHookEvent::SessionEnd,
+                ])],
+            );
+            FlowStore::configure_hooks(&engine, &tables, selected.clone()).unwrap();
+        }
+        {
+            let mut engine = Engine::open(EngineOpen::new(&path, SchemaVersion::new(1))).unwrap();
+            let tables = ContextWarningConfigurationTables::register(
+                &mut engine,
+                HookConfigurationOrigin::ExistingStore,
+            )
+            .unwrap();
+            assert_eq!(
+                engine
+                    .match_records(QueryPlan::all(tables.hooks))
+                    .unwrap()
+                    .records(),
+                &[StoredHarnessHookEvents(selected)]
+            );
+            FlowStore::configure_hooks(&engine, &tables, Vec::new()).unwrap();
+        }
+        let mut engine = Engine::open(EngineOpen::new(&path, SchemaVersion::new(1))).unwrap();
+        let tables = ContextWarningConfigurationTables::register(
+            &mut engine,
+            HookConfigurationOrigin::ExistingStore,
+        )
+        .unwrap();
+        assert_eq!(
+            engine
+                .match_records(QueryPlan::all(tables.hooks))
+                .unwrap()
+                .records(),
+            &[StoredHarnessHookEvents(Vec::new())]
+        );
+    }
+
+    #[test]
+    fn a_new_store_persists_an_authoritative_empty_vector() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("new-configuration.sema");
+        let mut engine = Engine::open(EngineOpen::new(&path, SchemaVersion::new(1))).unwrap();
+        let tables = ContextWarningConfigurationTables::register(
+            &mut engine,
+            HookConfigurationOrigin::NewStore,
+        )
+        .unwrap();
+        assert_eq!(
+            engine
+                .match_records(QueryPlan::all(tables.hooks))
+                .unwrap()
+                .records(),
+            &[StoredHarnessHookEvents(Vec::new())]
+        );
     }
 }

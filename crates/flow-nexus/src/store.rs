@@ -1600,15 +1600,16 @@ pub(crate) struct MetaConfigurationTables {
 }
 
 trait RegistersMetaConfigurationTables: Sized {
-    fn register(engine: &mut Engine) -> Result<Self, StoreError>;
+    fn register(engine: &mut Engine, origin: HookConfigurationOrigin) -> Result<Self, StoreError>;
 }
 
 impl RegistersMetaConfigurationTables for MetaConfigurationTables {
-    fn register(engine: &mut Engine) -> Result<Self, StoreError> {
+    fn register(engine: &mut Engine, origin: HookConfigurationOrigin) -> Result<Self, StoreError> {
+        let nexus = engine.register_table(StoredMetaNexusConfiguration::descriptor())?;
         Ok(Self {
-            context_warnings: ContextWarningConfigurationTables::register(engine)?,
+            context_warnings: ContextWarningConfigurationTables::register(engine, origin)?,
             handover: <handover_configuration::StoredHandoverConfiguration as handover_configuration::UpgradesHandoverConfiguration>::upgrade_or_register(engine).map_err(StoreError::HandoverConfigurationUpgrade)?,
-            nexus: engine.register_table(StoredMetaNexusConfiguration::descriptor())?,
+            nexus,
             models: engine.register_table(StoredMetaModelConfiguration::descriptor())?,
             thresholds: engine.register_table(StoredMetaThresholdConfiguration::descriptor())?,
             send_servers: engine.register_table(
@@ -2013,11 +2014,12 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let configuration = engine.register_table(configuration_descriptor)?;
         let runtime_configuration = engine.register_table(runtime_configuration_descriptor)?;
         let delivery_configuration = engine.register_table(delivery_configuration_descriptor)?;
+        let nexus = engine.register_table(meta_nexus_descriptor)?;
         let meta_configuration_tables = MetaConfigurationTables {
-            context_warnings: ContextWarningConfigurationTables::register(&mut engine)?,
+            context_warnings: ContextWarningConfigurationTables::register(&mut engine, if recognized { HookConfigurationOrigin::ExistingStore } else { HookConfigurationOrigin::NewStore })?,
             handover: <handover_configuration::StoredHandoverConfiguration as handover_configuration::UpgradesHandoverConfiguration>::upgrade_or_register(&mut engine)
                 .map_err(StoreError::HandoverConfigurationUpgrade)?,
-            nexus: engine.register_table(meta_nexus_descriptor)?,
+            nexus,
             models: engine.register_table(meta_models_descriptor)?,
             thresholds: engine.register_table(meta_thresholds_descriptor)?,
             send_servers: engine.register_table(meta_send_servers_descriptor)?,
@@ -2702,7 +2704,8 @@ impl OpensFlowStore for FlowStore {
         let replacements = engine.register_table(replacements_descriptor)?;
         let roles = engine.register_table(roles_descriptor)?;
         let delivery_tables = DeliveryTables::register(&mut engine)?;
-        let meta_configuration_tables = MetaConfigurationTables::register(&mut engine)?;
+        let meta_configuration_tables =
+            MetaConfigurationTables::register(&mut engine, HookConfigurationOrigin::ExistingStore)?;
         if FlowStore::meta_configuration_snapshot(&engine, &meta_configuration_tables)?.is_none() {
             return Err(StoreError::NotConfigured);
         }
@@ -2826,6 +2829,11 @@ impl OpensFlowStore for FlowStore {
     }
 
     fn open_seeded(path: &Path, defaults: &DefaultConfiguration) -> Result<Self, StoreError> {
+        let origin = if path.exists() {
+            HookConfigurationOrigin::ExistingStore
+        } else {
+            HookConfigurationOrigin::NewStore
+        };
         let mut engine = Engine::open(EngineOpen::new(path, SchemaVersion::new(1)))?;
         let flows = engine.register_table(TableDescriptor::new(
             FLOW_TABLE_NAME,
@@ -2901,7 +2909,7 @@ impl OpensFlowStore for FlowStore {
             StoredLaunchAttempt::schema_hash(),
         ))?;
         let delivery_tables = DeliveryTables::register(&mut engine)?;
-        let meta_configuration_tables = MetaConfigurationTables::register(&mut engine)?;
+        let meta_configuration_tables = MetaConfigurationTables::register(&mut engine, origin)?;
         let event_tables =
             <events::EventTables as events::RegistersEventTables>::register(&mut engine)?;
         let warning_progress =

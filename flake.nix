@@ -400,7 +400,7 @@
                   grep -F 'rev = "4982eeb"' ${./Cargo.toml}
                   grep -F 'rev = "1c7597e107304740b922ec5a36c011c40fffe676"' ${./Cargo.toml}
                   grep -F 'signal-flow?rev=4982eeb#4982eeb6f8b2ef8a86a0070dc02acaf0f2088272' ${./Cargo.lock}
-                  grep -F 'meta-signal-flow?rev=1c7597e107304740b922ec5a36c011c40fffe676#1c7597e107304740b922ec5a36c011c40fffe676' ${./Cargo.lock}
+                  grep -F 'meta-signal-flow?rev=cf65bbd7a3829d0f18438b8538128ca7242f659f#cf65bbd7a3829d0f18438b8538128ca7242f659f' ${./Cargo.lock}
                   touch "$out"
                 '';
 

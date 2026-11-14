@@ -102,7 +102,6 @@ pub(crate) struct HarnessCommandResources {
     /// The session a Claude restart resumes: `--resume`, in place of
     /// `--session-id`.
     pub claude_resume: Option<String>,
-    pub codex_title: Option<String>,
     pub thread: Option<String>,
 }
 
@@ -126,7 +125,6 @@ impl RehearsesHarnessResources for HarnessCommandResources {
                 prompt_fd: Some("<prompt-fd>".into()),
                 claude_session: Some("<claude-session>".into()),
                 claude_resume: None,
-                codex_title: None,
                 thread: None,
             },
             HarnessKind::Codex => Self {
@@ -140,7 +138,6 @@ impl RehearsesHarnessResources for HarnessCommandResources {
                 prompt_fd: None,
                 claude_session: None,
                 claude_resume: None,
-                codex_title: Some("<title>".into()),
                 thread: Some("<thread>".into()),
             },
         }

@@ -8,7 +8,7 @@ use crate::RunningNexus;
 use crate::codex::{
     AccountsOpenedThread, OpensCodexThread, SelectsCodexEndpoint, SubmitsBoundCodexPart,
 };
-use crate::composition::{ComposesInRoot, CompositionError, HandoverRoot, HarnessedProfile};
+use crate::composition::{ComposesInRoot, HandoverRoot, HarnessedProfile};
 use crate::generated::operation::{
     Failed_Data, Open_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Asleep_Data,
     Record_Data_Awoken_Data, Record_Data_Context_Data, Record_Data_Harness_Data,
@@ -299,89 +299,12 @@ impl Performs for RunningNexus {
                     &open_requests,
                 ) {
                     Ok(launch) => Outcome::Composed(launch),
-                    Err(CompositionError::LeaveOut(refusal)) => {
-                        eprintln!(
-                            "flow-nexus: launch {request} leave-outs refused: {refusal:?}",
-                            request = request.0
-                        );
-                        Outcome::Failed(Failed_Data::LeaveOutRefused(refusal))
-                    }
-                    Err(CompositionError::Context(refusal)) => {
-                        eprintln!(
-                            "flow-nexus: launch {request} context refused: {refusal:?}",
-                            request = request.0
-                        );
-                        Outcome::Failed(Failed_Data::ContextRefused(refusal))
-                    }
-                    Err(CompositionError::InvalidProfileField(refusal)) => {
-                        eprintln!(
-                            "flow-nexus: launch {request} not composed: {refusal:?}",
-                            request = request.0
-                        );
-                        Outcome::Failed(Failed_Data::CompositionRefused(refusal))
-                    }
-                    Err(error @ CompositionError::PresentationPromptUnavailable(_)) => {
+                    Err(error) => {
                         eprintln!(
                             "flow-nexus: launch {request} not composed: {error}",
                             request = request.0
                         );
-                        Outcome::Failed(Failed_Data::CompositionRefused(
-                            signal_flow::CompositionRefusal::PresentationUnavailable,
-                        ))
-                    }
-                    Err(CompositionError::RecoveryUnavailable {
-                        address,
-                        predecessor,
-                        reason,
-                    }) => {
-                        let refusal = signal_flow::CompositionRefusal::RecoveryUnavailable(
-                            signal_flow::RecoveryUnavailable_Data {
-                                address,
-                                flow_id: predecessor,
-                                string: reason,
-                            },
-                        );
-                        eprintln!(
-                            "flow-nexus: launch {request} not composed: {refusal:?}",
-                            request = request.0
-                        );
-                        Outcome::Failed(Failed_Data::CompositionRefused(refusal))
-                    }
-                    Err(CompositionError::RecoveryPredecessorMismatch {
-                        address,
-                        recorded_address,
-                        expected_predecessor,
-                        intent_predecessor,
-                        recovery_predecessor,
-                    }) => {
-                        let refusal = signal_flow::CompositionRefusal::RecoveryPredecessorMismatch(
-                            signal_flow::RecoveryPredecessorMismatch_Data {
-                                first_address: address,
-                                second_address: recorded_address,
-                                first_flow_id: expected_predecessor,
-                                second_flow_id: intent_predecessor,
-                                third_flow_id: recovery_predecessor,
-                            },
-                        );
-                        eprintln!(
-                            "flow-nexus: launch {request} not composed: {refusal:?}",
-                            request = request.0
-                        );
-                        Outcome::Failed(Failed_Data::CompositionRefused(refusal))
-                    }
-                    Err(CompositionError::HandoverUnreadable { predecessor, fault }) => {
-                        eprintln!(
-                            "flow-nexus: launch {request} not composed: the handover of {predecessor} could not be read: {fault:?}",
-                            request = request.0
-                        );
-                        Outcome::Failed(Failed_Data::CompositionRefused(
-                            signal_flow::CompositionRefusal::HandoverUnreadable(
-                                signal_flow::HandoverUnreadable_Data {
-                                    flow_id: signal_flow::FlowId(predecessor),
-                                    handover_fault: fault,
-                                },
-                            ),
-                        ))
+                        Outcome::Failed(Failed_Data::from(error))
                     }
                 }
             }

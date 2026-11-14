@@ -74,6 +74,65 @@ impl From<ContextRefusal> for CompositionError {
     }
 }
 
+/// What a refused composition answers on Operation's wire. The two recovery
+/// refusals are bare positional in signal-flow 64, so each named field is
+/// written into the position the contract gives its role:
+///
+/// - `RecoveryUnavailable.{ Address FlowId String }`: the launch's Address,
+///   its predecessor, the reader's own text.
+/// - `RecoveryPredecessorMismatch.{ Address Address FlowId FlowId FlowId }`:
+///   the launch's Address, the recorded Address, then the launch's, the
+///   recorded intent's and the recovery's predecessor.
+impl From<CompositionError> for crate::generated::operation::Failed_Data {
+    fn from(error: CompositionError) -> Self {
+        use crate::generated::operation::Failed_Data;
+        match error {
+            CompositionError::InvalidProfileField(refusal) => {
+                Failed_Data::CompositionRefused(refusal)
+            }
+            CompositionError::Context(refusal) => Failed_Data::ContextRefused(refusal),
+            CompositionError::LeaveOut(refusal) => Failed_Data::LeaveOutRefused(refusal),
+            CompositionError::PresentationPromptUnavailable(_) => {
+                Failed_Data::CompositionRefused(CompositionRefusal::PresentationUnavailable)
+            }
+            CompositionError::RecoveryUnavailable {
+                address,
+                predecessor,
+                reason,
+            } => Failed_Data::CompositionRefused(CompositionRefusal::RecoveryUnavailable(
+                signal_flow::RecoveryUnavailable_Data {
+                    address,
+                    flow_id: predecessor,
+                    string: reason,
+                },
+            )),
+            CompositionError::RecoveryPredecessorMismatch {
+                address,
+                recorded_address,
+                expected_predecessor,
+                intent_predecessor,
+                recovery_predecessor,
+            } => Failed_Data::CompositionRefused(CompositionRefusal::RecoveryPredecessorMismatch(
+                signal_flow::RecoveryPredecessorMismatch_Data {
+                    first_address: address,
+                    second_address: recorded_address,
+                    first_flow_id: expected_predecessor,
+                    second_flow_id: intent_predecessor,
+                    third_flow_id: recovery_predecessor,
+                },
+            )),
+            CompositionError::HandoverUnreadable { predecessor, fault } => {
+                Failed_Data::CompositionRefused(CompositionRefusal::HandoverUnreadable(
+                    signal_flow::HandoverUnreadable_Data {
+                        flow_id: signal_flow::FlowId(predecessor),
+                        handover_fault: fault,
+                    },
+                ))
+            }
+        }
+    }
+}
+
 /// Composes launches through one context composer.
 #[derive(Clone, Debug)]
 pub struct LaunchComposer {
@@ -2269,5 +2328,76 @@ pub(crate) mod tests {
         let mut fresh = profile;
         fresh.flow_id_option = None;
         assert!(composer.emergency_predecessor(&fresh).unwrap().is_none());
+    }
+
+    fn recovery_address(topic: &str) -> Address {
+        Address {
+            aspect: Aspect::Mind,
+            topic: flow_ethos::Topic(topic.into()),
+            model: Model::Sol,
+        }
+    }
+
+    /// Each named field of a recovery refusal is written into the position
+    /// signal-flow 64 gives its role, and the refusal's datom text carries
+    /// the values in that order.
+    #[test]
+    fn recovery_refusals_write_each_named_field_into_its_contract_position() {
+        use crate::generated::operation::Failed_Data;
+        use datom_codec::Datomizable;
+        use protos::{Compactable, Protosizable};
+        let mismatch = CompositionError::RecoveryPredecessorMismatch {
+            address: recovery_address("launchAddress"),
+            recorded_address: recovery_address("recordedAddress"),
+            expected_predecessor: signal_flow::FlowId("expect".into()),
+            intent_predecessor: signal_flow::FlowId("intent".into()),
+            recovery_predecessor: signal_flow::FlowId("recovr".into()),
+        };
+        let expected = CompositionRefusal::RecoveryPredecessorMismatch(
+            signal_flow::RecoveryPredecessorMismatch_Data {
+                first_address: recovery_address("launchAddress"),
+                second_address: recovery_address("recordedAddress"),
+                first_flow_id: signal_flow::FlowId("expect".into()),
+                second_flow_id: signal_flow::FlowId("intent".into()),
+                third_flow_id: signal_flow::FlowId("recovr".into()),
+            },
+        );
+        assert_eq!(
+            Failed_Data::from(mismatch),
+            Failed_Data::CompositionRefused(expected.clone())
+        );
+        let text = expected.datomize(Vec::new()).protosize().compact();
+        let positions: Vec<usize> = [
+            "launchAddress",
+            "recordedAddress",
+            "expect",
+            "intent",
+            "recovr",
+        ]
+        .iter()
+        .map(|value| text.find(value).unwrap_or_else(|| panic!("{value} in {text}")))
+        .collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{text}");
+
+        let unavailable = CompositionError::RecoveryUnavailable {
+            address: recovery_address("launchAddress"),
+            predecessor: signal_flow::FlowId("predec".into()),
+            reason: "the intent read failed".into(),
+        };
+        let expected = CompositionRefusal::RecoveryUnavailable(signal_flow::RecoveryUnavailable_Data {
+            address: recovery_address("launchAddress"),
+            flow_id: signal_flow::FlowId("predec".into()),
+            string: "the intent read failed".into(),
+        });
+        assert_eq!(
+            Failed_Data::from(unavailable),
+            Failed_Data::CompositionRefused(expected.clone())
+        );
+        let text = expected.datomize(Vec::new()).protosize().compact();
+        let positions: Vec<usize> = ["launchAddress", "predec", "the intent read failed"]
+            .iter()
+            .map(|value| text.find(value).unwrap_or_else(|| panic!("{value} in {text}")))
+            .collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{text}");
     }
 }

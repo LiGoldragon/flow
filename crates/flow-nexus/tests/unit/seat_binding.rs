@@ -262,6 +262,10 @@ impl CodexCliWorld {
             format!("{{ {place_name} }}\n"),
         )
         .unwrap();
+        {
+            use crate::place::WritesTestPlaceFile;
+            crate::place::PlaceName(place_name.into()).write_place_file(&configuration, place);
+        }
         let gate = self.fixture.nexus.dispatch_gate.lock().unwrap();
         let mut command = Command::new("sh");
         command

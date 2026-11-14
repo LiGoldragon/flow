@@ -737,6 +737,11 @@ impl ServesCliWorld for CliWorld {
         std::fs::create_dir_all(&configuration).expect("the clients' configuration");
         std::fs::write(configuration.join("flow-nexus.datom"), "{ main }\n")
             .expect("the configuration names main");
+        {
+            use crate::place::WritesTestPlaceFile;
+            crate::place::PlaceName("main".into())
+                .write_place_file(&fixture.directory.path().join("config"), &place);
+        }
         let socket = place.join("flow.sock");
         let meta_socket = place.join("flow-meta.sock");
         let (served, meta_served) = (socket.clone(), meta_socket.clone());

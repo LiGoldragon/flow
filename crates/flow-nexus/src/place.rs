@@ -41,6 +41,33 @@ impl LaysOutPlace for Place {
     }
 }
 
+/// What a test writes so that the clients it runs find its place: the place
+/// file of `self` under a configuration home, holding the Runtime the test's
+/// sockets lie in.
+#[cfg(test)]
+pub(crate) trait WritesTestPlaceFile {
+    fn write_place_file(&self, configuration_home: &Path, runtime: &Path);
+}
+
+#[cfg(test)]
+impl WritesTestPlaceFile for PlaceName {
+    fn write_place_file(&self, configuration_home: &Path, runtime: &Path) {
+        use translator::place_file::{
+            ConfigurationHome, LocatesConfigurationHome, LocatesPlaceFile, WritesPlaceFile,
+        };
+        ConfigurationHome::under(Some(configuration_home.as_os_str()), None)
+            .expect("the configuration home")
+            .place_file(&Self::nexus_name(), self)
+            .expect("the place file")
+            .write_place(&Place {
+                place_name: self.clone(),
+                runtime: Runtime(runtime.to_string_lossy().into_owned()),
+                state: State(runtime.join("state").to_string_lossy().into_owned()),
+            })
+            .expect("the place file is written");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{FindsFlowPlace, LaysOutPlace, Place, PlaceFileRefusal, PlaceName, Runtime, State};

@@ -8016,10 +8016,17 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let runtime = directory.path().join("runtime");
         let configuration = directory.path().join("configuration");
-        let socket = runtime.join("nexus/main/flow-meta.sock");
+        // The Runtime is the one the place file holds, not a default under
+        // XDG_RUNTIME_DIR, which the CLI does not read.
+        let socket = runtime.join("elsewhere/flow-meta.sock");
         fs::create_dir_all(socket.parent().unwrap()).unwrap();
         fs::create_dir_all(configuration.join("nexus")).unwrap();
         fs::write(configuration.join("nexus/flow-nexus.datom"), "{ main }").unwrap();
+        {
+            use place::WritesTestPlaceFile;
+            place::PlaceName("main".into())
+                .write_place_file(&configuration, socket.parent().unwrap());
+        }
         let listener = UnixListener::bind(&socket).unwrap();
         let binary = std::env::current_exe()
             .unwrap()
@@ -8041,7 +8048,6 @@ mod tests {
             for query in ["Configuration", "ReadEvents.a001"] {
                 let output = std::process::Command::new(&binary)
                     .env_clear()
-                    .env("XDG_RUNTIME_DIR", &runtime)
                     .env("XDG_CONFIG_HOME", &configuration)
                     .arg(query)
                     .output()

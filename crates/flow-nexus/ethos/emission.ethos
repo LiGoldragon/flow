@@ -7,17 +7,21 @@
 
 Emission
 [ signal_flow:[ HerdrSessionName HerdrAgentName HerdrWorkspaceId HerdrPaneId
-                HarnessKind LaunchRequestId ]
+                HarnessKind LaunchRequestId NativeSessionId ]
   flow_ethos:[ KeyName ]
   flow_nexus:[ CurriculumQuery CurriculumOutcome ] ]
 [ ; Herdr's command line: one `herdr` process.
   Herdr.HerdrCommand
   ; One query to the Curriculum Nexus, on a connection of its own.
-  Curriculum.CurriculumQuery ]
+  Curriculum.CurriculumQuery
+  ; The flow-id helper's claim of a Flow ID for a native session.
+  FlowIdentity.FlowIdentityClaim ]
 [ ; What the process printed, and whether it ran and succeeded.
   Herdr.ProcessReply
   ; Curriculum's answer, or why none was read.
-  Curriculum.CurriculumExchange ]
+  Curriculum.CurriculumExchange
+  ; What the helper printed: the Flow ID it claimed, or its refusal.
+  FlowIdentity.ProcessReply ]
 [ HerdrCommand.[ ListSessions
                  InSession.{ HerdrSessionName HerdrSessionCommand } ]
   ; A command addressed to one Herdr session.
@@ -59,4 +63,7 @@ Emission
   ProcessReply.[ Unstarted.String Succeeded.Printout Failed.Printout Cancelled ]
   ; Unexchanged: the socket could not be reached, or the query written or
   ; the answer read; the String is the transport's own account.
-  CurriculumExchange.[ Answered.CurriculumOutcome Unexchanged.String ] ]
+  CurriculumExchange.[ Answered.CurriculumOutcome Unexchanged.String ]
+  ; The harness whose session is claimed, the flows directory the claim
+  ; is written under, and the native session it is claimed for.
+  FlowIdentityClaim.{ HarnessKind FlowsRoot.String NativeSessionId } ]

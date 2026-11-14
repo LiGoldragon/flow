@@ -3,9 +3,9 @@
 //! external call and observes its outcome.
 
 use crate::generated::emission::{
-    AgentStatus, AgentTarget, AgentWait, CurriculumExchange, Emittable, Focus, HerdrCommand,
-    HerdrSessionCommand, MetadataSource, OutputSource, Printout, ProcessReply, ScreenFormat,
-    Stderr, Stdout,
+    AgentStatus, AgentTarget, AgentWait, CurriculumExchange, Emittable, FlowIdentityClaim, Focus,
+    HerdrCommand, HerdrSessionCommand, MetadataSource, OutputSource, Printout, ProcessReply,
+    ScreenFormat, Stderr, Stdout,
 };
 use crate::herdr::HerdrCli;
 use crate::herdr::launch::NamesHerdrHarness;
@@ -260,13 +260,15 @@ impl WritesHerdrCommandLine for HerdrCli {
     }
 }
 
-/// One `herdr` process: its words, its status and what it printed.
-impl Emittable<HerdrCli> for HerdrCommand {
-    fn emit(&self, herdr: &HerdrCli) -> ProcessReply {
-        match Command::new(&herdr.executable)
-            .args(self.herdr_words())
-            .output()
-        {
+/// What a finished process is observed to have done: run and succeeded or
+/// failed, with what it printed, or not started at all.
+trait ObservesFinishedProcess {
+    fn process_reply(self) -> ProcessReply;
+}
+
+impl ObservesFinishedProcess for std::io::Result<std::process::Output> {
+    fn process_reply(self) -> ProcessReply {
+        match self {
             Err(error) => ProcessReply::Unstarted(error.to_string()),
             Ok(output) => {
                 let printout = Printout {
@@ -280,6 +282,16 @@ impl Emittable<HerdrCli> for HerdrCommand {
                 }
             }
         }
+    }
+}
+
+/// One `herdr` process: its words, its status and what it printed.
+impl Emittable<HerdrCli> for HerdrCommand {
+    fn emit(&self, herdr: &HerdrCli) -> ProcessReply {
+        Command::new(&herdr.executable)
+            .args(self.herdr_words())
+            .output()
+            .process_reply()
     }
 }
 
@@ -498,5 +510,29 @@ impl ExchangesCurriculumFrame for crate::CurriculumQuery {
             .map_err(|error| format!("answer not read: {error}"))?;
         rkyv::from_bytes::<crate::CurriculumOutcome, rkyv::rancor::Error>(&frame)
             .map_err(|error| format!("answer unreadable: {error}"))
+    }
+}
+
+/// The flow-id helper, run once for one claim: the harness name, the flows
+/// directory, and the native session, as an argument for Claude and in the
+/// environment for Codex.
+impl Emittable<HerdrCli> for FlowIdentityClaim {
+    fn emit(&self, herdr: &HerdrCli) -> ProcessReply {
+        let mut command = Command::new(&herdr.flow_id_executable);
+        command
+            .arg(self.harness_kind.expected_harness())
+            .arg("--flows-root")
+            .arg(&self.flows_root.0);
+        match self.harness_kind {
+            signal_flow::HarnessKind::Codex => {
+                command.env("CODEX_SESSION_ID", &self.native_session_id.0);
+            }
+            signal_flow::HarnessKind::Claude => {
+                command
+                    .arg("--parent-session")
+                    .arg(&self.native_session_id.0);
+            }
+        }
+        command.output().process_reply()
     }
 }

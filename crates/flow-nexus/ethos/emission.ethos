@@ -16,13 +16,18 @@ Emission
   ; One query to the Curriculum Nexus, on a connection of its own.
   Curriculum.CurriculumQuery
   ; The flow-id helper's claim of a Flow ID for a native session.
-  FlowIdentity.FlowIdentityClaim ]
+  FlowIdentity.FlowIdentityClaim
+  ; One `git` process in the handover archive's work tree, bounded by the
+  ; publication's deadline.
+  Git.GitCommand ]
 [ ; What the process printed, and whether it ran and succeeded.
   Herdr.ProcessReply
   ; Curriculum's answer, or why none was read.
   Curriculum.CurriculumExchange
   ; What the helper printed: the Flow ID it claimed, or its refusal.
-  FlowIdentity.ProcessReply ]
+  FlowIdentity.ProcessReply
+  ; What Git printed, or that the deadline passed first.
+  Git.ProcessReply ]
 [ HerdrCommand.[ ListSessions
                  InSession.{ HerdrSessionName HerdrSessionCommand } ]
   ; A command addressed to one Herdr session.
@@ -72,12 +77,27 @@ Emission
   ; The arguments the configuration adds, as a person wrote them.
   ConfiguredHarnessArguments.Vector<String>
   Printout.{ Stdout.String Stderr.String }
-  ; Unstarted: the process could not be run. Cancelled: the observation
-  ; it served was cancelled while it ran, and the process was ended.
-  ProcessReply.[ Unstarted.String Succeeded.Printout Failed.Printout Cancelled ]
+  ; Unstarted: the process could not be run. Unreadable: it succeeded but
+  ; printed what is not UTF-8 text. Cancelled: the observation it served
+  ; was cancelled while it ran, and the process was ended. TimedOut: its
+  ; deadline passed first, and the process was ended.
+  ProcessReply.[ Unstarted.String Succeeded.Printout Failed.Printout Unreadable.String Cancelled TimedOut ]
   ; Unexchanged: the socket could not be reached, or the query written or
   ; the answer read; the String is the transport's own account.
   CurriculumExchange.[ Answered.CurriculumOutcome Unexchanged.String ]
   ; The harness whose session is claimed, the flows directory the claim
   ; is written under, and the native session it is claimed for.
-  FlowIdentityClaim.{ HarnessKind FlowsRoot.String NativeSessionId } ]
+  FlowIdentityClaim.{ HarnessKind FlowsRoot.String NativeSessionId }
+  ; The Git commands the handover archive runs, each on a path relative to
+  ; the archive's work tree.
+  GitCommand.[ ShowsWorkTree
+               ResolveRevision.GitRevision
+               ShowBlob.GitBlob
+               ListTracked.ArchivePath
+               ShortStatus.ArchivePath
+               Add.ArchivePath
+               CommitOnly.ArchivePath ]
+  GitRevision.[ Head ArchivedAt.{ GitCommit ArchivePath } ]
+  GitCommit.String
+  GitBlob.String
+  ArchivePath.String ]

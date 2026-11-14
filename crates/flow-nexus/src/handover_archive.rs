@@ -1,6 +1,11 @@
 //! Publication of closed handovers into a configured Git archive.
 
+use crate::emission::ArchiveGit;
 use crate::event_wait::{AwaitsDescriptors, OpensExitDescriptor};
+use crate::generated::emission::{
+    ArchivePath, ArchivedAt_Data, Emittable, GitBlob, GitCommand, GitCommit, GitRevision,
+    ProcessReply,
+};
 use crate::{
     RunningNexus,
     model::RunsModel,
@@ -261,21 +266,21 @@ impl PublishesHandoverArchive for ExistingGitHandoverArchive {
             }
             Err(error) => return Err(HandoverArchiveRefusal::Write(error.to_string())),
         }
-        let runner = self.runner.as_ref();
-        let commit = runner
-            .run_git_output(&self.repository, ["rev-parse", "HEAD"], deadline)?
+        let git = self.git(deadline);
+        let commit = git
+            .run_git_output(GitCommand::ResolveRevision(GitRevision::Head))?
             .trim()
             .to_owned();
-        let object = format!("{commit}:{}", self.path_string(&target));
-        let blob = runner
-            .run_git_output(&self.repository, ["rev-parse", object.as_str()], deadline)?
+        let blob = git
+            .run_git_output(GitCommand::ResolveRevision(GitRevision::ArchivedAt(
+                ArchivedAt_Data {
+                    git_commit: GitCommit(commit.clone()),
+                    archive_path: ArchivePath(self.path_string(&target)),
+                },
+            )))?
             .trim()
             .to_owned();
-        let archived = runner.run_git_output(
-            &self.repository,
-            ["cat-file", "blob", blob.as_str()],
-            deadline,
-        )?;
+        let archived = git.run_git_output(GitCommand::ShowBlob(GitBlob(blob.clone())))?;
         if archived != request.document {
             return Err(HandoverArchiveRefusal::Conflict);
         }
@@ -336,15 +341,14 @@ impl ChecksArchiveTree for ExistingGitHandoverArchive {
         if !repository.is_dir() {
             return Err(HandoverArchiveRefusal::Unconfigured);
         }
-        let output = self.runner.run(
-            repository,
-            &["rev-parse", "--is-inside-work-tree"],
-            deadline,
-        )?;
-        if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true" {
-            Ok(())
-        } else {
-            Err(HandoverArchiveRefusal::Unconfigured)
+        match GitCommand::ShowsWorkTree.emit(&self.git(deadline)) {
+            ProcessReply::Succeeded(printout) if printout.stdout.0.trim() == "true" => Ok(()),
+            ProcessReply::Succeeded(_)
+            | ProcessReply::Failed(_)
+            | ProcessReply::Unreadable(_)
+            | ProcessReply::Cancelled => Err(HandoverArchiveRefusal::Unconfigured),
+            ProcessReply::TimedOut => Err(HandoverArchiveRefusal::PublicationTimedOut),
+            ProcessReply::Unstarted(error) => Err(HandoverArchiveRefusal::Git(error)),
         }
     }
 
@@ -395,25 +399,17 @@ impl CommitsArchiveDocument for ExistingGitHandoverArchive {
         target: &Path,
         deadline: Instant,
     ) -> Result<bool, HandoverArchiveRefusal> {
-        let relative = self.path_string(target);
-        let runner = self.runner.as_ref();
-        match runner.run_git_output(
-            &self.repository,
-            ["ls-files", "--error-unmatch", "--", relative.as_str()],
-            deadline,
-        ) {
+        let relative = ArchivePath(self.path_string(target));
+        let git = self.git(deadline);
+        match git.run_git_output(GitCommand::ListTracked(relative.clone())) {
             Ok(_) => {}
             Err(HandoverArchiveRefusal::PublicationTimedOut) => {
                 return Err(HandoverArchiveRefusal::PublicationTimedOut);
             }
             Err(_) => return Ok(false),
         }
-        Ok(runner
-            .run_git_output(
-                &self.repository,
-                ["status", "--porcelain", "--", relative.as_str()],
-                deadline,
-            )?
+        Ok(git
+            .run_git_output(GitCommand::ShortStatus(relative))?
             .trim()
             .is_empty())
     }
@@ -423,66 +419,53 @@ impl CommitsArchiveDocument for ExistingGitHandoverArchive {
         target: &Path,
         deadline: Instant,
     ) -> Result<(), HandoverArchiveRefusal> {
-        let relative = self.path_string(target);
-        let runner = self.runner.as_ref();
-        runner.run_git(&self.repository, ["add", "--", relative.as_str()], deadline)?;
-        runner.run_git(
-            &self.repository,
-            [
-                "commit",
-                "--only",
-                "-m",
-                "Archive handover",
-                "--",
-                relative.as_str(),
-            ],
-            deadline,
-        )
+        let relative = ArchivePath(self.path_string(target));
+        let git = self.git(deadline);
+        git.run_git(GitCommand::Add(relative.clone()))?;
+        git.run_git(GitCommand::CommitOnly(relative))
     }
 }
 
-/// Git run inside a repository by any Git command runner, bounded by the
-/// publication deadline.
+/// Git run in the archive's work tree, read the ways the archive reads it:
+/// what a successful command printed, Git's own refusal, or the deadline.
 trait RunsArchiveGit {
-    fn run_git<const N: usize>(
-        &self,
-        repository: &Path,
-        args: [&str; N],
-        deadline: Instant,
-    ) -> Result<(), HandoverArchiveRefusal>;
-    fn run_git_output<const N: usize>(
-        &self,
-        repository: &Path,
-        args: [&str; N],
-        deadline: Instant,
-    ) -> Result<String, HandoverArchiveRefusal>;
+    fn run_git(&self, command: GitCommand) -> Result<(), HandoverArchiveRefusal>;
+    fn run_git_output(&self, command: GitCommand) -> Result<String, HandoverArchiveRefusal>;
 }
 
-impl<Runner: RunsGitCommand + ?Sized> RunsArchiveGit for Runner {
-    fn run_git<const N: usize>(
-        &self,
-        repository: &Path,
-        args: [&str; N],
-        deadline: Instant,
-    ) -> Result<(), HandoverArchiveRefusal> {
-        self.run_git_output(repository, args, deadline).map(|_| ())
+impl RunsArchiveGit for ArchiveGit<'_> {
+    fn run_git(&self, command: GitCommand) -> Result<(), HandoverArchiveRefusal> {
+        self.run_git_output(command).map(|_| ())
     }
 
-    fn run_git_output<const N: usize>(
-        &self,
-        repository: &Path,
-        args: [&str; N],
-        deadline: Instant,
-    ) -> Result<String, HandoverArchiveRefusal> {
-        let output = self.run(repository, &args, deadline)?;
-        if output.status.success() {
-            String::from_utf8(output.stdout).map_err(|error| {
-                HandoverArchiveRefusal::Git(format!("git returned non-UTF-8 evidence: {error}"))
-            })
-        } else {
-            Err(HandoverArchiveRefusal::Git(
-                String::from_utf8_lossy(&output.stderr).trim().into(),
-            ))
+    fn run_git_output(&self, command: GitCommand) -> Result<String, HandoverArchiveRefusal> {
+        match command.emit(self) {
+            ProcessReply::Succeeded(printout) => Ok(printout.stdout.0),
+            ProcessReply::Failed(printout) => {
+                Err(HandoverArchiveRefusal::Git(printout.stderr.0.trim().into()))
+            }
+            ProcessReply::TimedOut => Err(HandoverArchiveRefusal::PublicationTimedOut),
+            ProcessReply::Unstarted(error) => Err(HandoverArchiveRefusal::Git(error)),
+            ProcessReply::Unreadable(error) => Err(HandoverArchiveRefusal::Git(format!(
+                "git returned non-UTF-8 evidence: {error}"
+            ))),
+            ProcessReply::Cancelled => Err(HandoverArchiveRefusal::Git("git was cancelled".into())),
+        }
+    }
+}
+
+/// The archive's Git: its runner in its work tree, bounded by one
+/// publication's deadline.
+trait SpeaksArchiveGit {
+    fn git(&self, deadline: Instant) -> ArchiveGit<'_>;
+}
+
+impl SpeaksArchiveGit for ExistingGitHandoverArchive {
+    fn git(&self, deadline: Instant) -> ArchiveGit<'_> {
+        ArchiveGit {
+            runner: self.runner.as_ref(),
+            repository: &self.repository,
+            deadline,
         }
     }
 }
@@ -729,13 +712,17 @@ mod tests {
     #[test]
     fn invalid_utf8_git_evidence_is_rejected_instead_of_aliasing_replacement_text() {
         let repository = tempfile::tempdir().unwrap();
-        RealGitCommand
-            .run_git(
-                repository.path(),
-                ["init", "-q"],
-                Instant::now() + Duration::from_secs(60),
-            )
-            .unwrap();
+        assert!(
+            RealGitCommand
+                .run(
+                    repository.path(),
+                    &["init", "-q"],
+                    Instant::now() + Duration::from_secs(60),
+                )
+                .unwrap()
+                .status
+                .success()
+        );
         let mut hash = Command::new("git")
             .arg("-C")
             .arg(repository.path())
@@ -748,12 +735,13 @@ mod tests {
         let output = hash.wait_with_output().unwrap();
         assert!(output.status.success());
         let blob = String::from_utf8(output.stdout).unwrap();
+        let git = crate::emission::ArchiveGit {
+            runner: &RealGitCommand,
+            repository: repository.path(),
+            deadline: Instant::now() + Duration::from_secs(60),
+        };
         assert!(matches!(
-            RealGitCommand.run_git_output(
-                repository.path(),
-                ["cat-file", "blob", blob.trim()],
-                Instant::now() + Duration::from_secs(60)
-            ),
+            git.run_git_output(GitCommand::ShowBlob(GitBlob(blob.trim().into()))),
             Err(HandoverArchiveRefusal::Git(_))
         ));
     }
@@ -762,27 +750,39 @@ mod tests {
     #[test]
     fn publication_timeout_owns_and_kills_a_hanging_hook_process_group() {
         let repository = tempfile::tempdir().unwrap();
-        RealGitCommand
-            .run_git(
-                repository.path(),
-                ["init", "-q"],
-                Instant::now() + Duration::from_secs(60),
-            )
-            .unwrap();
-        RealGitCommand
-            .run_git(
-                repository.path(),
-                ["config", "user.email", "flow@example.invalid"],
-                Instant::now() + Duration::from_secs(60),
-            )
-            .unwrap();
-        RealGitCommand
-            .run_git(
-                repository.path(),
-                ["config", "user.name", "Flow Test"],
-                Instant::now() + Duration::from_secs(60),
-            )
-            .unwrap();
+        assert!(
+            RealGitCommand
+                .run(
+                    repository.path(),
+                    &["init", "-q"],
+                    Instant::now() + Duration::from_secs(60),
+                )
+                .unwrap()
+                .status
+                .success()
+        );
+        assert!(
+            RealGitCommand
+                .run(
+                    repository.path(),
+                    &["config", "user.email", "flow@example.invalid"],
+                    Instant::now() + Duration::from_secs(60),
+                )
+                .unwrap()
+                .status
+                .success()
+        );
+        assert!(
+            RealGitCommand
+                .run(
+                    repository.path(),
+                    &["config", "user.name", "Flow Test"],
+                    Instant::now() + Duration::from_secs(60),
+                )
+                .unwrap()
+                .status
+                .success()
+        );
         fs::create_dir_all(repository.path().join(".git/hooks")).unwrap();
         let hook = repository.path().join(".git/hooks/pre-commit");
         fs::write(&hook, "#!/bin/sh\nsleep 30\n").unwrap();
@@ -865,27 +865,39 @@ mod tests {
     #[test]
     fn publication_rejects_unbounded_hook_output() {
         let repository = tempfile::tempdir().unwrap();
-        RealGitCommand
-            .run_git(
-                repository.path(),
-                ["init", "-q"],
-                Instant::now() + Duration::from_secs(60),
-            )
-            .unwrap();
-        RealGitCommand
-            .run_git(
-                repository.path(),
-                ["config", "user.email", "flow@example.invalid"],
-                Instant::now() + Duration::from_secs(60),
-            )
-            .unwrap();
-        RealGitCommand
-            .run_git(
-                repository.path(),
-                ["config", "user.name", "Flow Test"],
-                Instant::now() + Duration::from_secs(60),
-            )
-            .unwrap();
+        assert!(
+            RealGitCommand
+                .run(
+                    repository.path(),
+                    &["init", "-q"],
+                    Instant::now() + Duration::from_secs(60),
+                )
+                .unwrap()
+                .status
+                .success()
+        );
+        assert!(
+            RealGitCommand
+                .run(
+                    repository.path(),
+                    &["config", "user.email", "flow@example.invalid"],
+                    Instant::now() + Duration::from_secs(60),
+                )
+                .unwrap()
+                .status
+                .success()
+        );
+        assert!(
+            RealGitCommand
+                .run(
+                    repository.path(),
+                    &["config", "user.name", "Flow Test"],
+                    Instant::now() + Duration::from_secs(60),
+                )
+                .unwrap()
+                .status
+                .success()
+        );
         let hook = repository.path().join(".git/hooks/pre-commit");
         fs::write(&hook, "#!/bin/sh\nyes output\n").unwrap();
         use std::os::unix::fs::PermissionsExt;

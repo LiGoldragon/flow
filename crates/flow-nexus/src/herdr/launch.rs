@@ -727,8 +727,11 @@ impl ClaimsNativeIdentity for HerdrCli {
             ProcessReply::Unstarted(error) => {
                 return Err(format!("flow-id claim helper could not start: {error}"));
             }
-            ProcessReply::Cancelled => {
-                return Err("flow-id claim helper was cancelled".into());
+            ProcessReply::Unreadable(_) => {
+                return Err("flow-id claim helper returned non-UTF-8 output".into());
+            }
+            ProcessReply::Cancelled | ProcessReply::TimedOut => {
+                return Err("flow-id claim helper did not finish".into());
             }
         };
         let flow_id = printed.trim_end_matches(['\r', '\n']);
@@ -2322,7 +2325,12 @@ impl StartsHerdrAgent for HerdrCli {
                     printout.stdout.0.as_bytes(),
                 )),
             )),
-            ProcessReply::Cancelled => Err("Herdr command was cancelled".into()),
+            ProcessReply::Unreadable(error) => {
+                Err(format!("Herdr returned unreadable JSON: {error}").into())
+            }
+            ProcessReply::Cancelled | ProcessReply::TimedOut => {
+                Err("Herdr command did not finish".into())
+            }
             ProcessReply::Succeeded(printout) => {
                 serde_json::from_str::<serde_json::Value>(&printout.stdout.0)
                     .map(|_| ())

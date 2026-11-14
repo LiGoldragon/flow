@@ -273,9 +273,9 @@ fn production_rehearse_success_and_refusal_create_nothing() {
     )
     .unwrap();
 
-    let signal_flow::Response::Rehearsed(command) = fixture
+    let signal_flow::Output::Rehearsed(command) = fixture
         .nexus
-        .dispatch(signal_flow::Query::Rehearse(request.clone()))
+        .dispatch(signal_flow::Input::Rehearse(request.clone()))
     else {
         panic!("valid rehearsal answers its command")
     };
@@ -320,12 +320,10 @@ fn production_rehearse_success_and_refusal_create_nothing() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch(signal_flow::Query::Rehearse(request)),
-        signal_flow::Response::RehearseRejected(
-            signal_flow::StartRejection::MalformedHarnessFlags(
-                HarnessFlagsRefusal::UnclosedSingleQuote
-            )
-        )
+            .dispatch(signal_flow::Input::Rehearse(request)),
+        signal_flow::Output::RehearseRejected(signal_flow::StartRejection::MalformedHarnessFlags(
+            HarnessFlagsRefusal::UnclosedSingleQuote
+        ))
     );
     assert_eq!(
         fixture.nexus.store.configuration_snapshot().unwrap(),

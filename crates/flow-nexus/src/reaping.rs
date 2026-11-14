@@ -78,7 +78,7 @@ use crate::store::{
 use crate::{PendingHandover, PendingReap};
 use signal_flow::{
     Address, FlowId, FlowLifecycle, FlowNode, HandoverCloseRefusal, HandoverOwnerRefusal,
-    HerdrRoute, HerdrRouteSelection, Launched, ReapStanding, Replaced, Response,
+    HerdrRoute, HerdrRouteSelection, Launched, Output, ReapStanding, Replaced,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, mpsc};
@@ -91,19 +91,19 @@ pub(crate) trait ReapsPredecessors {
     /// the obligation is durable, `Owed`; `Unrecorded` when its commit is
     /// refused, `PredecessorMissing` or `PredecessorUnknown` as the
     /// predecessor's row reads.
-    fn owe_reap(&self, replacement: &Replacement, launched: &Launched) -> Response;
+    fn owe_reap(&self, replacement: &Replacement, launched: &Launched) -> Output;
     /// W3 for the reap no row records but the rows imply.
-    fn owe_derived_reap(&self, derived: &DerivedReap) -> Response;
+    fn owe_derived_reap(&self, derived: &DerivedReap) -> Output;
     /// The reap of `predecessor` taken up at a bearing event, in the store
     /// alone: W3 for a derived reap, the predecessor read again at
     /// `PredecessorUnknown`, step 3 again where the pane was witnessed
     /// gone, a rearm of the worker where the pane step is owed; a row at
     /// `PredecessorMissing` is answered as it stands.
-    fn retry_reap(&self, predecessor: &str) -> Option<Response>;
+    fn retry_reap(&self, predecessor: &str) -> Option<Output>;
     /// Step 3: the receiving flow read afresh decides the generation.
-    fn settle_reap(&self, predecessor: &str) -> Option<Response>;
+    fn settle_reap(&self, predecessor: &str) -> Option<Output>;
     /// The reply a PendingReap reads as.
-    fn reap_reply(&self, row: &PendingReap) -> Response;
+    fn reap_reply(&self, row: &PendingReap) -> Output;
     /// Asks for the reap worker of `predecessor` to be armed again.
     fn rearm(&self, predecessor: &str);
 }
@@ -120,9 +120,9 @@ pub(crate) trait HandsOverGenerations {
         launch_request_id: &str,
         address: &Address,
         started: &Launched,
-    ) -> Response;
+    ) -> Output;
     /// The handover owed at `address` taken up at a bearing event.
-    fn retry_handover(&self, address: &Address) -> Option<Response>;
+    fn retry_handover(&self, address: &Address) -> Option<Output>;
     /// The handover a receiving flow is owed and no row records: the row
     /// at the Address names another owner, no PendingHandover names the
     /// receiving flow, and no reap carries it. The receiving flow and its
@@ -188,7 +188,7 @@ impl EvidencesClosedResource for FlowNode {
 }
 
 impl ReapsPredecessors for RunningNexus {
-    fn owe_reap(&self, replacement: &Replacement, launched: &Launched) -> Response {
+    fn owe_reap(&self, replacement: &Replacement, launched: &Launched) -> Output {
         let predecessor = replacement.predecessor.0.clone();
         let launch_request_id = replacement.launch_request_id.clone();
         let address = self
@@ -204,7 +204,7 @@ impl ReapsPredecessors for RunningNexus {
         let Some(address) = address else {
             // A confirmed launch always has its attempt; without it nothing
             // of the reap can be named, and it stands derived.
-            return Response::ReapPending(self.store_reap_reply(
+            return Output::ReapPending(self.store_reap_reply(
                 &replaced,
                 None,
                 ReapStanding::Unrecorded,
@@ -230,7 +230,7 @@ impl ReapsPredecessors for RunningNexus {
                         launched.flow_id.0, launch_request_id.0
                     );
                 }
-                Response::ReapPending(signal_flow::ReapPending {
+                Output::ReapPending(signal_flow::ReapPending {
                     address,
                     predecessor: signal_flow::Predecessor(FlowId(predecessor)),
                     launched: launched.clone(),
@@ -242,7 +242,7 @@ impl ReapsPredecessors for RunningNexus {
                     "flow-nexus: the reap of {predecessor} for {} (launch {}) is owed and unrecorded: {error}",
                     launched.flow_id.0, launch_request_id.0
                 );
-                Response::ReapPending(signal_flow::ReapPending {
+                Output::ReapPending(signal_flow::ReapPending {
                     address,
                     predecessor: signal_flow::Predecessor(FlowId(predecessor)),
                     launched: launched.clone(),
@@ -252,13 +252,13 @@ impl ReapsPredecessors for RunningNexus {
         }
     }
 
-    fn owe_derived_reap(&self, derived: &DerivedReap) -> Response {
+    fn owe_derived_reap(&self, derived: &DerivedReap) -> Output {
         let replaced = derived.replaced_record();
         let launched = self.launched_now(&replaced.launched_record);
         self.owe_reap(&derived.replacement, &launched)
     }
 
-    fn retry_reap(&self, predecessor: &str) -> Option<Response> {
+    fn retry_reap(&self, predecessor: &str) -> Option<Output> {
         let row = match self.store.pending_reap(predecessor) {
             Ok(row) => row,
             Err(error) => {
@@ -315,7 +315,7 @@ impl ReapsPredecessors for RunningNexus {
         }
     }
 
-    fn settle_reap(&self, predecessor: &str) -> Option<Response> {
+    fn settle_reap(&self, predecessor: &str) -> Option<Output> {
         let row = self.store.pending_reap(predecessor).ok()??;
         let replaced = self.store.reaped_record(&row).ok()??;
         let successor = replaced.launched_record.flow_id.clone();
@@ -352,7 +352,7 @@ impl ReapsPredecessors for RunningNexus {
             self.store.nothing_closing()
         };
         match self.store.reaped(predecessor, closing) {
-            Ok(()) => Some(Response::Replaced(Replaced {
+            Ok(()) => Some(Output::Replaced(Replaced {
                 flow_id: replaced.flow_id.clone(),
                 launched: self.launched_now(&replaced.launched_record),
             })),
@@ -369,15 +369,15 @@ impl ReapsPredecessors for RunningNexus {
         }
     }
 
-    fn reap_reply(&self, row: &PendingReap) -> Response {
+    fn reap_reply(&self, row: &PendingReap) -> Output {
         let replaced = self.store.reaped_record(row).ok().flatten();
         match replaced {
-            Some(replaced) => Response::ReapPending(self.store_reap_reply(
+            Some(replaced) => Output::ReapPending(self.store_reap_reply(
                 &replaced,
                 Some(row.address.clone()),
                 row.reap_standing.clone(),
             )),
-            None => Response::ReapPending(signal_flow::ReapPending {
+            None => Output::ReapPending(signal_flow::ReapPending {
                 address: row.address.clone(),
                 predecessor: signal_flow::Predecessor(FlowId(row.predecessor.0.clone())),
                 launched: Launched {
@@ -405,7 +405,7 @@ trait NamesReapReply {
         address: Option<Address>,
         standing: ReapStanding,
     ) -> signal_flow::ReapPending;
-    fn current_reap_reply(&self, predecessor: &str) -> Option<Response>;
+    fn current_reap_reply(&self, predecessor: &str) -> Option<Output>;
     /// A launched record made a wire `Launched`, its route as its row
     /// holds it now.
     fn launched_now(&self, record: &LaunchedRecord) -> Launched;
@@ -427,7 +427,7 @@ impl NamesReapReply for RunningNexus {
         reply
     }
 
-    fn current_reap_reply(&self, predecessor: &str) -> Option<Response> {
+    fn current_reap_reply(&self, predecessor: &str) -> Option<Output> {
         // A reap settled meanwhile has no row: its outcome answers.
         self.store
             .pending_reap(predecessor)
@@ -447,7 +447,7 @@ impl HandsOverGenerations for RunningNexus {
         launch_request_id: &str,
         address: &Address,
         started: &Launched,
-    ) -> Response {
+    ) -> Output {
         let launched = LaunchedRecord::from(started);
         let flow_id = started.flow_id.0.clone();
         let predecessor = self
@@ -468,7 +468,7 @@ impl HandsOverGenerations for RunningNexus {
                 launched.clone(),
                 closing,
             ) {
-                Ok(()) => return Response::Started(started.clone()),
+                Ok(()) => return Output::Started(started.clone()),
                 Err(error) => {
                     eprintln!(
                         "flow-nexus: the handover at {address:?} for {flow_id} (launch {launch_request_id}) was not settled: {error}"
@@ -498,7 +498,7 @@ impl HandsOverGenerations for RunningNexus {
                 "flow-nexus: the handover at {address:?} for {flow_id} (launch {launch_request_id}) is owed and unrecorded: {refusal:?}: {error}"
             );
         }
-        Response::HandoverPending(signal_flow::HandoverPending {
+        Output::HandoverPending(signal_flow::HandoverPending {
             address: address.clone(),
             handover_owner: signal_flow::HandoverOwner(FlowId(owner)),
             launched: started.clone(),
@@ -506,7 +506,7 @@ impl HandsOverGenerations for RunningNexus {
         })
     }
 
-    fn retry_handover(&self, address: &Address) -> Option<Response> {
+    fn retry_handover(&self, address: &Address) -> Option<Output> {
         use crate::store::NamesPendingReplies;
         let receiving = self.store.receiving_flow(address).ok()??;
         let row = self.store.pending_handover(address).ok()?;
@@ -551,7 +551,7 @@ impl HandsOverGenerations for RunningNexus {
                 }
             }
             let row = self.store.pending_handover(address).ok()??;
-            return Some(Response::HandoverPending(
+            return Some(Output::HandoverPending(
                 self.store.handover_pending_reply(&LaunchedRecord {
                     flow_id: row.successor.0.clone(),
                     session_id: self
@@ -599,13 +599,13 @@ impl HandsOverGenerations for RunningNexus {
 
 /// The reply a PendingHandover reads as.
 trait NamesHandoverReply {
-    fn handover_reply(&self, row: &PendingHandover) -> Option<Response>;
+    fn handover_reply(&self, row: &PendingHandover) -> Option<Output>;
 }
 
 impl NamesHandoverReply for RunningNexus {
-    fn handover_reply(&self, row: &PendingHandover) -> Option<Response> {
+    fn handover_reply(&self, row: &PendingHandover) -> Option<Output> {
         let node = self.store.flow_node(&row.successor.0.0).ok()??;
-        Some(Response::HandoverPending(signal_flow::HandoverPending {
+        Some(Output::HandoverPending(signal_flow::HandoverPending {
             address: row.address.clone(),
             handover_owner: row.handover_owner.clone(),
             launched: Launched {
@@ -795,19 +795,19 @@ impl TakesUpObligations for RunningNexus {
 
 /// One log line per obligation answer that is not settled.
 trait LogsObligation {
-    fn log_obligation(flow_id: &str, answer: &Response);
+    fn log_obligation(flow_id: &str, answer: &Output);
 }
 
 impl LogsObligation for RunningNexus {
-    fn log_obligation(flow_id: &str, answer: &Response) {
+    fn log_obligation(flow_id: &str, answer: &Output) {
         match answer {
-            Response::ReapPending(pending) if pending.reap_standing != ReapStanding::Owed => {
+            Output::ReapPending(pending) if pending.reap_standing != ReapStanding::Owed => {
                 eprintln!(
                     "flow-nexus: the reap of {} for {flow_id} is pending: {:?}",
                     pending.predecessor.0.0, pending.reap_standing
                 );
             }
-            Response::HandoverPending(pending) => {
+            Output::HandoverPending(pending) => {
                 eprintln!(
                     "flow-nexus: the handover at {:?} for {flow_id} is pending: {:?}",
                     pending.address, pending.handover_close_refusal

@@ -6,7 +6,7 @@ use crate::sending::IdentifiesSender;
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::{HoldsStopRequest, RunningNexus};
-use signal_flow::{ObserveSender_Data, Refusal, Response, SentBy};
+use signal_flow::{ObserveSender_Data, Output, Refusal, SentBy};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Which sends an observation follows: every one, one sender's, or those
@@ -24,28 +24,26 @@ pub enum SendSelection {
 pub(crate) trait ObservesLogicalSends {
     /// The sender a forwarded ObserveSender names: the thread's metaflow
     /// when it names a Codex thread, else what the named process sends as.
-    fn observation_sender(&self, forwarded: &ObserveSender_Data) -> Result<SentBy, Box<Response>>;
+    fn observation_sender(&self, forwarded: &ObserveSender_Data) -> Result<SentBy, Box<Output>>;
     fn observe_delivery_changes(
         &self,
         selection: &SendSelection,
         cursor: Option<i64>,
         disconnected: &AtomicBool,
-        send: &mut dyn FnMut(&Response) -> Result<(), String>,
+        send: &mut dyn FnMut(&Output) -> Result<(), String>,
     ) -> Result<(), String>;
 }
 
 impl ObservesLogicalSends for RunningNexus {
-    fn observation_sender(&self, forwarded: &ObserveSender_Data) -> Result<SentBy, Box<Response>> {
+    fn observation_sender(&self, forwarded: &ObserveSender_Data) -> Result<SentBy, Box<Output>> {
         if let Some(thread) = &forwarded.native_session_id_option {
             match self.identify_thread(signal_flow::IdentifyThread_Data {
                 process: forwarded.process.clone(),
                 native_session_id: thread.clone(),
             }) {
-                Ok(Response::Identified(address)) => Ok(SentBy::Sender(address)),
+                Ok(Output::Identified(address)) => Ok(SentBy::Sender(address)),
                 Ok(_) => Ok(SentBy::Unbound),
-                Err(error) => Err(Box::new(Response::Refused(Refusal::Store(
-                    error.to_string(),
-                )))),
+                Err(error) => Err(Box::new(Output::Refused(Refusal::Store(error.to_string())))),
             }
         } else {
             self.sender_of(&forwarded.process)
@@ -57,7 +55,7 @@ impl ObservesLogicalSends for RunningNexus {
         selection: &SendSelection,
         mut cursor: Option<i64>,
         disconnected: &AtomicBool,
-        send: &mut dyn FnMut(&Response) -> Result<(), String>,
+        send: &mut dyn FnMut(&Output) -> Result<(), String>,
     ) -> Result<(), String> {
         let changes = self.store.launch_changes.clone();
         let mut opened = false;
@@ -78,14 +76,14 @@ impl ObservesLogicalSends for RunningNexus {
             };
             let observation = match observation {
                 Ok(observation) => observation,
-                Err(error) => return send(&Response::Refused(Refusal::Store(error.to_string()))),
+                Err(error) => return send(&Output::Refused(Refusal::Store(error.to_string()))),
             };
             cursor = Some(observation.delivery_cursor.0);
             if disconnected.load(Ordering::Acquire) {
                 return Err("the observing peer disconnected".into());
             }
             if !opened {
-                send(&Response::SendsObserved(
+                send(&Output::SendsObserved(
                     crate::message_projection::ProjectsSendObservation::visible_send_observation(
                         &observation,
                     ),
@@ -93,7 +91,7 @@ impl ObservesLogicalSends for RunningNexus {
                 opened = true;
             } else {
                 for snapshot in observation.delivery_snapshot_vector {
-                    send(&Response::SendChanged(
+                    send(&Output::SendChanged(
                         crate::message_projection::ProjectsDeliverySnapshot::visible_delivery_snapshot(&snapshot),
                     ))?;
                 }

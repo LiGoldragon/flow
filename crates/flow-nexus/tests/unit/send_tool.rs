@@ -2443,9 +2443,9 @@ fn crashed_before_receipt(fixture: &NexusFixture) -> TestRequest {
 fn codex_standings(fixture: &NexusFixture) -> Vec<meta_signal_flow::VisibleQueueDeliveryStanding> {
     match fixture
         .nexus
-        .dispatch_meta(meta_signal_flow::Query::ReadQueueDeliveries(seat_at()))
+        .dispatch_meta(meta_signal_flow::Input::ReadQueueDeliveries(seat_at()))
     {
-        meta_signal_flow::Response::QueueDeliveriesRead(read) => read
+        meta_signal_flow::Output::QueueDeliveriesRead(read) => read
             .visible_queue_delivery_vector
             .into_iter()
             .map(|delivery| delivery.visible_queue_delivery_standing)
@@ -2682,9 +2682,9 @@ fn a_start_reading_an_unanswering_codex_history_still_serves_metaflows() {
         );
         let listed = fixture
             .nexus
-            .dispatch_serially(signal_flow::Query::Metaflows, signal_flow::Origin::Unbound);
+            .dispatch_serially(signal_flow::Input::Metaflows, signal_flow::Origin::Unbound);
         assert!(
-            matches!(listed, signal_flow::Response::Listed(_)),
+            matches!(listed, signal_flow::Output::Listed(_)),
             "{listed:?}"
         );
         assert!(
@@ -2738,7 +2738,7 @@ fn codex_resolved_absent(
     fixture.nexus.codex_turns.observe(SEAT_THREAD, first_event);
     fake.accept_queued_turns(SEAT_THREAD, 1..=2);
     let response = fixture.nexus.dispatch_meta_serially(
-        meta_signal_flow::Query::ResolveQueueDelivery(QueueDeliveryResolution {
+        meta_signal_flow::Input::ResolveQueueDelivery(QueueDeliveryResolution {
             queue_attempt_id: meta_signal_flow::QueueAttemptId(attempt),
             queue_resolution_outcome: QueueResolutionOutcome::Absent,
             queue_resolution_reason: meta_signal_flow::QueueResolutionReason(
@@ -2749,7 +2749,7 @@ fn codex_resolved_absent(
     );
     assert!(matches!(
         response,
-        meta_signal_flow::Response::QueueDeliveryResolved(_)
+        meta_signal_flow::Output::QueueDeliveryResolved(_)
     ));
     (fixture, fake, first)
 }

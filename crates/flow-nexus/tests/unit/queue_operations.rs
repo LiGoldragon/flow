@@ -15,9 +15,10 @@ use crate::store::turn_end::RecordsTurnEnds;
 use crate::store::{FlowStore, ReadsFlowMemory};
 use flow_ethos::State;
 use signal_flow::{
-    Address, Aspect, DeliveredMessage, DeliveredRequest, DeliveryState, HarnessKind, Message,
-    Metaflow, Model, NativeReceipt, Origin, PrivateSendResponse, Query, Request, RequestRejection,
-    Response, SendAcceptance, SendRequest, SentBy, TurnEnd, VisibleNativeInput, VisibleSender,
+    Address, Aspect, DeliveredMessage, DeliveredRequest, DeliveryState, HarnessKind, Input,
+    Message, Metaflow, Model, NativeReceipt, Origin, Output, PrivateSendResponse, Request,
+    RequestRejection, SendAcceptance, SendRequest, SentBy, TurnEnd, VisibleNativeInput,
+    VisibleSender,
 };
 
 fn at(topic: &str) -> Address {
@@ -131,8 +132,8 @@ fn cancel_closes_a_delivered_order_and_tells_both_ends() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Query::Cancel(order.request_id.clone())),
-        Response::Cancelled(order.request_id.clone())
+            .dispatch(Input::Cancel(order.request_id.clone())),
+        Output::Cancelled(order.request_id.clone())
     );
     assert_eq!(
         fixture
@@ -149,8 +150,8 @@ fn cancel_closes_a_delivered_order_and_tells_both_ends() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Query::Cancel(order.request_id.clone())),
-        Response::CancelRejected(RequestRejection::UnknownRequest)
+            .dispatch(Input::Cancel(order.request_id.clone())),
+        Output::CancelRejected(RequestRejection::UnknownRequest)
     );
 }
 
@@ -182,7 +183,7 @@ fn cancel_takes_a_queued_task_out_with_its_reminder() {
     );
     assert_eq!(
         fixture.nexus.cancel(&task.request_id),
-        Response::Cancelled(task.request_id.clone())
+        Output::Cancelled(task.request_id.clone())
     );
     assert!(queued(&fixture, &recipient).is_empty(), "it left the queue");
     assert_eq!(
@@ -225,8 +226,8 @@ fn silence_stops_a_tasks_reminders_and_leaves_it_open() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Query::Silence(task.request_id.clone())),
-        Response::Silenced(task.request_id.clone())
+            .dispatch(Input::Silence(task.request_id.clone())),
+        Output::Silenced(task.request_id.clone())
     );
     assert_eq!(
         fixture
@@ -246,14 +247,14 @@ fn silence_stops_a_tasks_reminders_and_leaves_it_open() {
         "the Task stays open"
     );
     assert_eq!(
-        fixture.nexus.dispatch(Query::Silence(order.request_id)),
-        Response::SilenceRejected(RequestRejection::NotTask)
+        fixture.nexus.dispatch(Input::Silence(order.request_id)),
+        Output::SilenceRejected(RequestRejection::NotTask)
     );
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Query::Silence(flow_ethos::RequestId("none".into()))),
-        Response::SilenceRejected(RequestRejection::UnknownRequest)
+            .dispatch(Input::Silence(flow_ethos::RequestId("none".into()))),
+        Output::SilenceRejected(RequestRejection::UnknownRequest)
     );
 }
 
@@ -286,7 +287,7 @@ fn clear_and_clear_all_empty_queues_that_queues_reads() {
         Request::Order("c".into()),
     );
 
-    let Response::Queues(held) = fixture.nexus.dispatch(Query::Queues) else {
+    let Output::Queues(held) = fixture.nexus.dispatch(Input::Queues) else {
         panic!("Queues reads")
     };
     let first_queue = held
@@ -318,22 +319,22 @@ fn clear_and_clear_all_empty_queues_that_queues_reads() {
     );
 
     assert_eq!(
-        fixture.nexus.dispatch(Query::Clear(first.clone())),
-        Response::Cleared(vec![a.request_id, b.request_id])
+        fixture.nexus.dispatch(Input::Clear(first.clone())),
+        Output::Cleared(vec![a.request_id, b.request_id])
     );
     assert!(queued(&fixture, &first).is_empty());
     assert_eq!(
-        fixture.nexus.dispatch(Query::ClearAll),
-        Response::Cleared(vec![c.request_id])
+        fixture.nexus.dispatch(Input::ClearAll),
+        Output::Cleared(vec![c.request_id])
     );
     assert!(queued(&fixture, &second).is_empty());
     assert_eq!(
-        fixture.nexus.dispatch(Query::Queues),
-        Response::Queues(vec![])
+        fixture.nexus.dispatch(Input::Queues),
+        Output::Queues(vec![])
     );
     assert_eq!(
-        fixture.nexus.dispatch(Query::Clear(at("neverHeld"))),
-        Response::Refused(signal_flow::Refusal::Unknown(
+        fixture.nexus.dispatch(Input::Clear(at("neverHeld"))),
+        Output::Refused(signal_flow::Refusal::Unknown(
             signal_flow::Unknown_Data::Address(at("neverHeld"))
         ))
     );
@@ -348,20 +349,20 @@ fn push_forces_a_queue_and_answers_what_was_delivered() {
     let recipient = at("pushRecipient");
     asleep(&fixture, &recipient);
     let push = |address: &Address, priority| {
-        fixture.nexus.dispatch(Query::Push(signal_flow::Push_Data {
+        fixture.nexus.dispatch(Input::Push(signal_flow::Push_Data {
             address: address.clone(),
             priority,
         }))
     };
     assert_eq!(
         push(&at("neverHeld"), signal_flow::Priority::HardAbrupt),
-        Response::Refused(signal_flow::Refusal::Unknown(
+        Output::Refused(signal_flow::Refusal::Unknown(
             signal_flow::Unknown_Data::Address(at("neverHeld"))
         ))
     );
     assert_eq!(
         push(&recipient, signal_flow::Priority::HardAbrupt),
-        Response::Pushed(vec![])
+        Output::Pushed(vec![])
     );
     let held = admitted(
         &fixture,
@@ -371,7 +372,7 @@ fn push_forces_a_queue_and_answers_what_was_delivered() {
     );
     assert_eq!(
         push(&recipient, signal_flow::Priority::HardAbrupt),
-        Response::Pushed(vec![]),
+        Output::Pushed(vec![]),
         "a metaflow with no launch record is not woken; nothing was delivered"
     );
     let entries = queued(&fixture, &recipient);
@@ -396,7 +397,7 @@ fn hot_reads_each_live_flow_by_its_last_turn_end() {
     ));
     assert_eq!(
         fixture.nexus.hot(),
-        Response::Hot(vec![signal_flow::Warmth {
+        Output::Hot(vec![signal_flow::Warmth {
             address: seat.clone(),
             minutes_option: None,
         }])
@@ -416,8 +417,8 @@ fn hot_reads_each_live_flow_by_its_last_turn_end() {
         })
         .unwrap();
     assert_eq!(
-        fixture.nexus.dispatch(Query::Hot),
-        Response::Hot(vec![signal_flow::Warmth {
+        fixture.nexus.dispatch(Input::Hot),
+        Output::Hot(vec![signal_flow::Warmth {
             address: seat,
             minutes_option: Some(flow_ethos::Minutes(10)),
         }])
@@ -460,7 +461,7 @@ fn the_owner_and_an_unbound_caller_are_served_as_a_flow_is() {
             Some(caller),
         );
         assert!(
-            matches!(answer.response, Response::SendAccepted(_)),
+            matches!(answer.response, Output::SendAccepted(_)),
             "{:?}",
             answer.response
         );
@@ -469,13 +470,12 @@ fn the_owner_and_an_unbound_caller_are_served_as_a_flow_is() {
     assert_eq!(entries.len(), 2);
     assert!(entries.iter().all(|entry| entry.sent_by == SentBy::Unbound));
     assert_eq!(
-        fixture.nexus.dispatch(Query::DeliverAll(recipient.clone())),
+        fixture.nexus.dispatch(Input::DeliverAll(recipient.clone())),
         fixture
             .nexus
-            .dispatch_from(Query::DeliverAll(recipient.clone()), Origin::Unbound),
+            .dispatch_from(Input::DeliverAll(recipient.clone()), Origin::Unbound),
     );
-    let Response::SendsObserved(observed) = fixture.nexus.dispatch(Query::ObserveSends(None))
-    else {
+    let Output::SendsObserved(observed) = fixture.nexus.dispatch(Input::ObserveSends(None)) else {
         panic!("every send is observed")
     };
     assert!(
@@ -491,7 +491,7 @@ fn the_owner_and_an_unbound_caller_are_served_as_a_flow_is() {
     // whoever answers.
     assert!(matches!(
         fixture.nexus.clear(&recipient),
-        Response::Cleared(cleared) if cleared.len() == 2
+        Output::Cleared(cleared) if cleared.len() == 2
     ));
     let order = admitted(
         &fixture,
@@ -550,10 +550,7 @@ fn a_result_goes_to_the_requests_sender_whatever_address_it_names() {
         .nexus
         .send_request(answer_to(&elsewhere, &order.request_id), None);
     assert!(
-        matches!(
-            answer.response,
-            Response::SendAccepted(_) | Response::Sent(_)
-        ),
+        matches!(answer.response, Output::SendAccepted(_) | Output::Sent(_)),
         "{:?}",
         answer.response
     );
@@ -568,8 +565,8 @@ fn a_result_goes_to_the_requests_sender_whatever_address_it_names() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Query::Answer(order.request_id.clone())),
-        Response::AnswerRejected(signal_flow::AnswerRejection::Routed)
+            .dispatch(Input::Answer(order.request_id.clone())),
+        Output::AnswerRejected(signal_flow::AnswerRejection::Routed)
     );
 }
 
@@ -595,23 +592,23 @@ fn an_answer_to_an_unbound_request_is_kept_and_read_by_answer() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Query::Answer(question.request_id.clone())),
-        Response::AnswerRejected(signal_flow::AnswerRejection::Open)
+            .dispatch(Input::Answer(question.request_id.clone())),
+        Output::AnswerRejected(signal_flow::AnswerRejection::Open)
     );
     let answer = fixture
         .nexus
         .send_request(answer_to(&elsewhere, &question.request_id), None);
     assert_eq!(
         answer.response,
-        Response::Sent(signal_flow::VisibleSendReceipt(question.request_id.clone()))
+        Output::Sent(signal_flow::VisibleSendReceipt(question.request_id.clone()))
     );
     assert!(queued(&fixture, &elsewhere).is_empty());
     assert!(queued(&fixture, &answerer).is_empty());
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Query::Answer(question.request_id.clone())),
-        Response::Answered(VisibleNativeInput {
+            .dispatch(Input::Answer(question.request_id.clone())),
+        Output::Answered(VisibleNativeInput {
             visible_sender: VisibleSender::Unbound,
             delivered_message: DeliveredMessage::Soft(DeliveredRequest::Result(
                 signal_flow::DeliveredRequest_Result_Data {
@@ -627,13 +624,13 @@ fn an_answer_to_an_unbound_request_is_kept_and_read_by_answer() {
             .nexus
             .send_request(answer_to(&elsewhere, &question.request_id), None)
             .response,
-        Response::SendRefused(signal_flow::VisibleRefusal::Unresolved)
+        Output::SendRefused(signal_flow::VisibleRefusal::Unresolved)
     );
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Query::Answer(flow_ethos::RequestId("zzzz".into()))),
-        Response::AnswerRejected(signal_flow::AnswerRejection::UnknownRequest)
+            .dispatch(Input::Answer(flow_ethos::RequestId("zzzz".into()))),
+        Output::AnswerRejected(signal_flow::AnswerRejection::UnknownRequest)
     );
 }
 
@@ -649,7 +646,7 @@ fn remind_sends_its_address_a_reminder_when_its_minutes_lapse() {
     let asker = at("remindAsker");
     asleep(&fixture, &reminded);
     asleep(&fixture, &asker);
-    let Response::Reminded(request_id) = fixture.nexus.remind(
+    let Output::Reminded(request_id) = fixture.nexus.remind(
         signal_flow::Remind_Data {
             address: reminded.clone(),
             minutes: flow_ethos::Minutes(30),
@@ -692,8 +689,8 @@ fn remind_sends_its_address_a_reminder_when_its_minutes_lapse() {
         None
     );
     assert_eq!(
-        fixture.nexus.dispatch(Query::Cancel(request_id)),
-        Response::CancelRejected(RequestRejection::Closed)
+        fixture.nexus.dispatch(Input::Cancel(request_id)),
+        Output::CancelRejected(RequestRejection::Closed)
     );
 }
 
@@ -713,15 +710,15 @@ fn cancel_ends_a_reminder_and_remind_refuses_what_a_task_refuses() {
         minutes: flow_ethos::Minutes(minutes),
         string: "Later.".into(),
     };
-    let Response::Reminded(request_id) = fixture
+    let Output::Reminded(request_id) = fixture
         .nexus
         .remind(remind(5, &reminded), SentBy::Sender(asker.clone()))
     else {
         panic!("a reminder is kept")
     };
     assert_eq!(
-        fixture.nexus.dispatch(Query::Cancel(request_id.clone())),
-        Response::Cancelled(request_id.clone())
+        fixture.nexus.dispatch(Input::Cancel(request_id.clone())),
+        Output::Cancelled(request_id.clone())
     );
     assert_eq!(
         fixture.nexus.store.scheduled_reminder(&request_id).unwrap(),
@@ -734,7 +731,7 @@ fn cancel_ends_a_reminder_and_remind_refuses_what_a_task_refuses() {
     assert!(queued(&fixture, &reminded).is_empty());
     assert_eq!(
         fixture.nexus.remind(remind(0, &reminded), SentBy::Unbound),
-        Response::Refused(signal_flow::Refusal::MinutesRefused(
+        Output::Refused(signal_flow::Refusal::MinutesRefused(
             signal_flow::MinutesRefusal::Zero
         ))
     );
@@ -742,7 +739,7 @@ fn cancel_ends_a_reminder_and_remind_refuses_what_a_task_refuses() {
         fixture
             .nexus
             .remind(remind(5, &at("noSuchSeat")), SentBy::Unbound),
-        Response::Refused(signal_flow::Refusal::Unknown(
+        Output::Refused(signal_flow::Refusal::Unknown(
             signal_flow::Unknown_Data::Address(at("noSuchSeat"))
         ))
     );

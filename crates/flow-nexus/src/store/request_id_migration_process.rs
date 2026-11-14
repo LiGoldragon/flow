@@ -64,13 +64,13 @@ fn own_process() -> signal_flow::Process {
     }
 }
 
-fn socket_query(socket: &Path, query: signal_flow::Query) -> signal_flow::Response {
+fn socket_query(socket: &Path, query: signal_flow::Input) -> signal_flow::Output {
     let mut peer = UnixStream::connect(socket).expect("current Flow socket connects");
     // Every ordinary connection greets the current Flow first.
     {
         use signal_flow::Contracted;
         peer.write_frame(
-            &rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Query::greeting())
+            &rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Input::greeting())
                 .expect("greeting encodes"),
         )
         .expect("greeting writes");
@@ -80,7 +80,7 @@ fn socket_query(socket: &Path, query: signal_flow::Query) -> signal_flow::Respon
         .expect("receipt decodes");
         assert_eq!(
             receipt,
-            signal_flow::HandshakeReceipt::Greeted(signal_flow::Query::contract_digest())
+            signal_flow::HandshakeReceipt::Greeted(signal_flow::Input::contract_digest())
         );
     }
     peer.write_query(&query).expect("socket query writes");
@@ -91,12 +91,12 @@ fn bind_socket(socket: &Path, address: signal_flow::Address) {
     assert!(matches!(
         socket_query(
             socket,
-            signal_flow::Query::Bind(signal_flow::Bind_Data {
+            signal_flow::Input::Bind(signal_flow::Bind_Data {
                 address,
                 process: own_process(),
             }),
         ),
-        signal_flow::Response::Bound(_)
+        signal_flow::Output::Bound(_)
     ));
 }
 
@@ -112,19 +112,19 @@ fn current_socket_client_serves_request_operations() {
             bind_socket(&socket, migration_sender());
             let order = socket_query(
                 &socket,
-                signal_flow::Query::Send(signal_flow::SendRequest {
+                signal_flow::Input::Send(signal_flow::SendRequest {
                     address: migration_recipient(),
                     sendable_message: signal_flow::SendableMessage::Soft(
                         signal_flow::SendableRequest::Order("socket order".into()),
                     ),
                 }),
             );
-            let signal_flow::Response::SendAccepted(order) = order else {
+            let signal_flow::Output::SendAccepted(order) = order else {
                 panic!("socket Order is admitted: {order:?}")
             };
             let task = socket_query(
                 &socket,
-                signal_flow::Query::Send(signal_flow::SendRequest {
+                signal_flow::Input::Send(signal_flow::SendRequest {
                     address: migration_recipient(),
                     sendable_message: signal_flow::SendableMessage::Soft(
                         signal_flow::SendableRequest::Task(signal_flow::AnswerableTask {
@@ -134,20 +134,20 @@ fn current_socket_client_serves_request_operations() {
                     ),
                 }),
             );
-            let signal_flow::Response::SendAccepted(task) = task else {
+            let signal_flow::Output::SendAccepted(task) = task else {
                 panic!("socket Task is admitted: {task:?}")
             };
             assert!(matches!(
                 socket_query(
                     &socket,
-                    signal_flow::Query::Send(signal_flow::SendRequest {
+                    signal_flow::Input::Send(signal_flow::SendRequest {
                         address: migration_recipient(),
                         sendable_message: signal_flow::SendableMessage::Soft(
                             signal_flow::SendableRequest::Notice("socket notice".into()),
                         ),
                     }),
                 ),
-                signal_flow::Response::SendAccepted(_)
+                signal_flow::Output::SendAccepted(_)
             ));
             println!("SOCKET_ORDER={}", order.request_id.0);
             println!("SOCKET_TASK={}", task.request_id.0);
@@ -160,7 +160,7 @@ fn current_socket_client_serves_request_operations() {
                 flow_ethos::RequestId(std::env::var("FLOW_MIGRATION_TASK").unwrap());
             let result = socket_query(
                 &socket,
-                signal_flow::Query::Send(signal_flow::SendRequest {
+                signal_flow::Input::Send(signal_flow::SendRequest {
                     address: migration_sender(),
                     sendable_message: signal_flow::SendableMessage::Soft(
                         signal_flow::SendableRequest::Result(
@@ -172,12 +172,12 @@ fn current_socket_client_serves_request_operations() {
                     ),
                 }),
             );
-            let signal_flow::Response::SendAccepted(result) = result else {
+            let signal_flow::Output::SendAccepted(result) = result else {
                 panic!("socket Result is admitted: {result:?}")
             };
             let done = socket_query(
                 &socket,
-                signal_flow::Query::Send(signal_flow::SendRequest {
+                signal_flow::Input::Send(signal_flow::SendRequest {
                     address: migration_sender(),
                     sendable_message: signal_flow::SendableMessage::Soft(
                         signal_flow::SendableRequest::Done(
@@ -189,7 +189,7 @@ fn current_socket_client_serves_request_operations() {
                     ),
                 }),
             );
-            let signal_flow::Response::SendAccepted(done) = done else {
+            let signal_flow::Output::SendAccepted(done) = done else {
                 panic!("socket Done is admitted: {done:?}")
             };
             println!("SOCKET_RESULT={}", result.request_id.0);
@@ -202,9 +202,9 @@ fn current_socket_client_serves_request_operations() {
             assert_eq!(
                 socket_query(
                     &socket,
-                    signal_flow::Query::ArchiveRequest(archived.clone()),
+                    signal_flow::Input::ArchiveRequest(archived.clone()),
                 ),
-                signal_flow::Response::RequestArchived(archived)
+                signal_flow::Output::RequestArchived(archived)
             );
         }
         // Another than the request's sender archives it: any caller may.
@@ -215,9 +215,9 @@ fn current_socket_client_serves_request_operations() {
             assert_eq!(
                 socket_query(
                     &socket,
-                    signal_flow::Query::ArchiveRequest(archived.clone())
+                    signal_flow::Input::ArchiveRequest(archived.clone())
                 ),
-                signal_flow::Response::RequestArchived(archived)
+                signal_flow::Output::RequestArchived(archived)
             );
         }
         // Once archived, the id names no request, to a caller in no flow as
@@ -227,11 +227,9 @@ fn current_socket_client_serves_request_operations() {
             assert_eq!(
                 socket_query(
                     &socket,
-                    signal_flow::Query::ArchiveRequest(flow_ethos::RequestId(archived))
+                    signal_flow::Input::ArchiveRequest(flow_ethos::RequestId(archived))
                 ),
-                signal_flow::Response::ArchiveRejected(
-                    signal_flow::ArchiveRejection::UnknownRequest
-                )
+                signal_flow::Output::ArchiveRejected(signal_flow::ArchiveRejection::UnknownRequest)
             );
         }
         "archive-message" => {
@@ -240,11 +238,9 @@ fn current_socket_client_serves_request_operations() {
             assert_eq!(
                 socket_query(
                     &socket,
-                    signal_flow::Query::ArchiveRequest(flow_ethos::RequestId(archived))
+                    signal_flow::Input::ArchiveRequest(flow_ethos::RequestId(archived))
                 ),
-                signal_flow::Response::ArchiveRejected(
-                    signal_flow::ArchiveRejection::UnknownRequest
-                )
+                signal_flow::Output::ArchiveRejected(signal_flow::ArchiveRejection::UnknownRequest)
             );
         }
         "archive-unknown" => {
@@ -252,13 +248,11 @@ fn current_socket_client_serves_request_operations() {
             assert_eq!(
                 socket_query(
                     &socket,
-                    signal_flow::Query::ArchiveRequest(flow_ethos::RequestId(
+                    signal_flow::Input::ArchiveRequest(flow_ethos::RequestId(
                         "unknown-request-id".into()
                     )),
                 ),
-                signal_flow::Response::ArchiveRejected(
-                    signal_flow::ArchiveRejection::UnknownRequest
-                )
+                signal_flow::Output::ArchiveRejected(signal_flow::ArchiveRejection::UnknownRequest)
             );
         }
         // A request Flow raised itself is archived by anyone once it is
@@ -269,9 +263,9 @@ fn current_socket_client_serves_request_operations() {
             assert_eq!(
                 socket_query(
                     &socket,
-                    signal_flow::Query::ArchiveRequest(flow_ethos::RequestId(archived))
+                    signal_flow::Input::ArchiveRequest(flow_ethos::RequestId(archived))
                 ),
-                signal_flow::Response::ArchiveRejected(signal_flow::ArchiveRejection::NotYet)
+                signal_flow::Output::ArchiveRejected(signal_flow::ArchiveRejection::NotYet)
             );
         }
         mode => panic!("unknown migration client mode {mode}"),

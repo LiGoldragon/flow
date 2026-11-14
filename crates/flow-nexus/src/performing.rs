@@ -34,7 +34,7 @@ use crate::title::TitleRefused;
 use crate::waking::PerformsWakeAndDrain;
 use signal_flow::{
     HarnessKind, LaunchAttemptReservation, NativeLaunchFailure, NativeLaunchRefusal,
-    NativeLaunchStage, Response, StartRejection,
+    NativeLaunchStage, Output, StartRejection,
 };
 
 trait LabelsNativeLaunchStage {
@@ -358,8 +358,8 @@ impl Performs for RunningNexus {
                 Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
             },
             Operation::Confirm(flow_id) => match self.store.confirm_started(&flow_id.0) {
-                Ok(Response::Started(started)) => Outcome::Started(started),
-                Ok(Response::StartRejected(StartRejection::AddressAwake)) => {
+                Ok(Output::Started(started)) => Outcome::Started(started),
+                Ok(Output::StartRejected(StartRejection::AddressAwake)) => {
                     Outcome::Failed(Failed_Data::AddressAwake)
                 }
                 Ok(_) => Outcome::Failed(Failed_Data::Unstarted),
@@ -838,7 +838,7 @@ impl PerformsInParts for RunningNexus {
             Record_Data::Reaped(flow_id) => {
                 use crate::reaping::ReapsPredecessors;
                 match self.settle_reap(&flow_id.0) {
-                    Some(Response::Replaced(_)) => Outcome::Recorded,
+                    Some(Output::Replaced(_)) => Outcome::Recorded,
                     _ => Outcome::Failed(Failed_Data::StoreRefused),
                 }
             }
@@ -857,7 +857,7 @@ impl PerformsInParts for RunningNexus {
             Record_Data::HandedOver(address) => {
                 use crate::reaping::HandsOverGenerations;
                 match self.retry_handover(&address) {
-                    Some(Response::Started(_)) => Outcome::Recorded,
+                    Some(Output::Started(_)) => Outcome::Recorded,
                     _ => Outcome::Failed(Failed_Data::StoreRefused),
                 }
             }
@@ -882,7 +882,7 @@ impl PerformsInParts for RunningNexus {
                 use crate::generated::starter::NamesLaunchedRoute;
                 let started = self.store.launched(&launched);
                 match self.settle_fresh(&launch_request_id, &address, &started) {
-                    Response::Started(_) => Outcome::Recorded,
+                    Output::Started(_) => Outcome::Recorded,
                     _ => Outcome::Failed(Failed_Data::StoreRefused),
                 }
             }

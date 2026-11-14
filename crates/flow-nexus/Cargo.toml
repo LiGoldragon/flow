@@ -44,7 +44,7 @@ getrandom = "0.3"
 thiserror.workspace = true
 tungstenite = "0.28"
 [build-dependencies]
-ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "1976e45" }
+ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "8c95310" }
 [dev-dependencies]
 # The published signal-flow 60, whose peers the ordinary greeting refuses and
 # whose launch outcomes the 0.54.7 Memory step upgrades from.

@@ -140,7 +140,7 @@ use flow_native::DigestsPrompt;
 use meta_signal_flow::{AbsenceProof, Continuity, Undecided};
 use signal_flow::{
     Address, AgentState, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile,
-    Metaflow, NativePrompt, Origin, QueueEntry, Response,
+    Metaflow, NativePrompt, Origin, Output, QueueEntry,
 };
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -493,7 +493,7 @@ pub enum KeptAtStop {
     NotResting(PaneAgent),
     /// A replacement ordered from outside was carried out at the seat's
     /// rest and refused, with the refusal; the order is spent.
-    OrderedRefused(Box<Response>),
+    OrderedRefused(Box<Output>),
     /// The Codex seat's app-server shows its thread in a turn, or holding
     /// work Flow typed whose turn has not begun.
     InTurn,
@@ -511,7 +511,7 @@ pub enum KeptAtStop {
     RefreshUnplaceable,
     /// The successor's launch or its replacement was refused; the
     /// predecessor stays Awake, and its next rest tries again.
-    RefreshLaunchRefused(Box<Response>),
+    RefreshLaunchRefused(Box<Output>),
     /// An OnDemand seat with nothing queued could not be closed: the close
     /// or its Stopped record was refused; it stays Awake.
     SleepRefused(Box<Outcome>),
@@ -750,10 +750,10 @@ impl StartsUnbound for RunningNexus {
         // The gate is released before the wait: the launch is settled by the
         // Nexus's own promoter, which needs the gate to do it.
         match response {
-            Response::Started(launched) => Ok(launched.flow_id),
+            Output::Started(launched) => Ok(launched.flow_id),
             // The flow started and receives; only its handover is owed.
-            Response::HandoverPending(pending) => Ok(pending.launched.flow_id),
-            Response::StartRejected(rejection) => Err(FreshRefusal::Rejected(rejection)),
+            Output::HandoverPending(pending) => Ok(pending.launched.flow_id),
+            Output::StartRejected(rejection) => Err(FreshRefusal::Rejected(rejection)),
             _ => Err(FreshRefusal::Failed(Failed_Data::Unstarted)),
         }
     }
@@ -815,7 +815,7 @@ trait WakesInParts {
     /// launch that has not settled, or a reap refused once the successor
     /// was confirmed, stays owed under the same request; any other answer
     /// forgets it, so the next refresh owes a new launch.
-    fn settle_owed(&self, address: &Address, response: &Response);
+    fn settle_owed(&self, address: &Address, response: &Output);
     /// Whether the launch request has settled refused.
     fn launch_refused(&self, launch_request_id: &str) -> bool;
     /// The launch profile of the successor the metaflow's flow is owed: its
@@ -1817,18 +1817,18 @@ pub trait RefreshesMetaflows {
     /// queue kept. The successor's context is what any wake composes: the
     /// metaflow's declaration, else the last launch's modules, remembering
     /// the ending flow.
-    fn refresh(&self, address: &Address) -> Response;
+    fn refresh(&self, address: &Address) -> Output;
     /// A Replace, as a Launch addressed to an Awake metaflow names one: a
     /// refresh whose successor is the profile's. Under the metaflow's lock
     /// the successor is started and confirmed, then the flow it replaces is
     /// reaped, given no turn; once the lock is released the queue is handed
     /// to the successor, oldest first. A metaflow another holds is refused
     /// Locked. Runs off the dispatch gate, taking it for the replacement.
-    fn replace_held(&self, profile: LaunchProfile, origin: Origin) -> Response;
+    fn replace_held(&self, profile: LaunchProfile, origin: Origin) -> Output;
 }
 
 impl RefreshesMetaflows for RunningNexus {
-    fn refresh(&self, address: &Address) -> Response {
+    fn refresh(&self, address: &Address) -> Output {
         use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
         use signal_flow::{RefreshRejection, Refusal, Unknown_Data};
         let turn = self
@@ -1836,7 +1836,7 @@ impl RefreshesMetaflows for RunningNexus {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(lock) = self.waking.hold(address) else {
-            return Response::RefreshRejected(RefreshRejection::Locked);
+            return Output::RefreshRejected(RefreshRejection::Locked);
         };
         self.rest_ended_awake(address);
         let metaflow = match self.store.metaflow(address) {
@@ -1846,17 +1846,17 @@ impl RefreshesMetaflows for RunningNexus {
                     ..
                 },
             )) => metaflow,
-            Ok(Some(_)) => return Response::RefreshRejected(RefreshRejection::NotAwake),
+            Ok(Some(_)) => return Output::RefreshRejected(RefreshRejection::NotAwake),
             Ok(None) => {
                 return match self.store.metaflow_declaration(address) {
-                    Ok(Some(_)) => Response::RefreshRejected(RefreshRejection::NotAwake),
+                    Ok(Some(_)) => Output::RefreshRejected(RefreshRejection::NotAwake),
                     Ok(None) => {
-                        Response::Refused(Refusal::Unknown(Unknown_Data::Address(address.clone())))
+                        Output::Refused(Refusal::Unknown(Unknown_Data::Address(address.clone())))
                     }
-                    Err(error) => Response::Refused(Refusal::Store(error.to_string())),
+                    Err(error) => Output::Refused(Refusal::Store(error.to_string())),
                 };
             }
-            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+            Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
         };
         // A restart holds the flow's Address as a refresh would.
         if let flow_ethos::State::Awake(current) = &metaflow.state
@@ -1865,10 +1865,10 @@ impl RefreshesMetaflows for RunningNexus {
                 Ok(None)
             )
         {
-            return Response::RefreshRejected(RefreshRejection::Locked);
+            return Output::RefreshRejected(RefreshRejection::Locked);
         }
         let flow_ethos::State::Awake(flow_id) = metaflow.state.clone() else {
-            return Response::RefreshRejected(RefreshRejection::NotAwake);
+            return Output::RefreshRejected(RefreshRejection::NotAwake);
         };
         // A flow whose launch is not yet confirmed only holds its Address:
         // the launch that holds it is the owed successor's, still pending
@@ -1876,20 +1876,20 @@ impl RefreshesMetaflows for RunningNexus {
         match self.store.address_hold(&flow_id.0) {
             Ok(None) => {}
             Ok(Some(_)) => {
-                return Response::RefreshRejected(match self.store.successor_intent(address) {
+                return Output::RefreshRejected(match self.store.successor_intent(address) {
                     Ok(Some(_)) => RefreshRejection::SuccessorUnconfirmed,
                     Ok(None) => RefreshRejection::Locked,
-                    Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+                    Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
                 });
             }
-            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+            Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
         }
         let node = match self.store.flow_node(&flow_id.0) {
             Ok(Some(node)) => node,
             Ok(None) => {
-                return Response::Refused(Refusal::Unknown(Unknown_Data::FlowId(flow_id)));
+                return Output::Refused(Refusal::Unknown(Unknown_Data::FlowId(flow_id)));
             }
-            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+            Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
         };
         // The recorded route is read first: a Herdr that cannot be read
         // shows no pane, and is never taken for one gone.
@@ -1899,10 +1899,10 @@ impl RefreshesMetaflows for RunningNexus {
             // Exited, which puts the metaflow Asleep.
             PanePresence::Absent | PanePresence::Bare => {
                 let _ = self.perform(Operation::Record(Record_Data::Exited(flow_id)));
-                return Response::RefreshRejected(RefreshRejection::NotAwake);
+                return Output::RefreshRejected(RefreshRejection::NotAwake);
             }
             PanePresence::Unknown => {
-                return Response::RefreshRejected(RefreshRejection::HerdrUnavailable);
+                return Output::RefreshRejected(RefreshRejection::HerdrUnavailable);
             }
         }
         let node = self.herdr.refresh_route(node);
@@ -1914,7 +1914,7 @@ impl RefreshesMetaflows for RunningNexus {
         self.refresh_held(address, metaflow, flow_id, node, turn, lock)
     }
 
-    fn replace_held(&self, profile: LaunchProfile, origin: Origin) -> Response {
+    fn replace_held(&self, profile: LaunchProfile, origin: Origin) -> Output {
         use signal_flow::ReplaceRejection;
         let address = profile.address.clone();
         let response = {
@@ -1923,13 +1923,13 @@ impl RefreshesMetaflows for RunningNexus {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let Some(lock) = self.waking.hold(&address) else {
-                return Response::ReplaceRejected(ReplaceRejection::Locked);
+                return Output::ReplaceRejected(ReplaceRejection::Locked);
             };
             // A restart holds the Address its predecessor runs at.
             if let Ok(Some(_)) =
                 crate::store::restart::RecordsRestarts::restart_at(&*self.store, &address)
             {
-                return Response::ReplaceRejected(ReplaceRejection::Locked);
+                return Output::ReplaceRejected(ReplaceRejection::Locked);
             }
             // A working predecessor is never closed: the replacement waits
             // for its idle event. One already under way or settled resumes.
@@ -1975,11 +1975,11 @@ pub(crate) trait WaitsForRestToReplace {
         node: FlowNode,
         turn: std::sync::MutexGuard<'_, ()>,
         lock: WakingLease<'_>,
-    ) -> Response;
+    ) -> Output;
     /// Records a Refresh of the working `flow_id`, under the gate, and
     /// answers RefreshQueued; a Launch already waiting for it refuses it
     /// Locked.
-    fn queue_refresh(&self, address: &Address, flow_id: &str) -> Response;
+    fn queue_refresh(&self, address: &Address, flow_id: &str) -> Output;
     /// Records the Launch or Replace of the working `predecessor`, under the
     /// gate, once its successor composes, and answers LaunchPending with the
     /// attempt it waits as; another order waiting for it refuses it Locked.
@@ -1988,11 +1988,11 @@ pub(crate) trait WaitsForRestToReplace {
         profile: LaunchProfile,
         origin: Origin,
         predecessor: FlowId,
-    ) -> Response;
+    ) -> Output;
     /// The replacement, under the metaflow's hold the caller has: its
     /// successor owed until confirmed, started and confirmed, then its
     /// predecessor reaped. Takes the gate.
-    fn replace_owed(&self, profile: LaunchProfile, origin: Origin) -> Response;
+    fn replace_owed(&self, profile: LaunchProfile, origin: Origin) -> Output;
     /// Whether Flow already holds an attempt, an outcome or a replacement of
     /// this launch request.
     fn launch_known(&self, launch_request_id: &str) -> bool;
@@ -2026,18 +2026,18 @@ impl WaitsForRestToReplace for RunningNexus {
         node: FlowNode,
         turn: std::sync::MutexGuard<'_, ()>,
         lock: WakingLease<'_>,
-    ) -> Response {
+    ) -> Output {
         use signal_flow::{RefreshRejection, Refreshed, Refusal};
         let continuity = match self.store.continuity(address) {
             Ok(continuity) => continuity,
-            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+            Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
         };
         let wakes = metaflow
             .queue
             .0
             .iter()
             .any(|entry| !matches!(entry.message, signal_flow::Message::Soft(_)));
-        let refreshed = Response::Refreshed(Refreshed {
+        let refreshed = Output::Refreshed(Refreshed {
             address: address.clone(),
             flow_id: flow_id.clone(),
         });
@@ -2062,7 +2062,7 @@ impl WaitsForRestToReplace for RunningNexus {
                         );
                     }
                     self.wake_due(address.clone());
-                    Response::ReapPending(*pending)
+                    Output::ReapPending(*pending)
                 }
                 AtStop::Refreshed(_) => {
                     eprintln!(
@@ -2081,27 +2081,27 @@ impl WaitsForRestToReplace for RunningNexus {
                 // one whose launch is still pending or ambiguous when the
                 // confirmation wait ends is unconfirmed, and stays owed.
                 AtStop::Kept(KeptAtStop::RefreshLaunchRefused(response)) => {
-                    Response::RefreshRejected(match *response {
-                        Response::ReplaceRejected(rejection) => {
+                    Output::RefreshRejected(match *response {
+                        Output::ReplaceRejected(rejection) => {
                             RefreshRejection::SuccessorRefused(rejection)
                         }
-                        Response::StartRejected(rejection) => RefreshRejection::SuccessorRefused(
+                        Output::StartRejected(rejection) => RefreshRejection::SuccessorRefused(
                             signal_flow::ReplaceRejection::LaunchRefused(rejection),
                         ),
-                        Response::LaunchPending(_) | Response::StartAmbiguous(_) => {
+                        Output::LaunchPending(_) | Output::StartAmbiguous(_) => {
                             RefreshRejection::SuccessorUnconfirmed
                         }
                         _ => RefreshRejection::PersistenceRefused,
                     })
                 }
                 AtStop::Kept(KeptAtStop::RefreshUnplaceable) => {
-                    Response::RefreshRejected(RefreshRejection::Undeclared)
+                    Output::RefreshRejected(RefreshRejection::Undeclared)
                 }
-                _ => Response::RefreshRejected(RefreshRejection::PersistenceRefused),
+                _ => Output::RefreshRejected(RefreshRejection::PersistenceRefused),
             };
         }
         if let Err(outcome) = self.close_at_rest(&flow_id.0, &node) {
-            return Response::RefreshRejected(match *outcome {
+            return Output::RefreshRejected(match *outcome {
                 Outcome::Failed(Failed_Data::HerdrRefused) => RefreshRejection::CloseRefused,
                 _ => RefreshRejection::PersistenceRefused,
             });
@@ -2121,32 +2121,32 @@ impl WaitsForRestToReplace for RunningNexus {
         refreshed
     }
 
-    fn queue_refresh(&self, address: &Address, flow_id: &str) -> Response {
+    fn queue_refresh(&self, address: &Address, flow_id: &str) -> Output {
         use signal_flow::{RefreshQueued, RefreshRejection, Refusal};
         match self.store.ordered_replacement(address) {
             Ok(Some(order)) if order.predecessor == flow_id => {
                 return match order.order {
-                    ReplacementOrder::Refresh => Response::RefreshQueued(RefreshQueued {
+                    ReplacementOrder::Refresh => Output::RefreshQueued(RefreshQueued {
                         address: address.clone(),
                         flow_id: signal_flow::FlowId(flow_id.to_owned()),
                     }),
                     ReplacementOrder::Launch(_) | ReplacementOrder::Restart => {
-                        Response::RefreshRejected(RefreshRejection::Locked)
+                        Output::RefreshRejected(RefreshRejection::Locked)
                     }
                 };
             }
             Ok(_) => {}
-            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+            Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
         }
         if let Err(error) = self.store.order_replacement(OrderedReplacement {
             address: address.clone(),
             predecessor: flow_id.to_owned(),
             order: ReplacementOrder::Refresh,
         }) {
-            return Response::Refused(Refusal::Store(error.to_string()));
+            return Output::Refused(Refusal::Store(error.to_string()));
         }
         eprintln!("flow-nexus: flow {flow_id} works; its refresh waits for its rest");
-        Response::RefreshQueued(RefreshQueued {
+        Output::RefreshQueued(RefreshQueued {
             address: address.clone(),
             flow_id: signal_flow::FlowId(flow_id.to_owned()),
         })
@@ -2157,11 +2157,11 @@ impl WaitsForRestToReplace for RunningNexus {
         mut profile: LaunchProfile,
         origin: Origin,
         predecessor: FlowId,
-    ) -> Response {
+    ) -> Output {
         use crate::launching::{InterpretsLaunchObservations, ResumesReplacement};
         use signal_flow::{ReplaceRejection, StartRejection};
         let persistence = || {
-            Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
+            Output::ReplaceRejected(ReplaceRejection::LaunchRefused(
                 StartRejection::LaunchPersistenceRefused,
             ))
         };
@@ -2175,9 +2175,9 @@ impl WaitsForRestToReplace for RunningNexus {
             Ok(Some(order)) if order.predecessor == predecessor.0 => {
                 return match order.ordered_launch() {
                     Some(launch) if launch.launch_profile == profile && launch.origin == origin => {
-                        Response::LaunchPending(launch.waiting_attempt())
+                        Output::LaunchPending(launch.waiting_attempt())
                     }
-                    _ => Response::ReplaceRejected(ReplaceRejection::Locked),
+                    _ => Output::ReplaceRejected(ReplaceRejection::Locked),
                 };
             }
             Ok(_) => {}
@@ -2211,10 +2211,10 @@ impl WaitsForRestToReplace for RunningNexus {
             "flow-nexus: flow {predecessor} works; its replacement waits for its rest",
             predecessor = predecessor.0
         );
-        Response::LaunchPending(launch.waiting_attempt())
+        Output::LaunchPending(launch.waiting_attempt())
     }
 
-    fn replace_owed(&self, profile: LaunchProfile, origin: Origin) -> Response {
+    fn replace_owed(&self, profile: LaunchProfile, origin: Origin) -> Output {
         use signal_flow::{ReplaceRejection, StartRejection};
         let address = profile.address.clone();
         let _turn = self
@@ -2234,7 +2234,7 @@ impl WaitsForRestToReplace for RunningNexus {
                 })
                 .is_err()
         {
-            return Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
+            return Output::ReplaceRejected(ReplaceRejection::LaunchRefused(
                 StartRejection::LaunchPersistenceRefused,
             ));
         }
@@ -2277,7 +2277,7 @@ impl WaitsForRestToReplace for RunningNexus {
                     &order.predecessor,
                 );
                 return match response {
-                    Response::Restarted(_) => AtStop::Restarted(address),
+                    Output::Restarted(_) => AtStop::Restarted(address),
                     response => AtStop::Kept(KeptAtStop::OrderedRefused(Box::new(response))),
                 };
             }
@@ -2304,10 +2304,10 @@ impl WaitsForRestToReplace for RunningNexus {
         };
         let _ = self.store.forget_ordered_replacement(&address);
         match response {
-            Response::Refreshed(_) | Response::Replaced(_) => AtStop::Refreshed(address),
+            Output::Refreshed(_) | Output::Replaced(_) => AtStop::Refreshed(address),
             // The successor started and receives; the predecessor's reap is
             // owed: the order was carried out.
-            Response::ReapPending(pending) => AtStop::ReapPending(Box::new(pending)),
+            Output::ReapPending(pending) => AtStop::ReapPending(Box::new(pending)),
             response => AtStop::Kept(KeptAtStop::OrderedRefused(Box::new(response))),
         }
     }
@@ -2684,7 +2684,7 @@ impl DrainsHeldSeats for RunningNexus {
             lease,
         );
         let proved_absent = matches!(&result,
-            meta_signal_flow::Response::DeliveryRejected(rejected)
+            meta_signal_flow::Output::DeliveryRejected(rejected)
                 if matches!(rejected,
                     meta_signal_flow::DeliveryRejection::UnknownFlow
                     | meta_signal_flow::DeliveryRejection::FlowStopped
@@ -2711,9 +2711,7 @@ impl DrainsHeldSeats for RunningNexus {
         // whose completion is then no rest of the seat.
         if node.harness_kind == HarnessKind::Codex {
             let interrupt = match &result {
-                meta_signal_flow::Response::Delivered(delivery) => {
-                    delivery.interrupt_witness.clone()
-                }
+                meta_signal_flow::Output::Delivered(delivery) => delivery.interrupt_witness.clone(),
                 _ => meta_signal_flow::InterruptWitness::NotRequested,
             };
             self.codex_turns.delivered(&node.session_id.0, &interrupt);
@@ -3586,10 +3584,10 @@ impl WakesInParts for RunningNexus {
         };
         self.settle_owed(&address, &response);
         match response {
-            Response::Replaced(_) => AtStop::Refreshed(address),
+            Output::Replaced(_) => AtStop::Refreshed(address),
             // The successor is confirmed and receiving; its predecessor's
             // reap is owed.
-            Response::ReapPending(pending) => AtStop::ReapPending(Box::new(pending)),
+            Output::ReapPending(pending) => AtStop::ReapPending(Box::new(pending)),
             response => AtStop::Kept(KeptAtStop::RefreshLaunchRefused(Box::new(response))),
         }
     }
@@ -3707,9 +3705,9 @@ impl WakesInParts for RunningNexus {
         }
     }
 
-    fn settle_owed(&self, address: &Address, response: &Response) {
+    fn settle_owed(&self, address: &Address, response: &Output) {
         match response {
-            Response::LaunchPending(_) | Response::StartAmbiguous(_) => {}
+            Output::LaunchPending(_) | Output::StartAmbiguous(_) => {}
             _ => {
                 let _ = self.store.forget_successor(address);
             }
@@ -3779,8 +3777,8 @@ impl WakesInParts for RunningNexus {
                 };
                 self.settle_owed(&address, &response);
                 match response {
-                    Response::Replaced(_) => AtStop::Refreshed(address),
-                    Response::ReapPending(pending) => AtStop::ReapPending(Box::new(pending)),
+                    Output::Replaced(_) => AtStop::Refreshed(address),
+                    Output::ReapPending(pending) => AtStop::ReapPending(Box::new(pending)),
                     response => AtStop::Kept(KeptAtStop::RefreshLaunchRefused(Box::new(response))),
                 }
             }

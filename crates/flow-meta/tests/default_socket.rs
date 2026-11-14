@@ -1,4 +1,4 @@
-//! The CLI is `flow-nexus-meta '<Query>'`: it takes the datom and nothing
+//! The CLI is `flow-nexus-meta '<Input>'`: it takes the datom and nothing
 //! else. The place is the Flow configuration's,
 //! `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`, resolved under
 //! `$XDG_RUNTIME_DIR/nexus/` to that place's meta socket alone.
@@ -48,7 +48,7 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
         peer.read_exact(&mut greeting).expect("greeting");
         let greeting = rkyv::from_bytes::<signal::Handshake, rkyv::rancor::Error>(&greeting)
             .expect("the client sends a Signal greeting first");
-        let receipt = meta_signal_flow::Query::receipt(&greeting);
+        let receipt = meta_signal_flow::Input::receipt(&greeting);
         assert!(matches!(receipt, signal::HandshakeReceipt::Greeted(_)));
         let receipt = rkyv::to_bytes::<rkyv::rancor::Error>(&receipt).expect("receipt encodes");
         peer.write_all(&(receipt.len() as u32).to_be_bytes())
@@ -57,9 +57,9 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
         peer.read_exact(&mut length).expect("query length");
         let mut query = vec![0; u32::from_be_bytes(length) as usize];
         peer.read_exact(&mut query).expect("query");
-        let reply = rkyv::to_bytes::<rkyv::rancor::Error>(
-            &meta_signal_flow::Response::FlowRetired(retired()),
-        )
+        let reply = rkyv::to_bytes::<rkyv::rancor::Error>(&meta_signal_flow::Output::FlowRetired(
+            retired(),
+        ))
         .expect("reply encodes");
         peer.write_all(&(reply.len() as u32).to_be_bytes())
             .and_then(|_| peer.write_all(&reply))

@@ -43,7 +43,7 @@ use lease::LeasesPanes;
 use meta_signal_flow::{
     CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Content, Delivery,
     DeliveryGrade, DeliveryRejection, DeliveryRequest, HarnessCommandKind, HarnessProfile,
-    InterruptWitness, Message, Response,
+    InterruptWitness, Message, Output,
 };
 use signal_flow::{
     AgentState, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
@@ -220,24 +220,24 @@ impl ReadsLeasedPane for RunningNexus {
 
 /// The privileged pane writes.
 pub trait DeliversMessages {
-    fn deliver(&self, request: DeliveryRequest) -> Response;
-    fn deliver_while_waking(&self, request: DeliveryRequest, lease: &WakingLease<'_>) -> Response;
-    fn deliver_inner(&self, request: DeliveryRequest, lease: Option<&WakingLease<'_>>) -> Response;
-    fn vet(&self, request: &DeliveryRequest) -> Response;
-    fn command(&self, request: CommandRequest) -> Response;
+    fn deliver(&self, request: DeliveryRequest) -> Output;
+    fn deliver_while_waking(&self, request: DeliveryRequest, lease: &WakingLease<'_>) -> Output;
+    fn deliver_inner(&self, request: DeliveryRequest, lease: Option<&WakingLease<'_>>) -> Output;
+    fn vet(&self, request: &DeliveryRequest) -> Output;
+    fn command(&self, request: CommandRequest) -> Output;
 }
 
 impl DeliversMessages for RunningNexus {
-    fn deliver(&self, request: DeliveryRequest) -> Response {
+    fn deliver(&self, request: DeliveryRequest) -> Output {
         match self.store.delivery(&request.delivery_id.0) {
             Ok(Some(delivery)) => {
-                return Response::Delivered(
+                return Output::Delivered(
                     crate::message_projection::ProjectsDelivery::visible_delivery(&delivery),
                 );
             }
             Ok(None) => {}
             Err(_) => {
-                return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused);
+                return Output::DeliveryRejected(DeliveryRejection::PersistenceRefused);
             }
         }
         let lease = match crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(
@@ -246,28 +246,28 @@ impl DeliversMessages for RunningNexus {
         ) {
             Ok(Some(metaflow)) => match self.waking.hold(&metaflow.address) {
                 Some(lease) => Some(lease),
-                None => return Response::DeliveryRejected(DeliveryRejection::RouteUnavailable),
+                None => return Output::DeliveryRejected(DeliveryRejection::RouteUnavailable),
             },
             Ok(None) => None,
-            Err(_) => return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused),
+            Err(_) => return Output::DeliveryRejected(DeliveryRejection::PersistenceRefused),
         };
         self.deliver_inner(request, lease.as_ref())
     }
 
-    fn deliver_while_waking(&self, request: DeliveryRequest, lease: &WakingLease<'_>) -> Response {
+    fn deliver_while_waking(&self, request: DeliveryRequest, lease: &WakingLease<'_>) -> Output {
         self.deliver_inner(request, Some(lease))
     }
 
-    fn deliver_inner(&self, request: DeliveryRequest, lease: Option<&WakingLease<'_>>) -> Response {
+    fn deliver_inner(&self, request: DeliveryRequest, lease: Option<&WakingLease<'_>>) -> Output {
         match self.store.delivery(&request.delivery_id.0) {
             Ok(Some(delivery)) => {
-                return Response::Delivered(
+                return Output::Delivered(
                     crate::message_projection::ProjectsDelivery::visible_delivery(&delivery),
                 );
             }
             Ok(None) => {}
             Err(_) => {
-                return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused);
+                return Output::DeliveryRejected(DeliveryRejection::PersistenceRefused);
             }
         }
         // A restart holds the flow: nothing is typed into a pane it is
@@ -277,27 +277,27 @@ impl DeliversMessages for RunningNexus {
             &request.flow_id.0,
         ) {
             Ok(None) => {}
-            Ok(Some(_)) => return Response::DeliveryRejected(DeliveryRejection::RouteUnavailable),
+            Ok(Some(_)) => return Output::DeliveryRejected(DeliveryRejection::RouteUnavailable),
             Err(_) => {
-                return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused);
+                return Output::DeliveryRejected(DeliveryRejection::PersistenceRefused);
             }
         }
         let target = match self.delivery_target(&request.flow_id.0) {
             Ok(target) => target,
-            Err(refusal) => return Response::DeliveryRejected(refusal.into()),
+            Err(refusal) => return Output::DeliveryRejected(refusal.into()),
         };
         let metaflow = match crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(
             &*self.store,
             &request.flow_id.0,
         ) {
             Ok(metaflow) => metaflow,
-            Err(_) => return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused),
+            Err(_) => return Output::DeliveryRejected(DeliveryRejection::PersistenceRefused),
         };
         match (lease, metaflow) {
             (Some(_), None) => {
                 // A binding disappearing after custody was acquired is a
                 // failed revalidation, never an unbound delivery.
-                return Response::DeliveryRejected(DeliveryRejection::RouteUnavailable);
+                return Output::DeliveryRejected(DeliveryRejection::RouteUnavailable);
             }
             (None, None) => {}
             (Some(lease), Some(metaflow)) => {
@@ -305,42 +305,42 @@ impl DeliversMessages for RunningNexus {
                     || lease.address() != &metaflow.address
                     || !matches!(metaflow.state, flow_ethos::State::Awake(ref id) if id == &request.flow_id)
                 {
-                    return Response::DeliveryRejected(DeliveryRejection::RouteUnavailable);
+                    return Output::DeliveryRejected(DeliveryRejection::RouteUnavailable);
                 }
             }
             (None, Some(_)) => {
                 // A binding appearing after the unbound read is also a
                 // failed revalidation: custody must precede the target.
-                return Response::DeliveryRejected(DeliveryRejection::RouteUnavailable);
+                return Output::DeliveryRejected(DeliveryRejection::RouteUnavailable);
             }
         }
         if let Some(refusal) = request.message.refusal(&target.profile) {
-            return Response::DeliveryRejected(DeliveryRejection::BodyRefused(refusal));
+            return Output::DeliveryRejected(DeliveryRejection::BodyRefused(refusal));
         }
         let _lease = self.pane_leases.hold(&target.route);
         match LeasedDelivery::new(self, &request, &target).run() {
-            Ok(delivery) => Response::Delivered(
+            Ok(delivery) => Output::Delivered(
                 crate::message_projection::ProjectsDelivery::visible_delivery(&delivery),
             ),
-            Err(rejection) => Response::DeliveryRejected(rejection),
+            Err(rejection) => Output::DeliveryRejected(rejection),
         }
     }
 
-    fn vet(&self, request: &DeliveryRequest) -> Response {
+    fn vet(&self, request: &DeliveryRequest) -> Output {
         let target = match self.delivery_target(&request.flow_id.0) {
             Ok(target) => target,
-            Err(refusal) => return Response::DeliveryRejected(refusal.into()),
+            Err(refusal) => return Output::DeliveryRejected(refusal.into()),
         };
         match request.message.refusal(&target.profile) {
-            Some(refusal) => Response::DeliveryRejected(DeliveryRejection::BodyRefused(refusal)),
-            None => Response::Vetted,
+            Some(refusal) => Output::DeliveryRejected(DeliveryRejection::BodyRefused(refusal)),
+            None => Output::Vetted,
         }
     }
 
-    fn command(&self, request: CommandRequest) -> Response {
+    fn command(&self, request: CommandRequest) -> Output {
         let target = match self.delivery_target(&request.flow_id.0) {
             Ok(target) => target,
-            Err(refusal) => return Response::CommandRejected(refusal.into()),
+            Err(refusal) => return Output::CommandRejected(refusal.into()),
         };
         // Compaction is an emergency measure: below its model's refresh
         // threshold it is refused before anything reaches the pane.
@@ -348,29 +348,29 @@ impl DeliversMessages for RunningNexus {
             match self.store.compaction_refusal(&target.node.flow_id.0) {
                 Ok(None) => {}
                 Ok(Some(refusal)) => {
-                    return Response::CommandRejected(CommandRejection::CompactionRefused(refusal));
+                    return Output::CommandRejected(CommandRejection::CompactionRefused(refusal));
                 }
-                Err(_) => return Response::CommandRejected(CommandRejection::NotDelivered),
+                Err(_) => return Output::CommandRejected(CommandRejection::NotDelivered),
             }
         }
         let _lease = self.pane_leases.hold(&target.route);
         let agent_state = match self.writable_state(&target) {
             Ok(agent_state) => agent_state,
-            Err(refusal) => return Response::CommandRejected(refusal.into()),
+            Err(refusal) => return Output::CommandRejected(refusal.into()),
         };
         let command_grade = match request.harness_command_kind {
             HarnessCommandKind::Interrupt => {
                 // Nothing to interrupt: no key is sent, since Escape into a
                 // resting Claude opens its rewind menu.
                 if agent_state != AgentState::Working {
-                    return Response::CommandRejected(CommandRejection::NotDelivered);
+                    return Output::CommandRejected(CommandRejection::NotDelivered);
                 }
                 match self
                     .herdr
                     .interrupt(&target.route, &target.profile.interrupt_keys.texts())
                 {
                     Interruption::Refused => {
-                        return Response::CommandRejected(CommandRejection::NotDelivered);
+                        return Output::CommandRejected(CommandRejection::NotDelivered);
                     }
                     Interruption::Observed => CommandGrade::Observed,
                     Interruption::Unobserved => CommandGrade::Transported,
@@ -382,7 +382,7 @@ impl DeliversMessages for RunningNexus {
                 let observe = matches!(agent_state, AgentState::Idle | AgentState::Done);
                 match self.herdr.place(&target.route, "/compact", observe) {
                     Placement::Refused => {
-                        return Response::CommandRejected(CommandRejection::NotDelivered);
+                        return Output::CommandRejected(CommandRejection::NotDelivered);
                     }
                     Placement::Uncertain => CommandGrade::Uncertain,
                     Placement::Placed { observed: true } => CommandGrade::Observed,
@@ -390,7 +390,7 @@ impl DeliversMessages for RunningNexus {
                 }
             }
         };
-        Response::Commanded(CommandOutcome {
+        Output::Commanded(CommandOutcome {
             flow_id: target.node.flow_id,
             harness_command_kind: request.harness_command_kind,
             command_grade,

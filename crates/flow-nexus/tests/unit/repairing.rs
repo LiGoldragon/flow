@@ -19,13 +19,13 @@ use crate::waking::HoldsWakingMetaflows;
 use crate::{Dispatches, DispatchesSerially};
 use flow_ethos::State;
 use meta_signal_flow::{
-    InspectRejected_Data, Query as MetaQuery, Rebind_Data, RebindRejected_Data, Rebinding,
-    Response as MetaResponse, VisibleAttempt, VisibleQueueDeliveryStanding, Withdraw_Data,
+    Input as MetaQuery, InspectRejected_Data, Output as MetaResponse, Rebind_Data,
+    RebindRejected_Data, Rebinding, VisibleAttempt, VisibleQueueDeliveryStanding, Withdraw_Data,
     WithdrawRejected_Data,
 };
 use signal_flow::{
     Address, Aspect, DeliveryState, HarnessKind, HerdrRoute, HerdrRouteSelection, Lock_Data,
-    Message, Metaflow, Model, QueueEntry, Request, Response, SentBy,
+    Message, Metaflow, Model, Output, QueueEntry, Request, SentBy,
 };
 use std::fs;
 
@@ -172,7 +172,7 @@ fn inspect_answers_the_metaflow_whole() {
         )
         .expect("lock recorded")
     {
-        Response::Locked(lock) => lock,
+        Output::Locked(lock) => lock,
         other => panic!("the sender locks the seat: {other:?}"),
     };
     prepared(&fixture);

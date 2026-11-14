@@ -9,5 +9,5 @@
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Invocation {
     pub meta_socket_path: flow_ethos::MetaSocketPath,
-    pub query: meta_signal_flow::Query,
+    pub input: meta_signal_flow::Input,
 }

@@ -2799,7 +2799,7 @@ mod tests {
         {
             use datom_codec::{Actualizing, Budget, Datomizable, Path, Potential};
             use protos::{Compactable, Protosizable, ReaderBudget};
-            let response = meta_signal_flow::Response::LegacyArchiveObserved(
+            let response = meta_signal_flow::Output::LegacyArchiveObserved(
                 archive
                     .iter()
                     .map(crate::message_projection::ProjectsLegacyArchiveEntry::visible_legacy_archive_entry)
@@ -2813,16 +2813,16 @@ mod tests {
                 maximum_depth: 1024,
             };
             assert_eq!(
-                Potential::<meta_signal_flow::Response>::from(text)
+                Potential::<meta_signal_flow::Output>::from(text)
                     .actualize(&mut budget)
                     .unwrap(),
                 response
             );
             assert_eq!(
-                Potential::<meta_signal_flow::Query>::from("ObserveLegacyArchive")
+                Potential::<meta_signal_flow::Input>::from("ObserveLegacyArchive")
                     .actualize(&mut budget)
                     .unwrap(),
-                meta_signal_flow::Query::ObserveLegacyArchive
+                meta_signal_flow::Input::ObserveLegacyArchive
             );
         }
         for (address, entry) in &expected {

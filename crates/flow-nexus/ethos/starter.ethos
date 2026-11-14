@@ -24,7 +24,7 @@ Library
                  HerdrSessionName LeaveOuts FlowKind ToolSet
                  LeaveOutRefusal ComposedLaunch
                  ContextRefusal SystemPrompt HerdrPaneBinding
-                 PromptDeliveryResult Response Launched
+                 PromptDeliveryResult Output Launched
                  NativeLaunchFailure ]
   flow_nexus:[ StartupSelection StartupComposition ContextProvenance CurriculumQuery CurriculumOutcome CompositionError VerifiedContext OperationOutcome CallerProcess ]
   serde_json:JsonValue.Value ]
@@ -115,10 +115,10 @@ Library
                      disallowed_tools.[ Vector<String> ]
                      attribution_off.[ Boolean ]
                      skill_listing_off.[ Boolean ] ]
-  SettlesStartupProgress.[ settle_progress.{ [ Profiled DeliveryIntended Progressing ] [ Response ] }
-                           advance_startup.{ [ Profiled DeliveryIntended ] [ Response ] }
+  SettlesStartupProgress.[ settle_progress.{ [ Profiled DeliveryIntended Progressing ] [ Output ] }
+                           advance_startup.{ [ Profiled DeliveryIntended ] [ Output ] }
                            stops_reported.{ [ Textual ] [ Integer ] }
-                           composition_refused:{ [ OutcomeCarrying ] [ Response ] } ]
+                           composition_refused:{ [ OutcomeCarrying ] [ Output ] } ]
   NamesLaunchedRoute.[ launched.{ [ LaunchedRecording ] [ Launched ] } ]
   DerivesOrigin.[ origin_of.{ [ CallerProcessing ] [ Origin ] } ]
   ; A model a launch names runs on the harness derived for it; it is

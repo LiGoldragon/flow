@@ -86,8 +86,8 @@ use meta_signal_flow::{
     RestartRecord,
 };
 use signal_flow::{
-    FlowNode, HarnessKind, HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, Process, Refusal,
-    Response, RestartRefusal, ResumeRefused_Data, StopRejection,
+    FlowNode, HarnessKind, HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, Output, Process,
+    Refusal, RestartRefusal, ResumeRefused_Data, StopRejection,
 };
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -140,11 +140,11 @@ pub trait RestartsFlows {
     /// Restarts `flow_id`, whoever asks. Runs off the dispatch gate and
     /// takes it for each step, so a Send arriving meanwhile is admitted and
     /// queues.
-    fn restart(&self, flow_id: &str) -> Response;
+    fn restart(&self, flow_id: &str) -> Output;
     /// Restarts `flow_id` at its idle event, whatever its seat shows: the
     /// restart a working seat was answered RestartQueued for, its
     /// background work ended by the closing of its harness.
-    fn restart_at_idle_event(&self, flow_id: &str) -> Response;
+    fn restart_at_idle_event(&self, flow_id: &str) -> Output;
     /// Takes up every restart an earlier Nexus left: Closing and Closed are
     /// composed again first, then Closing is reconciled against the old
     /// pane and Closed resumes; Opening is Interrupted, and
@@ -160,7 +160,7 @@ pub trait RestartsFlows {
     /// harness Flow saw there, its old seat. A restart step running is
     /// Restarting; an Interrupted spawn not proven quiesced is
     /// SpawnUnproven.
-    fn stop_restarting(&self, record: RestartRecord) -> Response;
+    fn stop_restarting(&self, record: RestartRecord) -> Output;
 }
 
 /// The fence on a flow's harness events.
@@ -474,13 +474,13 @@ struct PreparedRestart {
 struct FailedRun {
     failed: RestartRecord,
     resume_launch: ResumeLaunch,
-    response: Response,
+    response: Output,
 }
 
 /// How one run of a resume ended.
 enum Resumption {
     /// Bound, Interrupted, or refused: the answer.
-    Answered(Box<Response>),
+    Answered(Box<Output>),
     Failed(Box<FailedRun>),
 }
 
@@ -492,7 +492,7 @@ enum Reopening {
     /// no longer the Failed one, or the seat not proven quiescent.
     Kept,
     /// The resume refused again before any pane: Failed, the run counted.
-    Refused(Box<Response>),
+    Refused(Box<Output>),
 }
 
 /// The steps of one restart, each run under the gate unless it says not.
@@ -503,28 +503,28 @@ trait RestartsInSteps {
     /// At an idle event the seat is restarted whatever it shows; asked
     /// otherwise, a working seat's restart is ordered for its next idle
     /// event and answered RestartQueued.
-    fn begun(&self, flow_id: &str, at_idle_event: bool) -> Result<PreparedRestart, Box<Response>>;
+    fn begun(&self, flow_id: &str, at_idle_event: bool) -> Result<PreparedRestart, Box<Output>>;
     /// A working seat's restart ordered for its next idle event, answered
     /// RestartQueued; Busy when another replacement is ordered for its
     /// Address.
-    fn queue_restart(&self, address: &signal_flow::Address, flow_id: &str) -> Response;
+    fn queue_restart(&self, address: &signal_flow::Address, flow_id: &str) -> Output;
     /// The rest of a restart once its old harness is closed, or its
     /// refusal: the seat resumed, and its waiting queue handed over.
     fn restarted_after(
         &self,
         flow_id: &str,
-        closed: Result<PreparedRestart, Box<Response>>,
-    ) -> Response;
+        closed: Result<PreparedRestart, Box<Output>>,
+    ) -> Output;
     /// A restart another Nexus left at Closing or Closed, its resume
     /// composed and validated again; refused, the record is Failed and
     /// nothing is closed.
-    fn taken_up(&self, record: RestartRecord) -> Result<PreparedRestart, Box<Response>>;
+    fn taken_up(&self, record: RestartRecord) -> Result<PreparedRestart, Box<Output>>;
     /// The old pane closed, or found gone, and its harness proven exited:
     /// Closed written. Anything else is Failed.
-    fn closed_old(&self, prepared: PreparedRestart) -> Result<PreparedRestart, Box<Response>>;
+    fn closed_old(&self, prepared: PreparedRestart) -> Result<PreparedRestart, Box<Output>>;
     /// From Closed: each run resumed, and reopened by itself after a
     /// failure while the bound and the seat allow.
-    fn resumed(&self, prepared: PreparedRestart) -> Response;
+    fn resumed(&self, prepared: PreparedRestart) -> Output;
     /// One run from Closed: Opening written, the pane opened and recorded
     /// Spawning, the harness resumed with the prepared launch and bound off
     /// the gate, then bound or abandoned under it.
@@ -578,7 +578,7 @@ trait RestartsInSteps {
     ) -> Result<SeatBirth, RestartFailure>;
     /// The resumed seat bound in one write; then its queue is handed to it,
     /// off the gate.
-    fn bound(&self, record: &RestartRecord, birth: SeatBirth) -> Response;
+    fn bound(&self, record: &RestartRecord, birth: SeatBirth) -> Output;
     /// A resume that did not bind: its old seat rewritten to its pane and
     /// `spawned`, the harness that pane showed, then the pane discarded and
     /// the record Failed, or, the pane not shown gone, Interrupted.
@@ -591,8 +591,8 @@ trait RestartsInSteps {
         spawned: Option<Process>,
     ) -> Resumption;
     fn written(&self, record: &RestartRecord) -> bool;
-    fn failed(&self, record: RestartRecord, failure: RestartFailure) -> Response;
-    fn interrupted(&self, record: RestartRecord, pane: Option<HerdrPaneBinding>) -> Response;
+    fn failed(&self, record: RestartRecord, failure: RestartFailure) -> Output;
+    fn interrupted(&self, record: RestartRecord, pane: Option<HerdrPaneBinding>) -> Output;
     /// The native model the flow runs: its role's, else its launch's.
     fn actual_model(&self, flow_id: &str) -> Option<String>;
     /// The flow's latest launch profile.
@@ -606,13 +606,13 @@ trait RestartsInSteps {
 
 /// A refusal of a restart, naming its flow.
 trait AnswersRestartFailure {
-    fn answer(&self, flow_id: &str) -> Response;
+    fn answer(&self, flow_id: &str) -> Output;
 }
 
 impl AnswersRestartFailure for RestartFailure {
-    fn answer(&self, flow_id: &str) -> Response {
+    fn answer(&self, flow_id: &str) -> Output {
         let flow_id = flow_id.to_owned();
-        Response::RestartRefused(match self {
+        Output::RestartRefused(match self {
             RestartFailure::CloseRefused | RestartFailure::CloseUnproven => {
                 RestartRefusal::CloseRefused(signal_flow::FlowId(flow_id))
             }
@@ -633,17 +633,17 @@ impl AnswersRestartFailure for RestartFailure {
 
 /// A store that could not be written or read, as a restart answers it.
 trait RefusesStoreForRestart {
-    fn refused(self) -> Response;
+    fn refused(self) -> Output;
 }
 
 impl RefusesStoreForRestart for StoreError {
-    fn refused(self) -> Response {
-        Response::Refused(Refusal::Store(self.to_string()))
+    fn refused(self) -> Output {
+        Output::Refused(Refusal::Store(self.to_string()))
     }
 }
 
 impl RestartsInSteps for RunningNexus {
-    fn queue_restart(&self, address: &signal_flow::Address, flow_id: &str) -> Response {
+    fn queue_restart(&self, address: &signal_flow::Address, flow_id: &str) -> Output {
         use crate::store::ordered_replacement::{
             OrderedReplacement, OrdersReplacements, ReplacementOrder,
         };
@@ -652,9 +652,9 @@ impl RestartsInSteps for RunningNexus {
             Ok(Some(order))
                 if order.predecessor == flow_id && order.order == ReplacementOrder::Restart =>
             {
-                return Response::RestartQueued(flow);
+                return Output::RestartQueued(flow);
             }
-            Ok(Some(_)) => return Response::RestartRefused(RestartRefusal::Busy(flow)),
+            Ok(Some(_)) => return Output::RestartRefused(RestartRefusal::Busy(flow)),
             Ok(None) => {}
             Err(error) => return error.refused(),
         }
@@ -666,20 +666,20 @@ impl RestartsInSteps for RunningNexus {
             return error.refused();
         }
         eprintln!("flow-nexus: flow {flow_id} works; its restart waits for its idle event");
-        Response::RestartQueued(flow)
+        Output::RestartQueued(flow)
     }
 
     fn restarted_after(
         &self,
         flow_id: &str,
-        closed: Result<PreparedRestart, Box<Response>>,
-    ) -> Response {
+        closed: Result<PreparedRestart, Box<Output>>,
+    ) -> Output {
         let response = match closed {
             Ok(closed) => self.resumed(closed),
             Err(response) => return *response,
         };
         // The queue that waited goes through the ordinary delivery custody.
-        if let Response::Restarted(_) = &response
+        if let Output::Restarted(_) = &response
             && let Ok(Some(metaflow)) =
                 crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(&*self.store, flow_id)
         {
@@ -688,14 +688,14 @@ impl RestartsInSteps for RunningNexus {
         response
     }
 
-    fn begun(&self, flow_id: &str, at_idle_event: bool) -> Result<PreparedRestart, Box<Response>> {
+    fn begun(&self, flow_id: &str, at_idle_event: bool) -> Result<PreparedRestart, Box<Output>> {
         use crate::store::NamesConfiguredModel;
         use crate::store::address_hold::HoldsLaunchAddress;
         use crate::store::metaflow::SleepsMetaflows;
         use crate::store::queue_delivery::AccountsQueueDelivery;
         use crate::waking::{HoldsWakingMetaflows, ReadsClaudeDelivery, WakePolicy};
         let refused = |refusal: fn(signal_flow::FlowId) -> RestartRefusal| {
-            Err(Box::new(Response::RestartRefused(refusal(
+            Err(Box::new(Output::RestartRefused(refusal(
                 signal_flow::FlowId(flow_id.to_owned()),
             ))))
         };
@@ -797,7 +797,7 @@ impl RestartsInSteps for RunningNexus {
         ) {
             (Some(actual), Ok(Some(configured))) if actual == configured => {}
             _ => {
-                return Err(Box::new(Response::RestartRefused(
+                return Err(Box::new(Output::RestartRefused(
                     RestartRefusal::ResumeRefused(ResumeRefused_Data {
                         flow_id: signal_flow::FlowId(flow_id.to_owned()),
                         string: "ModelDiffers".into(),
@@ -904,7 +904,7 @@ impl RestartsInSteps for RunningNexus {
         })
     }
 
-    fn taken_up(&self, record: RestartRecord) -> Result<PreparedRestart, Box<Response>> {
+    fn taken_up(&self, record: RestartRecord) -> Result<PreparedRestart, Box<Output>> {
         match self.resume_launch(&record) {
             Ok(resume_launch) => Ok(PreparedRestart {
                 record,
@@ -914,7 +914,7 @@ impl RestartsInSteps for RunningNexus {
         }
     }
 
-    fn closed_old(&self, prepared: PreparedRestart) -> Result<PreparedRestart, Box<Response>> {
+    fn closed_old(&self, prepared: PreparedRestart) -> Result<PreparedRestart, Box<Output>> {
         use crate::delivery::lease::LeasesPanes;
         let PreparedRestart {
             record,
@@ -972,7 +972,7 @@ impl RestartsInSteps for RunningNexus {
         })
     }
 
-    fn resumed(&self, prepared: PreparedRestart) -> Response {
+    fn resumed(&self, prepared: PreparedRestart) -> Output {
         let mut prepared = prepared;
         loop {
             let run = match self.resumed_once(prepared) {
@@ -1062,7 +1062,7 @@ impl RestartsInSteps for RunningNexus {
         // Restarting, and another Restart answers Busy.
         if !matches!(self.store.restart_record(&flow_id.0), Ok(Some(current)) if current == spawning)
         {
-            return Resumption::Answered(Box::new(Response::RestartRefused(RestartRefusal::Busy(
+            return Resumption::Answered(Box::new(Output::RestartRefused(RestartRefusal::Busy(
                 flow_id,
             ))));
         }
@@ -1448,7 +1448,7 @@ impl RestartsInSteps for RunningNexus {
         })
     }
 
-    fn bound(&self, record: &RestartRecord, birth: SeatBirth) -> Response {
+    fn bound(&self, record: &RestartRecord, birth: SeatBirth) -> Output {
         use crate::generated::operation::Record_Data;
         let flow_id = record.flow_id.clone();
         if self.perform(Operation::Record(Record_Data::Rebound(birth))) != Outcome::Recorded {
@@ -1459,7 +1459,7 @@ impl RestartsInSteps for RunningNexus {
             "flow-nexus: flow {flow_id} restarted as its own session",
             flow_id = flow_id.0
         );
-        Response::Restarted(flow_id)
+        Output::Restarted(flow_id)
     }
 
     fn abandoned(
@@ -1506,7 +1506,7 @@ impl RestartsInSteps for RunningNexus {
         self.perform(Operation::Record(Record_Data::Restart(record.clone()))) == Outcome::Recorded
     }
 
-    fn failed(&self, record: RestartRecord, failure: RestartFailure) -> Response {
+    fn failed(&self, record: RestartRecord, failure: RestartFailure) -> Output {
         let flow_id = record.flow_id.clone();
         let failed = RestartRecord {
             restart_phase: RestartPhase::Failed(failure.clone()),
@@ -1518,7 +1518,7 @@ impl RestartsInSteps for RunningNexus {
         failure.answer(&flow_id.0)
     }
 
-    fn interrupted(&self, record: RestartRecord, pane: Option<HerdrPaneBinding>) -> Response {
+    fn interrupted(&self, record: RestartRecord, pane: Option<HerdrPaneBinding>) -> Output {
         let flow_id = record.flow_id.clone();
         eprintln!(
             "flow-nexus: restart of flow {flow_id} is interrupted; only a Stop clears it",
@@ -1531,7 +1531,7 @@ impl RestartsInSteps for RunningNexus {
         if !self.written(&interrupted) {
             return StoreError::StateInvariant.refused();
         }
-        Response::RestartRefused(RestartRefusal::Interrupted(flow_id))
+        Output::RestartRefused(RestartRefusal::Interrupted(flow_id))
     }
 
     fn actual_model(&self, flow_id: &str) -> Option<String> {
@@ -1601,7 +1601,7 @@ impl RestartsInSteps for RunningNexus {
 }
 
 impl RestartsFlows for RunningNexus {
-    fn restart(&self, flow_id: &str) -> Response {
+    fn restart(&self, flow_id: &str) -> Output {
         let closed = {
             let _turn = self
                 .dispatch_gate
@@ -1613,7 +1613,7 @@ impl RestartsFlows for RunningNexus {
         self.restarted_after(flow_id, closed)
     }
 
-    fn restart_at_idle_event(&self, flow_id: &str) -> Response {
+    fn restart_at_idle_event(&self, flow_id: &str) -> Output {
         let closed = {
             let _turn = self
                 .dispatch_gate
@@ -1705,18 +1705,18 @@ impl RestartsFlows for RunningNexus {
         }
     }
 
-    fn stop_restarting(&self, record: RestartRecord) -> Response {
+    fn stop_restarting(&self, record: RestartRecord) -> Output {
         let pane = match &record.restart_phase {
             RestartPhase::Failed(_) => None,
             RestartPhase::Interrupted(Some(pane)) => Some(pane.clone()),
             RestartPhase::Interrupted(None) => {
-                return Response::StopRejected(StopRejection::SpawnUnproven);
+                return Output::StopRejected(StopRejection::SpawnUnproven);
             }
             RestartPhase::Closing
             | RestartPhase::Closed
             | RestartPhase::Opening
             | RestartPhase::Spawning(_) => {
-                return Response::StopRejected(StopRejection::Restarting);
+                return Output::StopRejected(StopRejection::Restarting);
             }
         };
         // An interrupted spawn's pane is the seat a later retry reconciles:
@@ -1742,7 +1742,7 @@ impl RestartsFlows for RunningNexus {
             None => record,
         };
         if !self.quiesced(&record, pane.as_ref()) {
-            return Response::StopRejected(match pane {
+            return Output::StopRejected(match pane {
                 Some(_) => StopRejection::SpawnUnproven,
                 None => StopRejection::CloseRefused,
             });
@@ -1753,9 +1753,9 @@ impl RestartsFlows for RunningNexus {
             ..record
         };
         if !self.written(&stopped) {
-            return Response::StopRejected(StopRejection::PersistenceRefused);
+            return Output::StopRejected(StopRejection::PersistenceRefused);
         }
-        Response::Stopped(flow_id)
+        Output::Stopped(flow_id)
     }
 }
 

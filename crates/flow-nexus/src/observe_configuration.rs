@@ -5,37 +5,37 @@
 
 use crate::RunningNexus;
 use crate::store::{AnnouncesLaunchChanges, ManagesMetaflowState};
-use meta_signal_flow::{Response, StoreRefusal};
+use meta_signal_flow::{Output, StoreRefusal};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub trait ObservesConfiguration {
     /// The configuration as it stands: `Configuration`, or `Unconfigured`
     /// while no Nexus is declared.
-    fn configuration_response(&self) -> Response;
+    fn configuration_response(&self) -> Output;
     fn observe_configuration(
         &self,
         disconnected: &AtomicBool,
-        send: &mut dyn FnMut(&Response) -> Result<(), String>,
+        send: &mut dyn FnMut(&Output) -> Result<(), String>,
     ) -> Result<(), String>;
 }
 
 impl ObservesConfiguration for RunningNexus {
-    fn configuration_response(&self) -> Response {
+    fn configuration_response(&self) -> Output {
         match self.store.configuration_snapshot() {
-            Ok(Some(snapshot)) => Response::Configuration(snapshot),
-            Ok(None) => Response::Unconfigured,
-            Err(error) => Response::Refused(StoreRefusal::Store(error.to_string())),
+            Ok(Some(snapshot)) => Output::Configuration(snapshot),
+            Ok(None) => Output::Unconfigured,
+            Err(error) => Output::Refused(StoreRefusal::Store(error.to_string())),
         }
     }
 
     fn observe_configuration(
         &self,
         disconnected: &AtomicBool,
-        send: &mut dyn FnMut(&Response) -> Result<(), String>,
+        send: &mut dyn FnMut(&Output) -> Result<(), String>,
     ) -> Result<(), String> {
         use crate::HoldsStopRequest;
         let changes = self.configuration_changes.clone();
-        let mut sent: Option<Response> = None;
+        let mut sent: Option<Output> = None;
         loop {
             let seen = changes.current();
             if disconnected.load(Ordering::Acquire) {

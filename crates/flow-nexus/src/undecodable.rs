@@ -1,7 +1,7 @@
 //! Every connection greets first. A first frame that is not this
 //! contract's greeting, on the ordinary socket or the meta one, is answered
 //! the typed `GreetingRefused` and recorded here, metadata alone. A frame
-//! after the greeting that decodes as no Query is refused in this
+//! after the greeting that decodes as no Input is refused in this
 //! contract's words: `FrameRefused.UndecodableFrame`, naming the calling
 //! process and its seat as Flow read them from the kernel and Herdr, and
 //! the flow bound to that seat when there is one. Nothing in the frame is
@@ -13,11 +13,11 @@ use crate::sending::{GathersSeatEvidence, TypesSeatEvidence};
 use crate::store::undecodable_frame::RecordsUndecodableFrames;
 use crate::store::{AnnouncesLaunchChanges, ReadsFlowRows};
 use crate::{HoldsStopRequest, RunningNexus};
-use signal_flow::{Process, Query, Response, UndecodableFrame};
+use signal_flow::{Input, Output, Process, UndecodableFrame};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub trait ReadsOrdinaryFrames {
-    /// The Query `frame` carries. A frame that decodes as none is recorded
+    /// The Input `frame` carries. A frame that decodes as none is recorded
     /// and answered `FrameRefused` with what was read of its caller:
     /// `process`, its identity captured when the connection was accepted,
     /// and `caller`, the peer the kernel names, whose pane is its seat.
@@ -26,10 +26,10 @@ pub trait ReadsOrdinaryFrames {
         frame: &[u8],
         process: Option<&Process>,
         caller: Option<CallerProcess>,
-    ) -> Result<Query, Box<Response>>;
+    ) -> Result<Input, Box<Output>>;
     /// Records a first frame that is not this contract's greeting, on the
     /// ordinary or the meta socket, after its typed refusal was written:
-    /// metadata alone, as `ordinary_query` records a refused Query.
+    /// metadata alone, as `ordinary_query` records a refused Input.
     fn refused_greeting(
         &self,
         process: Option<&Process>,
@@ -86,20 +86,20 @@ impl ReadsOrdinaryFrames for RunningNexus {
         frame: &[u8],
         process: Option<&Process>,
         caller: Option<CallerProcess>,
-    ) -> Result<Query, Box<Response>> {
-        let decoded = rkyv::from_bytes::<Query, rkyv::rancor::Error>(frame);
+    ) -> Result<Input, Box<Output>> {
+        let decoded = rkyv::from_bytes::<Input, rkyv::rancor::Error>(frame);
         let error = match decoded {
             Ok(query) => return Ok(query),
             Err(error) => error,
         };
         let refused = self.refused_caller(process, caller);
         eprintln!(
-            "flow-nexus: an ordinary frame decoded as no Query ({error}); refused: {refused:?}"
+            "flow-nexus: an ordinary frame decoded as no Input ({error}); refused: {refused:?}"
         );
         if let Err(store_error) = self.store.record_undecodable(refused.clone()) {
             eprintln!("flow-nexus: the undecodable frame was not recorded: {store_error}");
         }
-        Err(Box::new(Response::FrameRefused(refused)))
+        Err(Box::new(Output::FrameRefused(refused)))
     }
 
     fn refused_greeting(
@@ -126,7 +126,7 @@ pub trait ObservesUndecodableFrames {
     fn observe_undecodable(
         &self,
         disconnected: &AtomicBool,
-        send: &mut dyn FnMut(&Response) -> Result<(), String>,
+        send: &mut dyn FnMut(&Output) -> Result<(), String>,
     ) -> Result<(), String>;
 }
 
@@ -134,7 +134,7 @@ impl ObservesUndecodableFrames for RunningNexus {
     fn observe_undecodable(
         &self,
         disconnected: &AtomicBool,
-        send: &mut dyn FnMut(&Response) -> Result<(), String>,
+        send: &mut dyn FnMut(&Output) -> Result<(), String>,
     ) -> Result<(), String> {
         let changes = self.store.launch_changes.clone();
         let mut sent: Option<usize> = None;
@@ -152,7 +152,7 @@ impl ObservesUndecodableFrames for RunningNexus {
                 .map_err(|error| error.to_string())?;
             let from = sent.unwrap_or_default().min(frames.len());
             if sent.is_none() || frames.len() > from {
-                send(&Response::UndecodableObserved(frames[from..].to_vec()))?;
+                send(&Output::UndecodableObserved(frames[from..].to_vec()))?;
                 sent = Some(frames.len());
             }
             changes.after(seen);

@@ -2,7 +2,7 @@ use super::NexusFixture;
 use crate::handover_observation::ReadsRetirementSubscription;
 use crate::store::handover::{HandoverRemovalOutcome, HandoverWriter, HoldsHandovers};
 use signal_flow::{
-    Address, Aspect, HandoverArchiveIdentity, Model, Response, RetirementChange,
+    Address, Aspect, HandoverArchiveIdentity, Model, Output, RetirementChange,
     RetirementObservationFailure, Section, Title, Touch,
 };
 
@@ -324,15 +324,15 @@ fn exact_retirement_identity_preserves_new_live_and_closed_rows() {
     );
     assert!(matches!(
         subscription.next_response().unwrap(),
-        Response::RetirementChanged(RetirementChange::GenerationClosed(_))
+        Output::RetirementChanged(RetirementChange::GenerationClosed(_))
     ));
     assert!(matches!(
         subscription.next_response().unwrap(),
-        Response::RetirementChanged(RetirementChange::ArchiveCommitted(_))
+        Output::RetirementChanged(RetirementChange::ArchiveCommitted(_))
     ));
     assert!(matches!(
         subscription.next_response().unwrap(),
-        Response::RetirementChanged(RetirementChange::GenerationRemoved(_))
+        Output::RetirementChanged(RetirementChange::GenerationRemoved(_))
     ));
     let row = store.handover_memory(&address).unwrap().unwrap();
     assert_eq!(row.current, vec![section("live", "d", "new")]);
@@ -359,7 +359,7 @@ fn changed_published_snapshot_is_retained() {
     );
     assert!(matches!(
         subscription.next_response().unwrap(),
-        Response::RetirementObservationFailed(RetirementObservationFailure::MissingEvidence(_))
+        Output::RetirementObservationFailed(RetirementObservationFailure::MissingEvidence(_))
     ));
     assert_eq!(store.closed_handovers(&address, 0).unwrap().len(), 1);
 }
@@ -394,7 +394,7 @@ fn already_absent_is_explicitly_incomplete_and_never_emits_removed() {
     );
     assert!(matches!(
         subscription.next_response().unwrap(),
-        Response::RetirementObservationFailed(RetirementObservationFailure::MissingEvidence(_))
+        Output::RetirementObservationFailed(RetirementObservationFailure::MissingEvidence(_))
     ));
 }
 
@@ -416,11 +416,11 @@ fn verified_archive_then_memory_failure_reports_archive_and_incomplete_without_r
     );
     assert!(matches!(
         subscription.next_response().unwrap(),
-        Response::RetirementChanged(RetirementChange::ArchiveCommitted(_))
+        Output::RetirementChanged(RetirementChange::ArchiveCommitted(_))
     ));
     assert!(matches!(
         subscription.next_response().unwrap(),
-        Response::RetirementObservationFailed(RetirementObservationFailure::MissingEvidence(_))
+        Output::RetirementObservationFailed(RetirementObservationFailure::MissingEvidence(_))
     ));
     assert_eq!(store.closed_handovers(&address, 0).unwrap(), vec![closed]);
 }
@@ -443,7 +443,7 @@ fn retirement_completion_read_failure_is_explicitly_incomplete_and_retains_the_g
     );
     assert!(matches!(
         subscription.next_response().unwrap(),
-        Response::RetirementObservationFailed(RetirementObservationFailure::MissingEvidence(_))
+        Output::RetirementObservationFailed(RetirementObservationFailure::MissingEvidence(_))
     ));
     assert_eq!(store.closed_handovers(&address, 0).unwrap(), vec![closed]);
 }
@@ -490,7 +490,7 @@ fn concurrent_attach_and_close_places_the_generation_exactly_once_in_snapshot_or
     if in_snapshot == 0 {
         assert!(matches!(
             subscription.next_response().unwrap(),
-            Response::RetirementChanged(RetirementChange::GenerationClosed(key))
+            Output::RetirementChanged(RetirementChange::GenerationClosed(key))
                 if key.predecessor.0.0 == "pred" && key.successor == signal_flow::Successor(flow_ethos::FlowId("succ".into()))
         ));
     }
@@ -511,7 +511,7 @@ fn two_closes_are_observed_in_their_durable_mutation_order() {
     for (generation, predecessor, successor) in [(0, "pred", "succ"), (1, "succ", "next")] {
         assert!(matches!(
             subscription.next_response().unwrap(),
-            Response::RetirementChanged(RetirementChange::GenerationClosed(key))
+            Output::RetirementChanged(RetirementChange::GenerationClosed(key))
                 if key.handover_generation == signal_flow::HandoverGeneration(generation)
                     && key.predecessor.0.0 == predecessor
                     && key.successor.0.0 == successor
@@ -541,7 +541,7 @@ fn queued_delivery_completes_while_the_handover_mutation_gate_is_held() {
             .recv_timeout(std::time::Duration::from_secs(1))
             .unwrap()
             .unwrap(),
-        Response::RetirementChanged(RetirementChange::GenerationClosed(_))
+        Output::RetirementChanged(RetirementChange::GenerationClosed(_))
     ));
     drop(gate);
     delivery.join().unwrap();

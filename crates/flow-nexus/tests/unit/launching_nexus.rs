@@ -168,8 +168,8 @@ fn a_configured_harness_hook_takes_effect_in_the_running_nexus_without_a_restart
         stable.to_string_lossy().into_owned(),
     ));
     assert_eq!(
-        nexus.dispatch_meta(meta_signal_flow::Query::Configure(declared.clone())),
-        meta_signal_flow::Response::Configured(declared)
+        nexus.dispatch_meta(meta_signal_flow::Input::Configure(declared.clone())),
+        meta_signal_flow::Output::Configured(declared)
     );
     assert_eq!(*nexus.herdr.harness_hook.current(), stable);
     for command in hook_commands(&nexus) {

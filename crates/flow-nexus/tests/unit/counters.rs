@@ -30,7 +30,7 @@ fn ask(fixture: &NexusFixture, text: &str) -> String {
         depth: 0,
         maximum_depth: 1024,
     };
-    let query = Potential::<meta_signal_flow::Query>::from(text)
+    let query = Potential::<meta_signal_flow::Input>::from(text)
         .actualize(&mut budget)
         .unwrap_or_else(|error| panic!("{text}: {error:?}"));
     fixture

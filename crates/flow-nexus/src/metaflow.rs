@@ -13,11 +13,11 @@ use crate::{RunningNexus, store::metaflow::MutatesMetaflows};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
-use signal_flow::{IdentifyThread_Data, Process, Query, Refusal, Response};
+use signal_flow::{IdentifyThread_Data, Input, Output, Process, Refusal};
 
 /// A metaflow dispatch's answer.
 pub(crate) struct MetaflowAnswer {
-    pub response: Response,
+    pub response: Output,
     pub private_response: signal_flow::PrivateSendResponse,
     pub(crate) _pending_answer: Option<crate::store::logical_delivery::PendingAnswerHold>,
 }
@@ -34,8 +34,8 @@ impl From<signal_flow::PrivateSendResponse> for MetaflowAnswer {
     }
 }
 
-impl From<Response> for MetaflowAnswer {
-    fn from(response: Response) -> Self {
+impl From<Output> for MetaflowAnswer {
+    fn from(response: Output) -> Self {
         Self {
             response,
             private_response: signal_flow::PrivateSendResponse::Refused(Refusal::NotMessage),
@@ -50,11 +50,11 @@ pub(crate) trait IdentifiesThread {
     /// thread Flow recorded at its Start; any other thread is Unidentified.
     /// The shared app-server is never bound, and the process's environment
     /// is never read.
-    fn identify_thread(&self, request: IdentifyThread_Data) -> Result<Response, StoreError>;
+    fn identify_thread(&self, request: IdentifyThread_Data) -> Result<Output, StoreError>;
 }
 
 impl IdentifiesThread for RunningNexus {
-    fn identify_thread(&self, request: IdentifyThread_Data) -> Result<Response, StoreError> {
+    fn identify_thread(&self, request: IdentifyThread_Data) -> Result<Output, StoreError> {
         let IdentifyThread_Data {
             process,
             native_session_id,
@@ -65,19 +65,19 @@ impl IdentifiesThread for RunningNexus {
             .root_thread(&native_session_id.0);
         match self.store.thread_metaflow(&root_thread)? {
             Some(metaflow) if !self.rest_ended_awake(&metaflow.address) => {
-                Ok(Response::Identified(metaflow.address))
+                Ok(Output::Identified(metaflow.address))
             }
-            _ => Ok(Response::Refused(Refusal::unidentified(process))),
+            _ => Ok(Output::Refused(Refusal::unidentified(process))),
         }
     }
 }
 
 pub(crate) trait DispatchesMetaflowPeer {
-    fn dispatch_metaflow_peer(&self, query: Query, peer: Option<&Process>) -> MetaflowAnswer;
+    fn dispatch_metaflow_peer(&self, query: Input, peer: Option<&Process>) -> MetaflowAnswer;
 }
 
 impl DispatchesMetaflowPeer for RunningNexus {
-    fn dispatch_metaflow_peer(&self, query: Query, peer: Option<&Process>) -> MetaflowAnswer {
+    fn dispatch_metaflow_peer(&self, query: Input, peer: Option<&Process>) -> MetaflowAnswer {
         let _turn = self
             .dispatch_gate
             .lock()
@@ -89,13 +89,11 @@ impl DispatchesMetaflowPeer for RunningNexus {
         {
             Some(now) => now,
             None => {
-                return Response::Refused(Refusal::Store(
-                    "clock is outside the lease range".into(),
-                ))
-                .into();
+                return Output::Refused(Refusal::Store("clock is outside the lease range".into()))
+                    .into();
             }
         };
-        let result = if let Query::Bind(binding) = query {
+        let result = if let Input::Bind(binding) = query {
             // A process running in a flow Flow launched binds its Address
             // Awake as that flow, so the flow's own Stop drains its queue.
             let launched = u32::try_from(binding.process.pid.0)
@@ -105,37 +103,37 @@ impl DispatchesMetaflowPeer for RunningNexus {
                 .map(|caller| caller.flow_id);
             return match self.store.bind_metaflow(binding, launched) {
                 Ok(response) => response.into(),
-                Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
+                Err(error) => Output::Refused(Refusal::Store(error.to_string())).into(),
             };
-        } else if let Query::ArchiveRequest(request_id) = query {
+        } else if let Input::ArchiveRequest(request_id) = query {
             // Any caller archives any request by its id.
             use crate::store::logical_delivery::RecordsLogicalDeliveries;
             return match self.store.archive_request(&request_id.0) {
-                Ok(Ok(())) => Response::RequestArchived(request_id).into(),
-                Ok(Err(rejection)) => Response::ArchiveRejected(rejection).into(),
+                Ok(Ok(())) => Output::RequestArchived(request_id).into(),
+                Ok(Err(rejection)) => Output::ArchiveRejected(rejection).into(),
                 Err(_) => {
-                    Response::ArchiveRejected(signal_flow::ArchiveRejection::StoreRefused).into()
+                    Output::ArchiveRejected(signal_flow::ArchiveRejection::StoreRefused).into()
                 }
             };
         } else {
             match query {
                 // Identify names the metaflow the named process sends as;
                 // a process in no flow is Unidentified.
-                Query::Identify(process) => Ok(match self.sender_of(&process) {
-                    Ok(signal_flow::SentBy::Sender(address)) => Response::Identified(address),
-                    Ok(_) => Response::Refused(Refusal::unidentified(process)),
+                Input::Identify(process) => Ok(match self.sender_of(&process) {
+                    Ok(signal_flow::SentBy::Sender(address)) => Output::Identified(address),
+                    Ok(_) => Output::Refused(Refusal::unidentified(process)),
                     Err(response) => *response,
                 }),
-                Query::IdentifyThread(request) => self.identify_thread(request),
-                Query::Lock(request) => self.store.lock_metaflow(request, now),
-                Query::Acknowledge(keys) => {
+                Input::IdentifyThread(request) => self.identify_thread(request),
+                Input::Lock(request) => self.store.lock_metaflow(request, now),
+                Input::Acknowledge(keys) => {
                     use crate::store::logical_delivery::RecordsLogicalDeliveries;
                     return match self.store.acknowledge_deliver_calls(&keys) {
-                        Ok(()) => Response::Acknowledged.into(),
-                        Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
+                        Ok(()) => Output::Acknowledged.into(),
+                        Err(error) => Output::Refused(Refusal::Store(error.to_string())).into(),
                     };
                 }
-                Query::Deliver(request) => {
+                Input::Deliver(request) => {
                     let digest_text = request.datomize(Vec::new()).protosize().compact();
                     let digest = format!("{:x}", Sha256::digest(digest_text.as_bytes()));
                     let sender = request.lock.first_address.clone();
@@ -150,10 +148,10 @@ impl DispatchesMetaflowPeer for RunningNexus {
                             answer._pending_answer = Some(pending);
                             return answer;
                         }
-                        Ok(Some(_)) => return Response::DeliverKeyReused.into(),
+                        Ok(Some(_)) => return Output::DeliverKeyReused.into(),
                         Ok(None) => {}
                         Err(error) => {
-                            return Response::Refused(Refusal::Store(error.to_string())).into();
+                            return Output::Refused(Refusal::Store(error.to_string())).into();
                         }
                     }
                     self.rest_ended_awake(&request.lock.second_address);
@@ -227,12 +225,12 @@ impl DispatchesMetaflowPeer for RunningNexus {
                         response.private_response.clone(),
                     ) {
                         Ok(_) => response,
-                        Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
+                        Err(error) => Output::Refused(Refusal::Store(error.to_string())).into(),
                     };
                 }
-                Query::Release(lock) => self.store.release_metaflow_lock(lock, now),
+                Input::Release(lock) => self.store.release_metaflow_lock(lock, now),
                 _ => {
-                    return Response::Refused(Refusal::Store(
+                    return Output::Refused(Refusal::Store(
                         "a query the metaflow bridge does not serve".into(),
                     ))
                     .into();
@@ -240,7 +238,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
             }
         };
         result
-            .unwrap_or_else(|error| Response::Refused(Refusal::Store(error.to_string())))
+            .unwrap_or_else(|error| Output::Refused(Refusal::Store(error.to_string())))
             .into()
     }
 }

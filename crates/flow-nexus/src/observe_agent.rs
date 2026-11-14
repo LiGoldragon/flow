@@ -19,20 +19,20 @@ use crate::herdr::pane::{PaneAgent, WritesPane};
 use crate::observation_lifetime::{CancelsObservation, ObservationCancellation};
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
 use signal_flow::{
-    AgentObservation, AgentState, FlowNode, HerdrRoute, HerdrRouteSelection, Response,
+    AgentObservation, AgentState, FlowNode, HerdrRoute, HerdrRouteSelection, Output,
 };
 use std::path::PathBuf;
 
 /// Answers and streams a flow's agent state.
 pub trait ObservesAgent {
     /// The state now: the opening frame of the subscription.
-    fn agent_observation(&self, flow_id: &str) -> Response;
+    fn agent_observation(&self, flow_id: &str) -> Output;
     /// Sends the state now, then each change, ending after Gone.
     fn observe_agent(
         &self,
         flow_id: &str,
         cancellation: &ObservationCancellation,
-        send: &mut dyn FnMut(&Response) -> Result<(), String>,
+        send: &mut dyn FnMut(&Output) -> Result<(), String>,
     ) -> Result<(), String>;
 }
 
@@ -104,12 +104,12 @@ impl RecordsWitnessedExit for RunningNexus {
 
 /// An agent state is observed of one flow.
 trait ReportsAgentState {
-    fn observed_of(self, flow_id: &str) -> Response;
+    fn observed_of(self, flow_id: &str) -> Output;
 }
 
 impl ReportsAgentState for AgentState {
-    fn observed_of(self, flow_id: &str) -> Response {
-        Response::AgentObserved(AgentObservation {
+    fn observed_of(self, flow_id: &str) -> Output {
+        Output::AgentObserved(AgentObservation {
             flow_id: signal_flow::FlowId(flow_id.to_owned()),
             agent_state: self,
         })
@@ -135,7 +135,7 @@ impl FindsObservableFlow for RunningNexus {
 }
 
 impl ObservesAgent for RunningNexus {
-    fn agent_observation(&self, flow_id: &str) -> Response {
+    fn agent_observation(&self, flow_id: &str) -> Output {
         let Some((node, _)) = self.observable(flow_id) else {
             return AgentState::Gone.observed_of(flow_id);
         };
@@ -154,13 +154,13 @@ impl ObservesAgent for RunningNexus {
         &self,
         flow_id: &str,
         cancellation: &ObservationCancellation,
-        send: &mut dyn FnMut(&Response) -> Result<(), String>,
+        send: &mut dyn FnMut(&Output) -> Result<(), String>,
     ) -> Result<(), String> {
         cancellation.check()?;
         let opening = self.agent_observation(flow_id);
         cancellation.check()?;
         send(&opening)?;
-        let Response::AgentObserved(AgentObservation {
+        let Output::AgentObserved(AgentObservation {
             agent_state: mut last,
             ..
         }) = opening

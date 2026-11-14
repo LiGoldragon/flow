@@ -16,11 +16,11 @@ use crate::{Dispatches, OpensRunningNexus, RunningNexus};
 use meta_signal_flow::{
     ConfigurationChange, ConfigurationSnapshot, ConfigureHarnessFlags, ConfigureMetaflow,
     ConfigureModel, ConfigureNexus, ConfigureRefusal, ConfigureThreshold, HeartbeatConfig,
-    Response as MetaResponse,
+    Output as MetaResponse,
 };
 use signal_flow::{
     Address, Aspect, Bind_Data, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin,
-    HarnessKind, HerdrRoute, HerdrRouteSelection, Lock_Data, Model, Origin, Process, Response,
+    HarnessKind, HerdrRoute, HerdrRouteSelection, Lock_Data, Model, Origin, Output, Process,
 };
 use std::collections::BTreeSet;
 
@@ -201,7 +201,7 @@ impl ConfiguredStore {
                     None,
                 )
                 .expect("bind reads"),
-            Response::Bound(_)
+            Output::Bound(_)
         ));
         assert!(matches!(
             store
@@ -213,7 +213,7 @@ impl ConfiguredStore {
                     100,
                 )
                 .expect("lock reads"),
-            Response::Locked(_)
+            Output::Locked(_)
         ));
         drop(store);
         Self {
@@ -338,7 +338,7 @@ fn stable_models(nexus: &RunningNexus) -> BTreeSet<String> {
 }
 
 fn configure(nexus: &RunningNexus, change: ConfigurationChange) -> MetaResponse {
-    nexus.dispatch_meta(meta_signal_flow::Query::Configure(change))
+    nexus.dispatch_meta(meta_signal_flow::Input::Configure(change))
 }
 
 /// A Configure the Nexus takes is answered Configured with the change it
@@ -990,7 +990,7 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
             depth: 0,
             maximum_depth: 1024,
         };
-        let query = Potential::<meta_signal_flow::Query>::from(text)
+        let query = Potential::<meta_signal_flow::Input>::from(text)
             .actualize(&mut budget)
             .unwrap_or_else(|error| panic!("{text}: {error:?}"));
         nexus
@@ -1057,7 +1057,7 @@ fn configured_counters_are_kept_across_a_reopen() {
             depth: 0,
             maximum_depth: 1024,
         };
-        let query = Potential::<meta_signal_flow::Query>::from(text)
+        let query = Potential::<meta_signal_flow::Input>::from(text)
             .actualize(&mut budget)
             .unwrap_or_else(|error| panic!("{text}: {error:?}"));
         nexus

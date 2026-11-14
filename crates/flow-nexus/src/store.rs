@@ -1,7 +1,7 @@
 //! Durable Flow Nexus identity and dispatch state.
 //!
 //! The ordinary Signal contract remains the public boundary.  This module
-//! owns its single `.sema` store and lowers a closed `signal_flow::Query`
+//! owns its single `.sema` store and lowers a closed `signal_flow::Input`
 //! into its typed, durable records.
 
 use crate::store::delivery::RegistersDeliveryTables;
@@ -86,11 +86,10 @@ use signal_flow::Request;
 use signal_flow::{
     Address, Aspect, CallerIdentity, CallerResolutionRejection, ComposedLaunch, EndpointSelection,
     FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
-    LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile, Launched, LeaveOut,
-    Lock, Metaflow, Model, NativeLaunchBinding, NativeLaunchIntent, Origin, Process,
-    PromptDeliveryIntent, PromptDeliveryResult, Query, RecipientResolutionRejection,
-    RegistrationAcknowledgement, ReplaceRejection, Replaced, Response, RouteReadiness,
-    StartRejection,
+    Input, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile, Launched,
+    LeaveOut, Lock, Metaflow, Model, NativeLaunchBinding, NativeLaunchIntent, Origin, Output,
+    Process, PromptDeliveryIntent, PromptDeliveryResult, RecipientResolutionRejection,
+    RegistrationAcknowledgement, ReplaceRejection, Replaced, RouteReadiness, StartRejection,
 };
 
 const FLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_flows");
@@ -1379,7 +1378,7 @@ pub(crate) struct LaunchInspectionRecords {
 pub trait AnswersLaunchOutcome {
     /// The reply the outcome is on the wire, naming each launched flow's
     /// Herdr route as its row holds it now.
-    fn response(&self, store: &FlowStore) -> Response;
+    fn response(&self, store: &FlowStore) -> Output;
     /// The outcome as LaunchStatus reports it.
     fn status_outcome(&self, store: &FlowStore) -> signal_flow::LaunchStatusOutcome;
 }
@@ -1522,23 +1521,21 @@ impl NamesLaunchedRoute for FlowStore {
 }
 
 impl AnswersLaunchOutcome for LaunchOutcome {
-    fn response(&self, store: &FlowStore) -> Response {
+    fn response(&self, store: &FlowStore) -> Output {
         match self {
-            Self::Started(started) => Response::Started(store.launched(started)),
-            Self::Replaced(replaced) => Response::Replaced(Replaced {
+            Self::Started(started) => Output::Started(store.launched(started)),
+            Self::Replaced(replaced) => Output::Replaced(Replaced {
                 flow_id: replaced.flow_id.clone(),
                 launched: store.launched(&replaced.launched_record),
             }),
-            Self::StartRejected(rejection) => Response::StartRejected(rejection.clone()),
-            Self::ReplaceRejected(rejection) => Response::ReplaceRejected(rejection.clone()),
-            Self::ReapPending(replaced) => {
-                Response::ReapPending(store.reap_pending_reply(replaced))
-            }
+            Self::StartRejected(rejection) => Output::StartRejected(rejection.clone()),
+            Self::ReplaceRejected(rejection) => Output::ReplaceRejected(rejection.clone()),
+            Self::ReapPending(replaced) => Output::ReapPending(store.reap_pending_reply(replaced)),
             Self::HandoverPending(launched) => {
-                Response::HandoverPending(store.handover_pending_reply(launched))
+                Output::HandoverPending(store.handover_pending_reply(launched))
             }
             Self::HandoverSuperseded(superseded) => {
-                Response::HandoverSuperseded(store.handover_superseded_reply(superseded))
+                Output::HandoverSuperseded(store.handover_superseded_reply(superseded))
             }
         }
     }
@@ -2391,12 +2388,12 @@ pub trait OpensFlowStore {
 
 /// The only ordinary-socket operation that reaches durable Flow state.
 pub trait AppliesFlowQuery {
-    fn apply(&self, query: Query) -> Result<Response, StoreError>;
+    fn apply(&self, query: Input) -> Result<Output, StoreError>;
 }
 
 /// Reserves a flow identity before a launcher asks the daemon for a thread.
 pub trait ReservesPendingStart {
-    fn reserve_pending_start(&self, query: Query) -> Result<Option<PendingLaunch>, StoreError>;
+    fn reserve_pending_start(&self, query: Input) -> Result<Option<PendingLaunch>, StoreError>;
 }
 
 /// Records the daemon thread immediately after `thread/start` has accepted it.
@@ -2410,7 +2407,7 @@ pub trait RecordsPendingThread {
 
 /// Marks a known pending launch active only after its first turn was accepted.
 pub trait ConfirmsStartedFlow {
-    fn confirm_started(&self, flow_id: &str) -> Result<Response, StoreError>;
+    fn confirm_started(&self, flow_id: &str) -> Result<Output, StoreError>;
 }
 
 /// Configuration is durable policy and shares the Nexus's sole `.sema` store.
@@ -2584,7 +2581,7 @@ trait ReadsFlowStore {
         &self,
         launch_request_id: &str,
     ) -> Result<Option<StoredLaunchAttempt>, StoreError>;
-    fn resolve_recipient(&self, flow_id: &str) -> Result<Response, StoreError>;
+    fn resolve_recipient(&self, flow_id: &str) -> Result<Output, StoreError>;
 }
 
 trait WritesFlowStore {
@@ -2592,7 +2589,7 @@ trait WritesFlowStore {
     -> Result<PendingLaunch, StoreError>;
     fn record_thread(&self, pending: &PendingLaunch, thread_id: String)
     -> Result<bool, StoreError>;
-    fn confirm_start(&self, flow_id: &str) -> Result<Response, StoreError>;
+    fn confirm_start(&self, flow_id: &str) -> Result<Output, StoreError>;
     /// Writes the attempt's next state, keeping what its row knows of the
     /// context its seat started with.
     fn mutate_launch_attempt(&self, stored: StoredLaunchAttempt) -> Result<(), StoreError>;
@@ -3297,17 +3294,17 @@ pub enum ConfigurationCommit {
 /// given, echoed whole, whether or not anything was written. A Configure
 /// answers Configured with its change, a Remove Removed with its Removal.
 pub trait EchoesConfigurationEdit {
-    fn echo(&self) -> meta_signal_flow::Response;
+    fn echo(&self) -> meta_signal_flow::Output;
 }
 
 impl EchoesConfigurationEdit for ConfigurationEdit {
-    fn echo(&self) -> meta_signal_flow::Response {
+    fn echo(&self) -> meta_signal_flow::Output {
         match self {
             ConfigurationEdit::Declare(change) => {
-                meta_signal_flow::Response::Configured(change.as_ref().clone())
+                meta_signal_flow::Output::Configured(change.as_ref().clone())
             }
             ConfigurationEdit::Remove(removal) => {
-                meta_signal_flow::Response::Removed(removal.clone())
+                meta_signal_flow::Output::Removed(removal.clone())
             }
         }
     }
@@ -3352,14 +3349,14 @@ pub(crate) trait ManagesMetaflowState: Sized {
         address: &Address,
     ) -> Result<Option<StoredMetaflowLock>, StoreError>;
     fn bound_process(&self, address: &Address) -> Result<Option<Process>, StoreError>;
-    fn current_metaflow(&self, address: &Address) -> Result<Response, StoreError>;
+    fn current_metaflow(&self, address: &Address) -> Result<Output, StoreError>;
     fn list_metaflows(&self) -> Result<Vec<Metaflow>, StoreError>;
-    fn identify_process(&self, process: Process) -> Result<Response, StoreError>;
+    fn identify_process(&self, process: Process) -> Result<Output, StoreError>;
     fn release_metaflow_lock(
         &self,
         lock: Lock,
         now_epoch_seconds: i64,
-    ) -> Result<Response, StoreError>;
+    ) -> Result<Output, StoreError>;
 }
 
 impl ManagesMetaflowState for FlowStore {
@@ -3521,7 +3518,7 @@ impl ManagesMetaflowState for FlowStore {
             .map(|binding| binding.process))
     }
 
-    fn current_metaflow(&self, address: &Address) -> Result<Response, StoreError> {
+    fn current_metaflow(&self, address: &Address) -> Result<Output, StoreError> {
         let current = match self.stored_metaflow(address)? {
             None => signal_flow::Current_Data::Unknown,
             Some(stored) => match stored.metaflow.state {
@@ -3529,7 +3526,7 @@ impl ManagesMetaflowState for FlowStore {
                 MetaflowState::Asleep => signal_flow::Current_Data::Asleep,
             },
         };
-        Ok(Response::Current(current))
+        Ok(Output::Current(current))
     }
 
     fn list_metaflows(&self) -> Result<Vec<Metaflow>, StoreError> {
@@ -3547,10 +3544,10 @@ impl ManagesMetaflowState for FlowStore {
         Ok(metaflows)
     }
 
-    fn identify_process(&self, process: Process) -> Result<Response, StoreError> {
+    fn identify_process(&self, process: Process) -> Result<Output, StoreError> {
         let lineage = FlowStore::process_lineage(&process);
         if lineage.is_empty() {
-            return Ok(Response::Refused(
+            return Ok(Output::Refused(
                 <signal_flow::Refusal as crate::sending::RefusesUnidentified>::unidentified(
                     process,
                 ),
@@ -3565,9 +3562,9 @@ impl ManagesMetaflowState for FlowStore {
             }) else {
                 continue;
             };
-            return Ok(Response::Identified(binding.address.clone()));
+            return Ok(Output::Identified(binding.address.clone()));
         }
-        Ok(Response::Refused(
+        Ok(Output::Refused(
             <signal_flow::Refusal as crate::sending::RefusesUnidentified>::unidentified(process),
         ))
     }
@@ -3576,14 +3573,14 @@ impl ManagesMetaflowState for FlowStore {
         &self,
         lock: Lock,
         now_epoch_seconds: i64,
-    ) -> Result<Response, StoreError> {
+    ) -> Result<Output, StoreError> {
         let Some(stored) = self.stored_metaflow_lock(&lock.second_address)? else {
-            return Ok(Response::Refused(signal_flow::Refusal::Unknown(
+            return Ok(Output::Refused(signal_flow::Refusal::Unknown(
                 signal_flow::Unknown_Data::Lock(lock),
             )));
         };
         if stored.lock != lock {
-            return Ok(Response::Refused(signal_flow::Refusal::Unknown(
+            return Ok(Output::Refused(signal_flow::Refusal::Unknown(
                 signal_flow::Unknown_Data::Lock(lock),
             )));
         }
@@ -3593,87 +3590,87 @@ impl ManagesMetaflowState for FlowStore {
             RecordKey::new(FlowStore::address_record_key(&lock.second_address)),
         ))?;
         if expired {
-            Ok(Response::Refused(signal_flow::Refusal::Lapsed))
+            Ok(Output::Refused(signal_flow::Refusal::Lapsed))
         } else {
-            Ok(Response::Released)
+            Ok(Output::Released)
         }
     }
 }
 
 impl AppliesFlowQuery for FlowStore {
-    fn apply(&self, query: Query) -> Result<Response, StoreError> {
+    fn apply(&self, query: Input) -> Result<Output, StoreError> {
         match query {
             // The store alone launches nothing.
-            Query::Start(_) => Ok(Response::StartRejected(
+            Input::Start(_) => Ok(Output::StartRejected(
                 StartRejection::LaunchPersistenceRefused,
             )),
-            Query::Rehearse(_) => Ok(Response::RehearseRejected(
+            Input::Rehearse(_) => Ok(Output::RehearseRejected(
                 StartRejection::LaunchPersistenceRefused,
             )),
             // A refresh closes a pane, which the store alone cannot.
-            Query::Refresh(_) => Ok(Response::Refused(signal_flow::Refusal::Store(
+            Input::Refresh(_) => Ok(Output::Refused(signal_flow::Refusal::Store(
                 "the store alone closes no pane".into(),
             ))),
             // A restart closes and opens panes, which the store alone cannot.
-            Query::Restart(_) => Ok(Response::Refused(signal_flow::Refusal::Store(
+            Input::Restart(_) => Ok(Output::Refused(signal_flow::Refusal::Store(
                 "the store alone closes no pane".into(),
             ))),
-            Query::ResolveRecipient(flow_id) => self.resolve_recipient(&flow_id.0.0),
-            Query::Stop(_) => Ok(Response::StopRejected(
+            Input::ResolveRecipient(flow_id) => self.resolve_recipient(&flow_id.0.0),
+            Input::Stop(_) => Ok(Output::StopRejected(
                 signal_flow::StopRejection::PersistenceRefused,
             )),
-            Query::Bind(_)
-            | Query::Identify(_)
-            | Query::IdentifyThread(_)
-            | Query::Lock(_)
-            | Query::Deliver(_)
-            | Query::Acknowledge(_)
-            | Query::ArchiveRequest(_)
-            | Query::Release(_)
-            | Query::Send(_)
-            | Query::DeliverAll(_)
-            | Query::BindSeat(_)
-            | Query::Adopt(_)
-            | Query::ObserveSends(_)
-            | Query::ObserveSender(_)
-            | Query::ObserveDeliveries(_)
-            | Query::Cancel(_)
-            | Query::Silence(_)
-            | Query::Clear(_)
-            | Query::ClearAll
-            | Query::Push(_)
-            | Query::Queues
-            | Query::Hot
-            | Query::Remind(_)
-            | Query::Answer(_) => Ok(Response::Refused(signal_flow::Refusal::Store(
+            Input::Bind(_)
+            | Input::Identify(_)
+            | Input::IdentifyThread(_)
+            | Input::Lock(_)
+            | Input::Deliver(_)
+            | Input::Acknowledge(_)
+            | Input::ArchiveRequest(_)
+            | Input::Release(_)
+            | Input::Send(_)
+            | Input::DeliverAll(_)
+            | Input::BindSeat(_)
+            | Input::Adopt(_)
+            | Input::ObserveSends(_)
+            | Input::ObserveSender(_)
+            | Input::ObserveDeliveries(_)
+            | Input::Cancel(_)
+            | Input::Silence(_)
+            | Input::Clear(_)
+            | Input::ClearAll
+            | Input::Push(_)
+            | Input::Queues
+            | Input::Hot
+            | Input::Remind(_)
+            | Input::Answer(_) => Ok(Output::Refused(signal_flow::Refusal::Store(
                 "the Nexus answers this query, not its store alone".into(),
             ))),
-            Query::Launch(_) => Ok(Response::StartRejected(
+            Input::Launch(_) => Ok(Output::StartRejected(
                 StartRejection::LaunchPersistenceRefused,
             )),
-            Query::Keep(_) | Query::Drop(_) | Query::Glance(_) | Query::Read(_) => {
-                Ok(Response::Refused(signal_flow::Refusal::Store(
+            Input::Keep(_) | Input::Drop(_) | Input::Glance(_) | Input::Read(_) => {
+                Ok(Output::Refused(signal_flow::Refusal::Store(
                     "handover requires running Nexus caller".into(),
                 )))
             }
-            Query::Current(address) => self.current_metaflow(&address),
-            Query::Metaflows => self.list_metaflows().map(Response::Listed),
-            Query::Replace(_) => Ok(Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
+            Input::Current(address) => self.current_metaflow(&address),
+            Input::Metaflows => self.list_metaflows().map(Output::Listed),
+            Input::Replace(_) => Ok(Output::ReplaceRejected(ReplaceRejection::LaunchRefused(
                 StartRejection::LaunchPersistenceRefused,
             ))),
             // The caller is read from the socket, which the store never sees.
-            Query::ResolveCaller(_) => Ok(Response::CallerResolutionRejected(
+            Input::ResolveCaller(_) => Ok(Output::CallerResolutionRejected(
                 CallerResolutionRejection::CallerUnknown,
             )),
-            Query::LaunchStatus(_) | Query::Observe(_) => Ok(Response::LaunchStatusRejected(
+            Input::LaunchStatus(_) | Input::Observe(_) => Ok(Output::LaunchStatusRejected(
                 signal_flow::LaunchStatusRejection::PersistenceRefused,
             )),
-            Query::Report(report) => {
+            Input::Report(report) => {
                 use events::{EventRecording, RecordsHarnessEvents};
                 match self.record_event(&report.flow_id.0, report.event)? {
-                    EventRecording::Recorded => Ok(Response::Reported),
+                    EventRecording::Recorded => Ok(Output::Reported),
                     EventRecording::UnknownFlow => {
-                        Ok(Response::Refused(signal_flow::Refusal::Unknown(
+                        Ok(Output::Refused(signal_flow::Refusal::Unknown(
                             signal_flow::Unknown_Data::FlowId(report.flow_id),
                         )))
                     }
@@ -3684,52 +3681,52 @@ impl AppliesFlowQuery for FlowStore {
 }
 
 impl ReservesPendingStart for FlowStore {
-    fn reserve_pending_start(&self, query: Query) -> Result<Option<PendingLaunch>, StoreError> {
+    fn reserve_pending_start(&self, query: Input) -> Result<Option<PendingLaunch>, StoreError> {
         match query {
-            Query::Start(_) => self
+            Input::Start(_) => self
                 .reserve_start("legacy-test-start".into(), Origin::Unbound)
                 .map(Some),
-            Query::Refresh(_)
-            | Query::Rehearse(_)
-            | Query::ResolveRecipient(_)
-            | Query::Stop(_)
-            | Query::Current(_)
-            | Query::Metaflows
-            | Query::Replace(_)
-            | Query::LaunchStatus(_)
-            | Query::Observe(_)
-            | Query::ObserveSends(_)
-            | Query::ObserveSender(_)
-            | Query::ObserveDeliveries(_)
-            | Query::ResolveCaller(_)
-            | Query::Report(_)
-            | Query::Bind(_)
-            | Query::Identify(_)
-            | Query::IdentifyThread(_)
-            | Query::Lock(_)
-            | Query::Deliver(_)
-            | Query::Acknowledge(_)
-            | Query::ArchiveRequest(_)
-            | Query::Release(_)
-            | Query::Send(_)
-            | Query::DeliverAll(_)
-            | Query::Launch(_)
-            | Query::BindSeat(_)
-            | Query::Adopt(_)
-            | Query::Restart(_)
-            | Query::Keep(_)
-            | Query::Drop(_)
-            | Query::Glance(_)
-            | Query::Read(_)
-            | Query::Cancel(_)
-            | Query::Silence(_)
-            | Query::Clear(_)
-            | Query::ClearAll
-            | Query::Push(_)
-            | Query::Queues
-            | Query::Hot
-            | Query::Remind(_)
-            | Query::Answer(_) => Ok(None),
+            Input::Refresh(_)
+            | Input::Rehearse(_)
+            | Input::ResolveRecipient(_)
+            | Input::Stop(_)
+            | Input::Current(_)
+            | Input::Metaflows
+            | Input::Replace(_)
+            | Input::LaunchStatus(_)
+            | Input::Observe(_)
+            | Input::ObserveSends(_)
+            | Input::ObserveSender(_)
+            | Input::ObserveDeliveries(_)
+            | Input::ResolveCaller(_)
+            | Input::Report(_)
+            | Input::Bind(_)
+            | Input::Identify(_)
+            | Input::IdentifyThread(_)
+            | Input::Lock(_)
+            | Input::Deliver(_)
+            | Input::Acknowledge(_)
+            | Input::ArchiveRequest(_)
+            | Input::Release(_)
+            | Input::Send(_)
+            | Input::DeliverAll(_)
+            | Input::Launch(_)
+            | Input::BindSeat(_)
+            | Input::Adopt(_)
+            | Input::Restart(_)
+            | Input::Keep(_)
+            | Input::Drop(_)
+            | Input::Glance(_)
+            | Input::Read(_)
+            | Input::Cancel(_)
+            | Input::Silence(_)
+            | Input::Clear(_)
+            | Input::ClearAll
+            | Input::Push(_)
+            | Input::Queues
+            | Input::Hot
+            | Input::Remind(_)
+            | Input::Answer(_) => Ok(None),
         }
     }
 }
@@ -3745,7 +3742,7 @@ impl RecordsPendingThread for FlowStore {
 }
 
 impl ConfirmsStartedFlow for FlowStore {
-    fn confirm_started(&self, flow_id: &str) -> Result<Response, StoreError> {
+    fn confirm_started(&self, flow_id: &str) -> Result<Output, StoreError> {
         self.confirm_start(flow_id)
     }
 }
@@ -4875,9 +4872,9 @@ impl ReadsFlowStore for FlowStore {
         }
     }
 
-    fn resolve_recipient(&self, flow_id: &str) -> Result<Response, StoreError> {
+    fn resolve_recipient(&self, flow_id: &str) -> Result<Output, StoreError> {
         let Some(node) = self.flow_node(flow_id)? else {
-            return Ok(Response::RecipientResolutionRejected(
+            return Ok(Output::RecipientResolutionRejected(
                 RecipientResolutionRejection::UnknownFlow,
             ));
         };
@@ -4888,11 +4885,11 @@ impl ReadsFlowStore for FlowStore {
             metaflow::Succession::Superseded { .. } | metaflow::Succession::Unconfirmed
         );
         if node.session_id.0.is_empty() || !node.flow_lifecycle.is_live() || succeeded {
-            return Ok(Response::RecipientResolutionRejected(
+            return Ok(Output::RecipientResolutionRejected(
                 RecipientResolutionRejection::FlowUnavailable,
             ));
         }
-        Ok(Response::RecipientResolved(node))
+        Ok(Output::RecipientResolved(node))
     }
 }
 
@@ -5290,9 +5287,9 @@ impl WritesFlowStore for FlowStore {
         Ok(true)
     }
 
-    fn confirm_start(&self, flow_id: &str) -> Result<Response, StoreError> {
+    fn confirm_start(&self, flow_id: &str) -> Result<Output, StoreError> {
         let unrecorded = || {
-            Response::StartRejected(StartRejection::NativeLaunchRefused(
+            Output::StartRejected(StartRejection::NativeLaunchRefused(
                 signal_flow::NativeLaunchRefusal {
                     native_launch_stage: signal_flow::NativeLaunchStage::Confirm,
                     native_launch_failure: signal_flow::NativeLaunchFailure::SessionUnrecorded,
@@ -5328,7 +5325,7 @@ impl WritesFlowStore for FlowStore {
             )? {
                 metaflow::AddressTaking::Takes(taking) => taken = Some(taking),
                 metaflow::AddressTaking::Refused(rejection) => {
-                    return Ok(Response::StartRejected(rejection));
+                    return Ok(Output::StartRejected(rejection));
                 }
             }
         }
@@ -5365,7 +5362,7 @@ impl WritesFlowStore for FlowStore {
             .flow_node(flow_id)?
             .map(|node| node.herdr_route_selection)
             .unwrap_or(HerdrRouteSelection::Unavailable);
-        Ok(Response::Started(Launched {
+        Ok(Output::Started(Launched {
             flow_id: signal_flow::FlowId(flow_id.into()),
             session_id: signal_flow::SessionId(session_id),
             herdr_route_selection,
@@ -8344,10 +8341,10 @@ mod tests {
     };
     use signal_flow::{
         Address, Aspect, CallerIdentity, ComposedLaunch, FirstPromptPayload, FlowOrigin,
-        HarnessKind, HerdrPaneBinding, LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile,
-        Model, NativeLaunchBinding, NativeLaunchIntent, NativeTargetReceipt,
-        NativeTranscriptAbsence, NativeTranscriptBoundary, NativeTranscriptCursor, Origin,
-        PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement, Response,
+        HarnessKind, HerdrPaneBinding, Input, LaunchAttemptPhase, LaunchAttemptReservation,
+        LaunchProfile, Model, NativeLaunchBinding, NativeLaunchIntent, NativeTargetReceipt,
+        NativeTranscriptAbsence, NativeTranscriptBoundary, NativeTranscriptCursor, Origin, Output,
+        PromptDeliveryIntent, PromptDeliveryResult, RegistrationAcknowledgement,
         TargetReceiptRequest,
     };
 
@@ -8975,7 +8972,7 @@ mod tests {
     impl StartsFixtureFlow for StoreFixture {
         fn start(&self, store: &FlowStore) -> String {
             let pending = store
-                .reserve_pending_start(Query::Start(self.launch_profile("legacy-start-1")))
+                .reserve_pending_start(Input::Start(self.launch_profile("legacy-start-1")))
                 .expect("start reserves")
                 .expect("flow type is accepted");
             assert!(
@@ -8986,7 +8983,7 @@ mod tests {
             let response = store
                 .confirm_started(&pending.flow_id)
                 .expect("start confirms");
-            let Response::Started(started) = response else {
+            let Output::Started(started) = response else {
                 panic!("start must be accepted")
             };
             started.flow_id.0
@@ -9763,8 +9760,8 @@ mod tests {
         let fixture = StoreFixture::new();
         let store = fixture.store();
         let flow_id = fixture.start(&store);
-        let Response::RecipientResolved(node) = store
-            .apply(Query::ResolveRecipient(
+        let Output::RecipientResolved(node) = store
+            .apply(Input::ResolveRecipient(
                 signal_flow::RecipientResolutionRequest(flow_ethos::FlowId(flow_id.clone())),
             ))
             .expect("identity resolves")
@@ -9817,11 +9814,11 @@ mod tests {
         assert_eq!(
             fixture
                 .store()
-                .apply(Query::ResolveRecipient(
+                .apply(Input::ResolveRecipient(
                     signal_flow::RecipientResolutionRequest(flow_ethos::FlowId("da1e3f".into()))
                 ))
                 .unwrap(),
-            Response::RecipientResolved(node)
+            Output::RecipientResolved(node)
         );
     }
 
@@ -11331,7 +11328,7 @@ mod tests {
     fn message_delivery_observation_is_one_global_private_stream_across_ack_archive_and_restart() {
         use super::logical_delivery::{DeliverCallSpec, VerifiedDeliveryLock};
         use crate::store::metaflow::MutatesMetaflows;
-        use signal_flow::{DeliveryState, Lock_Data, Message, Metaflow, Request, Response, SentBy};
+        use signal_flow::{DeliveryState, Lock_Data, Message, Metaflow, Output, Request, SentBy};
 
         let fixture = StoreFixture::new();
         fixture.configured();
@@ -11376,7 +11373,7 @@ mod tests {
                     100,
                 )
                 .expect("Message lock reads");
-            let Response::Locked(lock) = response else {
+            let Output::Locked(lock) = response else {
                 panic!("Message locks the recipient: {response:?}")
             };
             let signal_flow::PrivateSendResponse::SendAccepted(accepted) = store

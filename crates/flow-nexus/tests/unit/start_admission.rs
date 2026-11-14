@@ -6,7 +6,7 @@
 use super::model::{configure, seat};
 use super::{NexusFixture, pane_unopened};
 use crate::Dispatches;
-use signal_flow::{Aspect, Model, Query, Response, StartRejection};
+use signal_flow::{Aspect, Input, Model, Output, StartRejection};
 use std::fs;
 
 #[test]
@@ -17,8 +17,8 @@ fn a_sol_start_needs_no_other_seat() {
     configure(&fixture, &[(Model::Sol, "gpt-6-sol")]);
     let secondary = seat(Aspect::Mind, Model::Sol, "gpt-6-sol", "secondary-request");
     assert_eq!(
-        fixture.nexus.dispatch(Query::Start(secondary)),
-        Response::StartRejected(pane_unopened())
+        fixture.nexus.dispatch(Input::Start(secondary)),
+        Output::StartRejected(pane_unopened())
     );
 }
 
@@ -36,8 +36,8 @@ fn a_start_waits_for_no_other_models_seat() {
     let mut astra = seat(Aspect::Mind, Model::Astra, "gpt-6-sol", "astra-request");
     astra.address.topic = flow_ethos::Topic("topics".into());
     assert_eq!(
-        fixture.nexus.dispatch(Query::Start(astra.clone())),
-        Response::StartRejected(pane_unopened())
+        fixture.nexus.dispatch(Input::Start(astra.clone())),
+        Output::StartRejected(pane_unopened())
     );
     assert!(
         fixture
@@ -84,8 +84,8 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
         let mut start = seat(Aspect::Mind, Model::Sol, "gpt-6-sol", "topic-request");
         start.address.topic = flow_ethos::Topic(topic.into());
         assert_eq!(
-            fixture.nexus.dispatch(Query::Start(start)),
-            Response::StartRejected(StartRejection::TopicRefused(flow_ethos::Topic(
+            fixture.nexus.dispatch(Input::Start(start)),
+            Output::StartRejected(StartRejection::TopicRefused(flow_ethos::Topic(
                 topic.into()
             ))),
             "{topic:?}"
@@ -115,10 +115,10 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
         assert_eq!(
             fixture
                 .nexus
-                .dispatch_meta(meta_signal_flow::Query::Configure(
+                .dispatch_meta(meta_signal_flow::Input::Configure(
                     meta_signal_flow::ConfigurationChange::Metaflows(vec![declared])
                 )),
-            meta_signal_flow::Response::ConfigureRefused(
+            meta_signal_flow::Output::ConfigureRefused(
                 meta_signal_flow::ConfigureRefusal::TopicRefused(flow_ethos::Topic(topic.into()))
             ),
             "{topic:?}"
@@ -127,8 +127,8 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
     let mut kept = seat(Aspect::Mind, Model::Sol, "gpt-6-sol", "kept-request");
     kept.address.topic = flow_ethos::Topic("primaryCommitting".into());
     assert_eq!(
-        fixture.nexus.dispatch(Query::Start(kept)),
-        Response::StartRejected(pane_unopened())
+        fixture.nexus.dispatch(Input::Start(kept)),
+        Output::StartRejected(pane_unopened())
     );
     let attempt = fixture
         .nexus
@@ -168,7 +168,7 @@ fn a_send_to_a_bad_topic_is_topic_refused() {
         );
         assert_eq!(
             sent.response,
-            Response::SendRefused(signal_flow::VisibleRefusal::TopicRefused(
+            Output::SendRefused(signal_flow::VisibleRefusal::TopicRefused(
                 flow_ethos::Topic(topic.into())
             )),
             "{topic:?}"
@@ -186,7 +186,7 @@ fn a_send_to_a_bad_topic_is_topic_refused() {
         );
         assert_eq!(
             abrupt.response,
-            Response::Failed(signal_flow::VisibleSendFailure::Unadmitted(
+            Output::Failed(signal_flow::VisibleSendFailure::Unadmitted(
                 signal_flow::VisibleSendFailureReason::Refused(
                     signal_flow::VisibleRefusal::TopicRefused(flow_ethos::Topic(topic.into()))
                 )
@@ -206,7 +206,7 @@ fn launch_with_a_bad_topic_is_topic_refused() {
     fixture.claims_flow_ids();
     let _ = fs::remove_file(&fixture.snapshot_program);
     configure(&fixture, &[(Model::Sol, "gpt-6-sol")]);
-    let response = fixture.nexus.dispatch(Query::Launch(LaunchRequest {
+    let response = fixture.nexus.dispatch(Input::Launch(LaunchRequest {
         address: Address {
             aspect: Aspect::Mind,
             topic: flow_ethos::Topic("PrimaryCommitting".into()),
@@ -217,7 +217,7 @@ fn launch_with_a_bad_topic_is_topic_refused() {
     }));
     assert_eq!(
         response,
-        Response::StartRejected(StartRejection::TopicRefused(flow_ethos::Topic(
+        Output::StartRejected(StartRejection::TopicRefused(flow_ethos::Topic(
             "PrimaryCommitting".into()
         ))),
     );

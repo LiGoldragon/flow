@@ -10,10 +10,10 @@ use crate::Dispatches;
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use meta_signal_flow::{
     BodyRefusal, CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Content, Delivery,
-    DeliveryGrade, DeliveryRejection, DeliveryRequest, HarnessCommandKind, InterruptWitness,
-    Letter, Message, Query as MetaQuery, Response as MetaResponse,
+    DeliveryGrade, DeliveryRejection, DeliveryRequest, HarnessCommandKind, Input as MetaQuery,
+    InterruptWitness, Letter, Message, Output as MetaResponse,
 };
-use signal_flow::{AgentObservation, AgentState, FlowLifecycle, ObserveSelection, Query, Response};
+use signal_flow::{AgentObservation, AgentState, FlowLifecycle, Input, ObserveSelection, Output};
 use std::fs;
 
 fn letter(text: &str) -> Letter {
@@ -135,10 +135,7 @@ fn soft_waits_for_an_idle_recipient() {
     let fixture = NexusFixture::new();
     let (_caller, peer) = soft_recipient(&fixture, false);
     let response = send_soft(&fixture, &peer, "when you rest");
-    assert!(
-        matches!(response, Response::SendAccepted(_)),
-        "{response:?}"
-    );
+    assert!(matches!(response, Output::SendAccepted(_)), "{response:?}");
     assert!(prompts(&fixture.directory.path().join("herdr-operations.log")).is_empty());
     assert_eq!(fixture.typed(), None);
     assert_eq!(
@@ -747,10 +744,10 @@ fn observe_agent_opens_on_the_state_herdr_shows() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Query::Observe(ObserveSelection::Agent(flow_ethos::FlowId(
+            .dispatch(Input::Observe(ObserveSelection::Agent(flow_ethos::FlowId(
                 "908786".into()
             )))),
-        Response::AgentObserved(AgentObservation {
+        Output::AgentObserved(AgentObservation {
             flow_id: flow_ethos::FlowId("908786".into()),
             agent_state: AgentState::Working,
         })
@@ -758,10 +755,10 @@ fn observe_agent_opens_on_the_state_herdr_shows() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Query::Observe(ObserveSelection::Agent(flow_ethos::FlowId(
+            .dispatch(Input::Observe(ObserveSelection::Agent(flow_ethos::FlowId(
                 "unheld".into()
             )))),
-        Response::AgentObserved(AgentObservation {
+        Output::AgentObserved(AgentObservation {
             flow_id: flow_ethos::FlowId("unheld".into()),
             agent_state: AgentState::Gone,
         })
@@ -791,7 +788,7 @@ fn every_meta_peer_is_answered_alike() {
     let unread = fixture.nexus.meta_resolver(None);
     assert_eq!(unread.process_identity.process_id.0, 0);
     assert_eq!(unread.flow_id_option, None);
-    let asked = meta_signal_flow::Query::Configuration;
+    let asked = meta_signal_flow::Input::Configuration;
     let answer = fixture.nexus.dispatch_meta(asked.clone());
     for resolver in [mind, owner, unread] {
         assert_eq!(
@@ -919,7 +916,7 @@ fn direct_delivery_custody_blocks_refresh_until_pane_input_finishes() {
     use crate::DispatchesSerially;
     use crate::event_wait::AwaitsPath;
     use crate::fixture_executable::{FixtureExecutable, HoldsLatch, InstallsScript, Latch};
-    use signal_flow::{Origin, Query, RefreshRejection};
+    use signal_flow::{Input, Origin, RefreshRejection};
     use std::time::{Duration, Instant};
 
     let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
@@ -961,18 +958,18 @@ fn direct_delivery_custody_blocks_refresh_until_pane_input_finishes() {
         );
         let refresh = fixture
             .nexus
-            .dispatch_serially(Query::Refresh(address.clone()), Origin::Unbound);
+            .dispatch_serially(Input::Refresh(address.clone()), Origin::Unbound);
         assert_eq!(
             refresh,
-            signal_flow::Response::RefreshRejected(RefreshRejection::Locked)
+            signal_flow::Output::RefreshRejected(RefreshRejection::Locked)
         );
         release.release();
         (delivery.join().expect("direct delivery"), refresh)
     });
-    assert!(matches!(delivery, meta_signal_flow::Response::Delivered(_)));
+    assert!(matches!(delivery, meta_signal_flow::Output::Delivered(_)));
     assert_eq!(
         refresh,
-        signal_flow::Response::RefreshRejected(RefreshRejection::Locked)
+        signal_flow::Output::RefreshRejected(RefreshRejection::Locked)
     );
     assert_eq!(
         fixture.typed(),
@@ -980,10 +977,10 @@ fn direct_delivery_custody_blocks_refresh_until_pane_input_finishes() {
     );
     let after = fixture
         .nexus
-        .dispatch_serially(Query::Refresh(address), Origin::Unbound);
+        .dispatch_serially(Input::Refresh(address), Origin::Unbound);
     assert!(!matches!(
         after,
-        signal_flow::Response::RefreshRejected(RefreshRejection::Locked)
+        signal_flow::Output::RefreshRejected(RefreshRejection::Locked)
     ));
 }
 

@@ -3,7 +3,7 @@ use flow_ethos::place::{
     CliEnvironment, NamesPlaceSockets, PlaceSockets, ReadsCliEnvironment, ResolvesCliPlace,
 };
 use flow_meta::Invocation;
-use meta_signal_flow::{Query, Response};
+use meta_signal_flow::{Input, Output};
 use protos::{Compactable, Protosizable, ReaderBudget};
 use std::{
     env,
@@ -13,7 +13,7 @@ use std::{
 
 struct FlowMetaClient;
 
-/// The CLI is `flow-nexus-meta '<Query>'`: it takes the datom and nothing
+/// The CLI is `flow-nexus-meta '<Input>'`: it takes the datom and nothing
 /// else. The place is the Flow configuration's,
 /// `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`, the same file `flow-nexus`
 /// reads, resolved under `$XDG_RUNTIME_DIR/nexus/` to the place's meta
@@ -32,7 +32,7 @@ trait GreetsMetaNexus {
 trait CallsMetaNexus {
     /// Sends one query and hands each reply frame on: one, or for
     /// ObserveConfiguration every frame until the Nexus ends the exchange.
-    fn call(&self, invocation: &Invocation, each: &mut dyn FnMut(Response)) -> Result<(), String>;
+    fn call(&self, invocation: &Invocation, each: &mut dyn FnMut(Output)) -> Result<(), String>;
 }
 #[cfg(test)]
 trait ParsesMetaDatom {
@@ -61,7 +61,7 @@ impl ParsesMetaCommand for FlowMetaClient {
         place: &dyn ResolvesCliPlace,
     ) -> Result<Invocation, String> {
         let usage = || {
-            "usage: flow-nexus-meta '<one inline Query datom>'; the place is read from $XDG_CONFIG_HOME/nexus/flow-nexus.datom".to_owned()
+            "usage: flow-nexus-meta '<one inline Input datom>'; the place is read from $XDG_CONFIG_HOME/nexus/flow-nexus.datom".to_owned()
         };
         let (Some(source), None) = (arguments.next(), arguments.next()) else {
             return Err(usage());
@@ -73,16 +73,16 @@ impl ParsesMetaCommand for FlowMetaClient {
             depth: 0,
             maximum_depth: 1_024,
         };
-        let query = Potential::<Query>::from(source)
+        let query = Potential::<Input>::from(source)
             .actualize(&mut budget)
-            .map_err(|error| format!("invalid Flow meta Query: {error:?}"))?;
+            .map_err(|error| format!("invalid Flow meta Input: {error:?}"))?;
         Ok(Invocation {
             meta_socket_path: flow_ethos::MetaSocketPath(
                 PlaceSockets::meta_in(&runtime)
                     .to_string_lossy()
                     .into_owned(),
             ),
-            query,
+            input: query,
         })
     }
 }
@@ -90,7 +90,7 @@ impl ParsesMetaCommand for FlowMetaClient {
 impl GreetsMetaNexus for UnixStream {
     fn greet_meta(&mut self) -> Result<(), String> {
         use signal::Contracted;
-        let greeting = Query::greeting();
+        let greeting = Input::greeting();
         let bytes =
             rkyv::to_bytes::<rkyv::rancor::Error>(&greeting).map_err(|error| error.to_string())?;
         self.write_all(&(bytes.len() as u32).to_be_bytes())
@@ -118,16 +118,16 @@ impl GreetsMetaNexus for UnixStream {
 }
 
 impl CallsMetaNexus for FlowMetaClient {
-    fn call(&self, invocation: &Invocation, each: &mut dyn FnMut(Response)) -> Result<(), String> {
+    fn call(&self, invocation: &Invocation, each: &mut dyn FnMut(Output)) -> Result<(), String> {
         let mut peer = UnixStream::connect(&invocation.meta_socket_path.0)
             .map_err(|error| error.to_string())?;
         peer.greet_meta()?;
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&invocation.query)
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&invocation.input)
             .map_err(|error| error.to_string())?;
         peer.write_all(&(bytes.len() as u32).to_be_bytes())
             .map_err(|error| error.to_string())?;
         peer.write_all(&bytes).map_err(|error| error.to_string())?;
-        let streams = invocation.query == Query::ObserveConfiguration;
+        let streams = invocation.input == Input::ObserveConfiguration;
         loop {
             let mut length = [0; 4];
             match peer.read_exact(&mut length) {
@@ -145,7 +145,7 @@ impl CallsMetaNexus for FlowMetaClient {
             peer.read_exact(&mut reply)
                 .map_err(|error| error.to_string())?;
             each(
-                rkyv::from_bytes::<Response, rkyv::rancor::Error>(&reply)
+                rkyv::from_bytes::<Output, rkyv::rancor::Error>(&reply)
                     .map_err(|error| error.to_string())?,
             );
             if !streams {
@@ -181,14 +181,14 @@ mod tests {
         fn parse_query(
             &self,
             arguments: impl Iterator<Item = String>,
-        ) -> Result<meta_signal_flow::Query, String>;
+        ) -> Result<meta_signal_flow::Input, String>;
     }
 
     impl ParsesTestQuery for FlowMetaClient {
         fn parse_query(
             &self,
             mut arguments: impl Iterator<Item = String>,
-        ) -> Result<meta_signal_flow::Query, String> {
+        ) -> Result<meta_signal_flow::Input, String> {
             let Some(query) = arguments.next() else {
                 return Err("missing fixture".into());
             };
@@ -196,7 +196,7 @@ mod tests {
                 return Err("extra fixture".into());
             }
             self.parse_command([query].into_iter(), &FixedPlace)
-                .map(|Invocation { query, .. }| query)
+                .map(|Invocation { input, .. }| input)
         }
     }
 
@@ -209,7 +209,7 @@ mod tests {
         }
     }
     use datom_codec::Datomizable;
-    use meta_signal_flow::{ConfigurationChange, ConfigureNexus, Query};
+    use meta_signal_flow::{ConfigurationChange, ConfigureNexus, Input};
     use protos::{Compactable, Protosizable};
 
     #[test]
@@ -241,10 +241,10 @@ mod tests {
             presentation_prompt_option: None,
             herdr_session_name: signal_flow::HerdrSessionName("default".into()),
         };
-        let query = Query::Configure(ConfigurationChange::Nexus(nexus.clone()));
+        let query = Input::Configure(ConfigurationChange::Nexus(nexus.clone()));
         let datom = query.datomize(vec![]).protosize().compact();
         let client = FlowMetaClient;
-        let Query::Configure(ConfigurationChange::Nexus(actual)) = client
+        let Input::Configure(ConfigurationChange::Nexus(actual)) = client
             .parse_query([datom.clone()].into_iter())
             .expect("typed Nexus Configure")
         else {
@@ -273,7 +273,7 @@ mod tests {
         let query = client
             .parse_query([datom.to_owned()].into_iter())
             .expect("Metaflows declaration parses");
-        let Query::Configure(ConfigurationChange::Metaflows(metaflows)) = &query else {
+        let Input::Configure(ConfigurationChange::Metaflows(metaflows)) = &query else {
             panic!("a Metaflows declaration must stay one Configure query")
         };
         assert_eq!(metaflows.len(), 2);
@@ -304,7 +304,7 @@ mod tests {
             .expect("Amend parses");
         assert!(matches!(
             &query,
-            Query::Configure(ConfigurationChange::Amend(_))
+            Input::Configure(ConfigurationChange::Amend(_))
         ));
         assert_eq!(query.datomize(vec![]).protosize().compact(), amend);
         // Reconfigure is not a request: Configure.Nexus replaces the Nexus.
@@ -324,7 +324,7 @@ mod tests {
             client
                 .parse_query(["Refresh.{ Mind flow Sol }".to_owned()].into_iter())
                 .expect("Refresh parses"),
-            Query::Refresh(signal_flow::Address {
+            Input::Refresh(signal_flow::Address {
                 aspect: signal_flow::Aspect::Mind,
                 topic: flow_ethos::Topic("flow".into()),
                 model: signal_flow::Model::Sol,
@@ -334,14 +334,14 @@ mod tests {
             client
                 .parse_query(["Restart.c1a0de".to_owned()].into_iter())
                 .expect("Restart parses"),
-            Query::Restart(flow_ethos::FlowId("c1a0de".into()))
+            Input::Restart(flow_ethos::FlowId("c1a0de".into()))
         );
     }
 
     #[test]
     fn deliver_is_one_inline_datom_carrying_a_typed_message() {
         let client = FlowMetaClient;
-        let Query::Deliver(request) = client
+        let Input::Deliver(request) = client
             .parse_query(
                 ["Deliver.{ m-7f3a2c:7d41e0:0 7d41e0 Soft.{ Notification Text.«Stage 1 is deployed; run the tier tests.» } }".into()]
                     .into_iter(),
@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn thirty_one_printed_metaflows_roundtrip_without_head_whitespace() {
         use super::ParsesMetaDatom;
-        use meta_signal_flow::{ConfigurationSnapshot, ConfigureMetaflow, Response};
+        use meta_signal_flow::{ConfigurationSnapshot, ConfigureMetaflow, Output};
         use signal_flow::{Address, Aspect, FlowKind, Model, ToolSet};
         let endpoint = || meta_signal_flow::CodexEndpoint {
             client_path: flow_ethos::ClientPath("/opt/codex".into()),
@@ -461,22 +461,22 @@ mod tests {
                 meta_signal_flow::HarnessHookConfiguration::Unconfigured,
             ),
         };
-        let printed = Response::Configuration(snapshot)
+        let printed = Output::Configuration(snapshot)
             .datomize(vec![])
             .protosize()
             .compact();
         assert!(!printed.contains("Explicit. ["), "{printed}");
-        let Response::Configuration(parsed) =
-            FlowMetaClient::parse_datom::<Response>(printed, "printed configuration").unwrap()
+        let Output::Configuration(parsed) =
+            FlowMetaClient::parse_datom::<Output>(printed, "printed configuration").unwrap()
         else {
             panic!("wrong response")
         };
-        let query = Query::Configure(ConfigurationChange::Metaflows(
+        let query = Input::Configure(ConfigurationChange::Metaflows(
             parsed.configured_metaflows.0,
         ));
         let text = query.datomize(vec![]).protosize().compact();
         let client = FlowMetaClient;
-        let Query::Configure(ConfigurationChange::Metaflows(actual)) =
+        let Input::Configure(ConfigurationChange::Metaflows(actual)) =
             client.parse_query([text].into_iter()).unwrap()
         else {
             panic!("wrong configure")

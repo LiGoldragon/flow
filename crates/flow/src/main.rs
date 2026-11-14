@@ -7,7 +7,7 @@ use flow_ethos::place::{
 use protos::ReaderBudget;
 use std::env;
 
-/// The CLI is `flow-nexus '<Query>'`: named after the Nexus, taking the datom
+/// The CLI is `flow-nexus '<Input>'`: named after the Nexus, taking the datom
 /// and nothing else. The place is its configuration's,
 /// `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`, resolved under
 /// `$XDG_RUNTIME_DIR/nexus/` to the place's ordinary socket; no place is
@@ -27,7 +27,7 @@ impl ParsesFlowCommand for FlowClient {
         place: &dyn ResolvesCliPlace,
     ) -> Result<Invocation, String> {
         let usage = || {
-            "usage: flow-nexus '<one inline Query datom>'; the place is read from $XDG_CONFIG_HOME/nexus/flow-nexus.datom".to_owned()
+            "usage: flow-nexus '<one inline Input datom>'; the place is read from $XDG_CONFIG_HOME/nexus/flow-nexus.datom".to_owned()
         };
         let (Some(value), None) = (arguments.next(), arguments.next()) else {
             return Err(usage());
@@ -39,16 +39,16 @@ impl ParsesFlowCommand for FlowClient {
             depth: 0,
             maximum_depth: 1_024,
         };
-        let query = Potential::<signal_flow::Query>::from(value)
+        let query = Potential::<signal_flow::Input>::from(value)
             .actualize(&mut budget)
-            .map_err(|error| format!("invalid Flow Query: {error:?}"))?;
+            .map_err(|error| format!("invalid Flow Input: {error:?}"))?;
         Ok(Invocation {
             ordinary_socket_path: flow_ethos::OrdinarySocketPath(
                 PlaceSockets::ordinary_in(&runtime)
                     .to_string_lossy()
                     .into_owned(),
             ),
-            query,
+            input: query,
         })
     }
 }
@@ -105,14 +105,14 @@ mod tests {
         fn parse_query(
             &self,
             arguments: impl Iterator<Item = String>,
-        ) -> Result<signal_flow::Query, String>;
+        ) -> Result<signal_flow::Input, String>;
     }
 
     impl ParsesTestQuery for FlowClient {
         fn parse_query(
             &self,
             mut arguments: impl Iterator<Item = String>,
-        ) -> Result<signal_flow::Query, String> {
+        ) -> Result<signal_flow::Input, String> {
             let Some(query) = arguments.next() else {
                 return Err("missing fixture".into());
             };
@@ -120,7 +120,7 @@ mod tests {
                 return Err("extra fixture".into());
             }
             self.parse_command([query].into_iter(), &FixedPlace)
-                .map(|Invocation { query, .. }| query)
+                .map(|Invocation { input, .. }| input)
         }
     }
 
@@ -133,13 +133,13 @@ mod tests {
         }
     }
     use signal_flow::{
-        Address, Aspect, Model, ObserveSelection, Query, Response, SendableMessage, SendableRequest,
+        Address, Aspect, Input, Model, ObserveSelection, Output, SendableMessage, SendableRequest,
     };
 
     #[test]
     fn send_priority_and_deliver_all_are_typed() {
         let client = FlowClient;
-        let Query::Send(send) = client
+        let Input::Send(send) = client
             .parse_query(["Send.{ { Mind core Sol } Soft.Order.«Review.» }".into()].into_iter())
             .expect("current Send parses")
         else {
@@ -171,7 +171,7 @@ mod tests {
             client
                 .parse_query(["DeliverAll.{ Mind core Sol }".into()].into_iter())
                 .expect("DeliverAll parses"),
-            Query::DeliverAll(_)
+            Input::DeliverAll(_)
         ));
     }
 
@@ -187,7 +187,7 @@ mod tests {
             let explicit = client
                 .parse_query([format!("Send.{{ {{ Psyche core Opus }} {message} }}")].into_iter())
                 .expect("Send parses");
-            assert!(matches!(explicit, Query::Send(_)));
+            assert!(matches!(explicit, Input::Send(_)));
         }
         for invalid in [
             "Send.{}",
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn cli_parses_result_by_request_id() {
         let client = FlowClient;
-        let Query::Send(send) = client
+        let Input::Send(send) = client
             .parse_query(
                 ["Send.{ { Psyche core Opus } Soft.Result.{ k7ph «Reviewed; green.» } }".into()]
                     .into_iter(),
@@ -234,7 +234,7 @@ mod tests {
     fn cli_prints_sent_with_request_id() {
         let client = FlowClient;
         assert_eq!(
-            client.textualize_reply(&Response::Sent(signal_flow::VisibleSendReceipt(
+            client.textualize_reply(&Output::Sent(signal_flow::VisibleSendReceipt(
                 flow_ethos::RequestId("k7ph".into())
             ))),
             "Sent.k7ph"
@@ -265,7 +265,7 @@ mod tests {
             client
                 .parse_query(["ResolveRecipient.fac697".into()].into_iter())
                 .unwrap(),
-            Query::ResolveRecipient(signal_flow::RecipientResolutionRequest(
+            Input::ResolveRecipient(signal_flow::RecipientResolutionRequest(
                 signal_flow::FlowId("fac697".into())
             ))
         );
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn start_accepts_one_inline_typed_launch_profile() {
         let client = FlowClient;
-        let Query::Start(request) = client
+        let Input::Start(request) = client
             .parse_query([
                 "Start.{ request-7 [ spirit:core:0 intent:flow:0 ] [ operation:main-flow:0 compensation:behavior:0 ] Custom.[ 1b8ac0 ] { Field flow Astra } gpt-6-astra medium Some.836818 messaging-build Some.[ SkillTool WorkflowTool ] Regular Default «Carry this bounded launch request.» }".into(),
             ]
@@ -351,17 +351,17 @@ mod tests {
             client
                 .parse_query(["LaunchStatus.request-8".into()].into_iter())
                 .unwrap(),
-            Query::LaunchStatus(signal_flow::LaunchRequestId("request-8".into()))
+            Input::LaunchStatus(signal_flow::LaunchRequestId("request-8".into()))
         );
         assert_eq!(
             client
                 .parse_query(["Observe.Launch.request-8".into()].into_iter())
                 .unwrap(),
-            Query::Observe(signal_flow::ObserveSelection::Launch(
+            Input::Observe(signal_flow::ObserveSelection::Launch(
                 signal_flow::LaunchRequestId("request-8".into())
             ))
         );
-        let Query::Replace(request) = client
+        let Input::Replace(request) = client
             .parse_query(["Replace.{ request-8 [ spirit:core:0 ] [] Predecessors.1 { Field flow Astra } opus-5-5 high Some.fac697 messaging-build None Regular Default «Carry on from fac697.» }".into()].into_iter())
             .expect("typed Replace parses")
         else {
@@ -394,7 +394,7 @@ mod tests {
     #[test]
     fn native_resolution_serialization_matches_the_signal_contract() {
         let client = FlowClient;
-        let reply = Response::RecipientResolved(signal_flow::FlowNode {
+        let reply = Output::RecipientResolved(signal_flow::FlowNode {
             flow_id: signal_flow::FlowId("da1e3f".into()),
             session_id: signal_flow::SessionId("da1e3f9d-full".into()),
             harness_kind: signal_flow::HarnessKind::Claude,
@@ -438,9 +438,9 @@ mod tests {
                     ["Remind.{ { Mind core Sol } 30 «Check the capsule run.» }".into()].into_iter()
                 )
                 .expect("a Remind reads"),
-            Query::Remind(_)
+            Input::Remind(_)
         ));
-        let Query::Send(send) = client
+        let Input::Send(send) = client
             .parse_query(
                 ["Send.{ { Mind core Sol } Soft.Task.{ 30 «Check the capsule run.» } }".into()]
                     .into_iter(),
@@ -474,7 +474,7 @@ mod tests {
         peer.read_exact(&mut frame).unwrap();
         let greeting =
             rkyv::from_bytes::<signal_flow::Handshake, rkyv::rancor::Error>(&frame).unwrap();
-        let receipt = rkyv::to_bytes::<rkyv::rancor::Error>(&Query::receipt(&greeting)).unwrap();
+        let receipt = rkyv::to_bytes::<rkyv::rancor::Error>(&Input::receipt(&greeting)).unwrap();
         peer.write_all(&(receipt.len() as u32).to_be_bytes())
             .unwrap();
         peer.write_all(&receipt).unwrap();
@@ -499,7 +499,7 @@ mod tests {
                 ordinary_socket_path: flow_ethos::OrdinarySocketPath(
                     socket.to_string_lossy().into_owned(),
                 ),
-                query: Query::Observe(ObserveSelection::Retirement(Address {
+                input: Input::Observe(ObserveSelection::Retirement(Address {
                     aspect: Aspect::Mind,
                     topic: flow_ethos::Topic("retirementCli".into()),
                     model: Model::Sol,
@@ -527,7 +527,7 @@ mod tests {
             ordinary_socket_path: flow_ethos::OrdinarySocketPath(
                 socket.to_string_lossy().into_owned(),
             ),
-            query: Query::Observe(ObserveSelection::Launch(signal_flow::LaunchRequestId(
+            input: Input::Observe(ObserveSelection::Launch(signal_flow::LaunchRequestId(
                 "request".into(),
             ))),
         };
@@ -540,7 +540,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let socket = directory.path().join("ordinary.sock");
         let listener = UnixListener::bind(&socket).unwrap();
-        let response = Response::RetirementObservationFailed(
+        let response = Output::RetirementObservationFailed(
             signal_flow::RetirementObservationFailure::Overflow,
         );
         let server = std::thread::spawn(move || {
@@ -558,7 +558,7 @@ mod tests {
             ordinary_socket_path: flow_ethos::OrdinarySocketPath(
                 socket.to_string_lossy().into_owned(),
             ),
-            query: Query::Observe(ObserveSelection::Retirement(Address {
+            input: Input::Observe(ObserveSelection::Retirement(Address {
                 aspect: Aspect::Mind,
                 topic: flow_ethos::Topic("retirementCli".into()),
                 model: Model::Sol,
@@ -572,7 +572,7 @@ mod tests {
         );
         assert_eq!(
             seen,
-            vec![Response::RetirementObservationFailed(
+            vec![Output::RetirementObservationFailed(
                 signal_flow::RetirementObservationFailure::Overflow
             )]
         );

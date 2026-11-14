@@ -60,7 +60,7 @@ use flow::{HookConfiguration, Invocation};
 use flow_native::{DigestsPrompt, ReadsClaudePaste};
 use protos::{Compactable, Protosizable, ReaderBudget};
 use signal_flow::{
-    BackgroundTask, BackgroundTaskKind, BackgroundWork, Event, NativePrompt, NativeStop, Query,
+    BackgroundTask, BackgroundTaskKind, BackgroundWork, Event, Input, NativePrompt, NativeStop,
     Report_Data,
 };
 use std::{env, io::Read, process::ExitCode};
@@ -220,7 +220,7 @@ enum StopRefusal {
 /// What the hook does with one event.
 #[derive(Debug, PartialEq, Eq)]
 enum HookCall {
-    Report(Box<Query>),
+    Report(Box<Input>),
     Nothing(&'static str),
     Refused(StopRefusal),
 }
@@ -440,7 +440,7 @@ impl ChoosesHookCall for HarnessHook {
             },
             _ => return HookCall::Nothing("no Report for this event"),
         };
-        HookCall::Report(Box::new(Query::Report(Report_Data {
+        HookCall::Report(Box::new(Input::Report(Report_Data {
             flow_id: signal_flow::FlowId(flow_id.clone()),
             process_option: self.harness.clone(),
             event,
@@ -462,7 +462,7 @@ impl ReportsThroughCli for HarnessHook {
                 );
             }
         };
-        let Query::Report(report) = &query else {
+        let Input::Report(report) = &query else {
             unreachable!("a hook call constructs only a Report");
         };
         let metadata = HookReportMetadata {
@@ -482,7 +482,7 @@ impl ReportsThroughCli for HarnessHook {
         };
         let invocation = Invocation {
             ordinary_socket_path: configuration.ordinary_socket_path.clone(),
-            query,
+            input: query,
         };
         let mut replies = Vec::new();
         let line = match FlowClient.call(&invocation, &mut |reply| {
@@ -524,7 +524,7 @@ mod tests {
             maximum_depth: 1_024,
         };
         HookCall::Report(Box::new(
-            Potential::<signal_flow::Query>::from(source)
+            Potential::<signal_flow::Input>::from(source)
                 .actualize(&mut budget)
                 .expect("fixture query"),
         ))
@@ -869,7 +869,7 @@ mod tests {
                 serde_json::json!({"hook_event_name": "Stop", "session_id": "s",
                 "transcript_path": "/t/a »b».jsonl", "background_tasks": []})
             ),
-            signal_flow::Query::Report(signal_flow::Report_Data {
+            signal_flow::Input::Report(signal_flow::Report_Data {
                 flow_id: signal_flow::FlowId("5a4d0b".into()),
                 process_option: None,
                 event: signal_flow::Event::Stopped(signal_flow::NativeStop {
@@ -885,7 +885,7 @@ mod tests {
         assert_eq!(
             read(serde_json::json!({"hook_event_name": "UserPromptSubmit",
                 "session_id": "s", "prompt": "abc"})),
-            signal_flow::Query::Report(signal_flow::Report_Data {
+            signal_flow::Input::Report(signal_flow::Report_Data {
                 flow_id: signal_flow::FlowId("5a4d0b".into()),
                 process_option: None,
                 event: signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
@@ -900,7 +900,7 @@ mod tests {
         assert_eq!(
             read(serde_json::json!({"hook_event_name": "SessionEnd",
                 "session_id": "s1", "reason": "clear"})),
-            signal_flow::Query::Report(signal_flow::Report_Data {
+            signal_flow::Input::Report(signal_flow::Report_Data {
                 flow_id: signal_flow::FlowId("5a4d0b".into()),
                 process_option: None,
                 event: signal_flow::Event::Cleared(Some(signal_flow::NativeSessionId("s1".into()))),
@@ -908,7 +908,7 @@ mod tests {
         );
         assert_eq!(
             read(serde_json::json!({"hook_event_name": "SessionStart", "session_id": "s2"})),
-            signal_flow::Query::Report(signal_flow::Report_Data {
+            signal_flow::Input::Report(signal_flow::Report_Data {
                 flow_id: signal_flow::FlowId("5a4d0b".into()),
                 process_option: None,
                 event: signal_flow::Event::Started(Some(signal_flow::NativeSessionId("s2".into()))),
@@ -927,7 +927,7 @@ mod tests {
         };
         assert_eq!(
             *query,
-            signal_flow::Query::Report(signal_flow::Report_Data {
+            signal_flow::Input::Report(signal_flow::Report_Data {
                 flow_id: signal_flow::FlowId("5a4d0b".into()),
                 process_option: None,
                 event: signal_flow::Event::ToolUsed("Bash".into()),

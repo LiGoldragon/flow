@@ -1,11 +1,11 @@
 ; The ordinary text edge names the Nexus instance with its socket and the
-; existing ordinary Query. HookConfiguration gives the Claude hook the same
+; existing ordinary Input. HookConfiguration gives the Claude hook the same
 ; transport address while its event remains separate JSON on stdin.
 
 Library
 [ flow_ethos:OrdinarySocketPath
-  signal_flow:Query ]
-[ Invocation.{ OrdinarySocketPath Query }
+  signal_flow:Input ]
+[ Invocation.{ OrdinarySocketPath Input }
   HookConfiguration.{ OrdinarySocketPath } ]
 []
 []

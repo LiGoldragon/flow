@@ -62,7 +62,7 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
     use crate::sending::SendsRequests;
     use crate::store::FlowStore;
     use crate::store::metaflow::SeedsMetaflow;
-    use signal_flow::{Message, Metaflow, Response, SendRequest};
+    use signal_flow::{Message, Metaflow, Output, SendRequest};
     let fixture = NexusFixture::new();
     bind_existing_caller(&fixture, "a001", "pane-1");
     fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
@@ -91,7 +91,7 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
     assert!(
         matches!(
             answer.response,
-            Response::Failed(signal_flow::VisibleSendFailure::Admitted(
+            Output::Failed(signal_flow::VisibleSendFailure::Admitted(
                 signal_flow::VisibleSendFailure_Admitted_Data {
                     visible_send_failure_reason: signal_flow::VisibleSendFailureReason::NotSent(_),
                     ..
@@ -129,7 +129,7 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
     );
     assert!(matches!(
         answer.response,
-        Response::Failed(signal_flow::VisibleSendFailure::Unadmitted(
+        Output::Failed(signal_flow::VisibleSendFailure::Unadmitted(
             signal_flow::VisibleSendFailureReason::RecipientUnavailable(_)
         ))
     ));
@@ -143,7 +143,7 @@ fn an_existing_sleeping_recipient_keeps_admitted_work_when_its_wake_is_unconfigu
         },
         Some(&peer),
     );
-    assert!(matches!(queued.response, Response::SendAccepted(_)));
+    assert!(matches!(queued.response, Output::SendAccepted(_)));
     assert_eq!(
         fixture
             .nexus
@@ -239,7 +239,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
     use crate::sending::SendsRequests;
     use crate::store::FlowStore;
     use crate::store::metaflow::SeedsMetaflow;
-    use signal_flow::{Message, Metaflow, Response, SendRequest};
+    use signal_flow::{Message, Metaflow, Output, SendRequest};
     use std::io::Write;
     use std::time::{Duration, Instant};
     for (hard, duplicate, privileged) in [
@@ -315,10 +315,10 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
         let answer = if privileged {
             use crate::metaflow::DispatchesMetaflowPeer;
             let (_message_child, message_peer) = super::waking::message_peer(&fixture);
-            let Response::Locked(lock) = fixture
+            let Output::Locked(lock) = fixture
                 .nexus
                 .dispatch_metaflow_peer(
-                    signal_flow::Query::Lock(signal_flow::Lock_Data {
+                    signal_flow::Input::Lock(signal_flow::Lock_Data {
                         first_address: Address {
                             aspect: Aspect::Mind,
                             topic: flow_ethos::Topic("core".into()),
@@ -335,7 +335,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
             fixture
                 .nexus
                 .dispatch_metaflow_peer(
-                    signal_flow::Query::Deliver(signal_flow::Deliver_Data {
+                    signal_flow::Input::Deliver(signal_flow::Deliver_Data {
                         lock,
                         deliver_key: super::deliver_key(
                             i64::from(hard) * 4 + i64::from(duplicate) * 2 + i64::from(privileged),
@@ -358,7 +358,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
         };
         writer.join().unwrap();
         if duplicate {
-            let Response::SendAccepted(accepted) = answer else {
+            let Output::SendAccepted(accepted) = answer else {
                 panic!("uncertain admitted send: {answer:?}")
             };
             assert_eq!(
@@ -380,7 +380,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
             continue;
         }
         if privileged {
-            let Response::SendAccepted(accepted) = answer else {
+            let Output::SendAccepted(accepted) = answer else {
                 panic!("Deliver answers its admission: {answer:?}")
             };
             use crate::store::logical_delivery::{MintsRequestIds, RecordsLogicalDeliveries};
@@ -414,7 +414,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
             );
             continue;
         }
-        let Response::Sent(receipt) = answer else {
+        let Output::Sent(receipt) = answer else {
             use crate::store::queue_delivery::AccountsQueueDelivery;
             use crate::waking::{ReadsClaudeDelivery, RendersAttemptInput};
             let attempts = fixture.nexus.store.unsettled_deliveries(&target).unwrap();

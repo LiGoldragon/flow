@@ -19,7 +19,9 @@ Emission
   FlowIdentity.FlowIdentityClaim
   ; One `git` process in the handover archive's work tree, bounded by the
   ; publication's deadline.
-  Git.GitCommand ]
+  Git.GitCommand
+  ; One request line on a Herdr session's socket, one reply line back.
+  HerdrSocket.HerdrSocketCall ]
 [ ; What the process printed, and whether it ran and succeeded.
   Herdr.ProcessReply
   ; Curriculum's answer, or why none was read.
@@ -27,7 +29,9 @@ Emission
   ; What the helper printed: the Flow ID it claimed, or its refusal.
   FlowIdentity.ProcessReply
   ; What Git printed, or that the deadline passed first.
-  Git.ProcessReply ]
+  Git.ProcessReply
+  ; Herdr's reply, its refusal, or why none was read.
+  HerdrSocket.HerdrSocketReply ]
 [ HerdrCommand.[ ListSessions
                  InSession.{ HerdrSessionName HerdrSessionCommand } ]
   ; A command addressed to one Herdr session.
@@ -100,4 +104,12 @@ Emission
   GitRevision.[ Head ArchivedAt.{ GitCommit ArchivePath } ]
   GitCommit.String
   GitBlob.String
-  ArchivePath.String ]
+  ArchivePath.String
+  ; A request on the socket of the session it names.
+  HerdrSocketCall.{ HerdrSessionName HerdrSocketRequest }
+  ; Prompt the agent with the text, for the launch whose part it is.
+  HerdrSocketRequest.[ PromptAgentByName.{ LaunchRequestId HerdrAgentName PromptText } ]
+  ; Answered: Herdr's reply line, which carries a result. Refused: the error
+  ; Herdr answered with. Unexchanged: the socket was not found or reached,
+  ; or the request was too long or not written, or the reply not read.
+  HerdrSocketReply.[ Answered.String Refused.String Unexchanged.String ] ]

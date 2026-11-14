@@ -5,8 +5,8 @@
 use crate::generated::emission::{
     AgentStatus, AgentTarget, AgentWait, ClaudeSessionStart, CodexTitle, CurriculumExchange,
     Emittable, FlowIdentityClaim, Focus, GitCommand, GitRevision, HarnessCommandLine, HerdrCommand,
-    HerdrSessionCommand, MetadataSource, OutputSource, Printout, ProcessReply, ScreenFormat,
-    Stderr, Stdout,
+    HerdrSessionCommand, HerdrSocketCall, HerdrSocketReply, HerdrSocketRequest, MetadataSource,
+    OutputSource, Printout, ProcessReply, ScreenFormat, Stderr, Stdout,
 };
 use crate::herdr::HerdrCli;
 use crate::herdr::launch::NamesHerdrHarness;
@@ -701,6 +701,84 @@ impl Emittable<ArchiveGit<'_>> for GitCommand {
             Err(HandoverArchiveRefusal::PublicationTimedOut) => ProcessReply::TimedOut,
             Err(HandoverArchiveRefusal::Git(error)) => ProcessReply::Unstarted(error),
             Err(refusal) => ProcessReply::Unstarted(refusal.to_string()),
+        }
+    }
+}
+
+/// How long Herdr is given to answer one socket request.
+const HERDR_SOCKET_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Herdr's socket API, spoken directly: one JSON request line out, one JSON
+/// reply line back, on the socket `herdr session list` names for the
+/// session. Herdr 0.8.2 reads a request line up to 1 MiB.
+impl Emittable<HerdrCli> for HerdrSocketCall {
+    fn emit(&self, herdr: &HerdrCli) -> HerdrSocketReply {
+        self.exchanged_line(herdr)
+            .unwrap_or_else(HerdrSocketReply::Unexchanged)
+    }
+}
+
+/// The request line written and the reply line read; the error is the
+/// account of the step that failed before Herdr answered.
+trait ExchangesHerdrSocketLine {
+    fn exchanged_line(&self, herdr: &HerdrCli) -> Result<HerdrSocketReply, String>;
+}
+
+impl ExchangesHerdrSocketLine for HerdrSocketCall {
+    fn exchanged_line(&self, herdr: &HerdrCli) -> Result<HerdrSocketReply, String> {
+        use crate::generated::starter::PromptsThroughHerdrSocket;
+        use std::io::{BufRead, Write};
+        let mut line = serde_json::to_string(&self.herdr_socket_request.request_body())
+            .map_err(|error| format!("Herdr prompt request not encoded: {error}"))?;
+        line.push('\n');
+        if line.len() > crate::composition::HERDR_REQUEST_LINE_LIMIT {
+            return Err("Herdr prompt request exceeds its line limit".into());
+        }
+        let socket = herdr.herdr_session_socket(&self.herdr_session_name.0)?;
+        let mut stream = std::os::unix::net::UnixStream::connect(&socket)
+            .map_err(|error| format!("Herdr socket unreachable: {error}"))?;
+        stream
+            .set_read_timeout(Some(HERDR_SOCKET_REPLY_TIMEOUT))
+            .and_then(|_| stream.set_write_timeout(Some(HERDR_SOCKET_REPLY_TIMEOUT)))
+            .map_err(|error| error.to_string())?;
+        stream
+            .write_all(line.as_bytes())
+            .and_then(|_| stream.flush())
+            .map_err(|error| format!("Herdr prompt request not written: {error}"))?;
+        let mut reply = String::new();
+        std::io::BufReader::new(&stream)
+            .read_line(&mut reply)
+            .map_err(|error| format!("Herdr prompt reply not read: {error}"))?;
+        let read: serde_json::Value = serde_json::from_str(reply.trim())
+            .map_err(|error| format!("Herdr returned unreadable JSON: {error}"))?;
+        if let Some(error) = read.get("error") {
+            return Ok(HerdrSocketReply::Refused(error.to_string()));
+        }
+        if read.get("result").is_none() {
+            return Err("Herdr prompt reply carries no result".into());
+        }
+        Ok(HerdrSocketReply::Answered(reply.trim().to_owned()))
+    }
+}
+
+/// The JSON request body a Herdr socket request is written as.
+trait SpeaksHerdrSocket {
+    fn request_body(&self) -> serde_json::Value;
+}
+
+impl SpeaksHerdrSocket for HerdrSocketRequest {
+    fn request_body(&self) -> serde_json::Value {
+        match self {
+            // Herdr's `agent.prompt` for the named agent types the text,
+            // then Enter.
+            HerdrSocketRequest::PromptAgentByName(prompt) => serde_json::json!({
+                "id": format!("flow:prompt:{}", prompt.launch_request_id.0),
+                "method": "agent.prompt",
+                "params": {
+                    "target": prompt.herdr_agent_name.0,
+                    "text": prompt.prompt_text.0,
+                }
+            }),
         }
     }
 }

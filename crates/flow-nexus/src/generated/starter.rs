@@ -138,10 +138,6 @@ pub trait SystemPrompted {
     fn system_prompt(&self) -> signal_flow::SystemPrompt;
 }
 #[rustfmt::skip]
-pub trait PaneBound {
-    fn pane(&self) -> signal_flow::HerdrPaneBinding;
-}
-#[rustfmt::skip]
 pub trait JsonRow {
     fn row(&self) -> serde_json::Value;
 }
@@ -287,11 +283,6 @@ pub trait PromptsThroughHerdrSocket {
         &self,
         input: N,
     ) -> std::result::Result<String, String>;
-    fn prompt_through_socket<N: PaneBound, O: Textual>(
-        &self,
-        input_0: N,
-        input_1: O,
-    ) -> std::result::Result<serde_json::Value, String>;
 }
 #[rustfmt::skip]
 pub trait ReadsStartupRecord {

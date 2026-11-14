@@ -216,7 +216,8 @@ impl ResolvesLaunchRoot for RunningNexus {
                 self.store
                     .runtime_configuration()
                     .map_err(|_| StartRejection::LaunchPersistenceRefused)?
-                    .source_root,
+                    .source_root
+                    .0,
             ),
         };
         let path = Path::new(&root.0);

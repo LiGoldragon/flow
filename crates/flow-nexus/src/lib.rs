@@ -1668,7 +1668,7 @@ impl From<&meta_signal_flow::ConfigurationSnapshot> for ConfiguredRunner {
         }
         Self {
             codex_endpoints,
-            source_root: PathBuf::from(&runtime.source_root),
+            source_root: PathBuf::from(&runtime.source_root.0),
             curriculum_nexus_path: snapshot.configured_nexus.0.curriculum_nexus_path.clone().0,
             presentation_prompt_option: snapshot
                 .configured_nexus
@@ -3873,7 +3873,8 @@ mod tests {
             let mut runtime = store
                 .runtime_configuration()
                 .expect("fixture runtime configuration");
-            runtime.source_root = directory.path().to_string_lossy().into_owned();
+            runtime.source_root =
+                flow_ethos::SourceRoot(directory.path().to_string_lossy().into_owned());
             store
                 .configure_runtime(runtime)
                 .expect("fixture source root configuration");
@@ -4035,22 +4036,10 @@ mod tests {
                         .store
                         .delivery_configuration()
                         .expect("fixture delivery configuration");
-                    let endpoint = |endpoint: crate::store::CodexEndpointConfiguration| {
-                        meta_signal_flow::CodexEndpoint {
-                            client_path: flow_ethos::ClientPath(endpoint.client_path),
-                            home: flow_ethos::Home(endpoint.home),
-                            control_socket_path: flow_ethos::ControlSocketPath(endpoint.socket),
-                            model_name_vector: endpoint
-                                .model_names
-                                .into_iter()
-                                .map(flow_ethos::ModelName)
-                                .collect(),
-                        }
-                    };
                     meta_signal_flow::ConfigureNexus {
-                        source_root: flow_ethos::SourceRoot(runtime.source_root),
-                        first_codex_endpoint: endpoint(runtime.stable_codex),
-                        second_codex_endpoint: endpoint(runtime.next_codex),
+                        source_root: runtime.source_root,
+                        first_codex_endpoint: runtime.stable_codex.0,
+                        second_codex_endpoint: runtime.next_codex.0,
                         harness_profiles: flow_ethos::HarnessProfiles(
                             delivery.harness_profile_vector,
                         ),
@@ -6651,6 +6640,7 @@ mod tests {
                     .runtime_configuration()
                     .unwrap()
                     .source_root
+                    .0
             )
         );
     }

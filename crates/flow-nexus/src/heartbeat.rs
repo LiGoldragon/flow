@@ -192,7 +192,11 @@ impl RunsHeartbeat for crate::RunningNexus {
     }
 
     fn sync_heartbeat(&self, recipients: &[Address]) {
-        use crate::store::{StoredHeartbeatStanding, TracksHeartbeat};
+        use crate::store::{
+            BaselineAwake, BaselineQueue, BaselineSent, BaselineWorking, BaselineWorkingComplete,
+            LatestAwake, LatestQueue, LatestSent, LatestWorking, LatestWorkingComplete,
+            StoredHeartbeatStanding, TracksHeartbeat,
+        };
         let Ok(evidence) = self.heartbeat_evidence(recipients) else {
             return;
         };
@@ -202,31 +206,24 @@ impl RunsHeartbeat for crate::RunningNexus {
         let mut standings = held;
         for (address, own) in &evidence.recipients {
             if !standings.iter().any(|row| row.address == *address) {
+                let working = match evidence.shared.working_panes {
+                    Observed::Known(count) | Observed::Partial(count) => Some(count as i64),
+                    Observed::Unknown => None,
+                };
+                let complete = matches!(evidence.shared.working_panes, Observed::Known(_));
                 standings.push(StoredHeartbeatStanding {
                     address: address.clone(),
-                    baseline_awake: evidence.shared.awake_metaflows as i64,
-                    baseline_working: match evidence.shared.working_panes {
-                        Observed::Known(count) | Observed::Partial(count) => Some(count as i64),
-                        Observed::Unknown => None,
-                    },
-                    baseline_working_complete: matches!(
-                        evidence.shared.working_panes,
-                        Observed::Known(_)
-                    ),
-                    baseline_sent: own.ordinary_messages_sent as i64,
-                    baseline_queue: own.ordinary_queue_length as i64,
-                    latest_awake: evidence.shared.awake_metaflows as i64,
-                    latest_working: match evidence.shared.working_panes {
-                        Observed::Known(count) | Observed::Partial(count) => Some(count as i64),
-                        Observed::Unknown => None,
-                    },
-                    latest_working_complete: matches!(
-                        evidence.shared.working_panes,
-                        Observed::Known(_)
-                    ),
-                    latest_sent: own.ordinary_messages_sent as i64,
-                    latest_queue: own.ordinary_queue_length as i64,
-                    outstanding: None,
+                    baseline_awake: BaselineAwake(evidence.shared.awake_metaflows as i64),
+                    baseline_working: BaselineWorking(working),
+                    baseline_working_complete: BaselineWorkingComplete(complete),
+                    baseline_sent: BaselineSent(own.ordinary_messages_sent as i64),
+                    baseline_queue: BaselineQueue(own.ordinary_queue_length as i64),
+                    latest_awake: LatestAwake(evidence.shared.awake_metaflows as i64),
+                    latest_working: LatestWorking(working),
+                    latest_working_complete: LatestWorkingComplete(complete),
+                    latest_sent: LatestSent(own.ordinary_messages_sent as i64),
+                    latest_queue: LatestQueue(own.ordinary_queue_length as i64),
+                    logical_delivery_id_option: None,
                 });
             }
         }
@@ -234,7 +231,10 @@ impl RunsHeartbeat for crate::RunningNexus {
     }
 
     fn heartbeat_tick(&self, recipients: &[Address]) {
-        use crate::store::{JudgesHeartbeatStanding, TracksHeartbeat};
+        use crate::store::{
+            JudgesHeartbeatStanding, LatestAwake, LatestQueue, LatestSent, LatestWorking,
+            LatestWorkingComplete, TracksHeartbeat,
+        };
         use crate::waking::SleepsAndWakesSeats;
         let Ok(evidence) = self.heartbeat_evidence(recipients) else {
             return;
@@ -247,19 +247,19 @@ impl RunsHeartbeat for crate::RunningNexus {
             let Some(standing) = standings.iter_mut().find(|row| row.address == *address) else {
                 continue;
             };
-            standing.latest_awake = evidence.shared.awake_metaflows as i64;
-            standing.latest_working = match evidence.shared.working_panes {
+            standing.latest_awake = LatestAwake(evidence.shared.awake_metaflows as i64);
+            standing.latest_working = LatestWorking(match evidence.shared.working_panes {
                 Observed::Known(count) | Observed::Partial(count) => Some(count as i64),
                 Observed::Unknown => None,
-            };
+            });
             standing.latest_working_complete =
-                matches!(evidence.shared.working_panes, Observed::Known(_));
-            standing.latest_sent = own.ordinary_messages_sent as i64;
-            standing.latest_queue = own.ordinary_queue_length as i64;
-            if let Some(outstanding) = standing.outstanding.as_ref()
+                LatestWorkingComplete(matches!(evidence.shared.working_panes, Observed::Known(_)));
+            standing.latest_sent = LatestSent(own.ordinary_messages_sent as i64);
+            standing.latest_queue = LatestQueue(own.ordinary_queue_length as i64);
+            if let Some(outstanding) = standing.logical_delivery_id_option.as_ref()
                 && self
                     .store
-                    .logical_delivery_snapshot(&flow_ethos::LogicalDeliveryId(outstanding.clone()))
+                    .logical_delivery_snapshot(outstanding)
                     .ok()
                     .flatten()
                     .is_some_and(|snapshot| {
@@ -271,24 +271,25 @@ impl RunsHeartbeat for crate::RunningNexus {
                         )
                     })
             {
-                standing.outstanding = None;
+                standing.logical_delivery_id_option = None;
             }
-            if standing.changed() && standing.outstanding.is_none() {
+            if standing.changed() && standing.logical_delivery_id_option.is_none() {
                 deliveries.push(HeartbeatDelivery {
                     recipient: address.clone(),
                     body: HeartbeatDelivery::reminder(
                         address,
                         &RecipientEvidence {
-                            ordinary_messages_sent: standing.baseline_sent as u64,
-                            ordinary_queue_length: standing.baseline_queue as usize,
+                            ordinary_messages_sent: standing.baseline_sent.0 as u64,
+                            ordinary_queue_length: standing.baseline_queue.0 as usize,
                         },
                         own,
                         &SharedEvidence {
-                            awake_metaflows: standing.baseline_awake as usize,
+                            awake_metaflows: standing.baseline_awake.0 as usize,
                             working_panes: standing
                                 .baseline_working
+                                .0
                                 .map(|value| {
-                                    if standing.baseline_working_complete {
+                                    if standing.baseline_working_complete.0 {
                                         Observed::Known(value as usize)
                                     } else {
                                         Observed::Partial(value as usize)

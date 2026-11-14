@@ -2278,12 +2278,13 @@ impl RecordsLogicalDeliveries for FlowStore {
             ))?;
             if let [held] = standing.records() {
                 let mut next = held.clone();
-                next.baseline_awake = next.latest_awake;
-                next.baseline_working = next.latest_working;
-                next.baseline_working_complete = next.latest_working_complete;
-                next.baseline_sent = next.latest_sent;
-                next.baseline_queue = next.latest_queue;
-                next.outstanding = Some(id.clone());
+                next.baseline_awake = BaselineAwake(next.latest_awake.0);
+                next.baseline_working = BaselineWorking(next.latest_working.0);
+                next.baseline_working_complete =
+                    BaselineWorkingComplete(next.latest_working_complete.0);
+                next.baseline_sent = BaselineSent(next.latest_sent.0);
+                next.baseline_queue = BaselineQueue(next.latest_queue.0);
+                next.logical_delivery_id_option = Some(LogicalDeliveryId(id.clone()));
                 commit.mutate(self.heartbeat_standings, next)
             } else {
                 commit

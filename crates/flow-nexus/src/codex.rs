@@ -4,7 +4,7 @@
 
 use crate::generated::send_tool::DeclaresSendTool;
 use crate::send_tool::SendTool;
-use crate::store::{CodexEndpointConfiguration, RuntimeConfiguration};
+use crate::store::RuntimeConfiguration;
 use crate::submission::{NotesAppServerMessage, NothingNoted};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha1::{Digest, Sha1};
@@ -162,15 +162,19 @@ impl crate::generated::starter::DerivesHarness for CodexEndpoints {
     }
 }
 
-impl From<&CodexEndpointConfiguration> for CodexEndpoint {
-    fn from(configuration: &CodexEndpointConfiguration) -> Self {
-        let home = PathBuf::from(&configuration.home);
+impl From<&flow_ethos::CodexEndpoint> for CodexEndpoint {
+    fn from(configuration: &flow_ethos::CodexEndpoint) -> Self {
+        let home = PathBuf::from(&configuration.home.0);
         Self {
-            client_path: PathBuf::from(&configuration.client_path),
+            client_path: PathBuf::from(&configuration.client_path.0),
             transcript_root: home.join("sessions"),
             home,
-            socket: configuration.socket.clone(),
-            model_names: configuration.model_names.iter().cloned().collect(),
+            socket: configuration.control_socket_path.0.clone(),
+            model_names: configuration
+                .model_name_vector
+                .iter()
+                .map(|name| name.0.clone())
+                .collect(),
         }
     }
 }
@@ -178,10 +182,10 @@ impl From<&CodexEndpointConfiguration> for CodexEndpoint {
 impl From<&RuntimeConfiguration> for CodexEndpoints {
     fn from(configuration: &RuntimeConfiguration) -> Self {
         Self {
-            stable: CodexEndpoint::from(&configuration.stable_codex),
-            next: CodexEndpoint::from(&configuration.next_codex),
+            stable: CodexEndpoint::from(&configuration.stable_codex.0),
+            next: CodexEndpoint::from(&configuration.next_codex.0),
             timeout: Self::APP_SERVER_TIMEOUT,
-            workspace_root: PathBuf::from(&configuration.source_root),
+            workspace_root: PathBuf::from(&configuration.source_root.0),
             nonces: Arc::new(RandomNonce),
         }
     }

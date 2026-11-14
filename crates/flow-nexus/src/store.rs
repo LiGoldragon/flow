@@ -53,6 +53,13 @@ pub(crate) mod successor;
 pub(crate) mod turn_end;
 pub(crate) mod undecodable_frame;
 pub(crate) use crate::generated::memory::{
+    BaselineAwake, BaselineQueue, BaselineSent, BaselineWorking, BaselineWorkingComplete, BootId,
+    FlowHerdrRouteRecord, FlowRecord, Generation, HostId, LatestAwake, LatestQueue, LatestSent,
+    LatestWorking, LatestWorkingComplete, NativeOwnerProof, NativeOwnerProofRecord, NextCodex,
+    RuntimeConfiguration, StableCodex, StoredHeartbeatStanding, StoredLaunchOutcome,
+    StoredMetaflowProcess,
+};
+pub(crate) use crate::generated::memory::{
     FlowStoreConfiguration, FlowStoreState, NextFlowNumber, StoredLaunchAttempt,
     StoredMetaDefaultMinutesConfiguration, StoredMetaHarnessFlagsConfiguration,
     StoredMetaHarnessHookConfiguration, StoredMetaHeartbeatConfiguration,
@@ -97,10 +104,10 @@ use sema_engine::{
 use signal_flow::Request;
 use signal_flow::{
     Address, Aspect, CallerIdentity, CallerResolutionRejection, ComposedLaunch, EndpointSelection,
-    FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
-    Input, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile, Launched,
-    LeaveOut, Lock, Metaflow, Model, NativeLaunchBinding, NativeLaunchIntent, Origin, Output,
-    Process, PromptDeliveryIntent, PromptDeliveryResult, RecipientResolutionRejection,
+    FlowLifecycle, FlowNode, HarnessKind, HerdrRouteSelection, Input, LaunchAttempt,
+    LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile, Launched, LeaveOut, Lock,
+    Metaflow, Model, NativeLaunchBinding, NativeLaunchIntent, Origin, Output, Process,
+    PromptDeliveryIntent, PromptDeliveryResult, RecipientResolutionRejection,
     RegistrationAcknowledgement, ReplaceRejection, Replaced, RouteReadiness, StartRejection,
 };
 
@@ -368,9 +375,9 @@ impl SeedsConfiguration for DefaultConfiguration {
 
     fn runtime_configuration(&self) -> RuntimeConfiguration {
         RuntimeConfiguration {
-            source_root: self.source_root().to_string_lossy().into_owned(),
-            stable_codex: CodexEndpointConfiguration::from(self.stable_codex()),
-            next_codex: CodexEndpointConfiguration::from(self.next_codex()),
+            source_root: flow_ethos::SourceRoot(self.source_root().to_string_lossy().into_owned()),
+            stable_codex: StableCodex(self.stable_codex().codex_endpoint()),
+            next_codex: NextCodex(self.next_codex().codex_endpoint()),
         }
     }
 
@@ -390,60 +397,20 @@ impl SeedsConfiguration for DefaultConfiguration {
     }
 }
 
-impl From<flow_defaults::DefaultCodexEndpoint> for CodexEndpointConfiguration {
-    fn from(endpoint: flow_defaults::DefaultCodexEndpoint) -> Self {
-        Self {
-            client_path: endpoint.client_path,
-            home: endpoint.home,
-            socket: endpoint.socket,
-            model_names: endpoint.model_names,
-        }
-    }
+/// A default Codex endpoint as the contract's CodexEndpoint.
+trait NamesDefaultCodexEndpoint {
+    fn codex_endpoint(self) -> flow_ethos::CodexEndpoint;
 }
 
-/// Launch configuration held in the Nexus's Sema store beside the socket
-/// paths. Together they are the meta `Configuration`: seeded from
-/// `DefaultConfiguration` and replaced only by meta `Configure`.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeConfiguration {
-    pub source_root: String,
-    pub stable_codex: CodexEndpointConfiguration,
-    pub next_codex: CodexEndpointConfiguration,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct CodexEndpointConfiguration {
-    pub client_path: String,
-    pub home: String,
-    pub socket: String,
-    pub model_names: Vec<String>,
-}
-
-impl From<&meta_signal_flow::CodexEndpoint> for CodexEndpointConfiguration {
-    fn from(endpoint: &meta_signal_flow::CodexEndpoint) -> Self {
-        Self {
-            client_path: endpoint.client_path.clone().0,
-            home: endpoint.home.clone().0,
-            socket: endpoint.control_socket_path.clone().0,
-            model_names: endpoint
-                .model_name_vector
-                .iter()
-                .map(|name| name.0.clone())
-                .collect(),
-        }
-    }
-}
-
-impl From<&CodexEndpointConfiguration> for meta_signal_flow::CodexEndpoint {
-    fn from(endpoint: &CodexEndpointConfiguration) -> Self {
-        Self {
-            client_path: flow_ethos::ClientPath(endpoint.client_path.clone()),
-            home: flow_ethos::Home(endpoint.home.clone()),
-            control_socket_path: flow_ethos::ControlSocketPath(endpoint.socket.clone()),
-            model_name_vector: endpoint
+impl NamesDefaultCodexEndpoint for flow_defaults::DefaultCodexEndpoint {
+    fn codex_endpoint(self) -> flow_ethos::CodexEndpoint {
+        flow_ethos::CodexEndpoint {
+            client_path: flow_ethos::ClientPath(self.client_path),
+            home: flow_ethos::Home(self.home),
+            control_socket_path: flow_ethos::ControlSocketPath(self.socket),
+            model_name_vector: self
                 .model_names
-                .iter()
-                .cloned()
+                .into_iter()
                 .map(flow_ethos::ModelName)
                 .collect(),
         }
@@ -453,9 +420,9 @@ impl From<&CodexEndpointConfiguration> for meta_signal_flow::CodexEndpoint {
 impl From<&Configuration> for RuntimeConfiguration {
     fn from(configuration: &Configuration) -> Self {
         Self {
-            source_root: configuration.source_root.clone(),
-            stable_codex: CodexEndpointConfiguration::from(&configuration.stable_codex),
-            next_codex: CodexEndpointConfiguration::from(&configuration.next_codex),
+            source_root: flow_ethos::SourceRoot(configuration.source_root.clone()),
+            stable_codex: StableCodex(configuration.stable_codex.clone()),
+            next_codex: NextCodex(configuration.next_codex.clone()),
         }
     }
 }
@@ -463,9 +430,9 @@ impl From<&Configuration> for RuntimeConfiguration {
 impl From<&ConfigureNexus> for RuntimeConfiguration {
     fn from(configuration: &ConfigureNexus) -> Self {
         Self {
-            source_root: configuration.source_root.clone().0,
-            stable_codex: CodexEndpointConfiguration::from(&configuration.first_codex_endpoint),
-            next_codex: CodexEndpointConfiguration::from(&configuration.second_codex_endpoint),
+            source_root: configuration.source_root.clone(),
+            stable_codex: StableCodex(configuration.first_codex_endpoint.clone()),
+            next_codex: NextCodex(configuration.second_codex_endpoint.clone()),
         }
     }
 }
@@ -474,30 +441,6 @@ impl EngineRecord for RuntimeConfiguration {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(RUNTIME_CONFIGURATION_KEY)
     }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FlowRecord {
-    flow_id: String,
-    flow_type: String,
-    origin: Origin,
-    thread_id: Option<String>,
-    harness_kind: HarnessKind,
-    endpoint_selection: EndpointSelection,
-    lifecycle: FlowLifecycle,
-    generation: u64,
-}
-
-/// Exact foreground process witnessed at adoption, scoped to this host boot.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct NativeOwnerProof {
-    process_id: i64,
-    process_user_id: i64,
-    process_start_token: String,
-    host_id: String,
-    boot_id: String,
-    harness_kind: HarnessKind,
-    native_session_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -550,15 +493,9 @@ impl ReadsSystemNativeOwnerEnvironment for NativeOwnerEnvironment {
     }
 }
 
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct NativeOwnerProofRecord {
-    flow_id: String,
-    proof: NativeOwnerProof,
-}
-
 impl EngineRecord for NativeOwnerProofRecord {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.flow_id.clone())
+        RecordKey::new(self.flow_id.0.clone())
     }
 }
 
@@ -605,13 +542,13 @@ impl DerivesNativeOwnerProof for NativeOwnerProof {
         environment: &NativeOwnerEnvironment,
     ) -> Option<Self> {
         (!environment.host_id.is_empty() && !environment.boot_id.is_empty()).then(|| Self {
-            process_id: binding.process_identity.process_id.0,
-            process_user_id: binding.process_identity.process_user_id.0,
-            process_start_token: binding.process_identity.process_start_token.clone().0,
-            host_id: environment.host_id.clone(),
-            boot_id: environment.boot_id.clone(),
+            process_id: binding.process_identity.process_id,
+            process_user_id: binding.process_identity.process_user_id,
+            process_start_token: binding.process_identity.process_start_token.clone(),
+            host_id: HostId(environment.host_id.clone()),
+            boot_id: BootId(environment.boot_id.clone()),
             harness_kind: binding.harness_kind.clone(),
-            native_session_id: binding.native_session_id.clone().0,
+            native_session_id: binding.native_session_id.clone(),
         })
     }
 
@@ -622,10 +559,10 @@ impl DerivesNativeOwnerProof for NativeOwnerProof {
         let Some(environment) = environment else {
             return NativeOwnerState::Unknown;
         };
-        if environment.host_id != self.host_id || environment.boot_id != self.boot_id {
+        if environment.host_id != self.host_id.0 || environment.boot_id != self.boot_id.0 {
             return NativeOwnerState::Unknown;
         }
-        let Ok(process_id) = u32::try_from(self.process_id) else {
+        let Ok(process_id) = u32::try_from(self.process_id.0) else {
             return NativeOwnerState::Unknown;
         };
         let root = std::path::PathBuf::from(format!("/proc/{process_id}"));
@@ -636,7 +573,7 @@ impl DerivesNativeOwnerProof for NativeOwnerProof {
             }
             Err(_) => return NativeOwnerState::Unknown,
         };
-        if i64::from(metadata.uid()) != self.process_user_id {
+        if i64::from(metadata.uid()) != self.process_user_id.0 {
             return NativeOwnerState::Unknown;
         }
         let Ok(stat) = fs::read_to_string(root.join("stat")) else {
@@ -648,7 +585,7 @@ impl DerivesNativeOwnerProof for NativeOwnerProof {
         let Some(start_token) = fields.split_whitespace().nth(19) else {
             return NativeOwnerState::Unknown;
         };
-        if start_token == self.process_start_token {
+        if start_token == self.process_start_token.0 {
             NativeOwnerState::Live
         } else {
             NativeOwnerState::Dead
@@ -690,7 +627,7 @@ impl ReadsNativeOwnerProof for FlowStore {
     fn native_owner_proof(&self, flow_id: &str) -> Result<Option<NativeOwnerProof>, StoreError> {
         Ok(self
             .native_owner_proof_record(flow_id)?
-            .map(|record| record.proof))
+            .map(|record| record.native_owner_proof))
     }
 }
 
@@ -733,14 +670,6 @@ impl DescribesMetaflowTable for FlowStore {
         .with_predecessor::<request_id_upgrade::PriorStoredMetaflow>()
         .with_predecessor::<living_upgrade::StoredMetaflowBeforeLiving>()
     }
-}
-
-/// The process bound to an address, indexed by PID so a reused PID replaces
-/// only a binding whose recorded start token no longer names the process.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredMetaflowProcess {
-    process: Process,
-    address: Address,
 }
 
 impl EngineRecord for StoredMetaflowProcess {
@@ -1028,29 +957,14 @@ impl DescribesProtectedAddressTable for StoredMetaProtectedAddressConfiguration 
     }
 }
 
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredHeartbeatStanding {
-    pub address: Address,
-    pub baseline_awake: i64,
-    pub baseline_working: Option<i64>,
-    pub baseline_working_complete: bool,
-    pub baseline_sent: i64,
-    pub baseline_queue: i64,
-    pub latest_awake: i64,
-    pub latest_working: Option<i64>,
-    pub latest_working_complete: bool,
-    pub latest_sent: i64,
-    pub latest_queue: i64,
-    pub outstanding: Option<String>,
-}
 pub(crate) trait JudgesHeartbeatStanding {
     fn changed(&self) -> bool;
 }
 impl JudgesHeartbeatStanding for StoredHeartbeatStanding {
     fn changed(&self) -> bool {
-        self.baseline_awake != self.latest_awake
-            || self.baseline_sent != self.latest_sent
-            || self.baseline_queue != self.latest_queue
+        self.baseline_awake.0 != self.latest_awake.0
+            || self.baseline_sent.0 != self.latest_sent.0
+            || self.baseline_queue.0 != self.latest_queue.0
     }
 }
 impl EngineRecord for StoredHeartbeatStanding {
@@ -1100,19 +1014,6 @@ impl NamesConfiguredModel for FlowStore {
     }
 }
 
-/// Reads the requested process and its ancestors, each with the kernel start
-/// token. The request's token must match before any ancestor can identify it.
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-#[rkyv(derive(Debug))]
-enum FlowLifecycle {
-    Pending,
-    Active,
-    Stopped,
-    Retired,
-    Exited,
-}
-
 /// Whether a lifecycle on the wire still names a reachable seat.
 ///
 /// Stopped, Exited and Retired are all gone, and each names who ended the
@@ -1123,12 +1024,6 @@ pub trait NamesLiveFlow {
     fn is_live(&self) -> bool;
 }
 
-impl NamesLiveFlow for SignalFlowLifecycle {
-    fn is_live(&self) -> bool {
-        matches!(self, Self::Pending | Self::Active)
-    }
-}
-
 impl NamesLiveFlow for FlowLifecycle {
     fn is_live(&self) -> bool {
         matches!(self, Self::Pending | Self::Active)
@@ -1137,7 +1032,7 @@ impl NamesLiveFlow for FlowLifecycle {
 
 impl EngineRecord for FlowRecord {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.flow_id.clone())
+        RecordKey::new(self.flow_id.0.clone())
     }
 }
 
@@ -1177,15 +1072,9 @@ impl SeedsRole for FlowStore {
     }
 }
 
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FlowHerdrRouteRecord {
-    flow_id: String,
-    route: HerdrRoute,
-}
-
 impl EngineRecord for FlowHerdrRouteRecord {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.flow_id.clone())
+        RecordKey::new(self.flow_id.0.clone())
     }
 }
 
@@ -1222,9 +1111,9 @@ impl CompletesConfiguration for FlowStoreConfiguration {
         Configuration {
             ordinary_socket_path: self.ordinary_socket_path.0,
             meta_socket_path: self.meta_socket_path.0,
-            source_root: runtime.source_root.clone(),
-            stable_codex: meta_signal_flow::CodexEndpoint::from(&runtime.stable_codex),
-            next_codex: meta_signal_flow::CodexEndpoint::from(&runtime.next_codex),
+            source_root: runtime.source_root.0.clone(),
+            stable_codex: runtime.stable_codex.0.clone(),
+            next_codex: runtime.next_codex.0.clone(),
             harness_profile_vector: delivery.harness_profile_vector.clone(),
             meta_aspects: delivery.meta_aspects.clone().0,
             message_nexus_path: delivery
@@ -1418,7 +1307,7 @@ impl WritesLaunchOutcome for FlowStore {
         commit: sema_engine::AtomicCommit,
     ) -> Result<sema_engine::AtomicCommit, StoreError> {
         let stored = StoredLaunchOutcome {
-            launch_request_id: launch_request_id.into(),
+            launch_request_id: signal_flow::LaunchRequestId(launch_request_id.to_owned()),
             launch_outcome: outcome,
         };
         Ok(if self.launch_outcome(launch_request_id)?.is_some() {
@@ -1498,15 +1387,9 @@ impl AnswersLaunchOutcome for LaunchOutcome {
     }
 }
 
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredLaunchOutcome {
-    launch_request_id: String,
-    launch_outcome: LaunchOutcome,
-}
-
 impl EngineRecord for StoredLaunchOutcome {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.launch_request_id.clone())
+        RecordKey::new(self.launch_request_id.0.clone())
     }
 }
 
@@ -3757,13 +3640,13 @@ impl RegistersBindings for FlowStore {
             return Ok(FlowRegistration::ConflictingBinding);
         };
         if let Some(flow) = self.flow(&flow_node.flow_id.0)? {
-            if flow.thread_id.as_deref() != Some(flow_node.session_id.0.as_str())
+            if flow.session_id_option.as_ref() != Some(&flow_node.session_id)
                 || flow.harness_kind != flow_node.harness_kind
             {
                 return Ok(FlowRegistration::ConflictingBinding);
             }
             match self.herdr_route(&flow_node.flow_id.0)? {
-                Some(existing) if existing.route != route => {
+                Some(existing) if existing.herdr_route != route => {
                     return Ok(FlowRegistration::ConflictingBinding);
                 }
                 Some(_) => {}
@@ -3771,8 +3654,8 @@ impl RegistersBindings for FlowStore {
                     self.engine.assert(Assertion::new(
                         self.herdr_routes,
                         FlowHerdrRouteRecord {
-                            flow_id: flow_node.flow_id.clone().0,
-                            route,
+                            flow_id: flow_node.flow_id.clone(),
+                            herdr_route: route,
                         },
                     ))?;
                 }
@@ -3795,22 +3678,16 @@ impl RegistersBindings for FlowStore {
             }
             return Ok(FlowRegistration::Registered(Box::new(flow_node)));
         }
-        let lifecycle = match flow_node.flow_lifecycle {
-            SignalFlowLifecycle::Pending => FlowLifecycle::Pending,
-            SignalFlowLifecycle::Active => FlowLifecycle::Active,
-            SignalFlowLifecycle::Stopped => FlowLifecycle::Stopped,
-            SignalFlowLifecycle::Retired => FlowLifecycle::Retired,
-            SignalFlowLifecycle::Exited => FlowLifecycle::Exited,
-        };
+        let lifecycle = flow_node.flow_lifecycle.clone();
         let record = FlowRecord {
-            flow_id: flow_node.flow_id.clone().0,
-            flow_type,
+            flow_id: flow_node.flow_id.clone(),
+            flow_type: signal_flow::FlowType(flow_type),
             origin: flow_node.origin.clone(),
-            thread_id: Some(flow_node.session_id.clone().0),
+            session_id_option: Some(flow_node.session_id.clone()),
             harness_kind: flow_node.harness_kind.clone(),
             endpoint_selection: flow_node.endpoint_selection.clone(),
-            lifecycle,
-            generation: 1,
+            flow_lifecycle: lifecycle,
+            generation: Generation(1),
         };
         let commit = self
             .engine
@@ -3819,8 +3696,8 @@ impl RegistersBindings for FlowStore {
             .assert(
                 self.herdr_routes,
                 FlowHerdrRouteRecord {
-                    flow_id: flow_node.flow_id.clone().0,
-                    route,
+                    flow_id: flow_node.flow_id.clone(),
+                    herdr_route: route,
                 },
             );
         let commit = match role {
@@ -3915,7 +3792,11 @@ impl RegistersExistingFlow for FlowStore {
                     return Ok(ExistingSeatAdoption::Refused(Refusal::AddressOwnerUnknown));
                 };
                 if proof.harness_kind != previous.harness_kind
-                    || previous.thread_id.as_deref() != Some(proof.native_session_id.as_str())
+                    || previous
+                        .session_id_option
+                        .as_ref()
+                        .map(|session| session.0.as_str())
+                        != Some(proof.native_session_id.0.as_str())
                 {
                     return Ok(ExistingSeatAdoption::Refused(Refusal::AddressOwnerUnknown));
                 }
@@ -3939,7 +3820,7 @@ impl RegistersExistingFlow for FlowStore {
 
         let existing_flow = self.flow(&flow_node.flow_id.0)?;
         if let Some(existing) = &existing_flow {
-            if existing.thread_id.as_deref() != Some(flow_node.session_id.0.as_str())
+            if existing.session_id_option.as_ref() != Some(&flow_node.session_id)
                 || existing.harness_kind != flow_node.harness_kind
             {
                 return Ok(ExistingSeatAdoption::Refused(
@@ -3954,22 +3835,22 @@ impl RegistersExistingFlow for FlowStore {
             }
         }
         let lifecycle = match flow_node.flow_lifecycle {
-            SignalFlowLifecycle::Pending | SignalFlowLifecycle::Active => FlowLifecycle::Active,
-            SignalFlowLifecycle::Stopped
-            | SignalFlowLifecycle::Retired
-            | SignalFlowLifecycle::Exited => {
+            FlowLifecycle::Pending | FlowLifecycle::Active => FlowLifecycle::Active,
+            FlowLifecycle::Stopped | FlowLifecycle::Retired | FlowLifecycle::Exited => {
                 return Ok(ExistingSeatAdoption::Refused(Refusal::DeadProcess));
             }
         };
         let flow_record = FlowRecord {
-            flow_id: flow_node.flow_id.clone().0,
-            flow_type: format!("{:?}:{}", role.aspect, role.model_name.0),
+            flow_id: flow_node.flow_id.clone(),
+            flow_type: signal_flow::FlowType(format!("{:?}:{}", role.aspect, role.model_name.0)),
             origin: flow_node.origin.clone(),
-            thread_id: Some(flow_node.session_id.clone().0),
+            session_id_option: Some(flow_node.session_id.clone()),
             harness_kind: flow_node.harness_kind.clone(),
             endpoint_selection: flow_node.endpoint_selection.clone(),
-            lifecycle,
-            generation: existing_flow.as_ref().map_or(1, |flow| flow.generation),
+            flow_lifecycle: lifecycle,
+            generation: existing_flow
+                .as_ref()
+                .map_or(Generation(1), |flow| flow.generation),
         };
         let Some(environment) = self.native_owner_environment() else {
             return Ok(ExistingSeatAdoption::Refused(Refusal::AddressOwnerUnknown));
@@ -3978,8 +3859,8 @@ impl RegistersExistingFlow for FlowStore {
             return Ok(ExistingSeatAdoption::Refused(Refusal::AddressOwnerUnknown));
         };
         let owner_proof = NativeOwnerProofRecord {
-            flow_id: flow_node.flow_id.clone().0,
-            proof: owner_proof,
+            flow_id: flow_node.flow_id.clone(),
+            native_owner_proof: owner_proof,
         };
         let existing_owner_proof = self.native_owner_proof_record(&flow_node.flow_id.0)?;
         let existing_route = self.herdr_route(&flow_node.flow_id.0)?;
@@ -3993,15 +3874,15 @@ impl RegistersExistingFlow for FlowStore {
             Some(_) => commit.mutate(
                 self.herdr_routes,
                 FlowHerdrRouteRecord {
-                    flow_id: flow_node.flow_id.clone().0,
-                    route,
+                    flow_id: flow_node.flow_id.clone(),
+                    herdr_route: route,
                 },
             ),
             None => commit.assert(
                 self.herdr_routes,
                 FlowHerdrRouteRecord {
-                    flow_id: flow_node.flow_id.clone().0,
-                    route,
+                    flow_id: flow_node.flow_id.clone(),
+                    herdr_route: route,
                 },
             ),
         };
@@ -4019,9 +3900,9 @@ impl RegistersExistingFlow for FlowStore {
         };
         if let Some(previous) = previous_flow.filter(|previous| previous != &flow_node.flow_id)
             && let Some(mut old) = self.flow(&previous.0)?
-            && old.lifecycle.is_live()
+            && old.flow_lifecycle.is_live()
         {
-            old.lifecycle = FlowLifecycle::Exited;
+            old.flow_lifecycle = FlowLifecycle::Exited;
             commit = commit.mutate(self.flows, old);
         }
         commit = match existing_metaflow {
@@ -4523,7 +4404,7 @@ impl RecordsLaunchOutcome for FlowStore {
                 | LaunchOutcome::ReplaceRejected(ReplaceRejection::LaunchRefused(_))
         );
         let stored = StoredLaunchOutcome {
-            launch_request_id: launch_request_id.into(),
+            launch_request_id: signal_flow::LaunchRequestId(launch_request_id.to_owned()),
             launch_outcome: outcome,
         };
         let commit = self.engine.begin_atomic_commit();
@@ -4592,7 +4473,7 @@ impl AltersFlowRowsForTests for FlowStore {
 
     fn mark_exited(&self, flow_id: &str) {
         let mut flow = self.flow(flow_id).expect("flow read").expect("flow row");
-        flow.lifecycle = FlowLifecycle::Exited;
+        flow.flow_lifecycle = FlowLifecycle::Exited;
         let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
         self.engine
             .commit_atomic(commit)
@@ -4609,7 +4490,7 @@ impl AltersFlowRowsForTests for FlowStore {
 
     fn forget_session(&self, flow_id: &str) {
         let mut flow = self.flow(flow_id).expect("flow read").expect("flow row");
-        flow.thread_id = None;
+        flow.session_id_option = None;
         let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
         self.engine
             .commit_atomic(commit)
@@ -4622,20 +4503,25 @@ impl AltersFlowRowsForTests for FlowStore {
             .native_owner_environment()
             .expect("the test host and boot");
         let record = NativeOwnerProofRecord {
-            flow_id: flow_id.to_owned(),
-            proof: NativeOwnerProof {
-                process_id: i64::from(std::process::id()),
-                process_user_id: i64::from(
+            flow_id: flow_ethos::FlowId(flow_id.to_owned()),
+            native_owner_proof: NativeOwnerProof {
+                process_id: meta_signal_flow::ProcessId(i64::from(std::process::id())),
+                process_user_id: meta_signal_flow::ProcessUserId(i64::from(
                     fs::metadata(format!("/proc/{}", std::process::id()))
                         .expect("own process")
                         .uid(),
-                ),
+                )),
                 // A start this process never had: the adopted harness ended.
-                process_start_token: "0".into(),
-                host_id: environment.host_id,
-                boot_id: environment.boot_id,
+                process_start_token: meta_signal_flow::ProcessStartToken("0".into()),
+                host_id: crate::generated::memory::HostId(environment.host_id),
+                boot_id: crate::generated::memory::BootId(environment.boot_id),
                 harness_kind: flow.harness_kind.clone(),
-                native_session_id: flow.thread_id.clone().expect("the flow's session"),
+                native_session_id: signal_flow::NativeSessionId(
+                    flow.session_id_option
+                        .clone()
+                        .expect("the flow's session")
+                        .0,
+                ),
             },
         };
         let commit = match self.native_owner_proof_record(flow_id).expect("proof read") {
@@ -4751,7 +4637,7 @@ impl ReadsLaunchAttempt for FlowStore {
         };
         Ok(self
             .flow(&binding.flow_id.0)?
-            .is_none_or(|flow| flow.lifecycle.is_live()))
+            .is_none_or(|flow| flow.flow_lifecycle.is_live()))
     }
 }
 
@@ -4910,7 +4796,7 @@ impl ReadsLaunchInspectionRecords for FlowStore {
             .map(|stored| stored.launch_outcome.clone());
         let mut inconsistent = outcome_rows
             .first()
-            .is_some_and(|stored| stored.launch_request_id != launch_request_id);
+            .is_some_and(|stored| stored.launch_request_id.0 != launch_request_id);
         let flow_id_option = match launch_outcome_option.as_ref() {
             Some(LaunchOutcome::Started(launched)) => {
                 let matches_attempt = launch_attempt
@@ -5015,7 +4901,7 @@ impl ReadsFlowRows for FlowStore {
             .match_records(QueryPlan::all(self.flows))?
             .records()
             .iter()
-            .map(|flow| self.flow_node(&flow.flow_id))
+            .map(|flow| self.flow_node(&flow.flow_id.0))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .flatten()
@@ -5030,10 +4916,10 @@ impl RecordsFlowLifecycle for FlowStore {
         let Some(mut flow) = self.flow(flow_id)? else {
             return Ok(false);
         };
-        if !flow.lifecycle.is_live() {
+        if !flow.flow_lifecycle.is_live() {
             return Ok(false);
         }
-        flow.lifecycle = FlowLifecycle::Active;
+        flow.flow_lifecycle = FlowLifecycle::Active;
         self.engine.mutate_keyed(KeyedMutation::new(
             self.flows,
             RecordKey::new(flow_id),
@@ -5046,7 +4932,7 @@ impl RecordsFlowLifecycle for FlowStore {
         let Some(mut flow) = self.flow(flow_id)? else {
             return Ok(false);
         };
-        flow.lifecycle = FlowLifecycle::Stopped;
+        flow.flow_lifecycle = FlowLifecycle::Stopped;
         // A flow that ends before its launch was confirmed gives back the
         // Address it held; a confirmed one puts its metaflow to sleep, and
         // what it owed there is reassigned in the same commit.
@@ -5060,10 +4946,10 @@ impl RecordsFlowLifecycle for FlowStore {
         let Some(mut flow) = self.flow(flow_id)? else {
             return Ok(false);
         };
-        if !flow.lifecycle.is_live() {
+        if !flow.flow_lifecycle.is_live() {
             return Ok(false);
         }
-        flow.lifecycle = FlowLifecycle::Retired;
+        flow.flow_lifecycle = FlowLifecycle::Retired;
         // A flow that ends before its launch was confirmed gives back the
         // Address it held; a confirmed one puts its metaflow to sleep. A
         // restart record it holds goes in the same write.
@@ -5081,10 +4967,10 @@ impl RecordsFlowLifecycle for FlowStore {
         let Some(mut flow) = self.flow(flow_id)? else {
             return Ok(false);
         };
-        if !flow.lifecycle.is_live() {
+        if !flow.flow_lifecycle.is_live() {
             return Ok(false);
         }
-        flow.lifecycle = FlowLifecycle::Exited;
+        flow.flow_lifecycle = FlowLifecycle::Exited;
         // A Maintained metaflow whose flow went without Flow or an owner
         // ending it is owed a successor, in the same write.
         let owed = match self.address_hold(flow_id)? {
@@ -5154,15 +5040,18 @@ impl RebindsNativeSession for FlowStore {
         let Some(mut flow) = self.flow(flow_id)? else {
             return Ok(false);
         };
-        if !flow.lifecycle.is_live() || flow.thread_id.as_deref() != Some(previous) {
+        if !flow.flow_lifecycle.is_live()
+            || flow.session_id_option.as_ref().map(|held| held.0.as_str()) != Some(previous)
+        {
             return Ok(false);
         }
-        flow.thread_id = Some(session.to_owned());
+        flow.session_id_option = Some(signal_flow::SessionId(session.to_owned()));
         let mut commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
         if let Some(mut owner_proof) = self.native_owner_proof_record(flow_id)?
-            && owner_proof.proof.native_session_id == previous
+            && owner_proof.native_owner_proof.native_session_id.0 == previous
         {
-            owner_proof.proof.native_session_id = session.to_owned();
+            owner_proof.native_owner_proof.native_session_id =
+                signal_flow::NativeSessionId(session.to_owned());
             commit = commit.mutate(self.native_owner_proofs, owner_proof);
         }
         self.engine.commit_atomic(commit)?;
@@ -5187,7 +5076,12 @@ impl WritesFlowStore for FlowStore {
         origin: Origin,
     ) -> Result<PendingLaunch, StoreError> {
         let state = self.state()?;
-        let stable_socket = self.runtime_configuration()?.stable_codex.socket;
+        let stable_socket = self
+            .runtime_configuration()?
+            .stable_codex
+            .0
+            .control_socket_path
+            .0;
         let flow_id = format!("flow-{:016x}", state.next_flow_number.0);
         self.engine.commit_atomic(
             self.engine
@@ -5195,10 +5089,10 @@ impl WritesFlowStore for FlowStore {
                 .assert(
                     self.flows,
                     FlowRecord {
-                        flow_id: flow_id.clone(),
-                        flow_type,
+                        flow_id: flow_ethos::FlowId(flow_id.clone()),
+                        flow_type: signal_flow::FlowType(flow_type),
                         origin: origin.clone(),
-                        thread_id: None,
+                        session_id_option: None,
                         harness_kind: HarnessKind::Codex,
                         endpoint_selection: EndpointSelection::Available(
                             signal_flow::Available_Data {
@@ -5206,8 +5100,8 @@ impl WritesFlowStore for FlowStore {
                                 route_readiness: RouteReadiness::Parked,
                             },
                         ),
-                        lifecycle: FlowLifecycle::Pending,
-                        generation: 0,
+                        flow_lifecycle: FlowLifecycle::Pending,
+                        generation: Generation(0),
                     },
                 )
                 .mutate(
@@ -5229,12 +5123,12 @@ impl WritesFlowStore for FlowStore {
             return Ok(false);
         };
         if flow.origin != pending.origin
-            || flow.lifecycle != FlowLifecycle::Pending
-            || flow.thread_id.is_some()
+            || flow.flow_lifecycle != FlowLifecycle::Pending
+            || flow.session_id_option.is_some()
         {
             return Ok(false);
         }
-        flow.thread_id = Some(thread_id);
+        flow.session_id_option = Some(signal_flow::SessionId(thread_id));
         self.engine.mutate_keyed(KeyedMutation::new(
             self.flows,
             RecordKey::new(pending.flow_id.clone()),
@@ -5255,11 +5149,14 @@ impl WritesFlowStore for FlowStore {
         let Some(mut flow) = self.flow(flow_id)? else {
             return Ok(unrecorded());
         };
-        if flow.thread_id.is_none() {
+        if flow.session_id_option.is_none() {
             return Ok(unrecorded());
         }
         let origin = flow.origin.clone();
-        let session_id = flow.thread_id.clone().expect("checked thread identity");
+        let session_id = flow
+            .session_id_option
+            .clone()
+            .expect("checked thread identity");
         // The launch that bound this flow names the Address it takes, in
         // the same write that makes it Active; a launch that held it since
         // its binding keeps it and drops the hold.
@@ -5287,9 +5184,9 @@ impl WritesFlowStore for FlowStore {
         }
         let mut commit = self.engine.begin_atomic_commit();
         let mut written = false;
-        if flow.lifecycle == FlowLifecycle::Pending {
-            flow.lifecycle = FlowLifecycle::Active;
-            flow.generation = 1;
+        if flow.flow_lifecycle == FlowLifecycle::Pending {
+            flow.flow_lifecycle = FlowLifecycle::Active;
+            flow.generation = Generation(1);
             commit = commit.mutate(self.flows, flow);
             written = true;
         }
@@ -5320,7 +5217,7 @@ impl WritesFlowStore for FlowStore {
             .unwrap_or(HerdrRouteSelection::Unavailable);
         Ok(Output::Started(Launched {
             flow_id: signal_flow::FlowId(flow_id.into()),
-            session_id: signal_flow::SessionId(session_id),
+            session_id,
             herdr_route_selection,
             origin,
         }))
@@ -6881,21 +6778,17 @@ pub(crate) trait ReadsFlowMemory {
 
     fn recorded_flow_node(flow: FlowRecord, route: Option<FlowHerdrRouteRecord>) -> FlowNode {
         FlowNode {
-            flow_id: signal_flow::FlowId(flow.flow_id),
-            session_id: signal_flow::SessionId(flow.thread_id.unwrap_or_default()),
+            flow_id: flow.flow_id,
+            session_id: flow
+                .session_id_option
+                .unwrap_or_else(|| signal_flow::SessionId(String::new())),
             harness_kind: flow.harness_kind,
             endpoint_selection: flow.endpoint_selection,
             herdr_route_selection: route
-                .map(|record| HerdrRouteSelection::Available(record.route))
+                .map(|record| HerdrRouteSelection::Available(record.herdr_route))
                 .unwrap_or(HerdrRouteSelection::Unavailable),
             origin: flow.origin,
-            flow_lifecycle: match flow.lifecycle {
-                FlowLifecycle::Pending => SignalFlowLifecycle::Pending,
-                FlowLifecycle::Active => SignalFlowLifecycle::Active,
-                FlowLifecycle::Stopped => SignalFlowLifecycle::Stopped,
-                FlowLifecycle::Retired => SignalFlowLifecycle::Retired,
-                FlowLifecycle::Exited => SignalFlowLifecycle::Exited,
-            },
+            flow_lifecycle: flow.flow_lifecycle,
         }
     }
 }
@@ -6932,17 +6825,17 @@ mod tests {
         store
             .replace_heartbeat_standings(vec![StoredHeartbeatStanding {
                 address: recipient.clone(),
-                baseline_awake: 1,
-                baseline_working: None,
-                baseline_working_complete: false,
-                baseline_sent: 2,
-                baseline_queue: 3,
-                latest_awake: 4,
-                latest_working: Some(5),
-                latest_working_complete: true,
-                latest_sent: 6,
-                latest_queue: 7,
-                outstanding: None,
+                baseline_awake: crate::generated::memory::BaselineAwake(1),
+                baseline_working: crate::generated::memory::BaselineWorking(None),
+                baseline_working_complete: crate::generated::memory::BaselineWorkingComplete(false),
+                baseline_sent: crate::generated::memory::BaselineSent(2),
+                baseline_queue: crate::generated::memory::BaselineQueue(3),
+                latest_awake: crate::generated::memory::LatestAwake(4),
+                latest_working: crate::generated::memory::LatestWorking(Some(5)),
+                latest_working_complete: crate::generated::memory::LatestWorkingComplete(true),
+                latest_sent: crate::generated::memory::LatestSent(6),
+                latest_queue: crate::generated::memory::LatestQueue(7),
+                logical_delivery_id_option: None,
             }])
             .expect("standing persists");
         let signal_flow::PrivateSendResponse::SendAccepted(ordinary) = store
@@ -6971,13 +6864,25 @@ mod tests {
             panic!("heartbeat accepted")
         };
         let standing = store.heartbeat_standings().unwrap().pop().unwrap();
-        assert_eq!(standing.baseline_awake, 4);
-        assert_eq!(standing.baseline_working, Some(5));
-        assert_eq!(standing.baseline_sent, 6);
-        assert_eq!(standing.baseline_queue, 7);
         assert_eq!(
-            standing.outstanding,
-            Some(accepted.logical_delivery_id.clone()).map(|value| value.0)
+            standing.baseline_awake,
+            crate::generated::memory::BaselineAwake(4)
+        );
+        assert_eq!(
+            standing.baseline_working,
+            crate::generated::memory::BaselineWorking(Some(5))
+        );
+        assert_eq!(
+            standing.baseline_sent,
+            crate::generated::memory::BaselineSent(6)
+        );
+        assert_eq!(
+            standing.baseline_queue,
+            crate::generated::memory::BaselineQueue(7)
+        );
+        assert_eq!(
+            standing.logical_delivery_id_option,
+            Some(accepted.logical_delivery_id.clone())
         );
         assert!(store.delivery_purposes().unwrap().iter().any(|row| {
             row.logical_delivery_id == accepted.logical_delivery_id.0
@@ -6991,8 +6896,8 @@ mod tests {
         let reopened = fixture.store();
         let standing = reopened.heartbeat_standings().unwrap().pop().unwrap();
         assert_eq!(
-            standing.outstanding,
-            Some(accepted.logical_delivery_id).map(|value| value.0)
+            standing.logical_delivery_id_option,
+            Some(accepted.logical_delivery_id)
         );
     }
 
@@ -8123,13 +8028,13 @@ mod tests {
             boot_id: "test-boot".into(),
         };
         let proof = NativeOwnerProof {
-            process_id: i64::from(process_id),
-            process_user_id: i64::from(metadata.uid()),
-            process_start_token: start_token.clone(),
-            host_id: environment.host_id.clone(),
-            boot_id: environment.boot_id.clone(),
+            process_id: meta_signal_flow::ProcessId(i64::from(process_id)),
+            process_user_id: meta_signal_flow::ProcessUserId(i64::from(metadata.uid())),
+            process_start_token: meta_signal_flow::ProcessStartToken(start_token.clone()),
+            host_id: crate::generated::memory::HostId(environment.host_id.clone()),
+            boot_id: crate::generated::memory::BootId(environment.boot_id.clone()),
             harness_kind: HarnessKind::Codex,
-            native_session_id: "native-session".into(),
+            native_session_id: signal_flow::NativeSessionId("native-session".into()),
         };
         assert_eq!(
             proof.current_process_state(Some(&environment)),
@@ -8137,28 +8042,29 @@ mod tests {
         );
         assert_eq!(proof.current_process_state(None), NativeOwnerState::Unknown);
         let mut reused = proof.clone();
-        reused.process_start_token = "not-the-recorded-start".into();
+        reused.process_start_token =
+            meta_signal_flow::ProcessStartToken("not-the-recorded-start".into());
         assert_eq!(
             reused.current_process_state(Some(&environment)),
             NativeOwnerState::Dead
         );
         let mut another_boot = proof.clone();
-        another_boot.boot_id = "another-boot".into();
+        another_boot.boot_id = crate::generated::memory::BootId("another-boot".into());
         assert_eq!(
             another_boot.current_process_state(Some(&environment)),
             NativeOwnerState::Unknown
         );
         let mut another_host = proof;
-        another_host.host_id = "another-host".into();
+        another_host.host_id = crate::generated::memory::HostId("another-host".into());
         assert_eq!(
             another_host.current_process_state(Some(&environment)),
             NativeOwnerState::Unknown
         );
         // An unavailable process observation is not evidence of death.
         let mut unavailable = another_host;
-        unavailable.host_id = environment.host_id.clone();
-        unavailable.boot_id = environment.boot_id.clone();
-        unavailable.process_id = -1;
+        unavailable.host_id = crate::generated::memory::HostId(environment.host_id.clone());
+        unavailable.boot_id = crate::generated::memory::BootId(environment.boot_id.clone());
+        unavailable.process_id = meta_signal_flow::ProcessId(-1);
         assert_eq!(
             unavailable.current_process_state(Some(&environment)),
             NativeOwnerState::Unknown
@@ -8997,12 +8903,12 @@ mod tests {
         let runtime = store
             .runtime_configuration()
             .expect("runtime configuration");
-        assert_eq!(runtime.source_root, "/home/someone/primary");
+        assert_eq!(runtime.source_root.0, "/home/someone/primary");
         assert_eq!(
-            runtime.stable_codex.socket,
+            runtime.stable_codex.0.control_socket_path.0,
             "/home/someone/.codex/app-server-control/app-server-control.sock"
         );
-        assert_eq!(runtime.next_codex.home, "/home/someone/.codex-next");
+        assert_eq!(runtime.next_codex.0.home.0, "/home/someone/.codex-next");
         assert_eq!(
             defaults.store_path(),
             std::path::Path::new("/home/someone/.local/state/flow/flow.sema")
@@ -9018,7 +8924,8 @@ mod tests {
             resumed
                 .runtime_configuration()
                 .expect("resumed")
-                .source_root,
+                .source_root
+                .0,
             "/home/someone/primary",
             "a populated store resumes what it holds"
         );
@@ -9728,9 +9635,15 @@ mod tests {
             configuration
         );
         let runtime = store.runtime_configuration().expect("runtime recovers");
-        assert_eq!(runtime.source_root, "/srv/source");
-        assert_eq!(runtime.next_codex.socket, "/srv/next/control.sock");
-        assert_eq!(runtime.stable_codex.model_names, vec!["stable-model"]);
+        assert_eq!(runtime.source_root.0, "/srv/source");
+        assert_eq!(
+            runtime.next_codex.0.control_socket_path.0,
+            "/srv/next/control.sock"
+        );
+        assert_eq!(
+            runtime.stable_codex.0.model_name_vector,
+            vec![flow_ethos::ModelName("stable-model".into())]
+        );
     }
 
     #[test]

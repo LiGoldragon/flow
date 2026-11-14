@@ -1867,9 +1867,9 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
         }
         for standing in heartbeat_rows {
             if standing
-                .outstanding
+                .logical_delivery_id_option
                 .as_ref()
-                .is_some_and(|logical_id| !currents.contains_key(logical_id))
+                .is_some_and(|logical_id| !currents.contains_key(logical_id.0.as_str()))
             {
                 return Err(StoreError::StateInvariant);
             }
@@ -2376,12 +2376,12 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
             );
         for standing in heartbeat_rows {
             if standing
-                .outstanding
+                .logical_delivery_id_option
                 .as_ref()
-                .is_some_and(|logical_id| !held.contains(logical_id))
+                .is_some_and(|logical_id| !held.contains(logical_id.0.as_str()))
             {
                 let mut cleared = standing.clone();
-                cleared.outstanding = None;
+                cleared.logical_delivery_id_option = None;
                 evolution = evolution.mutate(heartbeat_table, cleared);
             }
         }
@@ -3463,17 +3463,17 @@ mod tests {
         }
         let heartbeat_row = StoredHeartbeatStanding {
             address: recipient.current().expect("address recodes"),
-            baseline_awake: 1,
-            baseline_working: None,
-            baseline_working_complete: true,
-            baseline_sent: 1,
-            baseline_queue: 0,
-            latest_awake: 1,
-            latest_working: None,
-            latest_working_complete: true,
-            latest_sent: 1,
-            latest_queue: 0,
-            outstanding: Some("delivered-moved".into()),
+            baseline_awake: crate::generated::memory::BaselineAwake(1),
+            baseline_working: crate::generated::memory::BaselineWorking(None),
+            baseline_working_complete: crate::generated::memory::BaselineWorkingComplete(true),
+            baseline_sent: crate::generated::memory::BaselineSent(1),
+            baseline_queue: crate::generated::memory::BaselineQueue(0),
+            latest_awake: crate::generated::memory::LatestAwake(1),
+            latest_working: crate::generated::memory::LatestWorking(None),
+            latest_working_complete: crate::generated::memory::LatestWorkingComplete(true),
+            latest_sent: crate::generated::memory::LatestSent(1),
+            latest_queue: crate::generated::memory::LatestQueue(0),
+            logical_delivery_id_option: Some(LogicalDeliveryId("delivered-moved".into())),
         };
         predecessor
             .assert(Assertion::new(heartbeat_table, heartbeat_row.clone()))
@@ -3580,7 +3580,7 @@ mod tests {
         let heartbeat_rows = engine
             .match_records(QueryPlan::all(heartbeat_table))
             .expect("heartbeat reads");
-        assert_eq!(heartbeat_rows.records()[0].outstanding, None);
+        assert_eq!(heartbeat_rows.records()[0].logical_delivery_id_option, None);
     }
 
     #[test]
@@ -3948,17 +3948,17 @@ mod tests {
                         heartbeat_table,
                         StoredHeartbeatStanding {
                             address: recipient.current().expect("address recodes"),
-                            baseline_awake: 0,
-                            baseline_working: None,
-                            baseline_working_complete: true,
-                            baseline_sent: 0,
-                            baseline_queue: 0,
-                            latest_awake: 0,
-                            latest_working: None,
-                            latest_working_complete: true,
-                            latest_sent: 0,
-                            latest_queue: 0,
-                            outstanding: Some("missing".into()),
+                            baseline_awake: crate::generated::memory::BaselineAwake(0),
+                            baseline_working: crate::generated::memory::BaselineWorking(None),
+                            baseline_working_complete: crate::generated::memory::BaselineWorkingComplete(true),
+                            baseline_sent: crate::generated::memory::BaselineSent(0),
+                            baseline_queue: crate::generated::memory::BaselineQueue(0),
+                            latest_awake: crate::generated::memory::LatestAwake(0),
+                            latest_working: crate::generated::memory::LatestWorking(None),
+                            latest_working_complete: crate::generated::memory::LatestWorkingComplete(true),
+                            latest_sent: crate::generated::memory::LatestSent(0),
+                            latest_queue: crate::generated::memory::LatestQueue(0),
+                            logical_delivery_id_option: Some(LogicalDeliveryId("missing".into())),
                         },
                     ))
                     .expect("orphan heartbeat stores")),
@@ -3989,17 +3989,17 @@ mod tests {
             };
             let heartbeat_row = StoredHeartbeatStanding {
                 address: recipient.current().expect("address recodes"),
-                baseline_awake: 0,
-                baseline_working: None,
-                baseline_working_complete: true,
-                baseline_sent: 0,
-                baseline_queue: 0,
-                latest_awake: 0,
-                latest_working: None,
-                latest_working_complete: true,
-                latest_sent: 0,
-                latest_queue: 0,
-                outstanding: Some("missing".into()),
+                baseline_awake: crate::generated::memory::BaselineAwake(0),
+                baseline_working: crate::generated::memory::BaselineWorking(None),
+                baseline_working_complete: crate::generated::memory::BaselineWorkingComplete(true),
+                baseline_sent: crate::generated::memory::BaselineSent(0),
+                baseline_queue: crate::generated::memory::BaselineQueue(0),
+                latest_awake: crate::generated::memory::LatestAwake(0),
+                latest_working: crate::generated::memory::LatestWorking(None),
+                latest_working_complete: crate::generated::memory::LatestWorkingComplete(true),
+                latest_sent: crate::generated::memory::LatestSent(0),
+                latest_queue: crate::generated::memory::LatestQueue(0),
+                logical_delivery_id_option: Some(LogicalDeliveryId("missing".into())),
             };
             let mut engine = Engine::open(
                 EngineOpen::new(&path, SchemaVersion::new(crate::store::FLOW_SCHEMA_VERSION))

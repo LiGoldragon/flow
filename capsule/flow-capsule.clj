@@ -2023,7 +2023,7 @@
 
 (defn window-measure
   "The window from the hand stop, in seconds: ready, end, each pane's mean
-  type-to-Bound, the readback, and the extrapolation to the night's seats."
+  type-to-SeatBound, the readback, and the extrapolation to the night's seats."
   [{:keys [start ready end pane-ms readback-ms seats]}]
   (let [span #(when (and %1 %2) (/ (- %2 %1) 1000.0))
         mean (when (seq pane-ms) (/ (reduce + pane-ms) (count pane-ms) 1000.0))
@@ -2339,13 +2339,13 @@
                      "; old store sha256 at the stop " old-digest)})))
 
 (defn rebind!
-  "Each line typed into its pane by Herdr, then Bound.<FlowId> awaited there;
-  each pane's time from typing to Bound."
+  "Each line typed into its pane by Herdr, then SeatBound.<FlowId> awaited there;
+  each pane's time from typing to SeatBound."
   [lines]
   (vec (for [{:keys [pane flow-id address line]} lines]
          (let [started (now)
                seen (atom [])
-               wait (arm [(herdr-events [(output-match pane (str "Bound." flow-id))] seen)])
+               wait (arm [(herdr-events [(output-match pane (str "SeatBound." flow-id))] seen)])
                typed (herdr "pane" "run" pane line)
                bound (boolean (wait (if (= address codex-secondary) 300 120) #(seq @seen)))]
            (when-not bound (keep-text! (str "takeover-rebind-" (str/replace pane ":" "-") ".txt") (pane-text pane)))
@@ -2383,7 +2383,7 @@
        :watched (str "no duplicate seat " (boolean no-duplicate) " (most panes " most-panes " of " pane-count
                      " before; Awake under another FlowId or newly " strangers ")"
                      "; re-bound " (- (count expected) (count unbound)) " of " (count expected) ", not " unbound
-                     "; Bound in a Claude pane " (boolean claude) ", in a Codex pane "
+                     "; SeatBound in a Claude pane " (boolean claude) ", in a Codex pane "
                      (if skip-codex "SKIPPED (FLOW_CAPSULE_SKIP_CODEX=1)" (boolean codex))
                      "; window " (pr-str measure) " against the night's 20-minute beat")})))
 

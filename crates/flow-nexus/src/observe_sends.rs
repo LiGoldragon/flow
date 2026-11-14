@@ -41,7 +41,7 @@ impl ObservesLogicalSends for RunningNexus {
                 process: forwarded.process.clone(),
                 native_session_id: thread.clone(),
             }) {
-                Ok(Output::Identified(address)) => Ok(SentBy::Sender(address)),
+                Ok(Output::ThreadIdentified(address)) => Ok(SentBy::Sender(address)),
                 Ok(_) => Ok(SentBy::Unbound),
                 Err(error) => Err(Box::new(Output::Refused(Refusal::Store(error.to_string())))),
             }
@@ -83,11 +83,16 @@ impl ObservesLogicalSends for RunningNexus {
                 return Err("the observing peer disconnected".into());
             }
             if !opened {
-                send(&Output::SendsObserved(
+                let visible =
                     crate::message_projection::ProjectsSendObservation::visible_send_observation(
                         &observation,
-                    ),
-                ))?;
+                    );
+                // ObserveDeliveries opens with its own output; ObserveSends
+                // and ObserveSender with SendsObserved.
+                send(&match selection {
+                    SendSelection::Message => Output::DeliveriesObserved(visible),
+                    SendSelection::Every | SendSelection::Sent(_) => Output::SendsObserved(visible),
+                })?;
                 opened = true;
             } else {
                 for snapshot in observation.delivery_snapshot_vector {

@@ -810,17 +810,18 @@ impl signal_flow::Answering for OrdinaryCall<'_> {
             .map_err(|error| Output::Refused(signal_flow::Refusal::Store(error.to_string())))
     }
 
-    // IdentifyThread answers Identified, the output at Identify's position:
-    // its own position holds an output it never gives, so its answer is
-    // always the error arm.
     fn identify_thread(
         &self,
         identify_thread: &signal_flow::IdentifyThread_Data,
-    ) -> Result<signal_flow::PromptDeliveryIntent, Output> {
-        Err(self
+    ) -> Result<signal_flow::Address, Output> {
+        match self
             .nexus
             .dispatch_metaflow_peer(Input::IdentifyThread(identify_thread.clone()), None)
-            .response)
+            .response
+        {
+            Output::ThreadIdentified(address) => Ok(address),
+            other => Err(other),
+        }
     }
 
     // An accepted Send answers SendAccepted, the output at Deliver's
@@ -883,28 +884,22 @@ impl signal_flow::Answering for OrdinaryCall<'_> {
         })
     }
 
-    // ObserveDeliveries's opening frame is SendsObserved, the output at
-    // ObserveSends's position: its own position holds an output it never
-    // gives, so its answer is always the error arm.
+    // An observation streams over a connection; a direct dispatch answers
+    // its opening frame once, as a read.
     fn observe_deliveries(
         &self,
         _delivery_cursor_option: &Option<signal_flow::DeliveryCursor>,
-    ) -> Result<StartRejection, Output> {
+    ) -> Result<signal_flow::VisibleSendObservation, Output> {
         use crate::store::logical_delivery::RecordsLogicalDeliveries;
-        Err(self
-            .nexus
+        self.nexus
             .store
             .read_message_delivery_snapshots(None)
-            .map_or_else(
-                |error| Output::Refused(signal_flow::Refusal::Store(error.to_string())),
-                |observation| {
-                    Output::SendsObserved(
-                        crate::message_projection::ProjectsSendObservation::visible_send_observation(
-                            &observation,
-                        ),
-                    )
-                },
-            ))
+            .map(|observation| {
+                crate::message_projection::ProjectsSendObservation::visible_send_observation(
+                    &observation,
+                )
+            })
+            .map_err(|error| Output::Refused(signal_flow::Refusal::Store(error.to_string())))
     }
 
     fn deliver_all(
@@ -945,11 +940,14 @@ impl signal_flow::Answering for OrdinaryCall<'_> {
         }
     }
 
-    // BindSeat answers Bound, the output at Bind's position: its own
-    // position holds an output it never gives, so its answer is always the
-    // error arm.
-    fn bind_seat(&self, bind_seat: &signal_flow::BindSeat_Data) -> Result<StartRejection, Output> {
-        Err(self.nexus.bind_seat(bind_seat.clone()))
+    fn bind_seat(
+        &self,
+        bind_seat: &signal_flow::BindSeat_Data,
+    ) -> Result<signal_flow::FlowId, Output> {
+        match self.nexus.bind_seat(bind_seat.clone()) {
+            Output::SeatBound(flow_id) => Ok(flow_id),
+            other => Err(other),
+        }
     }
 
     fn adopt(&self, adopt: &signal_flow::Adopt_Data) -> Result<signal_flow::FlowId, Output> {
@@ -1023,11 +1021,11 @@ impl signal_flow::Answering for OrdinaryCall<'_> {
         }
     }
 
-    // ClearAll answers Cleared, the output at Clear's position: its own
-    // position holds an output it never gives, so its answer is always the
-    // error arm.
-    fn clear_all(&self) -> Result<signal_flow::RefreshRejection, Output> {
-        Err(self.nexus.clear_all())
+    fn clear_all(&self) -> Result<Vec<signal_flow::RequestId>, Output> {
+        match self.nexus.clear_all() {
+            Output::AllCleared(cleared) => Ok(cleared),
+            other => Err(other),
+        }
     }
 
     fn push(&self, push: &signal_flow::Push_Data) -> Result<Vec<signal_flow::RequestId>, Output> {
@@ -2177,7 +2175,7 @@ impl ServesConnection for Connection {
                 let response = nexus.bind_seat(request);
                 let written = self.peer.write_response(&response);
                 drop(self);
-                if matches!(response, Output::Bound(_)) {
+                if matches!(response, Output::SeatBound(_)) {
                     nexus.drain_awake(&address);
                 }
                 return written;

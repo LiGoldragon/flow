@@ -284,7 +284,7 @@
   (check "a seat gone Asleep is changed"
          (= ["{ Psyche test Opus }"] (flow-capsule/changed-seats {"{ Psyche test Opus }" "0a1b2c"} {}))))
 
-;; The window, from the hand stop: ready, end, each pane's type-to-Bound
+;; The window, from the hand stop: ready, end, each pane's type-to-SeatBound
 ;; time, and the extrapolation to the night's seat count plus the readback.
 (check "the window is measured and extrapolated to the night's seats"
        (= {:ready-s 2.5 :end-s 30.0 :mean-pane-s 4.0 :readback-s 1.0 :extrapolated-s 85.0}

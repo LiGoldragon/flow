@@ -942,7 +942,10 @@ pub trait BindsSeats {
 
 impl BindsSeats for RunningNexus {
     fn bind_seat(&self, request: signal_flow::BindSeat_Data) -> Output {
-        self.adopt_seat(request.address, &request.seat_pane, None)
+        match self.adopt_seat(request.address, &request.seat_pane, None) {
+            Output::Bound(flow_id) => Output::SeatBound(flow_id),
+            response => response,
+        }
     }
 
     fn adopt(&self, request: signal_flow::Adopt_Data) -> Output {

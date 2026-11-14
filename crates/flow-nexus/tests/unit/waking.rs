@@ -3546,7 +3546,7 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
     // The trusted send server names the flow of its thread.
     assert_eq!(
         identify(&send_server_process, thread, &message),
-        Output::Identified(sender_address.clone())
+        Output::ThreadIdentified(sender_address.clone())
     );
     // A thread Flow recorded for no flow names no one.
     super::assert_unidentified(
@@ -3576,17 +3576,17 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
     let shell_process = FlowStore::process_identity_for_pid(shell.0.id()).unwrap();
     assert_eq!(
         identify(&shell_process, thread, &message),
-        Output::Identified(sender_address.clone())
+        Output::ThreadIdentified(sender_address.clone())
     );
     let foreign_child = child_written_at(&child_pid_file);
     assert_eq!(
         identify(&foreign_child, thread, &message),
-        Output::Identified(sender_address.clone())
+        Output::ThreadIdentified(sender_address.clone())
     );
     // Any caller may ask, the Message process or another.
     assert_eq!(
         identify(&send_server_process, thread, &send_server_process),
-        Output::Identified(sender_address.clone())
+        Output::ThreadIdentified(sender_address.clone())
     );
     // The send server runs in no pane: pane identification names no one.
     super::assert_unidentified(

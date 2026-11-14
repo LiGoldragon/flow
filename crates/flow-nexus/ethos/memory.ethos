@@ -21,7 +21,7 @@ Memory
 [ signal_flow:[ LaunchRequestId StartRejection ReplaceRejection FlowId HerdrRoute Process NativeSessionId TranscriptPath BackgroundWork NativePrompt Address ReapStanding HandoverCloseRefusal HandoverOwner Successor ]
   flow_nexus:[ LaunchedRecord ReplacedRecord ]
   signal_flow:[ LogicalDeliveryId Metaflow Lock CallerIdentity LaunchAttempt StoreIdentity OrdinarySocketPath MetaSocketPath FlowType Origin HarnessKind EndpointSelection FlowLifecycle SessionId HerdrPaneId DeliverKey SendAcceptance DeliverySnapshot DeliveryCursor RequestId SentBy VisibleNativeInput Section Touch HerdrPaneBinding LaunchProfile TurnEnd UndecodableFrame Tokens ModelName HandoverGeneration ]
-  meta_signal_flow:[ NativeCompactionMeasurement WarningBoundary WarningStage HarnessHookEvent ConfigureNexus ConfigureModel ConfigureThreshold ConfigureSendServer ConfigureMetaflow ConfigureHarnessFlags HeartbeatConfig DrawBound TryBound HandoverPoliciesConfiguration HandoverArchiveConfiguration HandoverCountConfiguration Duration RestartRecord SendOutcomeRecord Delivery ProcessId ProcessUserId ProcessStartToken DeliveryId HarnessProfile MetaAspects MessageNexusPath RequestDigest QueueRequestId QueueAttemptId QueueEvidence AbsenceProof Undecided QueueResolutionRecord EveryMinutes ReminderText ]
+  meta_signal_flow:[ ContextWarningLimit ContextUsageProjection WarningBoundary WarningStage HarnessHookEvent ConfigureNexus ConfigureModel ConfigureThreshold ConfigureSendServer ConfigureMetaflow ConfigureHarnessFlags HeartbeatConfig DrawBound TryBound HandoverPoliciesConfiguration HandoverArchiveConfiguration HandoverCountConfiguration Duration RestartRecord SendOutcomeRecord Delivery ProcessId ProcessUserId ProcessStartToken DeliveryId HarnessProfile MetaAspects MessageNexusPath RequestDigest QueueRequestId QueueAttemptId QueueEvidence AbsenceProof Undecided QueueResolutionRecord EveryMinutes ReminderText ]
   :meta_signal_flow:generated:signal:[ Path ]
   :std:boxed:[ Box ]
   flow_ethos:[ Minutes SourceRoot CodexEndpoint ] ]
@@ -76,7 +76,7 @@ Memory
   ; One model's refresh threshold, keyed by the model's name.
   StoredMetaThresholdConfiguration.{ ConfigureThreshold }
   ; One model's measured warning policy; its native evidence is retained.
-  StoredContextWarningPolicy.{ ModelName NativeCompactionMeasurement Vector<WarningBoundary> }
+  StoredContextWarningPolicy.{ ModelName ContextWarningLimit ContextUsageProjection Vector<WarningBoundary> }
   ; Installed native hooks, one explicit configuration row.
   StoredHarnessHookEvents.Vector<HarnessHookEvent>
   ; A flow crosses each fixed stage once; admission names its real delivery.

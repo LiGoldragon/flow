@@ -125,7 +125,8 @@ pub struct StoredMetaThresholdConfiguration {
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct StoredContextWarningPolicy {
     pub model_name: signal_flow::ModelName,
-    pub native_compaction_measurement: meta_signal_flow::NativeCompactionMeasurement,
+    pub context_warning_limit: meta_signal_flow::ContextWarningLimit,
+    pub context_usage_projection: meta_signal_flow::ContextUsageProjection,
     pub warning_boundary_vector: std::vec::Vec<meta_signal_flow::WarningBoundary>,
 }
 #[rustfmt::skip]

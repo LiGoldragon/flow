@@ -1,11 +1,11 @@
 //! Model-call context events choose one durable warning stage. A native
-//! compaction measurement supplies the denominator; refresh thresholds and
-//! advertised model windows do not enter this calculation.
+//! effective limit or an explicitly provisional policy supplies the
+//! denominator. The policy names the native usage projection and its lag.
 
 use crate::generated::memory::{ContextWarningProgress, WarningStageProgress, WarningStageState};
 use meta_signal_flow::{
-    ContextWarningConfigurationRefusal as PolicyRefusal, ContextWarningPolicy, WarningBoundary,
-    WarningStage,
+    ContextBoundaryEvidence, ContextWarningConfigurationRefusal as PolicyRefusal,
+    ContextWarningLimit, ContextWarningPolicy, WarningBoundary, WarningStage, WarningTokens,
 };
 
 pub(crate) struct WarningCrossing {
@@ -33,6 +33,27 @@ pub(crate) trait TracksContextWarnings {
         crossing: WarningCrossing,
         delivery_id: signal_flow::LogicalDeliveryId,
     ) -> Self;
+}
+
+pub(crate) trait DescribesContextWarningLimit {
+    fn warning_tokens(&self) -> &WarningTokens;
+    fn boundary_evidence(&self) -> &ContextBoundaryEvidence;
+}
+
+impl DescribesContextWarningLimit for ContextWarningLimit {
+    fn warning_tokens(&self) -> &WarningTokens {
+        match self {
+            Self::NativeEffectiveLimit(limit) => &limit.warning_tokens,
+            Self::ProvisionalPolicy(limit) => &limit.warning_tokens,
+        }
+    }
+
+    fn boundary_evidence(&self) -> &ContextBoundaryEvidence {
+        match self {
+            Self::NativeEffectiveLimit(limit) => &limit.context_boundary_evidence,
+            Self::ProvisionalPolicy(limit) => &limit.context_boundary_evidence,
+        }
+    }
 }
 
 trait OrdersWarningStages {
@@ -64,8 +85,8 @@ impl TestsWarningBoundary for WarningBoundary {
 
 impl JudgesContextWarnings for ContextWarningPolicy {
     fn validate(&self) -> Result<(), PolicyRefusal> {
-        if self.native_compaction_measurement.compaction_tokens.0 <= 0 {
-            return Err(PolicyRefusal::InvalidCompactionTokens);
+        if self.context_warning_limit.warning_tokens().0 <= 0 {
+            return Err(PolicyRefusal::InvalidWarningTokens);
         }
         let mut seen = std::collections::HashSet::new();
         for boundary in &self.warning_boundary_vector {
@@ -111,7 +132,7 @@ impl JudgesContextWarnings for ContextWarningPolicy {
                 progress.unreached(&boundary.warning_stage)
                     && boundary.reached(
                         context_tokens,
-                        self.native_compaction_measurement.compaction_tokens.0,
+                        self.context_warning_limit.warning_tokens().0,
                     )
             })
             .map(|boundary| boundary.warning_stage.clone())
@@ -137,7 +158,7 @@ impl JudgesContextWarnings for ContextWarningPolicy {
                 .is_some_and(|boundary| {
                     boundary.reached(
                         context_tokens,
-                        self.native_compaction_measurement.compaction_tokens.0,
+                        self.context_warning_limit.warning_tokens().0,
                     )
                 })
     }
@@ -146,7 +167,7 @@ impl JudgesContextWarnings for ContextWarningPolicy {
         self.validate().ok()?;
         let boundary = self.boundary(stage)?;
         let percent = i128::from(context_tokens.max(0)) * 100
-            / i128::from(self.native_compaction_measurement.compaction_tokens.0);
+            / i128::from(self.context_warning_limit.warning_tokens().0);
         Some(
             boundary
                 .warning_text
@@ -203,20 +224,27 @@ impl TracksContextWarnings for ContextWarningProgress {
 mod tests {
     use super::*;
     use meta_signal_flow::{
-        BoundaryIdentity, CompactionTokens, HarnessVersion, NativeCompactionMeasurement,
-        RemainingPercent, WarningPriority, WarningText,
+        BoundaryIdentity, ContextUsageProjection, CoverageGap, HarnessVersion,
+        NativeEffectiveLimit_Data, ProvisionalPolicy_Data, RemainingPercent, WarningPriority,
+        WarningText,
     };
 
     fn fixture_policy() -> ContextWarningPolicy {
         ContextWarningPolicy {
             model_name: meta_signal_flow::ModelName("fixture-model".into()),
-            native_compaction_measurement: NativeCompactionMeasurement {
-                compaction_tokens: CompactionTokens(200_000),
-                harness_kind: meta_signal_flow::HarnessKind::Codex,
-                harness_version: HarnessVersion("fixture-not-native-proof".into()),
-                transcript_path: signal_flow::TranscriptPath("/tmp/fixture.jsonl".into()),
-                boundary_identity: BoundaryIdentity("fixture-boundary".into()),
-            },
+            context_warning_limit: ContextWarningLimit::NativeEffectiveLimit(
+                NativeEffectiveLimit_Data {
+                    warning_tokens: WarningTokens(200_000),
+                    context_boundary_evidence: ContextBoundaryEvidence {
+                        harness_kind: meta_signal_flow::HarnessKind::Codex,
+                        harness_version: HarnessVersion("fixture-not-native-proof".into()),
+                        transcript_path: signal_flow::TranscriptPath("/tmp/fixture.jsonl".into()),
+                        boundary_identity: BoundaryIdentity("fixture-boundary".into()),
+                        coverage_gap: CoverageGap("fixture-not-native-proof".into()),
+                    },
+                },
+            ),
+            context_usage_projection: ContextUsageProjection::CodexLastTotal,
             warning_boundary_vector: vec![
                 WarningBoundary {
                     warning_stage: WarningStage::Early,
@@ -302,7 +330,11 @@ mod tests {
     #[test]
     fn capacity_and_refresh_threshold_do_not_enter_native_denominator_math() {
         let mut policy = fixture_policy();
-        policy.native_compaction_measurement.compaction_tokens = CompactionTokens(400_000);
+        let ContextWarningLimit::NativeEffectiveLimit(limit) = &mut policy.context_warning_limit
+        else {
+            panic!("fixture has a native limit");
+        };
+        limit.warning_tokens = WarningTokens(400_000);
         let progress = ContextWarningProgress::initial(signal_flow::FlowId("flow".into()));
         assert!(policy.crossing(&progress, 199_999).is_none());
         assert_eq!(
@@ -320,6 +352,27 @@ mod tests {
             policy.warning_text(&WarningStage::Early, 108_000).unwrap(),
             "you are at 54 percent of your context"
         );
+    }
+
+    #[test]
+    fn provisional_policy_uses_its_chosen_denominator_without_becoming_native() {
+        let mut policy = fixture_policy();
+        let evidence = policy.context_warning_limit.boundary_evidence().clone();
+        policy.context_warning_limit =
+            ContextWarningLimit::ProvisionalPolicy(ProvisionalPolicy_Data {
+                warning_tokens: WarningTokens(400_000),
+                context_boundary_evidence: evidence,
+            });
+        let progress = ContextWarningProgress::initial(signal_flow::FlowId("flow".into()));
+        assert!(policy.crossing(&progress, 199_999).is_none());
+        assert_eq!(
+            policy.crossing(&progress, 200_000).unwrap().selected,
+            WarningStage::Early
+        );
+        assert!(matches!(
+            policy.context_warning_limit,
+            ContextWarningLimit::ProvisionalPolicy(_)
+        ));
     }
 
     #[test]

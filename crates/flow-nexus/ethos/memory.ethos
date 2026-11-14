@@ -19,7 +19,11 @@
 
 Memory
 [ signal_flow:[ LaunchRequestId StartRejection ReplaceRejection FlowId HerdrRoute Process NativeSessionId TranscriptPath BackgroundWork NativePrompt Address ReapStanding HandoverCloseRefusal HandoverOwner Successor ]
-  flow_nexus:[ LaunchedRecord ReplacedRecord ] ]
+  flow_nexus:[ LaunchedRecord ReplacedRecord ]
+  signal_flow:[ Metaflow Lock CallerIdentity LaunchAttempt StoreIdentity OrdinarySocketPath MetaSocketPath ]
+  meta_signal_flow:[ ConfigureNexus ConfigureModel ConfigureThreshold ConfigureLeaveOut ConfigureSendServer ConfigureMetaflow ConfigureHarnessFlags HeartbeatConfig DrawBound TryBound HandoverPoliciesConfiguration HandoverArchiveConfiguration HandoverCountConfiguration Duration RestartRecord SendOutcomeRecord Delivery ]
+  :meta_signal_flow:generated:signal:[ Path ]
+  flow_ethos:[ Minutes ] ]
 [ LaunchOutcome.[ Started.LaunchedRecord
                   Replaced.ReplacedRecord
                   StartRejected.StartRejection
@@ -62,4 +66,53 @@ Memory
                          Ended.Option<NativeSessionId>
                          Cleared.Option<NativeSessionId> ]
   ; One flow's durable metadata; its original key is preserved exactly.
-  FlowEvents.{ FlowId Vector<RecordedHarnessEvent> } ]
+  FlowEvents.{ FlowId Vector<RecordedHarnessEvent> }
+  ; The configuration Flow keeps for its meta clients, one family per kind;
+  ; each row's key is written by hand beside it.
+  StoredMetaNexusConfiguration.{ ConfigureNexus }
+  ; The native model one Model runs, keyed by the Model.
+  StoredMetaModelConfiguration.{ ConfigureModel }
+  ; One model's refresh threshold, keyed by the model's name.
+  StoredMetaThresholdConfiguration.{ ConfigureThreshold }
+  ; One metaflow's default leave-outs on one harness, keyed by its Address
+  ; and that harness.
+  StoredMetaLeaveOutConfiguration.{ ConfigureLeaveOut }
+  StoredMetaSendServerConfiguration.{ ConfigureSendServer }
+  StoredMetaMetaflowConfiguration.{ ConfigureMetaflow }
+  ; The Address of the Investigation seat, one row.
+  StoredMetaInvestigationConfiguration.{ Address }
+  ; The default Minutes, one row; absent until Configure declares one.
+  StoredMetaDefaultMinutesConfiguration.{ Minutes }
+  StoredMetaRequestPolicyConfiguration.{ DrawBound TryBound }
+  ; Extra native harness arguments for one metaflow, keyed by Address. An
+  ; absent row means the empty argument string.
+  StoredMetaHarnessFlagsConfiguration.{ ConfigureHarnessFlags }
+  ; The configured sampling heartbeat; no row means disabled.
+  StoredMetaHeartbeatConfiguration.{ HeartbeatConfig }
+  ; The hook command a Claude flow is launched with, one row; none until a
+  ; HarnessHook is declared.
+  StoredMetaHarnessHookConfiguration.{ Path }
+  ; One protected Address, one row per Address; none by default.
+  StoredMetaProtectedAddressConfiguration.{ Address }
+  StoredHandoverConfiguration.{ HandoverPoliciesConfiguration
+                                HandoverArchiveConfiguration
+                                HandoverCountConfiguration
+                                Duration }
+  ; The durable address-indexed Metaflow. Its state and queue are separate
+  ; from native Flow launch records: an address remains asleep after the
+  ; process it named is gone.
+  StoredMetaflow.{ Metaflow }
+  ; At most one lock is held for a recipient address.
+  StoredMetaflowLock.{ Lock }
+  ; A flow's role: its aspect and model, keyed by its FlowId. It is exactly
+  ; what ResolveCaller answers, so the CallerIdentity is stored as it is.
+  StoredRole.{ CallerIdentity }
+  StoredLaunchAttempt.{ LaunchAttempt }
+  StoredRestart.{ RestartRecord }
+  StoredSendOutcome.{ SendOutcomeRecord }
+  StoredDelivery.{ Delivery }
+  StoredStoreIdentity.{ StoreIdentity }
+  ; The sockets half of the meta Configuration.
+  FlowStoreConfiguration.{ OrdinarySocketPath MetaSocketPath }
+  ; The store's flow counter: the number the next flow is minted with.
+  FlowStoreState.{ NextFlowNumber.Integer } ]

@@ -148,7 +148,7 @@ impl UpgradesLaunchOutcome for StoredLaunchOutcomeV9 {
         };
         let attempt = attempt.ok_or_else(|| ReapUpgradeRefusal::AttemptMissing(id.clone()))?;
         let binding = attempt
-            .attempt
+            .launch_attempt
             .native_launch_binding_option
             .as_ref()
             .ok_or_else(|| ReapUpgradeRefusal::BindingMissing(id.clone()))?;
@@ -159,7 +159,7 @@ impl UpgradesLaunchOutcome for StoredLaunchOutcomeV9 {
             launched_record: LaunchedRecord {
                 flow_id: binding.flow_id.clone(),
                 session_id: signal_flow::SessionId(binding.native_session_id.0.clone()),
-                origin: attempt.attempt.origin.clone(),
+                origin: attempt.launch_attempt.origin.clone(),
             },
         };
         let reap_standing = match stop {
@@ -173,7 +173,7 @@ impl UpgradesLaunchOutcome for StoredLaunchOutcomeV9 {
             Some(PendingReap {
                 predecessor: Predecessor(replacement.predecessor.0.clone()),
                 launch_request_id: signal_flow::LaunchRequestId(id),
-                address: attempt.attempt.launch_profile.address.clone(),
+                address: attempt.launch_attempt.launch_profile.address.clone(),
                 reap_standing,
                 // Owed by the successor until the evolution reads where
                 // its Address stands (`owned_as_stands`).
@@ -322,7 +322,7 @@ impl UpgradesReapMemory for FlowStore {
             attempt_rows
                 .records()
                 .iter()
-                .find(|stored| stored.attempt.launch_request_id.0 == id)
+                .find(|stored| stored.launch_attempt.launch_request_id.0 == id)
         };
         let replacement_of = |id: &str| {
             replacement_rows

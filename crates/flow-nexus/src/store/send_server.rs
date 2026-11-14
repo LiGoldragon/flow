@@ -10,8 +10,7 @@
 
 use super::metaflow::SleepsMetaflows;
 use super::{FlowStore, NamesLiveFlow, ReadsFlowRows, StoreError};
-use meta_signal_flow::ConfigureSendServer;
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+pub(crate) use crate::generated::memory::StoredMetaSendServerConfiguration;
 use sema_engine::{EngineRecord, FamilyName, RecordKey, SchemaHash, TableDescriptor, TableName};
 use signal_flow::{HarnessKind, Metaflow};
 
@@ -22,15 +21,9 @@ pub(super) const META_SEND_SERVER_CONFIGURATION_FAMILY: &str =
 pub(super) const META_SEND_SERVER_CONFIGURATION_SCHEMA: &str =
     "flow-nexus-meta-send-server-configuration-v1";
 
-/// One trusted send server, keyed by its Codex app-server executable.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredMetaSendServerConfiguration {
-    pub send_server: ConfigureSendServer,
-}
-
 impl EngineRecord for StoredMetaSendServerConfiguration {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.send_server.codex_app_server_binary.clone().0)
+        RecordKey::new(self.configure_send_server.codex_app_server_binary.clone().0)
     }
 }
 

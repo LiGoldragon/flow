@@ -126,11 +126,11 @@ impl MutatesMetaflows for FlowStore {
             }
         }
         let state = self.state()?;
-        let Some(next) = state.next_flow_number.checked_add(1) else {
+        let Some(next) = state.next_flow_number.0.checked_add(1) else {
             return Err(StoreError::StateInvariant);
         };
         let flow_id =
-            launched.unwrap_or_else(|| FlowId(format!("flow-{:016x}", state.next_flow_number)));
+            launched.unwrap_or_else(|| FlowId(format!("flow-{:016x}", state.next_flow_number.0)));
         let new_metaflow = existing.is_none();
         let new_binding = self.bound_process(&address)?.is_none();
         let mut metaflow = existing.map(|row| row.metaflow).unwrap_or(Metaflow {
@@ -148,7 +148,7 @@ impl MutatesMetaflows for FlowStore {
         let commit = self.engine.begin_atomic_commit().mutate(
             self.state,
             FlowStoreState {
-                next_flow_number: next,
+                next_flow_number: crate::generated::memory::NextFlowNumber(next),
             },
         );
         let commit = if new_metaflow {
@@ -525,7 +525,7 @@ impl TakesLaunchAddress for FlowStore {
             .match_records(QueryPlan::all(self.launch_attempts))?
             .records()
         {
-            let attempt = &attempt.attempt;
+            let attempt = &attempt.launch_attempt;
             if attempt.launch_request_id != profile.launch_request_id
                 && attempt.launch_profile.address == profile.address
                 && self.launch_attempt_unsettled(attempt)?

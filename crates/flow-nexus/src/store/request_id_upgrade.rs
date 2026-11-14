@@ -595,7 +595,7 @@ impl RunsRequestIdAnnouncements for super::FlowStore {
             .engine
             .match_records(QueryPlan::all(self.request_id_upgrade.task_announcements))?;
         for mut row in task_rows.records().to_vec() {
-            if self.settle_notice_status(&mut row.status, row.tries, policy.announcement_tries.0)? {
+            if self.settle_notice_status(&mut row.status, row.tries, policy.try_bound.0)? {
                 self.engine.mutate_keyed(KeyedMutation::new(
                     self.request_id_upgrade.task_announcements,
                     row.record_key(),
@@ -638,7 +638,7 @@ impl RunsRequestIdAnnouncements for super::FlowStore {
             .engine
             .match_records(QueryPlan::all(self.request_id_upgrade.upgrade_assignments))?;
         for mut row in assignment_rows.records().to_vec() {
-            if self.settle_notice_status(&mut row.status, row.tries, policy.announcement_tries.0)? {
+            if self.settle_notice_status(&mut row.status, row.tries, policy.try_bound.0)? {
                 self.engine.mutate_keyed(KeyedMutation::new(
                     self.request_id_upgrade.upgrade_assignments,
                     row.record_key(),
@@ -1344,7 +1344,7 @@ impl BecomesCurrentWithRequestIds for PriorStoredSendOutcome {
             }
         };
         Ok(super::send_outcome::StoredSendOutcome {
-            record: SendOutcomeRecord {
+            send_outcome_record: SendOutcomeRecord {
                 send_outcome_id: meta_signal_flow::SendOutcomeId(old.send_outcome_id.clone()),
                 process_option: old
                     .process_option
@@ -2370,10 +2370,8 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
             .register(
                 descriptors.request_policy,
                 vec![super::StoredMetaRequestPolicyConfiguration {
-                    request_id_draws: meta_signal_flow::DrawBound(super::SEEDED_REQUEST_ID_DRAWS),
-                    announcement_tries: meta_signal_flow::TryBound(
-                        super::SEEDED_ANNOUNCEMENT_TRIES,
-                    ),
+                    draw_bound: meta_signal_flow::DrawBound(super::SEEDED_REQUEST_ID_DRAWS),
+                    try_bound: meta_signal_flow::TryBound(super::SEEDED_ANNOUNCEMENT_TRIES),
                 }],
             );
         for standing in heartbeat_rows {
@@ -3791,8 +3789,9 @@ mod tests {
         let outcomes = engine
             .match_records(QueryPlan::all(outcomes))
             .expect("outcomes read");
-        let meta_signal_flow::OrdinarySendOutcome::Accepted(acceptance) =
-            &outcomes.records()[0].record.ordinary_send_outcome
+        let meta_signal_flow::OrdinarySendOutcome::Accepted(acceptance) = &outcomes.records()[0]
+            .send_outcome_record
+            .ordinary_send_outcome
         else {
             panic!("accepted outcome stays accepted")
         };
@@ -4480,12 +4479,9 @@ mod tests {
             .expect("policy reads");
         assert_eq!(policy.records().len(), 1);
         assert_eq!(
-            policy.records()[0].request_id_draws,
+            policy.records()[0].draw_bound,
             meta_signal_flow::DrawBound(64)
         );
-        assert_eq!(
-            policy.records()[0].announcement_tries,
-            meta_signal_flow::TryBound(3)
-        );
+        assert_eq!(policy.records()[0].try_bound, meta_signal_flow::TryBound(3));
     }
 }

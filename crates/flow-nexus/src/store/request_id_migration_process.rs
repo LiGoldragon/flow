@@ -576,8 +576,8 @@ fn inject_malformed_request_policy(store_path: &Path) {
         &store.engine,
         store.meta_configuration_tables.request_policy,
         vec![StoredMetaRequestPolicyConfiguration {
-            request_id_draws: meta_signal_flow::DrawBound(0),
-            announcement_tries: meta_signal_flow::TryBound(3),
+            draw_bound: meta_signal_flow::DrawBound(0),
+            try_bound: meta_signal_flow::TryBound(3),
         }],
     )
     .expect("test seam writes the malformed policy row");
@@ -1013,8 +1013,8 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
 
     inject_malformed_request_policy(&store_path);
     let malformed = vec![StoredMetaRequestPolicyConfiguration {
-        request_id_draws: meta_signal_flow::DrawBound(0),
-        announcement_tries: meta_signal_flow::TryBound(3),
+        draw_bound: meta_signal_flow::DrawBound(0),
+        try_bound: meta_signal_flow::TryBound(3),
     }];
     assert_eq!(request_policy_rows(&store_path), malformed);
     let refused_runtime = tempfile::tempdir().expect("refused runtime");

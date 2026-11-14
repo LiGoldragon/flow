@@ -43,7 +43,8 @@ impl RecordsCreatedLaunchPane for FlowStore {
         let Some(attempt) = self.stored_launch_attempt(&pane.launch_request_id.0)? else {
             return Ok(false);
         };
-        if attempt.attempt.launch_attempt_phase != LaunchAttemptPhase::NativeLaunchIntentRecorded
+        if attempt.launch_attempt.launch_attempt_phase
+            != LaunchAttemptPhase::NativeLaunchIntentRecorded
             || self
                 .stored_launch_pane(&pane.launch_request_id.0)?
                 .is_some()

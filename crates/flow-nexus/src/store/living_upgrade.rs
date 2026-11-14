@@ -417,7 +417,7 @@ impl UpgradeFrom<StoredSendOutcomeBeforeOrigin> for super::send_outcome::StoredS
     fn upgrade_from(before: StoredSendOutcomeBeforeOrigin) -> Decision<Self, Self::Refusal> {
         let record = before.record;
         Decision::Ready(super::send_outcome::StoredSendOutcome {
-            record: meta_signal_flow::SendOutcomeRecord {
+            send_outcome_record: meta_signal_flow::SendOutcomeRecord {
                 send_outcome_id: record.send_outcome_id,
                 process_option: record.process_option,
                 sent_by: record.sender.map_or(SentBy::Unknown, SentBy::Sender),
@@ -468,7 +468,7 @@ impl UpgradeFrom<StoredNexusBeforeSession>
     fn upgrade_from(before: StoredNexusBeforeSession) -> Decision<Self, Self::Refusal> {
         let nexus = before.nexus;
         Decision::Ready(super::nexus_configuration::StoredMetaNexusConfiguration {
-            nexus: meta_signal_flow::ConfigureNexus {
+            configure_nexus: meta_signal_flow::ConfigureNexus {
                 source_root: nexus.source_root,
                 first_codex_endpoint: nexus.first_codex_endpoint,
                 second_codex_endpoint: nexus.second_codex_endpoint,
@@ -815,8 +815,11 @@ mod tests {
                 .unwrap()
                 .records()[0]
                 .clone();
-            assert_eq!(outcome.record.sent_by, SentBy::Unknown);
-            assert_eq!(outcome.record.address_option, Some(address("upgraded")));
+            assert_eq!(outcome.send_outcome_record.sent_by, SentBy::Unknown);
+            assert_eq!(
+                outcome.send_outcome_record.address_option,
+                Some(address("upgraded"))
+            );
         }
     }
 
@@ -846,8 +849,8 @@ mod tests {
         };
         let Decision::Ready(now) =
             super::super::nexus_configuration::StoredMetaNexusConfiguration::upgrade_from(before);
-        assert_eq!(now.nexus.herdr_session_name.0, "default");
-        assert_eq!(now.nexus.source_root.0, "/source");
-        assert_eq!(now.nexus.lease.0, 60);
+        assert_eq!(now.configure_nexus.herdr_session_name.0, "default");
+        assert_eq!(now.configure_nexus.source_root.0, "/source");
+        assert_eq!(now.configure_nexus.lease.0, 60);
     }
 }

@@ -15,8 +15,8 @@
 
 use super::{AnnouncesLaunchChanges, FlowHerdrRouteRecord, FlowStore, ReadsFlowStore, StoreError};
 use crate::generated::memory::SeatBirth;
+pub(crate) use crate::generated::memory::StoredRestart;
 use meta_signal_flow::{RestartPhase, RestartRecord};
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     AtomicCommit, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan, RecordKey,
     SchemaHash, TableDescriptor, TableName,
@@ -29,12 +29,6 @@ pub(super) const RESTART_SCHEMA: &str = "flow-nexus-restart-v1";
 pub(super) const SEAT_BIRTH_TABLE_NAME: TableName = TableName::new("flow_nexus_seat_births");
 pub(super) const SEAT_BIRTH_FAMILY: &str = "flow-nexus-seat-birth";
 pub(super) const SEAT_BIRTH_SCHEMA: &str = "flow-nexus-seat-birth-v1";
-
-/// One flow's restart under way, keyed by its FlowId.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct StoredRestart {
-    pub restart_record: RestartRecord,
-}
 
 impl EngineRecord for StoredRestart {
     fn record_key(&self) -> RecordKey {

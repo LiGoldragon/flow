@@ -9,6 +9,7 @@ use super::metaflow::SleepsMetaflows;
 use super::queue_delivery::AccountsQueueDelivery;
 use super::reminder::RecordsReminders;
 use super::*;
+pub(crate) use crate::generated::memory::StoredStoreIdentity;
 use crate::generated::send_tool::{
     Accepted_Data, SendCall, SendOutcome as ToolSendOutcome, SendRefusal as ToolSendRefusal,
     Target, ToolCallKey,
@@ -62,10 +63,6 @@ impl DrawsRequestId for SystemRequestIdDrawer {
 const STORE_IDENTITY_TABLE_NAME: TableName = TableName::new("flow_nexus_store_identity");
 const STORE_IDENTITY_KEY: &str = "store";
 
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredStoreIdentity {
-    pub store_identity: signal_flow::StoreIdentity,
-}
 impl EngineRecord for StoredStoreIdentity {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(STORE_IDENTITY_KEY)

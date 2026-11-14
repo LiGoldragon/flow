@@ -1,6 +1,7 @@
 //! Durable, countable answers to ordinary Send queries.
 
 use super::*;
+pub(crate) use crate::generated::memory::StoredSendOutcome;
 use meta_signal_flow::{OrdinarySendOutcome, SendOutcomeRecord};
 use signal_flow::{Address, PrivateSendResponse, Process, SentBy};
 
@@ -35,14 +36,9 @@ impl MemoryDefinition for SendOutcomeCounter {
     }
 }
 
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredSendOutcome {
-    pub(crate) record: SendOutcomeRecord,
-}
-
 impl EngineRecord for StoredSendOutcome {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.record.send_outcome_id.clone().0)
+        RecordKey::new(self.send_outcome_record.send_outcome_id.clone().0)
     }
 }
 
@@ -180,7 +176,7 @@ impl RecordsSendOutcomes for FlowStore {
         self.engine.commit_atomic(counter_mutation.assert(
             self.send_outcomes.outcomes,
             StoredSendOutcome {
-                record: record.clone(),
+                send_outcome_record: record.clone(),
             },
         ))?;
         Ok(record)
@@ -192,7 +188,7 @@ impl RecordsSendOutcomes for FlowStore {
             .match_records(QueryPlan::all(self.send_outcomes.outcomes))?
             .records()
             .iter()
-            .map(|stored| stored.record.clone())
+            .map(|stored| stored.send_outcome_record.clone())
             .collect())
     }
 }
@@ -294,7 +290,7 @@ mod tests {
             .expect("ledger store opens");
             let tables = open_tables(&mut engine).expect("ledger tables register");
             let stored = StoredSendOutcome {
-                record: first.clone(),
+                send_outcome_record: first.clone(),
             };
             engine
                 .commit_atomic(
@@ -319,7 +315,12 @@ mod tests {
                 .expect("ledger reads")
                 .records()
                 .to_vec();
-            assert_eq!(rows, vec![StoredSendOutcome { record: first }]);
+            assert_eq!(
+                rows,
+                vec![StoredSendOutcome {
+                    send_outcome_record: first
+                }]
+            );
         }
     }
 }

@@ -9,6 +9,7 @@
 //! there and is never retried, since what reached the pane is not known.
 
 use super::{DefaultConfiguration, FlowStore, SeedsConfiguration, StoreError};
+pub(crate) use crate::generated::memory::StoredDelivery;
 use crate::store::ManagesMetaflowState;
 use meta_signal_flow::{
     Delivery, DeliveryGrade, DeliveryId, HarnessProfile, InterruptWitness, MessageNexusPath,
@@ -26,12 +27,6 @@ pub(super) const PANE_LEASE_TABLE_NAME: TableName = TableName::new("flow_nexus_p
 pub(super) const DELIVERY_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_delivery_configuration");
 pub(super) const DELIVERY_CONFIGURATION_KEY: &str = "delivery";
-
-/// A settled delivery, keyed by its DeliveryId: what a repeat answers.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct StoredDelivery {
-    pub delivery: Delivery,
-}
 
 impl EngineRecord for StoredDelivery {
     fn record_key(&self) -> RecordKey {

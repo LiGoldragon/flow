@@ -454,7 +454,6 @@
             inherit (context) pkgs processCheck binaries;
             flowNexus = context.members.flow-nexus;
             members = lib.attrValues (removeAttrs context.commands [ "flow-nexus" ]);
-            memberChecks = lib.attrValues context.memberChecks;
           };
         }
       );
@@ -516,16 +515,19 @@
         };
       });
 
-      # Every check, the base's cargo-nix with the ones above; checks.default
-      # is all of them, so a green default is the whole gate.
+      # Every check, the base's cargo-nix with the ones above. The configured
+      # package and its seed check are checks rather than inputs to the
+      # deployable package, so a test edit changes the gate alone.
       checks = forSystems (
         system:
-        (mkContext system).workspace.checks
-        // {
+        let
+          context = mkContext system;
+          pkgs = context.pkgs;
+          workspaceChecks = removeAttrs context.workspace.checks [ "default" ];
           # The package a deployment builds: the executable with a default
           # configuration composed into its Rust, so a contract change that
           # breaks that composition fails here and not at a deployment.
-          configured-package = self.lib.${system}.mkFlowPackage {
+          configuredPackage = self.lib.${system}.mkFlowPackage {
             defaultConfiguration = {
               sourceRoot = "/home/example/primary";
               runtimeDirectory = "/run/user/1000/nexus/main";
@@ -554,6 +556,25 @@
               herdrSession = "default";
             };
           };
+          configuredPackageCheck = pkgs.linkFarm "check-flow-configured-package" [
+            {
+              name = "package";
+              path = configuredPackage;
+            }
+            {
+              name = "configured-daemon-seeds";
+              path = configuredPackage.configuredNexusCheck;
+            }
+          ];
+          allChecks = workspaceChecks // {
+            configured-package = configuredPackageCheck;
+          };
+        in
+        allChecks
+        // {
+          default = pkgs.linkFarm "flow-checks" (
+            lib.mapAttrsToList (name: path: { inherit name path; }) allChecks
+          );
         }
       );
 

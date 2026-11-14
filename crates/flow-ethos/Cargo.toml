@@ -1,6 +1,6 @@
 [package]
 name = "flow-ethos"
-version.workspace = true
+version = "0.56.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

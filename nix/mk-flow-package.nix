@@ -5,9 +5,9 @@
 # Only flow-nexus's daemon binary is compiled again, with the
 # executable-default-configuration feature and the generated module, against
 # the one flow-nexus library every build links; every other binary and
-# member is its ordinary build, and no test is compiled again.  The package
-# exists only once every member's check has passed and the configured daemon
-# has seeded a fresh memory with what it carries.
+# member is its ordinary build, and no test is compiled again.  Repository
+# checks gate this package as checks; they are not inputs to the deployable
+# package, so changing a test leaves the package's store path unchanged.
 {
   lib,
   pkgs,
@@ -15,8 +15,6 @@
   flowNexus,
   # The other members' builds, whose binaries the package carries.
   members,
-  # Every member's check, flow-nexus's among them, which the package waits on.
-  memberChecks,
   # Runs one ignored test of the flow-nexus test build: name, test name,
   # the shell that sets its environment.
   processCheck,
@@ -261,7 +259,6 @@ binaries "flow-configured-${version}"
     ++ members
   )
   {
-    checked = [ configuredNexusCheck ] ++ memberChecks;
     passthru = {
       inherit generatedModule configuredNexusCheck;
       configured = true;

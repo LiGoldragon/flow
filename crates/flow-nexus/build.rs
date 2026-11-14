@@ -11,7 +11,6 @@ fn main() {
         "library",
         "starter",
         "send_tool",
-        "landing",
         "memory",
         "emission",
     ] {

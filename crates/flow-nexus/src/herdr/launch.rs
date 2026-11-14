@@ -13,14 +13,13 @@ use crate::codex::SelectsCodexEndpoint;
 use crate::emission::{AddressesHerdrSession, ReadsProcessReply, SpeaksHarness};
 use crate::generated::emission::{
     AgentStatus, AgentTarget, AgentWait, ClaudeCommandLine, ClaudeEnvironment, ClaudeSessionStart,
-    ClaudeSettings, CodexCommandLine, CodexExecutable, CodexSocket, CodexTitle,
-    ConfiguredHarnessArguments, CreateWorkspace_Data, Emittable, FlowIdentityClaim, FlowsRoot,
-    Focus, HarnessCommandLine, HerdrCommand, HerdrSessionCommand, HerdrSocketCall,
-    HerdrSocketReply, HerdrSocketRequest, Label, LineCount, MetadataSource, Milliseconds,
-    OutputMatch, OutputSource, ProcessReply, PromptAgentByName_Data, PromptText, ReadinessMarker,
-    RenamePane_Data, RenameWorkspace_Data, ReportPaneMetadata_Data, RunInPane_Data, SessionTitle,
-    ShellLine, StartAgent_Data, SystemPromptFile, WaitForAgent_Data, WaitForPaneOutput_Data,
-    WorkingDirectory,
+    ClaudeSettings, CodexCommandLine, CodexExecutable, CodexSocket, ConfiguredHarnessArguments,
+    CreateWorkspace_Data, Emittable, FlowIdentityClaim, FlowsRoot, Focus, HarnessCommandLine,
+    HerdrCommand, HerdrSessionCommand, HerdrSocketCall, HerdrSocketReply, Label, LineCount,
+    Milliseconds, OutputMatch, OutputSource, ProcessReply, PromptAgentByName, PromptText,
+    ReadinessMarker, RenamePane_Data, RenameWorkspace_Data, ReportPaneMetadata_Data,
+    RunInPane_Data, SessionTitle, StartAgent_Data, SystemPromptFile, WaitForAgent_Data,
+    WaitForPaneOutput_Data, WorkingDirectory,
 };
 pub use crate::generated::starter::StartupProgress;
 use crate::generated::starter::{
@@ -544,11 +543,11 @@ impl PreparesClaudePane for HerdrCli {
             &pane.herdr_session_name,
             HerdrSessionCommand::RunInPane(RunInPane_Data {
                 herdr_pane_id: pane.herdr_pane_id.clone(),
-                shell_line: ShellLine::PrepareClaudeEnvironment(ClaudeEnvironment {
+                claude_environment: ClaudeEnvironment {
                     flow_id_option: reserved.map(|flow_id| signal_flow::FlowId(flow_id.to_owned())),
                     lean_start: launch.lean_start(),
                     readiness_marker: ReadinessMarker(marker_suffix.clone()),
-                }),
+                },
             }),
         )
         .emit(self)
@@ -1496,7 +1495,6 @@ impl TitlesClaudeSession for HerdrCli {
             &pane.herdr_session_name,
             HerdrSessionCommand::ReportPaneMetadata(ReportPaneMetadata_Data {
                 herdr_pane_id: pane.herdr_pane_id.clone(),
-                metadata_source: MetadataSource::Flow,
                 display_agent: crate::generated::emission::DisplayAgent(title.as_str().into()),
             }),
         )
@@ -1953,7 +1951,6 @@ impl ConstructsHarnessCommand for HerdrCli {
                 })?),
                 model_name: launch.launch_profile.model_name.clone(),
                 effort: launch.launch_profile.effort.clone(),
-                codex_title: CodexTitle::ThreadTitle,
                 lean_start: launch.lean_start(),
                 configured_harness_arguments,
                 native_session_id_option: resources.thread.map(signal_flow::NativeSessionId),
@@ -2622,11 +2619,11 @@ impl SubmitsStartupPart for HerdrCli {
         let pane = &durable_intent.herdr_pane_binding;
         match (HerdrSocketCall {
             herdr_session_name: pane.herdr_session_name.clone(),
-            herdr_socket_request: HerdrSocketRequest::PromptAgentByName(PromptAgentByName_Data {
+            prompt_agent_by_name: PromptAgentByName {
                 launch_request_id: pane.launch_request_id.clone(),
                 herdr_agent_name: pane.herdr_agent_name.clone(),
                 prompt_text: PromptText(part.prompt_part_text.0.clone()),
-            }),
+            },
         })
         .emit(self)
         {
@@ -3614,8 +3611,8 @@ printf '%s\n' "$alias"
     impl RendersEnvironmentLine for EnvironmentLine {
         fn environment_preparation(reserved: Option<&str>) -> String {
             use crate::emission::SpeaksShell;
-            use crate::generated::emission::{ClaudeEnvironment, ReadinessMarker, ShellLine};
-            ShellLine::PrepareClaudeEnvironment(ClaudeEnvironment {
+            use crate::generated::emission::{ClaudeEnvironment, ReadinessMarker};
+            ClaudeEnvironment {
                 flow_id_option: reserved.map(|flow_id| signal_flow::FlowId(flow_id.to_owned())),
                 lean_start: crate::generated::starter::LeanStart {
                     harness_kind: HarnessKind::Claude,
@@ -3623,7 +3620,7 @@ printf '%s\n' "$alias"
                     tool_set: signal_flow::ToolSet::Default,
                 },
                 readiness_marker: ReadinessMarker("test-marker".into()),
-            })
+            }
             .shell_text()
         }
     }

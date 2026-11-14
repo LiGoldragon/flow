@@ -14,7 +14,7 @@ use crate::emission::{AddressesHerdrSession, ReadsProcessReply};
 use crate::generated::emission::{
     AgentStatus, AgentTarget, AgentWait, Emittable, HerdrCommand, HerdrSessionCommand, LineCount,
     Milliseconds, OutputSource, ProcessReply, PromptAgent_Data, PromptText, ReadAgent_Data,
-    ScreenFormat, SendKeys_Data, WaitForAgent_Data,
+    SendKeys_Data, WaitForAgent_Data,
 };
 use crate::herdr::ReadsHerdrAgent;
 use crate::herdr::ReadsHerdrPanes;
@@ -243,7 +243,6 @@ impl WritesPane for HerdrCli {
                 herdr_pane_id: route.herdr_pane_id.clone(),
                 output_source: OutputSource::Visible,
                 line_count: LineCount(Self::COMPOSER_LINES),
-                screen_format: ScreenFormat::Ansi,
             }),
         )
         .emit(self);

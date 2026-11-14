@@ -39,14 +39,14 @@ sha1 = "0.10"
 sha2 = "0.10"
 signal-flow.workspace = true
 # Curriculum's wire: the frames Flow asks the Curriculum Nexus for a launch's context.
-signal-curriculum-nexus = { git = "https://github.com/LiGoldragon/signal-curriculum-nexus", rev = "4358aa1", features = ["datom"] }
+signal-curriculum-nexus = { git = "https://github.com/LiGoldragon/signal-curriculum-nexus", rev = "4202d8b", features = ["datom"] }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "6d4eb74", default-features = false }
 tempfile = "3"
 getrandom = "0.3"
 thiserror.workspace = true
 tungstenite = "0.28"
 [build-dependencies]
-ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "8c95310" }
+ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "f23eacf" }
 [dev-dependencies]
 # The published signal-flow 60, whose peers the ordinary greeting refuses and
 # whose launch outcomes the 0.54.7 Memory step upgrades from.

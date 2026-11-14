@@ -2446,7 +2446,10 @@ impl DrainsHeldSeats for RunningNexus {
                         // A predecessor's receipt never marks its successor busy.
                         // The settled turn may still run: what follows waits
                         // for its end.
-                        self.codex_turns.delivered(&node.session_id.0);
+                        self.codex_turns.delivered(
+                            &node.session_id.0,
+                            &meta_signal_flow::InterruptWitness::NotRequested,
+                        );
                         return Outcome::Drained(vec![queued]);
                     }
                     drained.push(queued);
@@ -2668,9 +2671,17 @@ impl DrainsHeldSeats for RunningNexus {
         // A payload typed into a Codex pane is work its thread holds, whose
         // turn may not have begun, whether or not history shows it yet:
         // the seat is in its turn until that turn's own events end it, so
-        // the rest that typed it neither closes it nor hands it more.
+        // the rest that typed it neither closes it nor hands it more. An
+        // interrupt pressed before typing cut short the turn it was in,
+        // whose completion is then no rest of the seat.
         if node.harness_kind == HarnessKind::Codex {
-            self.codex_turns.delivered(&node.session_id.0);
+            let interrupt = match &result {
+                meta_signal_flow::Response::Delivered(delivery) => {
+                    delivery.interrupt_witness.clone()
+                }
+                _ => meta_signal_flow::InterruptWitness::NotRequested,
+            };
+            self.codex_turns.delivered(&node.session_id.0, &interrupt);
         }
         drained.extend(typed);
         Outcome::Drained(drained)

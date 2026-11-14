@@ -1,3 +1,32 @@
+# Flow 0.54.9: a Codex turn Flow interrupts to deliver is no rest of its seat
+
+Builds on 0.54.7 with unchanged wire contracts and stored format. It is
+independent of 0.54.8: it changes the Codex turn state, which 0.54.8 (a
+wake's carried first prompt) neither reads nor writes, and the two stack in
+either order.
+
+- **The turn a HardAbrupt cuts short ends late.** When Flow presses the
+  interrupt keys into a working Codex seat and types a HardAbrupt, the turn
+  the thread was in (the one its events showed when the keys were pressed)
+  is recorded as cut. Its `turn/completed` is that turn's late end: it is
+  still a turn end, but it neither rests the seat nor settles it, so an
+  OnDemand seat is no longer put to sleep while the turn the letter started
+  runs on in the shared app-server, and what that turn sends is sent as its
+  Address rather than Unbound. The turn the delivery started is the one whose
+  completion rests the seat, whether the cut turn's completion is read
+  before or after its start (primary-oumv).
+- **A cut is told from a steer.** The cut turn ended before the letter when
+  Flow saw the agent leave Working (`InterruptWitness::Observed`); for an
+  interrupt not seen taking (`Unobserved`), only the turn's own completion
+  status `interrupted` says it was cut, and a turn that ran to its end with
+  the letter steered into it rests the seat. A Soft or MiddleAbrupt letter,
+  which presses no interrupt, is steered into the running turn, whose
+  completion rests the seat as before.
+- `turn/completed` is read with its turn's status: `interrupted` is
+  `TurnEvent::Interrupted`, any other `TurnEvent::Completed`.
+
+Rollback to 0.54.7 opens the same memory: the turn state is memory only.
+
 # Flow 0.54.7: every Codex rest settles; routing follows the succession; a reap is owed at once and finished outside the dispatch gate; every connection greets
 
 Contracts: signal-flow 61.0.0 (4871bb8) and meta-signal-flow 77.0.0

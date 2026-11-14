@@ -8023,8 +8023,8 @@ mod tests {
         fs::create_dir_all(configuration.join("nexus")).unwrap();
         fs::write(configuration.join("nexus/flow-nexus.datom"), "{ main }").unwrap();
         {
-            use place::WritesTestPlaceFile;
-            place::PlaceName("main".into())
+            use crate::place::WritesTestPlaceFile;
+            crate::place::PlaceName("main".into())
                 .write_place_file(&configuration, socket.parent().unwrap());
         }
         let listener = UnixListener::bind(&socket).unwrap();

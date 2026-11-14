@@ -18,34 +18,34 @@ use crate::waking::{
     DrainsHeldSeats, HoldsWakingMetaflows, PushesAtPriority, RestsEndedAwake, SleepsAndWakesSeats,
 };
 use signal_flow::{
-    Address, AnswerRejection, ArchiveRejection, Message, Priority, Queue, Refusal, Remind_Data,
-    Request, RequestId, RequestRejection, Response, SentBy, Unknown_Data, Warmth,
+    Address, AnswerRejection, ArchiveRejection, Message, Output, Priority, Queue, Refusal,
+    Remind_Data, Request, RequestId, RequestRejection, SentBy, Unknown_Data, Warmth,
 };
 
 pub trait OperatesOnRequestsAndQueues {
     /// Closes an open request: one still queued leaves its queue, it is
     /// archived with its id and a Task's reminder, and its sender, and its
     /// recipient when it reached it, are told by a Soft Notice.
-    fn cancel(&self, request_id: &RequestId) -> Response;
+    fn cancel(&self, request_id: &RequestId) -> Output;
     /// Stops a Task's reminders; the Task stays open.
-    fn silence(&self, request_id: &RequestId) -> Response;
+    fn silence(&self, request_id: &RequestId) -> Output;
     /// Everything queued for `address` leaves its queue.
-    fn clear(&self, address: &Address) -> Response;
+    fn clear(&self, address: &Address) -> Output;
     /// Every queue is emptied.
-    fn clear_all(&self) -> Response;
+    fn clear_all(&self) -> Output;
     /// The whole queue of `address` is delivered now, as one message at
     /// `priority`; an Asleep metaflow is woken with it.
-    fn push(&self, address: &Address, priority: &Priority) -> Response;
+    fn push(&self, address: &Address, priority: &Priority) -> Output;
     /// Every queue that holds something, oldest first.
-    fn queues(&self) -> Response;
+    fn queues(&self) -> Output;
     /// Every live flow's Address, by the minutes since its last turn ended.
-    fn hot(&self) -> Response;
+    fn hot(&self) -> Output;
     /// Keeps a reminder for the Address `remind` names, sent from
     /// `sent_by` when its minutes lapse; answers the request id it is
     /// named by.
-    fn remind(&self, remind: Remind_Data, sent_by: SentBy) -> Response;
+    fn remind(&self, remind: Remind_Data, sent_by: SentBy) -> Output;
     /// The answer kept with the request `request_id`.
-    fn answer(&self, request_id: &RequestId) -> Response;
+    fn answer(&self, request_id: &RequestId) -> Output;
 }
 
 /// The steps the operations share.
@@ -105,9 +105,9 @@ impl EmptiesQueues for RunningNexus {
 }
 
 impl OperatesOnRequestsAndQueues for RunningNexus {
-    fn cancel(&self, request_id: &RequestId) -> Response {
+    fn cancel(&self, request_id: &RequestId) -> Output {
         use crate::store::scheduled_reminder::SchedulesReminders;
-        let refused = |rejection| Response::CancelRejected(rejection);
+        let refused = |rejection| Output::CancelRejected(rejection);
         let mut told = Vec::new();
         {
             let _turn = self
@@ -140,7 +140,7 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
                     for address in told {
                         self.wake_due(address);
                     }
-                    return Response::Cancelled(request_id.clone());
+                    return Output::Cancelled(request_id.clone());
                 }
                 Ok(None) => {}
                 Err(_) => return refused(RequestRejection::StoreRefused),
@@ -218,12 +218,12 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
         for address in told {
             self.wake_due(address);
         }
-        Response::Cancelled(request_id.clone())
+        Output::Cancelled(request_id.clone())
     }
 
-    fn silence(&self, request_id: &RequestId) -> Response {
+    fn silence(&self, request_id: &RequestId) -> Output {
         use crate::store::reminder::RecordsReminders;
-        let refused = |rejection| Response::SilenceRejected(rejection);
+        let refused = |rejection| Output::SilenceRejected(rejection);
         let binding = match self.store.request_binding(request_id) {
             Ok(Some(binding)) => binding,
             Ok(None) => return refused(RequestRejection::UnknownRequest),
@@ -248,12 +248,12 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
             return refused(RequestRejection::NotTask);
         }
         match self.store.close_reminder(&binding.logical_delivery_id.0) {
-            Ok(_) => Response::Silenced(request_id.clone()),
+            Ok(_) => Output::Silenced(request_id.clone()),
             Err(_) => refused(RequestRejection::StoreRefused),
         }
     }
 
-    fn clear(&self, address: &Address) -> Response {
+    fn clear(&self, address: &Address) -> Output {
         let _turn = self
             .dispatch_gate
             .lock()
@@ -261,36 +261,36 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
         match self.store.metaflow(address) {
             Ok(Some(_)) => {}
             Ok(None) => {
-                return Response::Refused(Refusal::Unknown(Unknown_Data::Address(address.clone())));
+                return Output::Refused(Refusal::Unknown(Unknown_Data::Address(address.clone())));
             }
-            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+            Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
         }
         match self.withdraw_all(address) {
-            Ok(withdrawn) => Response::Cleared(withdrawn),
-            Err(error) => Response::Refused(Refusal::Store(error.to_string())),
+            Ok(withdrawn) => Output::Cleared(withdrawn),
+            Err(error) => Output::Refused(Refusal::Store(error.to_string())),
         }
     }
 
-    fn clear_all(&self) -> Response {
+    fn clear_all(&self) -> Output {
         let _turn = self
             .dispatch_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let metaflows = match self.store.list_metaflows() {
             Ok(metaflows) => metaflows,
-            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+            Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
         };
         let mut withdrawn = Vec::new();
         for metaflow in metaflows {
             match self.withdraw_all(&metaflow.address) {
                 Ok(mut ids) => withdrawn.append(&mut ids),
-                Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+                Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
             }
         }
-        Response::Cleared(withdrawn)
+        Output::Cleared(withdrawn)
     }
 
-    fn push(&self, address: &Address, priority: &Priority) -> Response {
+    fn push(&self, address: &Address, priority: &Priority) -> Output {
         let (before, asleep) = {
             let _turn = self
                 .dispatch_gate
@@ -300,14 +300,14 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
             let metaflow = match self.store.metaflow(address) {
                 Ok(Some(metaflow)) => metaflow,
                 Ok(None) => {
-                    return Response::Refused(Refusal::Unknown(Unknown_Data::Address(
+                    return Output::Refused(Refusal::Unknown(Unknown_Data::Address(
                         address.clone(),
                     )));
                 }
-                Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+                Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
             };
             if metaflow.queue.0.is_empty() {
-                return Response::Pushed(Vec::new());
+                return Output::Pushed(Vec::new());
             }
             let before = metaflow
                 .queue
@@ -317,7 +317,7 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
                 .collect::<Vec<_>>();
             // Every entry wakes, so an Asleep metaflow is woken with it.
             if let Err(error) = self.store.force_queue_wake(address) {
-                return Response::Refused(Refusal::Store(error.to_string()));
+                return Output::Refused(Refusal::Store(error.to_string()));
             }
             let asleep = metaflow.state == flow_ethos::State::Asleep;
             if !asleep && let Some(lease) = self.waking.hold(address) {
@@ -329,23 +329,23 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
             self.wake_due(address.clone());
         }
         match self.queued_ids(address) {
-            Ok(after) => Response::Pushed(
+            Ok(after) => Output::Pushed(
                 before
                     .into_iter()
                     .filter(|request_id| !after.contains(request_id))
                     .collect(),
             ),
-            Err(error) => Response::Refused(Refusal::Store(error.to_string())),
+            Err(error) => Output::Refused(Refusal::Store(error.to_string())),
         }
     }
 
-    fn queues(&self) -> Response {
+    fn queues(&self) -> Output {
         use crate::message_projection::ProjectsQueueEntry;
         let metaflows = match self.store.list_metaflows() {
             Ok(metaflows) => metaflows,
-            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+            Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
         };
-        Response::Queues(
+        Output::Queues(
             metaflows
                 .into_iter()
                 .filter(|metaflow| !metaflow.queue.0.is_empty())
@@ -364,11 +364,11 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
         )
     }
 
-    fn hot(&self) -> Response {
+    fn hot(&self) -> Output {
         use crate::reminding::CountsUnixSeconds;
         let metaflows = match self.store.list_metaflows() {
             Ok(metaflows) => metaflows,
-            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+            Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
         };
         let now = std::time::SystemTime::now().seconds_since_epoch();
         let mut warm = Vec::new();
@@ -379,7 +379,7 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
             match self.store.flow_is_live(&flow_id.0) {
                 Ok(true) => {}
                 Ok(false) => continue,
-                Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+                Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
             }
             let minutes = match self.store.last_turn_end_of(&metaflow.address) {
                 // The last turn end held is this flow's own, not a
@@ -388,7 +388,7 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
                     now.saturating_sub(turn_end.observed_at.0).max(0) / 60,
                 )),
                 Ok(_) => None,
-                Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+                Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
             };
             warm.push(Warmth {
                 address: metaflow.address,
@@ -397,10 +397,10 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
         }
         // A flow none of whose turns has ended yet is the warmest.
         warm.sort_by_key(|warmth| warmth.minutes_option.as_ref().map(|minutes| minutes.0));
-        Response::Hot(warm)
+        Output::Hot(warm)
     }
 
-    fn remind(&self, remind: Remind_Data, sent_by: SentBy) -> Response {
+    fn remind(&self, remind: Remind_Data, sent_by: SentBy) -> Output {
         use crate::reminding::CountsUnixSeconds;
         use crate::store::reminder::RulesMinutes;
         use crate::store::scheduled_reminder::SchedulesReminders;
@@ -408,14 +408,14 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
         {
             use crate::launching::NamesTopic;
             if !address.topic.0.as_str().is_camel_case_topic() {
-                return Response::Refused(Refusal::TopicRefused(address.topic.clone()));
+                return Output::Refused(Refusal::TopicRefused(address.topic.clone()));
             }
         }
         let now = std::time::SystemTime::now().seconds_since_epoch();
         // A reminder's Minutes meets a Task's rule: above zero, and a
         // deadline inside the clock.
         if let Err(refusal) = remind.minutes.0.ruled_interval(now) {
-            return Response::Refused(Refusal::MinutesRefused(refusal));
+            return Output::Refused(Refusal::MinutesRefused(refusal));
         }
         let due = now.saturating_add(remind.minutes.0.saturating_mul(60));
         let _turn = self
@@ -425,25 +425,25 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
         match self.store.metaflow(&address) {
             Ok(Some(_)) => {}
             Ok(None) => {
-                return Response::Refused(Refusal::Unknown(Unknown_Data::Address(address)));
+                return Output::Refused(Refusal::Unknown(Unknown_Data::Address(address)));
             }
-            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+            Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
         }
         match self
             .store
             .schedule_reminder(address, sent_by, due, remind.string)
         {
-            Ok(Ok(request_id)) => Response::Reminded(request_id),
-            Ok(Err(refusal)) => Response::Refused(refusal),
-            Err(error) => Response::Refused(Refusal::Store(error.to_string())),
+            Ok(Ok(request_id)) => Output::Reminded(request_id),
+            Ok(Err(refusal)) => Output::Refused(refusal),
+            Err(error) => Output::Refused(Refusal::Store(error.to_string())),
         }
     }
 
-    fn answer(&self, request_id: &RequestId) -> Response {
+    fn answer(&self, request_id: &RequestId) -> Output {
         use crate::store::kept_answer::RoutesAnswers;
-        let refused = |rejection| Response::AnswerRejected(rejection);
+        let refused = |rejection| Output::AnswerRejected(rejection);
         match self.store.kept_answer(request_id) {
-            Ok(Some(kept)) => return Response::Answered(kept.answer),
+            Ok(Some(kept)) => return Output::Answered(kept.answer),
             Ok(None) => {}
             Err(_) => return refused(AnswerRejection::StoreRefused),
         }

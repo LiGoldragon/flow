@@ -259,7 +259,7 @@
            (and (= 2 (:exit missing)) (str/starts-with? (:err missing) "Missing.")
                 (str/includes? (:err missing) (str configuration "/nexus/flow-nexus.datom"))))
     (check "the packaged client takes its place from its configuration, and reaches no Nexus there"
-           (and (= 2 (:exit configured)) (not (str/includes? (:err configured) "invalid Flow Query"))
+           (and (= 2 (:exit configured)) (not (str/includes? (:err configured) "invalid Flow Input"))
                 (not (str/includes? (:err configured) "usage:"))
                 (not (str/starts-with? (:err configured) "Missing."))))
     (check "a typed place is a second argument, refused"

@@ -12,7 +12,7 @@ use crate::reporting::RecordsReports;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
 use flow_ethos::State;
-use signal_flow::{Event, FlowLifecycle, Metaflow, Model, Report_Data, Response};
+use signal_flow::{Event, FlowLifecycle, Metaflow, Model, Output, Report_Data};
 use std::fs;
 
 /// The session the harness goes on in after /clear.
@@ -26,7 +26,7 @@ fn report(fixture: &NexusFixture, event: Event) {
             process_option: None,
             event: event.clone(),
         }),
-        Response::Reported
+        Output::Reported
     );
     fixture.nexus.after_report(
         &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
@@ -95,10 +95,10 @@ fn after_retire_the_flow_s_pane_is_closed() {
     let fixture = NexusFixture::new();
     awake_seat(&fixture);
 
-    let meta_signal_flow::Response::FlowRetired(retired) =
+    let meta_signal_flow::Output::FlowRetired(retired) =
         fixture
             .nexus
-            .dispatch_meta(meta_signal_flow::Query::Retire(flow_ethos::FlowId(
+            .dispatch_meta(meta_signal_flow::Input::Retire(flow_ethos::FlowId(
                 CLAUDE_SEAT.into(),
             )))
     else {
@@ -147,10 +147,10 @@ fn retire_of_a_maintained_metaflow_s_flow_is_refused_and_changes_nothing() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch_meta(meta_signal_flow::Query::Retire(flow_ethos::FlowId(
+            .dispatch_meta(meta_signal_flow::Input::Retire(flow_ethos::FlowId(
                 CLAUDE_SEAT.into()
             ))),
-        meta_signal_flow::Response::RetireRejected(meta_signal_flow::RetireRejection::Maintained)
+        meta_signal_flow::Output::RetireRejected(meta_signal_flow::RetireRejection::Maintained)
     );
     assert!(lifecycle(&fixture).is_live(), "the flow stays live");
     assert_eq!(
@@ -161,10 +161,10 @@ fn retire_of_a_maintained_metaflow_s_flow_is_refused_and_changes_nothing() {
     assert!(fixture.typed().is_none(), "nothing is typed");
 
     declare_secondary(&fixture, meta_signal_flow::Continuity::OnDemand);
-    let meta_signal_flow::Response::FlowRetired(retired) =
+    let meta_signal_flow::Output::FlowRetired(retired) =
         fixture
             .nexus
-            .dispatch_meta(meta_signal_flow::Query::Retire(flow_ethos::FlowId(
+            .dispatch_meta(meta_signal_flow::Input::Retire(flow_ethos::FlowId(
                 CLAUDE_SEAT.into(),
             )))
     else {
@@ -310,10 +310,10 @@ fn a_retire_whose_close_herdr_refuses_answers_close_refused_and_records_nothing(
     assert_eq!(
         fixture
             .nexus
-            .dispatch_meta(meta_signal_flow::Query::Retire(flow_ethos::FlowId(
+            .dispatch_meta(meta_signal_flow::Input::Retire(flow_ethos::FlowId(
                 CLAUDE_SEAT.into()
             ))),
-        meta_signal_flow::Response::RetireRejected(meta_signal_flow::RetireRejection::CloseRefused)
+        meta_signal_flow::Output::RetireRejected(meta_signal_flow::RetireRejection::CloseRefused)
     );
     assert_eq!(lifecycle(&fixture), live);
     assert_eq!(

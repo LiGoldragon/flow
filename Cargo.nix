@@ -670,7 +670,7 @@ rec {
         };
         resolvedDefaultFeatures = [ "std" ];
       };
-      "ethos-zero" = rec {
+      "ethos-zero 22.0.0" = rec {
         crateName = "ethos-zero";
         version = "22.0.0";
         edition = "2024";
@@ -680,6 +680,58 @@ rec {
           url = "https://github.com/LiGoldragon/ethos-zero";
           rev = "1976e45fe1edfd5676cb33919dba1ec20c785a02";
           sha256 = "12b6np5n8knlpv2rb98g0m04n6xxaprd8n5hy4wgw658h5vg216j";
+        };
+        libName = "ethos_zero";
+        dependencies = [
+          {
+            name = "datom-codec";
+            packageId = "datom-codec";
+            features = [ "rkyv" ];
+          }
+          {
+            name = "prettyplease";
+            packageId = "prettyplease";
+          }
+          {
+            name = "proc-macro2";
+            packageId = "proc-macro2";
+          }
+          {
+            name = "protos";
+            packageId = "protos";
+            features = [ "rkyv" ];
+          }
+          {
+            name = "quote";
+            packageId = "quote";
+          }
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+          {
+            name = "syn";
+            packageId = "syn 3.0.5";
+            features = [ "full" ];
+          }
+        ];
+        features = {
+          "default" = [ "datom" ];
+        };
+        resolvedDefaultFeatures = [ "datom" "default" ];
+      };
+      "ethos-zero 27.0.0" = rec {
+        crateName = "ethos-zero";
+        version = "27.0.0";
+        edition = "2024";
+        crateBin = [];
+        workspace_member = null;
+        src = pkgs.fetchgit {
+          url = "https://github.com/LiGoldragon/ethos-zero";
+          rev = "8c95310c4c372cfe115cdebc3e85021b98cf2974";
+          sha256 = "1nqshn23ibbnnadi10wj79dn6wcjjkgfav6qkwsa7jg6r9m87v76";
         };
         libName = "ethos_zero";
         dependencies = [
@@ -794,14 +846,14 @@ rec {
           }
           {
             name = "signal-flow";
-            packageId = "signal-flow 62.0.0";
+            packageId = "signal-flow 63.0.0";
             features = [ "datom" ];
           }
         ];
         buildDependencies = [
           {
             name = "ethos-zero";
-            packageId = "ethos-zero";
+            packageId = "ethos-zero 27.0.0";
           }
         ];
         devDependencies = [
@@ -850,7 +902,7 @@ rec {
         buildDependencies = [
           {
             name = "ethos-zero";
-            packageId = "ethos-zero";
+            packageId = "ethos-zero 27.0.0";
           }
         ];
         features = {
@@ -908,7 +960,7 @@ rec {
           }
           {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow 78.0.0";
+            packageId = "meta-signal-flow 79.0.0";
             features = [ "datom" ];
           }
           {
@@ -928,13 +980,13 @@ rec {
           }
           {
             name = "signal-flow";
-            packageId = "signal-flow 62.0.0";
+            packageId = "signal-flow 63.0.0";
           }
         ];
         buildDependencies = [
           {
             name = "ethos-zero";
-            packageId = "ethos-zero";
+            packageId = "ethos-zero 27.0.0";
           }
         ];
         devDependencies = [
@@ -1027,7 +1079,7 @@ rec {
           }
           {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow 78.0.0";
+            packageId = "meta-signal-flow 79.0.0";
             features = [ "datom" ];
           }
           {
@@ -1085,7 +1137,7 @@ rec {
           }
           {
             name = "signal-flow";
-            packageId = "signal-flow 62.0.0";
+            packageId = "signal-flow 63.0.0";
           }
           {
             name = "signal-flow-before-request-ids";
@@ -1108,7 +1160,7 @@ rec {
         buildDependencies = [
           {
             name = "ethos-zero";
-            packageId = "ethos-zero";
+            packageId = "ethos-zero 27.0.0";
           }
         ];
         devDependencies = [
@@ -1670,7 +1722,7 @@ rec {
         buildDependencies = [
           {
             name = "ethos-zero";
-            packageId = "ethos-zero";
+            packageId = "ethos-zero 22.0.0";
           }
         ];
         features = {
@@ -1678,15 +1730,15 @@ rec {
         };
         resolvedDefaultFeatures = [ "datom" "default" ];
       };
-      "meta-signal-flow 78.0.0" = rec {
+      "meta-signal-flow 79.0.0" = rec {
         crateName = "meta-signal-flow";
-        version = "78.0.0";
+        version = "79.0.0";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-flow";
-          rev = "ac7db8a44c78c77df373e80fdf7d4d9ca5ad3048";
-          sha256 = "0vlza7l749l784k4442wwz7zlx688cvcg7pvn4xnnbd9h1fzj1d8";
+          rev = "96dd3fe418ca6733bd0ce965458d3fdea2766bda";
+          sha256 = "019l3lm6ghbjm2wimyvzvxbwgjl4sw0zlzzk7pic99qi36mil77i";
         };
         libName = "meta_signal_flow";
         dependencies = [
@@ -1718,13 +1770,13 @@ rec {
           }
           {
             name = "signal-flow";
-            packageId = "signal-flow 62.0.0";
+            packageId = "signal-flow 63.0.0";
           }
         ];
         buildDependencies = [
           {
             name = "ethos-zero";
-            packageId = "ethos-zero";
+            packageId = "ethos-zero 27.0.0";
           }
         ];
         features = {
@@ -2957,7 +3009,7 @@ rec {
         buildDependencies = [
           {
             name = "ethos-zero";
-            packageId = "ethos-zero";
+            packageId = "ethos-zero 22.0.0";
           }
         ];
         features = {
@@ -3007,7 +3059,7 @@ rec {
         buildDependencies = [
           {
             name = "ethos-zero";
-            packageId = "ethos-zero";
+            packageId = "ethos-zero 22.0.0";
           }
         ];
         features = {
@@ -3057,7 +3109,7 @@ rec {
         buildDependencies = [
           {
             name = "ethos-zero";
-            packageId = "ethos-zero";
+            packageId = "ethos-zero 22.0.0";
           }
         ];
         features = {
@@ -3065,15 +3117,15 @@ rec {
         };
         resolvedDefaultFeatures = [ "datom" "default" ];
       };
-      "signal-flow 62.0.0" = rec {
+      "signal-flow 63.0.0" = rec {
         crateName = "signal-flow";
-        version = "62.0.0";
+        version = "63.0.0";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal-flow";
-          rev = "37e99d39128a1554f4873d541a1b5d50545667e4";
-          sha256 = "18664k8kcqg4mywnwbpfqlk9rcmq7zqxz7lvlfg2df84xdwwc9iv";
+          rev = "f8ea6faadd2fdfc84ecbaaa7d96884a67ff353bd";
+          sha256 = "0ak37syify90ny4v0bv8azprph1nxr81rfl7xgpx8537316py0wz";
         };
         libName = "signal_flow";
         dependencies = [
@@ -3107,7 +3159,7 @@ rec {
         buildDependencies = [
           {
             name = "ethos-zero";
-            packageId = "ethos-zero";
+            packageId = "ethos-zero 27.0.0";
           }
         ];
         features = {

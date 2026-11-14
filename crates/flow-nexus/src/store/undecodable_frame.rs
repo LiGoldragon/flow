@@ -1,4 +1,4 @@
-//! The frames on the ordinary socket that decoded as no Query, each
+//! The frames on the ordinary socket that decoded as no Input, each
 //! recorded with what Flow read of its caller: the flow bound to the
 //! caller's seat, if one is, and the caller's seat and process. The Report
 //! of a hook built on an earlier contract is the frame this is for: its

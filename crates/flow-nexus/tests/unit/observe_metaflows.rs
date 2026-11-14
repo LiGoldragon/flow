@@ -7,7 +7,7 @@ use crate::Dispatches;
 use crate::observe_metaflows::ObservesMetaflows;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use flow_ethos::State;
-use signal_flow::{Address, Aspect, Metaflow, Model, ObserveSelection, Query, Response};
+use signal_flow::{Address, Aspect, Input, Metaflow, Model, ObserveSelection, Output};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
@@ -53,7 +53,7 @@ fn a_metaflow_subscriber_receives_the_list_on_open_then_each_change_once() {
     let first = undeclared("observedFirst");
     let second = undeclared("observedSecond");
     fixture.nexus.store.seed_metaflow(awake(&first, "c1a0de"));
-    let Response::Listed(listed) = fixture.nexus.dispatch(Query::Metaflows) else {
+    let Output::Listed(listed) = fixture.nexus.dispatch(Input::Metaflows) else {
         panic!("Metaflows lists the metaflows");
     };
     assert!(listed.contains(&awake(&first, "c1a0de")), "{listed:?}");
@@ -81,7 +81,7 @@ fn a_metaflow_subscriber_receives_the_list_on_open_then_each_change_once() {
                 .expect("the observer sends")
         };
 
-        assert_eq!(next(), Response::MetaflowsObserved(listed.clone()));
+        assert_eq!(next(), Output::MetaflowsObserved(listed.clone()));
 
         // A sleep refused (another flow) commits nothing; the seed after it
         // is the next frame.
@@ -93,7 +93,7 @@ fn a_metaflow_subscriber_receives_the_list_on_open_then_each_change_once() {
                 .unwrap()
         );
         fixture.nexus.store.seed_metaflow(awake(&second, "5ec0d1"));
-        assert_eq!(next(), Response::MetaflowChanged(awake(&second, "5ec0d1")));
+        assert_eq!(next(), Output::MetaflowChanged(awake(&second, "5ec0d1")));
 
         assert!(
             fixture
@@ -102,7 +102,7 @@ fn a_metaflow_subscriber_receives_the_list_on_open_then_each_change_once() {
                 .sleep_metaflow(&first, "c1a0de")
                 .unwrap()
         );
-        assert_eq!(next(), Response::MetaflowGone(first.clone()));
+        assert_eq!(next(), Output::MetaflowGone(first.clone()));
 
         drop(goes);
         assert!(observer.join().expect("the observer ends").is_err());
@@ -113,14 +113,14 @@ fn a_metaflow_subscriber_receives_the_list_on_open_then_each_change_once() {
         );
     });
     // A direct Observe answers the opening frame: the list as it now is.
-    let Response::Listed(now) = fixture.nexus.dispatch(Query::Metaflows) else {
+    let Output::Listed(now) = fixture.nexus.dispatch(Input::Metaflows) else {
         panic!("Metaflows lists the metaflows");
     };
     assert!(!now.iter().any(|metaflow| metaflow.address == first));
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Query::Observe(ObserveSelection::Metaflows)),
-        Response::MetaflowsObserved(now)
+            .dispatch(Input::Observe(ObserveSelection::Metaflows)),
+        Output::MetaflowsObserved(now)
     );
 }

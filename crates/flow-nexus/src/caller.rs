@@ -41,7 +41,7 @@ use crate::store::{
 };
 use signal_flow::{
     Address, CallerIdentity, CallerResolutionRejection, FlowId, FlowNode, FlowOrigin, HarnessKind,
-    Process, Response,
+    Output, Process,
 };
 use std::collections::BTreeSet;
 use std::{fs, os::unix::net::UnixStream, path::PathBuf};
@@ -467,7 +467,7 @@ impl AuthenticatesProcessAuthority for RunningNexus {
         let mut bound = Vec::new();
         let mut sending = Vec::new();
 
-        if let Response::Identified(address) = self.store.identify_process(peer.clone())? {
+        if let Output::Identified(address) = self.store.identify_process(peer.clone())? {
             sending.push(address);
         }
         if let Some(pane) = process.caller_pane(&self.herdr)
@@ -551,22 +551,20 @@ impl RecordsOriginOfProcess for RunningNexus {
 
 /// Answers ResolveCaller for the pane a connection's peer runs in.
 pub trait ResolvesCaller {
-    fn resolve_caller(&self, pane: Option<CallerPane>, claim: Option<FlowId>) -> Response;
+    fn resolve_caller(&self, pane: Option<CallerPane>, claim: Option<FlowId>) -> Output;
 }
 
 impl ResolvesCaller for RunningNexus {
-    fn resolve_caller(&self, pane: Option<CallerPane>, claim: Option<FlowId>) -> Response {
+    fn resolve_caller(&self, pane: Option<CallerPane>, claim: Option<FlowId>) -> Output {
         let caller = pane
             .ok_or(CallerResolutionRejection::CallerUnknown)
             .and_then(|pane| self.bound_caller(&pane));
         match (caller, claim) {
-            (Err(rejection), _) => Response::CallerResolutionRejected(rejection),
+            (Err(rejection), _) => Output::CallerResolutionRejected(rejection),
             (Ok(caller), Some(claimed)) if claimed != caller.flow_id => {
-                Response::CallerResolutionRejected(CallerResolutionRejection::CallerMismatch(
-                    caller,
-                ))
+                Output::CallerResolutionRejected(CallerResolutionRejection::CallerMismatch(caller))
             }
-            (Ok(caller), _) => Response::CallerResolved(caller),
+            (Ok(caller), _) => Output::CallerResolved(caller),
         }
     }
 }

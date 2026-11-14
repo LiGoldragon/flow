@@ -38,10 +38,10 @@ use meta_signal_flow::{
     QueueResolutionRecord, ReadEventsRejected_Data, ReadQueueDeliveriesRejected_Data,
     ResolveQueueDeliveryRejection, ResolverIdentity,
 };
-use signal_flow::{Address, Event, FlowId, Report_Data, Response};
+use signal_flow::{Address, Event, FlowId, Output, Report_Data};
 
 pub trait RecordsReports {
-    fn report(&self, report: Report_Data) -> Response;
+    fn report(&self, report: Report_Data) -> Output;
     /// What a recorded report sets going once it is answered: a `Stopped`
     /// flow's context size is written, and its resting seat is handed its
     /// oldest queued request or sleeps when nothing waits for it (see
@@ -53,21 +53,21 @@ pub trait RecordsReports {
     /// What a report sets going once its caller was attributed to the
     /// flow's bound seat.
     fn after_attributed_report(&self, flow_id: &FlowId, event: &Event);
-    fn read_events(&self, flow_id: FlowId) -> meta_signal_flow::Response;
+    fn read_events(&self, flow_id: FlowId) -> meta_signal_flow::Output;
     /// The owner's resolution of one Uncertain hand-over, recorded with the
     /// requesting peer, the reason and the time. Never run by Flow itself.
     fn resolve_queue_delivery(
         &self,
         resolution: QueueDeliveryResolution,
         resolver: ResolverIdentity,
-    ) -> meta_signal_flow::Response;
+    ) -> meta_signal_flow::Output;
     /// Every hand-over of the metaflow's queue that did not settle, with
     /// its standing: what an Uncertain one waits on is readable here.
-    fn read_queue_deliveries(&self, address: Address) -> meta_signal_flow::Response;
+    fn read_queue_deliveries(&self, address: Address) -> meta_signal_flow::Output;
 }
 
 impl RecordsReports for RunningNexus {
-    fn report(&self, report: Report_Data) -> Response {
+    fn report(&self, report: Report_Data) -> Output {
         let Report_Data { flow_id, event, .. } = report;
         match self.perform(Operation::Record(Record_Data::Harness(
             Record_Data_Harness_Data {
@@ -75,8 +75,8 @@ impl RecordsReports for RunningNexus {
                 event,
             },
         ))) {
-            Outcome::Recorded => Response::Reported,
-            Outcome::Failed(Failed_Data::UnknownFlow) => Response::Refused(
+            Outcome::Recorded => Output::Reported,
+            Outcome::Failed(Failed_Data::UnknownFlow) => Output::Refused(
                 signal_flow::Refusal::Unknown(signal_flow::Unknown_Data::FlowId(flow_id)),
             ),
             // signal-flow 9.0.0 names no persistence refusal for Report, so
@@ -87,7 +87,7 @@ impl RecordsReports for RunningNexus {
                     "flow-nexus: Report for {flow_id} not recorded: {outcome:?}",
                     flow_id = flow_id.0
                 );
-                Response::Refused(signal_flow::Refusal::Unknown(
+                Output::Refused(signal_flow::Refusal::Unknown(
                     signal_flow::Unknown_Data::FlowId(flow_id),
                 ))
             }
@@ -229,9 +229,9 @@ impl RecordsReports for RunningNexus {
         }
     }
 
-    fn read_events(&self, flow_id: FlowId) -> meta_signal_flow::Response {
+    fn read_events(&self, flow_id: FlowId) -> meta_signal_flow::Output {
         match self.store.events(&flow_id.0) {
-            Ok(Some(event_vector)) => meta_signal_flow::Response::EventsRead(EventsRead_Data {
+            Ok(Some(event_vector)) => meta_signal_flow::Output::EventsRead(EventsRead_Data {
                 flow_id,
                 harness_event_metadata_vector: event_vector
                     .iter()
@@ -239,11 +239,11 @@ impl RecordsReports for RunningNexus {
                     .collect(),
             }),
             Ok(None) => {
-                meta_signal_flow::Response::ReadEventsRejected(ReadEventsRejected_Data::UnknownFlow)
+                meta_signal_flow::Output::ReadEventsRejected(ReadEventsRejected_Data::UnknownFlow)
             }
-            Err(_) => meta_signal_flow::Response::ReadEventsRejected(
-                ReadEventsRejected_Data::StoreRefused,
-            ),
+            Err(_) => {
+                meta_signal_flow::Output::ReadEventsRejected(ReadEventsRejected_Data::StoreRefused)
+            }
         }
     }
 
@@ -251,9 +251,9 @@ impl RecordsReports for RunningNexus {
         &self,
         resolution: QueueDeliveryResolution,
         resolver: ResolverIdentity,
-    ) -> meta_signal_flow::Response {
+    ) -> meta_signal_flow::Output {
         let rejected = |rejection: meta_signal_flow::ResolveQueueDeliveryRejection| {
-            meta_signal_flow::Response::ResolveQueueDeliveryRejected(
+            meta_signal_flow::Output::ResolveQueueDeliveryRejected(
                 crate::message_projection::ProjectsQueueRejection::visible_queue_rejection(
                     rejection,
                 ),
@@ -281,7 +281,7 @@ impl RecordsReports for RunningNexus {
                     "flow-nexus: a queued delivery was resolved {:?} by the owner",
                     resolution.queue_resolution_outcome
                 );
-                meta_signal_flow::Response::QueueDeliveryResolved(QueueDeliveryResolved_Data {
+                meta_signal_flow::Output::QueueDeliveryResolved(QueueDeliveryResolved_Data {
                     address: attempt.address,
                     visible_queue_delivery_resolution:
                         crate::message_projection::ProjectsQueueResolution::visible_queue_resolution(
@@ -294,9 +294,8 @@ impl RecordsReports for RunningNexus {
         }
     }
 
-    fn read_queue_deliveries(&self, address: Address) -> meta_signal_flow::Response {
-        let rejected =
-            |rejection| meta_signal_flow::Response::ReadQueueDeliveriesRejected(rejection);
+    fn read_queue_deliveries(&self, address: Address) -> meta_signal_flow::Output {
+        let rejected = |rejection| meta_signal_flow::Output::ReadQueueDeliveriesRejected(rejection);
         match self.store.metaflow(&address) {
             Ok(Some(_)) => {}
             Ok(None) => return rejected(ReadQueueDeliveriesRejected_Data::UnknownAddress),
@@ -314,7 +313,7 @@ impl RecordsReports for RunningNexus {
                 )
             })
             .collect();
-        meta_signal_flow::Response::QueueDeliveriesRead(QueueDeliveriesRead_Data {
+        meta_signal_flow::Output::QueueDeliveriesRead(QueueDeliveriesRead_Data {
             address,
             visible_queue_delivery_vector,
         })

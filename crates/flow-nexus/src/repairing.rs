@@ -10,61 +10,61 @@ use crate::store::ReadsFlowRows;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::repair::RepairsMetaflows;
 use meta_signal_flow::{
-    InspectRejected_Data, Rebind_Data, RebindRejected_Data, Rebinding, Response, StoreRefusal,
+    InspectRejected_Data, Output, Rebind_Data, RebindRejected_Data, Rebinding, StoreRefusal,
     Withdraw_Data,
 };
 use signal_flow::{Address, HerdrRouteSelection};
 
 pub trait RepairsFromMeta {
     /// Inspected, or InspectRejected.UnknownAddress.
-    fn inspect(&self, address: Address) -> Response;
+    fn inspect(&self, address: Address) -> Output;
     /// Rebound once the new pane or flow is recorded; RebindRejected
     /// changes nothing.
-    fn rebind(&self, rebind: Rebind_Data) -> Response;
+    fn rebind(&self, rebind: Rebind_Data) -> Output;
     /// Withdrawn once the request has left the queue; WithdrawRejected
     /// changes nothing.
-    fn withdraw(&self, withdraw: Withdraw_Data) -> Response;
+    fn withdraw(&self, withdraw: Withdraw_Data) -> Output;
 }
 
 trait RefusesStore {
-    fn store_refused(error: impl ToString) -> Response;
+    fn store_refused(error: impl ToString) -> Output;
 }
 
 impl RefusesStore for RunningNexus {
-    fn store_refused(error: impl ToString) -> Response {
-        Response::Refused(StoreRefusal::Store(error.to_string()))
+    fn store_refused(error: impl ToString) -> Output {
+        Output::Refused(StoreRefusal::Store(error.to_string()))
     }
 }
 
 impl RepairsFromMeta for RunningNexus {
-    fn inspect(&self, address: Address) -> Response {
+    fn inspect(&self, address: Address) -> Output {
         match self.store.inspection(&address) {
-            Ok(Some(inspected)) => Response::Inspected(
+            Ok(Some(inspected)) => Output::Inspected(
                 crate::message_projection::ProjectsInspection::visible_inspection(inspected),
             ),
-            Ok(None) => Response::InspectRejected(InspectRejected_Data::UnknownAddress),
+            Ok(None) => Output::InspectRejected(InspectRejected_Data::UnknownAddress),
             Err(error) => Self::store_refused(error),
         }
     }
 
-    fn rebind(&self, rebind: Rebind_Data) -> Response {
+    fn rebind(&self, rebind: Rebind_Data) -> Output {
         let Rebind_Data { address, rebinding } = rebind;
         let rebound = match rebinding {
             Rebinding::Pane(herdr_pane_id) => {
                 let flow_id = match self.store.current_flow(&address) {
                     Ok(Ok(flow_id)) => flow_id,
-                    Ok(Err(rejection)) => return Response::RebindRejected(rejection),
+                    Ok(Err(rejection)) => return Output::RebindRejected(rejection),
                     Err(error) => return Self::store_refused(error),
                 };
                 let node = match self.store.flow_node(&flow_id.0) {
                     Ok(Some(node)) => node,
-                    Ok(None) => return Response::RebindRejected(RebindRejected_Data::FlowUnknown),
+                    Ok(None) => return Output::RebindRejected(RebindRejected_Data::FlowUnknown),
                     Err(error) => return Self::store_refused(error),
                 };
                 // The pane is looked for in the Herdr session the flow's
                 // route names.
                 let HerdrRouteSelection::Available(recorded) = &node.herdr_route_selection else {
-                    return Response::RebindRejected(RebindRejected_Data::PaneAbsent);
+                    return Output::RebindRejected(RebindRejected_Data::PaneAbsent);
                 };
                 let route = match self.herdr.pane_route(
                     &recorded.herdr_session_name.0,
@@ -73,10 +73,10 @@ impl RepairsFromMeta for RunningNexus {
                 ) {
                     PaneRoute::Shown(route) => route,
                     PaneRoute::NotShown => {
-                        return Response::RebindRejected(RebindRejected_Data::PaneAbsent);
+                        return Output::RebindRejected(RebindRejected_Data::PaneAbsent);
                     }
                     PaneRoute::Unreadable => {
-                        return Response::RebindRejected(RebindRejected_Data::HerdrUnavailable);
+                        return Output::RebindRejected(RebindRejected_Data::HerdrUnavailable);
                     }
                 };
                 self.store.rebind_route(&flow_id.0, route).map(Ok)
@@ -89,14 +89,14 @@ impl RepairsFromMeta for RunningNexus {
                     "flow-nexus: {:?} {} {:?} rebound by the owner",
                     address.aspect, address.topic.0, address.model
                 );
-                Response::Rebound(address)
+                Output::Rebound(address)
             }
-            Ok(Err(rejection)) => Response::RebindRejected(rejection),
+            Ok(Err(rejection)) => Output::RebindRejected(rejection),
             Err(error) => Self::store_refused(error),
         }
     }
 
-    fn withdraw(&self, withdraw: Withdraw_Data) -> Response {
+    fn withdraw(&self, withdraw: Withdraw_Data) -> Output {
         let Withdraw_Data {
             address,
             logical_delivery_id,
@@ -107,9 +107,9 @@ impl RepairsFromMeta for RunningNexus {
                     "flow-nexus: queued request {logical_delivery_id} withdrawn by the owner",
                     logical_delivery_id = logical_delivery_id.0
                 );
-                Response::Withdrawn
+                Output::Withdrawn
             }
-            Ok(Err(rejection)) => Response::WithdrawRejected(rejection),
+            Ok(Err(rejection)) => Output::WithdrawRejected(rejection),
             Err(error) => Self::store_refused(error),
         }
     }

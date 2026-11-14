@@ -52,8 +52,8 @@ pub(crate) trait MutatesMetaflows {
         &self,
         binding: Bind_Data,
         launched: Option<FlowId>,
-    ) -> Result<Response, StoreError>;
-    fn lock_metaflow(&self, request: Lock_Data, now: i64) -> Result<Response, StoreError>;
+    ) -> Result<Output, StoreError>;
+    fn lock_metaflow(&self, request: Lock_Data, now: i64) -> Result<Output, StoreError>;
     fn queue_metaflow(
         &self,
         request: Deliver_Data,
@@ -95,10 +95,10 @@ impl MutatesMetaflows for FlowStore {
         &self,
         binding: Bind_Data,
         launched: Option<FlowId>,
-    ) -> Result<Response, StoreError> {
+    ) -> Result<Output, StoreError> {
         let peer = &binding.process;
         if !FlowStore::process_is_live(peer) {
-            return Ok(Response::Refused(Refusal::unidentified(binding.process)));
+            return Ok(Output::Refused(Refusal::unidentified(binding.process)));
         }
         let address = binding.address.clone();
         let binding_address = address.clone();
@@ -110,7 +110,7 @@ impl MutatesMetaflows for FlowStore {
             .iter()
             .any(|binding| binding.process == *peer && binding.address != address)
         {
-            return Ok(Response::Refused(Refusal::Taken(address)));
+            return Ok(Output::Refused(Refusal::Taken(address)));
         }
         let existing = self.stored_metaflow(&address)?;
         if let Some(stored) = existing.as_ref()
@@ -119,10 +119,10 @@ impl MutatesMetaflows for FlowStore {
             if previous == *peer
                 && let MetaflowState::Awake(id) = &stored.metaflow.state
             {
-                return Ok(Response::Bound(id.clone()));
+                return Ok(Output::Bound(id.clone()));
             }
             if FlowStore::process_is_live(&previous) {
-                return Ok(Response::Refused(Refusal::Taken(address)));
+                return Ok(Output::Refused(Refusal::Taken(address)));
             }
         }
         let state = self.state()?;
@@ -181,31 +181,31 @@ impl MutatesMetaflows for FlowStore {
         if reassigned.moved > 0 {
             self.launch_changes.announce();
         }
-        Ok(Response::Bound(flow_id))
+        Ok(Output::Bound(flow_id))
     }
 
-    fn lock_metaflow(&self, request: Lock_Data, now: i64) -> Result<Response, StoreError> {
+    fn lock_metaflow(&self, request: Lock_Data, now: i64) -> Result<Output, StoreError> {
         // The sender is whom the request is queued under; it is checked
         // against nothing.
         let address = request.second_address;
         if !self.prepare_declared_metaflow(&address)? {
-            return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Address(
+            return Ok(Output::Refused(Refusal::Unknown(Unknown_Data::Address(
                 address,
             ))));
         }
         if let Some(held) = self.stored_metaflow_lock(&address)?
             && held.lock.until > flow_ethos::generated::library::Until(now)
         {
-            return Ok(Response::Refused(Refusal::Held(held.lock)));
+            return Ok(Output::Refused(Refusal::Held(held.lock)));
         }
         let Some(configuration) = self.configuration_snapshot()? else {
-            return Ok(Response::Refused(Refusal::NotConfigured));
+            return Ok(Output::Refused(Refusal::NotConfigured));
         };
         let Some(until) = now
             .checked_add(configuration.configured_nexus.0.lease.0)
             .filter(|until| *until > now)
         else {
-            return Ok(Response::Refused(Refusal::Store(
+            return Ok(Output::Refused(Refusal::Store(
                 "configured lease must be positive and fit the clock".into(),
             )));
         };
@@ -222,7 +222,7 @@ impl MutatesMetaflows for FlowStore {
             commit.assert(self.metaflow_locks, row)
         };
         self.engine.commit_atomic(commit)?;
-        Ok(Response::Locked(lock))
+        Ok(Output::Locked(lock))
     }
 
     fn queue_metaflow(
@@ -259,7 +259,7 @@ impl MutatesMetaflows for FlowStore {
         };
         if let Some(refusal) = message.oversized_refusal(&request.lock.first_address) {
             let released = self.release_metaflow_lock(request.lock.clone(), now)?;
-            if released != Response::Released {
+            if released != Output::Released {
                 return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Store(
                     "a verified delivery lock could not be released".into(),
                 )));
@@ -1005,7 +1005,7 @@ mod tests {
         };
         assert!(matches!(
             fixture.store.bind_metaflow(binding.clone(), None).unwrap(),
-            Response::Bound(_)
+            Output::Bound(_)
         ));
         let binding = Bind_Data {
             address: Address {
@@ -1018,7 +1018,7 @@ mod tests {
         forged.process.started.0 += 1;
         assert!(matches!(
             fixture.store.bind_metaflow(forged, None).unwrap(),
-            Response::Refused(Refusal::Unidentified(_))
+            Output::Refused(Refusal::Unidentified(_))
         ));
         assert_eq!(fixture.store.list_metaflows().unwrap().len(), 1);
     }
@@ -1036,7 +1036,7 @@ mod tests {
             process: fixture.peer.clone(),
         };
         let first = fixture.store.bind_metaflow(binding.clone(), None).unwrap();
-        assert!(matches!(&first, Response::Bound(_)));
+        assert!(matches!(&first, Output::Bound(_)));
         assert_eq!(fixture.store.bind_metaflow(binding, None).unwrap(), first);
         let target = Address {
             model: Model::Sol,
@@ -1052,14 +1052,14 @@ mod tests {
             first_address: fixture.message.clone(),
             second_address: target.clone(),
         };
-        let Response::Locked(lock) = fixture.store.lock_metaflow(request.clone(), 100).unwrap()
+        let Output::Locked(lock) = fixture.store.lock_metaflow(request.clone(), 100).unwrap()
         else {
             panic!("lease expected")
         };
         assert_eq!(lock.until, flow_ethos::Until(130));
         assert_eq!(
             fixture.store.lock_metaflow(request, 100).unwrap(),
-            Response::Refused(Refusal::Held(lock.clone()))
+            Output::Refused(Refusal::Held(lock.clone()))
         );
         let body = Request::Living(flow_ethos::Living_Data {
             context: flow_ethos::Context("fixture context".into()),
@@ -1171,7 +1171,7 @@ mod tests {
         };
         assert!(matches!(
             fixture.store.lock_metaflow(request.clone(), 10).unwrap(),
-            Response::Refused(Refusal::Unknown(_))
+            Output::Refused(Refusal::Unknown(_))
         ));
         fixture
             .store
@@ -1183,7 +1183,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        let Response::Locked(lock) = fixture.store.lock_metaflow(request, 10).unwrap() else {
+        let Output::Locked(lock) = fixture.store.lock_metaflow(request, 10).unwrap() else {
             panic!("lease expected")
         };
         assert_eq!(

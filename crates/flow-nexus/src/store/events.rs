@@ -443,13 +443,13 @@ mod tests {
                 store.record_event("5a4d0b", event.clone()).unwrap();
                 assert_eq!(
                     store
-                        .apply(signal_flow::Query::Report(signal_flow::Report_Data {
+                        .apply(signal_flow::Input::Report(signal_flow::Report_Data {
                             flow_id: signal_flow::FlowId("5a4d0b".into()),
                             process_option: None,
                             event,
                         }))
                         .unwrap(),
-                    signal_flow::Response::Reported
+                    signal_flow::Output::Reported
                 );
                 let row = store.event_row("5a4d0b").unwrap().unwrap();
                 assert_eq!(row.recorded_harness_event_vector.last(), Some(&expected));

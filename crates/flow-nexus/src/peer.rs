@@ -12,31 +12,31 @@ use crate::RunningNexus;
 use crate::binding::{ChecksProcessIdentity, ReadsProcessIdentity};
 use crate::caller::{CallerPane, CallerProcess, LocatesCallerPane, ResolvesCaller};
 use crate::store::ReadsFlowRoles;
-use meta_signal_flow::{ProcessIdentity, ResolverIdentity, Response};
+use meta_signal_flow::{Output, ProcessIdentity, ResolverIdentity};
 use signal_flow::CallerResolutionRejection;
 
 /// Names the flow a process runs in.
 pub trait ResolvesPeer {
-    fn resolve_peer(&self, identity: &ProcessIdentity) -> Response;
+    fn resolve_peer(&self, identity: &ProcessIdentity) -> Output;
 }
 
 impl ResolvesPeer for RunningNexus {
-    fn resolve_peer(&self, identity: &ProcessIdentity) -> Response {
+    fn resolve_peer(&self, identity: &ProcessIdentity) -> Output {
         // The identity must still name the same live process (user and start
         // time), so a reused process ID names no one.
         if !identity.is_live_process() {
-            return Response::PeerResolutionRejected(CallerResolutionRejection::CallerUnknown);
+            return Output::PeerResolutionRejected(CallerResolutionRejection::CallerUnknown);
         }
         let Ok(process_id) = u32::try_from(identity.process_id.0) else {
-            return Response::PeerResolutionRejected(CallerResolutionRejection::CallerUnknown);
+            return Output::PeerResolutionRejected(CallerResolutionRejection::CallerUnknown);
         };
         let pane = CallerProcess { process_id }.caller_pane(&self.herdr);
         match self.resolve_caller(pane, None) {
-            signal_flow::Response::CallerResolved(caller) => Response::PeerResolved(caller),
-            signal_flow::Response::CallerResolutionRejected(rejection) => {
-                Response::PeerResolutionRejected(rejection)
+            signal_flow::Output::CallerResolved(caller) => Output::PeerResolved(caller),
+            signal_flow::Output::CallerResolutionRejected(rejection) => {
+                Output::PeerResolutionRejected(rejection)
             }
-            _ => Response::PeerResolutionRejected(CallerResolutionRejection::CallerUnknown),
+            _ => Output::PeerResolutionRejected(CallerResolutionRejection::CallerUnknown),
         }
     }
 }
@@ -65,7 +65,7 @@ impl NamesMetaPeer for RunningNexus {
             return unread;
         };
         let flow_id_option = match self.resolve_caller(peer.caller_pane(&self.herdr), None) {
-            signal_flow::Response::CallerResolved(caller) => Some(caller.flow_id),
+            signal_flow::Output::CallerResolved(caller) => Some(caller.flow_id),
             _ => None,
         };
         ResolverIdentity {

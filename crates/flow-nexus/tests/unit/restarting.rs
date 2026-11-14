@@ -33,7 +33,7 @@ use flow_ethos::State;
 use meta_signal_flow::{OldSeat, RestartFailure, RestartPhase, RestartRecord};
 use signal_flow::{
     Address, Aspect, Event, FlowLifecycle, HerdrPaneBinding, HerdrRoute, HerdrRouteSelection,
-    Model, NativeStop, Process, Query, Report_Data, Response, RestartRefusal, ResumeRefused_Data,
+    Input, Model, NativeStop, Output, Process, Report_Data, RestartRefusal, ResumeRefused_Data,
     StopRejection,
 };
 use std::{fs, path::Path, time::Duration};
@@ -231,10 +231,10 @@ impl RestartWorld {
     }
 }
 
-fn restarted(fixture: &NexusFixture) -> Response {
+fn restarted(fixture: &NexusFixture) -> Output {
     fixture
         .nexus
-        .dispatch(Query::Restart(flow_ethos::FlowId(FLOW.into())))
+        .dispatch(Input::Restart(flow_ethos::FlowId(FLOW.into())))
 }
 
 fn record(fixture: &NexusFixture) -> Option<RestartRecord> {
@@ -267,7 +267,7 @@ fn report_from(fixture: &NexusFixture, event: Event, birth: Option<Process>) -> 
             process_option: birth,
             event: event.clone(),
         }),
-        Response::Reported
+        Output::Reported
     );
     if acts {
         fixture
@@ -327,14 +327,14 @@ fn bound_sender(fixture: &NexusFixture) -> BoundSender {
             },
             None,
         ),
-        Ok(Response::Bound(_))
+        Ok(Output::Bound(_))
     ));
     BoundSender(child, process)
 }
 
 /// Sends a Soft Order to `{ Mind flow Sol }` from the bound sender, then
 /// reads its wake as the ordinary socket does once it has answered.
-fn send(fixture: &NexusFixture, from: &BoundSender, body: &str) -> Response {
+fn send(fixture: &NexusFixture, from: &BoundSender, body: &str) -> Output {
     use crate::sending::SendsRequests;
     use crate::waking::SleepsAndWakesSeats;
     let answer = fixture.nexus.send_request(
@@ -441,7 +441,7 @@ fn restart_awake_resting_claude_resumes_same_session() {
 
     assert_eq!(
         restarted(&fixture),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
 
     let resumes = world.resumes();
@@ -534,7 +534,7 @@ fn restart_of_a_working_seat_is_carried_out_at_its_next_stop() {
     .unwrap();
     assert_eq!(
         restarted(&fixture),
-        Response::RestartQueued(flow_ethos::FlowId(FLOW.into()))
+        Output::RestartQueued(flow_ethos::FlowId(FLOW.into()))
     );
     assert!(world.calls_naming("pane close").is_empty());
     assert!(world.resumes().is_empty());
@@ -545,7 +545,7 @@ fn restart_of_a_working_seat_is_carried_out_at_its_next_stop() {
     // Asked again, it stays queued.
     assert_eq!(
         restarted(&fixture),
-        Response::RestartQueued(flow_ethos::FlowId(FLOW.into()))
+        Output::RestartQueued(flow_ethos::FlowId(FLOW.into()))
     );
 
     // Its Stop names work in flight; the restart runs at it all the same.
@@ -607,7 +607,7 @@ fn restart_arrival_queued_delivered_once() {
         assert!(
             matches!(
                 &queued,
-                Response::SendAccepted(acceptance)
+                Output::SendAccepted(acceptance)
                     if acceptance.visible_delivery_state == signal_flow::VisibleDeliveryState::Queued
             ),
             "{queued:?}"
@@ -617,7 +617,7 @@ fn restart_arrival_queued_delivered_once() {
         release_start.release();
         assert_eq!(
             restarting.join().unwrap(),
-            Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+            Output::Restarted(flow_ethos::FlowId(FLOW.into()))
         );
     });
 
@@ -648,7 +648,7 @@ fn restart_old_session_end_fenced() {
     let old_witness = fixture.nexus.seat_witness(FLOW).expect("witness");
     assert_eq!(
         restarted(&fixture),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
 
     // The old hook outlived its harness, as a SessionEnd hook does, and
@@ -703,7 +703,7 @@ fn restart_new_seat_real_exit_ends() {
     let world = fixture.restart_world(true);
     assert_eq!(
         restarted(&fixture),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     let hook = world.new_hook();
     assert!(report_from(
@@ -720,7 +720,7 @@ fn restart_new_seat_real_exit_ends() {
     let _world = second.restart_world(true);
     assert_eq!(
         restarted(&second),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     let witness: SeatWitness = second.nexus.seat_witness(FLOW).expect("witness");
     assert_eq!(witness.route.herdr_pane_id.0, NEW_PANE);
@@ -737,7 +737,7 @@ fn restart_resumed_hooks_report_to_live_nexus() {
     let world = fixture.restart_world(true);
     assert_eq!(
         restarted(&fixture),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     assert!(world.resumes()[0].contains("/fixture/run/flow-next/flow/flow.sock"));
     let mut queued = stored(&fixture, Model::Sol);
@@ -778,7 +778,7 @@ fn restart_close_refused_flow_unchanged() {
 
     assert_eq!(
         restarted(&fixture),
-        Response::RestartRefused(RestartRefusal::CloseRefused(flow_ethos::FlowId(
+        Output::RestartRefused(RestartRefusal::CloseRefused(flow_ethos::FlowId(
             FLOW.into()
         )))
     );
@@ -796,7 +796,7 @@ fn restart_close_refused_flow_unchanged() {
     fs::remove_file(world.fresh.state.join("close-refused")).unwrap();
     assert_eq!(
         restarted(&fixture),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(
         world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
@@ -830,7 +830,7 @@ fn restart_resume_refused_custody_kept() {
 
     assert_eq!(
         restarted(&fixture),
-        Response::RestartRefused(RestartRefusal::ResumeRefused(ResumeRefused_Data {
+        Output::RestartRefused(RestartRefusal::ResumeRefused(ResumeRefused_Data {
             flow_id: flow_ethos::FlowId(FLOW.into()),
             string: "SpawnRefused".into(),
         }))
@@ -853,8 +853,8 @@ fn restart_resume_refused_custody_kept() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Query::Stop(flow_ethos::FlowId(FLOW.into()))),
-        Response::Stopped(flow_ethos::FlowId(FLOW.into()))
+            .dispatch(Input::Stop(flow_ethos::FlowId(FLOW.into()))),
+        Output::Stopped(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(
         record(&fixture).map(|record| record.restart_phase),
@@ -866,7 +866,7 @@ fn restart_resume_refused_custody_kept() {
     fs::remove_file(world.fresh.state.join("refused-after-start")).unwrap();
     assert_eq!(
         restarted(&fixture),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(received(&world, &fixture, "kept work"), 1);
     assert_eq!(record(&fixture), None);
@@ -928,7 +928,7 @@ fn restart_first_old_pane_gone_harness_exited_proceeds() {
     born_at_route(&fixture, exited_process());
     assert_eq!(
         restarted(&fixture),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     assert!(
         world.calls_naming("pane close").is_empty(),
@@ -999,8 +999,8 @@ fn restart_unknown_flow() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Query::Restart(flow_ethos::FlowId("fade00".into()))),
-        Response::RestartRefused(RestartRefusal::UnknownFlow(flow_ethos::FlowId(
+            .dispatch(Input::Restart(flow_ethos::FlowId("fade00".into()))),
+        Output::RestartRefused(RestartRefusal::UnknownFlow(flow_ethos::FlowId(
             "fade00".into()
         )))
     );
@@ -1030,8 +1030,8 @@ fn restart_no_held_session() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Query::Restart(flow_ethos::FlowId("5e5510".into()))),
-        Response::RestartRefused(RestartRefusal::NoHeldSession(flow_ethos::FlowId(
+            .dispatch(Input::Restart(flow_ethos::FlowId("5e5510".into()))),
+        Output::RestartRefused(RestartRefusal::NoHeldSession(flow_ethos::FlowId(
             "5e5510".into()
         )))
     );
@@ -1055,7 +1055,7 @@ fn restart_transcript_absent() {
     .unwrap();
     assert_eq!(
         restarted(&fixture),
-        Response::RestartRefused(RestartRefusal::TranscriptAbsent(flow_ethos::FlowId(
+        Output::RestartRefused(RestartRefusal::TranscriptAbsent(flow_ethos::FlowId(
             FLOW.into()
         )))
     );
@@ -1074,7 +1074,7 @@ fn restart_busy() {
         let _wake = fixture.nexus.waking.hold(&address(Model::Sol)).unwrap();
         assert_eq!(
             restarted(&fixture),
-            Response::RestartRefused(RestartRefusal::Busy(flow_ethos::FlowId(FLOW.into())))
+            Output::RestartRefused(RestartRefusal::Busy(flow_ethos::FlowId(FLOW.into())))
         );
     }
     assert_eq!(record(&fixture), None);
@@ -1089,7 +1089,7 @@ fn restart_busy() {
         .unwrap();
     assert_eq!(
         restarted(&fixture),
-        Response::RestartRefused(RestartRefusal::Busy(flow_ethos::FlowId(FLOW.into())))
+        Output::RestartRefused(RestartRefusal::Busy(flow_ethos::FlowId(FLOW.into())))
     );
     assert_eq!(record(&fixture), Some(under_way));
     assert!(world.calls_naming("pane close").is_empty());
@@ -1114,7 +1114,7 @@ fn restart_bind_mismatch() {
 
     assert_eq!(
         restarted(&fixture),
-        Response::RestartRefused(RestartRefusal::ResumeRefused(ResumeRefused_Data {
+        Output::RestartRefused(RestartRefusal::ResumeRefused(ResumeRefused_Data {
             flow_id: flow_ethos::FlowId(FLOW.into()),
             string: "BindMismatch".into(),
         }))
@@ -1153,9 +1153,9 @@ fn restart_inspect_shows_record() {
     let mut fixture = NexusFixture::new();
     let world = fixture.restart_world(true);
     let inspect = || {
-        let meta_signal_flow::Response::Inspected(inspected) = fixture
+        let meta_signal_flow::Output::Inspected(inspected) = fixture
             .nexus
-            .dispatch_meta(meta_signal_flow::Query::Inspect(address(Model::Sol)))
+            .dispatch_meta(meta_signal_flow::Input::Inspect(address(Model::Sol)))
         else {
             panic!("the metaflow is inspected")
         };
@@ -1262,7 +1262,7 @@ fn restart_nexus_death_each_phase() {
     assert!(world.calls_naming("agent start").is_empty(), "no respawn");
     assert_eq!(
         restarted(&fixture),
-        Response::RestartRefused(RestartRefusal::Interrupted(flow_ethos::FlowId(FLOW.into())))
+        Output::RestartRefused(RestartRefusal::Interrupted(flow_ethos::FlowId(FLOW.into())))
     );
 
     let (fixture, world) = reopened_at("SpawningLive");
@@ -1370,24 +1370,24 @@ fn restart_interrupted_stop_needs_quiesced_spawn() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Query::Stop(flow_ethos::FlowId(FLOW.into()))),
-        Response::StopRejected(StopRejection::SpawnUnproven)
+            .dispatch(Input::Stop(flow_ethos::FlowId(FLOW.into()))),
+        Output::StopRejected(StopRejection::SpawnUnproven)
     );
     assert_eq!(record(&fixture), Some(unknown));
     assert_eq!(
         fixture
             .nexus
-            .dispatch_meta(meta_signal_flow::Query::Retire(flow_ethos::FlowId(
+            .dispatch_meta(meta_signal_flow::Input::Retire(flow_ethos::FlowId(
                 FLOW.into()
             ))),
-        meta_signal_flow::Response::RetireRejected(
+        meta_signal_flow::Output::RetireRejected(
             meta_signal_flow::RetireRejection::RestartUnresolved
         )
     );
     assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Active);
     assert_eq!(
         restarted(&fixture),
-        Response::RestartRefused(RestartRefusal::Interrupted(flow_ethos::FlowId(FLOW.into())))
+        Output::RestartRefused(RestartRefusal::Interrupted(flow_ethos::FlowId(FLOW.into())))
     );
 
     left_by_dead_nexus(&fixture, &world, true);
@@ -1405,8 +1405,8 @@ fn restart_interrupted_stop_needs_quiesced_spawn() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Query::Stop(flow_ethos::FlowId(FLOW.into()))),
-        Response::Stopped(flow_ethos::FlowId(FLOW.into()))
+            .dispatch(Input::Stop(flow_ethos::FlowId(FLOW.into()))),
+        Output::Stopped(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(
         record(&fixture).map(|record| record.restart_phase),
@@ -1423,7 +1423,7 @@ fn restart_interrupted_stop_needs_quiesced_spawn() {
     );
     assert_eq!(
         restarted(&fixture),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
 }
 
@@ -1480,8 +1480,8 @@ fn harness_flags(fixture: &NexusFixture, flags: &str) {
         .expect("harness flags configured");
 }
 
-fn resume_refused(category: &str) -> Response {
-    Response::RestartRefused(RestartRefusal::ResumeRefused(ResumeRefused_Data {
+fn resume_refused(category: &str) -> Output {
+    Output::RestartRefused(RestartRefusal::ResumeRefused(ResumeRefused_Data {
         flow_id: flow_ethos::FlowId(FLOW.into()),
         string: category.into(),
     }))
@@ -1594,7 +1594,7 @@ fn restart_precomposed_success_closes_once_resumes_same_session() {
 
     assert_eq!(
         restarted(&fixture),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
 
     let calls = world.fresh.calls();
@@ -1650,7 +1650,7 @@ fn restart_retry_after_composition_refused_restarts() {
     declared_composable(&fixture);
     assert_eq!(
         restarted(&fixture),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(
         world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
@@ -1717,7 +1717,7 @@ fn restart_crash_after_closing_composition_refused_old_harness_untouched() {
     declared_composable(&fixture);
     assert_eq!(
         restarted(&fixture),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(
         world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
@@ -1765,7 +1765,7 @@ fn restart_failed_not_composed_by_0530_retry_resumes_same_session() {
     declared_composable(&fixture);
     assert_eq!(
         restarted(&fixture),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(
         world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
@@ -1944,7 +1944,7 @@ fn restart_spawn_refused_once_reopens_same_session() {
 
     assert_eq!(
         restarted(&fixture),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
 
     reopened_once(&world, &fixture);
@@ -1985,7 +1985,7 @@ fn restart_bind_mismatch_once_reopens_same_session() {
 
     assert_eq!(
         restarted(&fixture),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
 
     reopened_once(&world, &fixture);
@@ -2046,7 +2046,7 @@ fn restart_failure_every_time_spends_bound_custody_kept() {
     fs::remove_file(world.fresh.state.join("refused-after-start")).unwrap();
     assert_eq!(
         restarted(&fixture),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     let resumes = world.resumes();
     assert_eq!(resumes.len(), 3);
@@ -2072,7 +2072,7 @@ fn restart_start_in_flight_not_respawned() {
 
     assert_eq!(
         restarted(&fixture),
-        Response::RestartRefused(RestartRefusal::Interrupted(flow_ethos::FlowId(FLOW.into())))
+        Output::RestartRefused(RestartRefusal::Interrupted(flow_ethos::FlowId(FLOW.into())))
     );
     let interrupted = record(&fixture).expect("record");
     assert!(
@@ -2170,8 +2170,8 @@ fn restart_owner_stop_during_bound() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Query::Stop(flow_ethos::FlowId(FLOW.into()))),
-        Response::Stopped(flow_ethos::FlowId(FLOW.into()))
+            .dispatch(Input::Stop(flow_ethos::FlowId(FLOW.into()))),
+        Output::Stopped(flow_ethos::FlowId(FLOW.into()))
     );
     let stopped = record(&fixture).expect("record");
     assert_eq!(
@@ -2187,7 +2187,7 @@ fn restart_owner_stop_during_bound() {
     assert_eq!(received(&world, &fixture, "kept through the Stop"), 0);
     assert_eq!(
         restarted(&fixture),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(world.resumes().len(), 1);
     assert_eq!(record(&fixture), None);
@@ -2215,8 +2215,8 @@ fn restart_owner_stop_during_bound() {
         assert_eq!(
             fixture
                 .nexus
-                .dispatch(Query::Stop(flow_ethos::FlowId(FLOW.into()))),
-            Response::StopRejected(StopRejection::Restarting)
+                .dispatch(Input::Stop(flow_ethos::FlowId(FLOW.into()))),
+            Output::StopRejected(StopRejection::Restarting)
         );
         assert_eq!(record(&fixture), Some(spawning));
         release_start.release();
@@ -2321,7 +2321,7 @@ fn killed(process: &Process) {
 /// abc123's restart whose first resumed pane reports another session and
 /// whose discard takes the pane down but leaves its harness running: the
 /// answer the restart gave, and that orphan, by its birth.
-fn orphaned(world: &RestartWorld, fixture: &NexusFixture) -> (Response, Process) {
+fn orphaned(world: &RestartWorld, fixture: &NexusFixture) -> (Output, Process) {
     queued_for_seat(fixture, "held until a reopen is proven");
     fs::write(
         world.fresh.state.join("report-session-once"),
@@ -2447,8 +2447,8 @@ fn restart_missing_witness_not_reopened_retry_refused() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Query::Stop(flow_ethos::FlowId(FLOW.into()))),
-        Response::Stopped(flow_ethos::FlowId(FLOW.into()))
+            .dispatch(Input::Stop(flow_ethos::FlowId(FLOW.into()))),
+        Output::Stopped(flow_ethos::FlowId(FLOW.into()))
     );
     let stopped = record(&fixture).expect("record");
     assert_eq!(
@@ -2738,7 +2738,7 @@ fn reported_to(nexus: &crate::RunningNexus, event: Event, birth: Option<Process>
             process_option: birth,
             event: event.clone(),
         }),
-        Response::Reported
+        Output::Reported
     );
     if acts {
         nexus.after_attributed_report(&flow_ethos::FlowId(FLOW.to_owned().to_owned()), &event);
@@ -2788,7 +2788,7 @@ fn restart_cutover_two_nexus() {
             seat_pane: old_seat_pane(),
             native_session_id: signal_flow::NativeSessionId(world.seat.session.clone()),
         }),
-        Response::Adopted(flow_ethos::FlowId(FLOW.into()))
+        Output::Adopted(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(new_node(&new).session_id.0, world.seat.session);
     assert_eq!(
@@ -2805,8 +2805,8 @@ fn restart_cutover_two_nexus() {
     // And restarts it: the same session resumed in w7:p1, its hooks aimed
     // at the new Nexus alone.
     assert_eq!(
-        new.dispatch(Query::Restart(flow_ethos::FlowId(FLOW.into()))),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        new.dispatch(Input::Restart(flow_ethos::FlowId(FLOW.into()))),
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     let resumes = world.resumes();
     assert_eq!(resumes.len(), 1, "{}", world.fresh.calls());
@@ -3020,10 +3020,10 @@ fn restart_protected_from_another_flow_accepted() {
     protect(&fixture);
     assert_eq!(
         fixture.nexus.dispatch_from(
-            Query::Restart(flow_ethos::FlowId(FLOW.into())),
+            Input::Restart(flow_ethos::FlowId(FLOW.into())),
             another_flow()
         ),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(world.resumes().len(), 1, "{}", world.fresh.calls());
     assert!(ended(&old), "the old harness exited");
@@ -3046,8 +3046,8 @@ fn restart_asked_by_the_flow_itself_is_served() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch_from(Query::Restart(flow_ethos::FlowId(FLOW.into())), own),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+            .dispatch_from(Input::Restart(flow_ethos::FlowId(FLOW.into())), own),
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(route_pane(&fixture), NEW_PANE);
     assert_eq!(record(&fixture), None);
@@ -3065,10 +3065,10 @@ fn restart_protected_from_meta_accepted() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch_meta(meta_signal_flow::Query::Restart(flow_ethos::FlowId(
+            .dispatch_meta(meta_signal_flow::Input::Restart(flow_ethos::FlowId(
                 FLOW.into()
             ))),
-        meta_signal_flow::Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        meta_signal_flow::Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(world.resumes().len(), 1, "{}", world.fresh.calls());
     assert!(ended(&old), "the old harness exited");
@@ -3088,8 +3088,8 @@ fn stop_and_retire_protected_from_another_flow_accepted() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch_from(Query::Stop(flow_ethos::FlowId(FLOW.into())), another_flow()),
-        Response::Stopped(flow_ethos::FlowId(FLOW.into()))
+            .dispatch_from(Input::Stop(flow_ethos::FlowId(FLOW.into())), another_flow()),
+        Output::Stopped(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Stopped);
 
@@ -3100,10 +3100,10 @@ fn stop_and_retire_protected_from_another_flow_accepted() {
     resolver.flow_id_option = Some(flow_ethos::FlowId("0f0e1d".into()));
     assert!(matches!(
         retiring.nexus.dispatch_meta_from(
-            meta_signal_flow::Query::Retire(flow_ethos::FlowId(FLOW.into())),
+            meta_signal_flow::Input::Retire(flow_ethos::FlowId(FLOW.into())),
             Some(resolver)
         ),
-        meta_signal_flow::Response::FlowRetired(_)
+        meta_signal_flow::Output::FlowRetired(_)
     ));
     assert_eq!(node(&retiring).flow_lifecycle, FlowLifecycle::Retired);
 }
@@ -3367,8 +3367,8 @@ fn reopen_new(fixture: &NexusFixture, nexus: &mut crate::RunningNexus) {
 }
 
 /// The answer the live restarts got.
-fn not_composed() -> Response {
-    Response::RestartRefused(RestartRefusal::ResumeRefused(ResumeRefused_Data {
+fn not_composed() -> Output {
+    Output::RestartRefused(RestartRefusal::ResumeRefused(ResumeRefused_Data {
         flow_id: flow_ethos::FlowId(FLOW.into()),
         string: "NotComposed".into(),
     }))
@@ -3406,7 +3406,7 @@ fn adopted_on_new(
             seat_pane: old_seat_pane(),
             native_session_id: signal_flow::NativeSessionId(world.seat.session.clone()),
         }),
-        Response::Adopted(flow_ethos::FlowId(FLOW.into()))
+        Output::Adopted(flow_ethos::FlowId(FLOW.into()))
     );
     (world, new, curriculum)
 }
@@ -3442,7 +3442,7 @@ fn restart_not_composed_refused_then_recovered() {
     new.store.seed_metaflow(queued);
 
     assert_eq!(
-        new.dispatch(Query::Restart(flow_ethos::FlowId(FLOW.into()))),
+        new.dispatch(Input::Restart(flow_ethos::FlowId(FLOW.into()))),
         not_composed()
     );
     assert_eq!(
@@ -3492,7 +3492,7 @@ fn restart_not_composed_refused_then_recovered() {
 
     // A retry while Curriculum still refuses: refused alike, nothing closed.
     assert_eq!(
-        new.dispatch(Query::Restart(flow_ethos::FlowId(FLOW.into()))),
+        new.dispatch(Input::Restart(flow_ethos::FlowId(FLOW.into()))),
         not_composed()
     );
     assert_eq!(new.store.restart_record(FLOW).unwrap(), None);
@@ -3504,8 +3504,8 @@ fn restart_not_composed_refused_then_recovered() {
     // Curriculum takes Model words, as 3f74 and 478c do: the retry resumes.
     curriculum.accept_models();
     assert_eq!(
-        new.dispatch(Query::Restart(flow_ethos::FlowId(FLOW.into()))),
-        Response::Restarted(flow_ethos::FlowId(FLOW.into()))
+        new.dispatch(Input::Restart(flow_ethos::FlowId(FLOW.into()))),
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(
         world.calls_naming(&format!("pane close {OLD_PANE}")).len(),
@@ -3582,15 +3582,15 @@ fn restart_not_composed_owner_stop() {
     }]);
     new.store.seed_metaflow(queued);
     assert_eq!(
-        new.dispatch(Query::Restart(flow_ethos::FlowId(FLOW.into()))),
+        new.dispatch(Input::Restart(flow_ethos::FlowId(FLOW.into()))),
         not_composed()
     );
     assert!(world.calls_naming("pane close").is_empty());
     assert_eq!(new.store.restart_record(FLOW).unwrap(), None);
 
     assert_eq!(
-        new.dispatch(Query::Stop(flow_ethos::FlowId(FLOW.into()))),
-        Response::Stopped(flow_ethos::FlowId(FLOW.into()))
+        new.dispatch(Input::Stop(flow_ethos::FlowId(FLOW.into()))),
+        Output::Stopped(flow_ethos::FlowId(FLOW.into()))
     );
     assert_eq!(new.store.restart_record(FLOW).unwrap(), None);
     let node = new.store.flow_node(FLOW).unwrap().unwrap();
@@ -3608,8 +3608,8 @@ fn restart_not_composed_owner_stop() {
 
     curriculum.accept_models();
     assert_eq!(
-        new.dispatch(Query::Restart(flow_ethos::FlowId(FLOW.into()))),
-        Response::RestartRefused(RestartRefusal::Asleep(flow_ethos::FlowId(FLOW.into())))
+        new.dispatch(Input::Restart(flow_ethos::FlowId(FLOW.into()))),
+        Output::RestartRefused(RestartRefusal::Asleep(flow_ethos::FlowId(FLOW.into())))
     );
     assert!(world.resumes().is_empty());
 }

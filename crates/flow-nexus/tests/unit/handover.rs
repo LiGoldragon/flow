@@ -25,7 +25,7 @@ use crate::waking::HoldsWakingMetaflows;
 use flow_ethos::State;
 use meta_signal_flow::{ConfigurationChange, ConfigureMetaflow, Continuity};
 use signal_flow::{
-    CompositionRefusal, HandoverFault, HandoverUnreadable_Data, Model, Query, Request, Response,
+    CompositionRefusal, HandoverFault, HandoverUnreadable_Data, Input, Model, Output, Request,
 };
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -202,7 +202,7 @@ fn declare(fixture: &NexusFixture, root_option: Option<String>) {
 
 /// A Refresh of a Maintained metaflow Awake as abc123, with `left` under
 /// abc123 and the metaflow's root `root_option`.
-fn refreshed(left: Left<'_>, root_option: Option<String>) -> (NexusFixture, FreshWorld, Response) {
+fn refreshed(left: Left<'_>, root_option: Option<String>) -> (NexusFixture, FreshWorld, Output) {
     let mut fixture = NexusFixture::new();
     let seat = launched_claude_ended_by(&fixture, |_| true);
     super::waking::rested_at_stop(&fixture, "abc123");
@@ -253,7 +253,7 @@ fn refreshed(left: Left<'_>, root_option: Option<String>) -> (NexusFixture, Fres
         vec![],
     ));
     use crate::Dispatches;
-    let response = fixture.nexus.dispatch(Query::Refresh(at));
+    let response = fixture.nexus.dispatch(Input::Refresh(at));
     (fixture, world, response)
 }
 
@@ -266,7 +266,7 @@ fn refreshed_first_turn(left: Left<'_>) -> String {
     assert!(
         matches!(
             &response,
-            Response::ReapPending(pending)
+            Output::ReapPending(pending)
                 if pending.address == address(Model::Sol)
                     && pending.predecessor.0.0 == "abc123"
                     && pending.reap_standing == signal_flow::ReapStanding::Owed
@@ -283,14 +283,14 @@ fn refreshed_first_turn(left: Left<'_>) -> String {
 /// Awake as abc123, holding its Address, no successor owed or started, and
 /// its pane and harness untouched, nothing closed and nothing typed.
 fn assert_predecessor_kept(
-    (fixture, world, response): (NexusFixture, FreshWorld, Response),
+    (fixture, world, response): (NexusFixture, FreshWorld, Output),
     refusal: impl FnOnce(&signal_flow::StartRejection) -> bool,
 ) {
     use crate::store::ReadsFlowRows as _;
     use crate::store::successor::OwesSuccessors as _;
     use signal_flow::{RefreshRejection, ReplaceRejection};
     match &response {
-        Response::RefreshRejected(RefreshRejection::SuccessorRefused(
+        Output::RefreshRejected(RefreshRejection::SuccessorRefused(
             ReplaceRejection::LaunchRefused(rejection),
         )) if refusal(rejection) => {}
         _ => panic!("the refresh is refused: {response:?}"),

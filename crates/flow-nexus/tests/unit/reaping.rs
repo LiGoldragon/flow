@@ -32,7 +32,7 @@ use crate::test_faults::{CrashPoint, InjectsCrashes, RefusedWrite};
 use crate::waking::SleepsAndWakesSeats;
 use crate::{Dispatches, HoldsStopRequest};
 use signal_flow::{
-    FlowLifecycle, HerdrRouteSelection, LaunchStatusOutcome, Query, ReapStanding, Response,
+    FlowLifecycle, HerdrRouteSelection, Input, LaunchStatusOutcome, Output, ReapStanding,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -347,11 +347,11 @@ pub(super) trait StagesReap {
     fn closes(&self) -> usize;
     fn snapshots_of_predecessor(&self) -> usize;
     /// The Replace of the staged launch.
-    fn replace(&self) -> Response;
+    fn replace(&self) -> Output;
     fn launch_status(&self) -> LaunchStatusOutcome;
     fn standing(&self) -> Option<ReapStanding>;
     fn lifecycle(&self, flow_id: &str) -> FlowLifecycle;
-    fn vet(&self, flow_id: &str) -> meta_signal_flow::Response;
+    fn vet(&self, flow_id: &str) -> meta_signal_flow::Output;
     /// Waits, bounded, for the store to show `holds`.
     fn until(&self, what: &str, holds: &mut dyn FnMut() -> bool);
 }
@@ -506,17 +506,17 @@ impl StagesReap for ReapWorld {
             .count()
     }
 
-    fn replace(&self) -> Response {
+    fn replace(&self) -> Output {
         self.fixture
             .nexus
-            .dispatch(Query::Replace(self.launch.request()))
+            .dispatch(Input::Replace(self.launch.request()))
     }
 
     fn launch_status(&self) -> LaunchStatusOutcome {
-        match self.fixture.nexus.dispatch(Query::LaunchStatus(
+        match self.fixture.nexus.dispatch(Input::LaunchStatus(
             self.launch.profile.launch_request_id.clone(),
         )) {
-            Response::LaunchInspected(inspection) => inspection
+            Output::LaunchInspected(inspection) => inspection
                 .launch_status_outcome_option
                 .expect("the launch has an outcome"),
             other => panic!("LaunchStatus answered {other:?}"),
@@ -536,10 +536,10 @@ impl StagesReap for ReapWorld {
         self.fixture.lifecycle(flow_id)
     }
 
-    fn vet(&self, flow_id: &str) -> meta_signal_flow::Response {
+    fn vet(&self, flow_id: &str) -> meta_signal_flow::Output {
         self.fixture
             .nexus
-            .dispatch_meta(meta_signal_flow::Query::Vet(
+            .dispatch_meta(meta_signal_flow::Input::Vet(
                 meta_signal_flow::DeliveryRequest {
                     delivery_id: meta_signal_flow::DeliveryId("vet".into()),
                     flow_id: signal_flow::FlowId(flow_id.into()),
@@ -757,8 +757,8 @@ pub(super) fn finish_reaps(fixture: &NexusFixture) {
     }
 }
 
-fn replaced_answer(world: &ReapWorld, standing: ReapStanding) -> Response {
-    Response::ReapPending(signal_flow::ReapPending {
+fn replaced_answer(world: &ReapWorld, standing: ReapStanding) -> Output {
+    Output::ReapPending(signal_flow::ReapPending {
         address: world.launch.profile.address.clone(),
         predecessor: signal_flow::Predecessor(signal_flow::FlowId(PREDECESSOR.into())),
         launched: match world.replace_answer_launched() {
@@ -785,32 +785,32 @@ impl ReadsLaunchedSuccessor for ReapWorld {
     }
 }
 
-pub(super) fn is_reap_pending(response: &Response, standing: ReapStanding) -> bool {
-    matches!(response, Response::ReapPending(pending)
+pub(super) fn is_reap_pending(response: &Output, standing: ReapStanding) -> bool {
+    matches!(response, Output::ReapPending(pending)
         if pending.predecessor.0.0 == PREDECESSOR
             && pending.launched.flow_id.0 == SUCCESSOR
             && pending.reap_standing == standing)
 }
 
-pub(super) fn vetted(response: &meta_signal_flow::Response) -> bool {
-    matches!(response, meta_signal_flow::Response::Vetted)
+pub(super) fn vetted(response: &meta_signal_flow::Output) -> bool {
+    matches!(response, meta_signal_flow::Output::Vetted)
 }
 
 pub(super) fn delivery_rejected(
-    response: &meta_signal_flow::Response,
+    response: &meta_signal_flow::Output,
     rejection: meta_signal_flow::DeliveryRejection,
 ) -> bool {
-    matches!(response, meta_signal_flow::Response::DeliveryRejected(found) if *found == rejection)
+    matches!(response, meta_signal_flow::Output::DeliveryRejected(found) if *found == rejection)
 }
 
 pub(super) fn inspect(world: &ReapWorld) -> Vec<meta_signal_flow::VisibleAttempt> {
     match world
         .fixture
         .nexus
-        .dispatch_meta(meta_signal_flow::Query::Inspect(
+        .dispatch_meta(meta_signal_flow::Input::Inspect(
             world.launch.profile.address.clone(),
         )) {
-        meta_signal_flow::Response::Inspected(inspected) => inspected.visible_attempt_vector,
+        meta_signal_flow::Output::Inspected(inspected) => inspected.visible_attempt_vector,
         other => panic!("Inspect answered {other:?}"),
     }
 }
@@ -1107,7 +1107,7 @@ fn the_receiving_flow_switches_at_confirmation_and_never_names_two() {
     // W2 through the store's own confirmation.
     assert!(matches!(
         store.confirm_started(SUCCESSOR).unwrap(),
-        Response::Started(_)
+        Output::Started(_)
     ));
     assert_eq!(succession(SUCCESSOR), Succession::Receiving);
     assert_eq!(
@@ -1231,7 +1231,7 @@ fn a_crash_at_each_replacement_point_recovers_the_reap_once() {
             CrashPoint::AfterReaped => {
                 // K5: nothing owed; the stored outcome answers.
                 assert!(world.standing().is_none(), "{point:?}");
-                assert!(matches!(world.replace(), Response::Replaced(_)));
+                assert!(matches!(world.replace(), Output::Replaced(_)));
             }
             _ => unreachable!(),
         }
@@ -2335,14 +2335,14 @@ trait SeatsLaunches {
     /// W2 of `flow`; the confirmed Launched.
     fn confirmed(&self, flow: &str) -> signal_flow::Launched;
     /// W1, W2 and the settlement under the gate, as a Launch runs them.
-    fn launched(&self, id: &str, flow: &str, predecessor: Option<&str>) -> Response;
+    fn launched(&self, id: &str, flow: &str, predecessor: Option<&str>) -> Output;
     fn outcome(&self, id: &str) -> Option<LaunchOutcome>;
     fn pending(&self) -> Option<crate::PendingHandover>;
     fn rest(&self, flow: &str);
     fn generations(&self) -> Vec<(String, String)>;
     fn owner_now(&self) -> Option<String>;
-    fn keep(&self, title: &str) -> Response;
-    fn drop_section(&self, title: &str) -> Response;
+    fn keep(&self, title: &str) -> Output;
+    fn drop_section(&self, title: &str) -> Output;
 }
 
 impl SeatsLaunches for HandoverWorld {
@@ -2405,12 +2405,12 @@ impl SeatsLaunches for HandoverWorld {
 
     fn confirmed(&self, flow: &str) -> signal_flow::Launched {
         match self.fixture.nexus.store.confirm_started(flow).unwrap() {
-            Response::Started(launched) => launched,
+            Output::Started(launched) => launched,
             other => panic!("{flow} confirmed as {other:?}"),
         }
     }
 
-    fn launched(&self, id: &str, flow: &str, predecessor: Option<&str>) -> Response {
+    fn launched(&self, id: &str, flow: &str, predecessor: Option<&str>) -> Output {
         use crate::launching::LaunchesFlows;
         let launch = self.acknowledged(id, flow, predecessor);
         if let Some(predecessor) = predecessor {
@@ -2425,7 +2425,7 @@ impl SeatsLaunches for HandoverWorld {
         }
         let launched = self.confirmed(flow);
         let _turn = self.fixture.nexus.dispatch_gate.lock().unwrap();
-        self.fixture.nexus.settle(id, Response::Started(launched))
+        self.fixture.nexus.settle(id, Output::Started(launched))
     }
 
     fn outcome(&self, id: &str) -> Option<LaunchOutcome> {
@@ -2469,10 +2469,10 @@ impl SeatsLaunches for HandoverWorld {
             .and_then(|row| row.current_flow_id)
     }
 
-    fn keep(&self, title: &str) -> Response {
+    fn keep(&self, title: &str) -> Output {
         self.fixture
             .nexus
-            .dispatch(Query::Keep(signal_flow::Keep_Data {
+            .dispatch(Input::Keep(signal_flow::Keep_Data {
                 address: self.address.clone(),
                 section: signal_flow::Section {
                     title: signal_flow::Title(title.into()),
@@ -2482,10 +2482,10 @@ impl SeatsLaunches for HandoverWorld {
             }))
     }
 
-    fn drop_section(&self, title: &str) -> Response {
+    fn drop_section(&self, title: &str) -> Output {
         self.fixture
             .nexus
-            .dispatch(Query::Drop(signal_flow::Drop_Data {
+            .dispatch(Input::Drop(signal_flow::Drop_Data {
                 address: self.address.clone(),
                 title: signal_flow::Title(title.into()),
             }))
@@ -2497,11 +2497,11 @@ const N2: &str = "b2b2b2";
 const S: &str = "c3c3c3";
 
 fn handover_pending(
-    response: &Response,
+    response: &Output,
     owner: &str,
     refusal: &signal_flow::HandoverCloseRefusal,
 ) -> bool {
-    matches!(response, Response::HandoverPending(pending)
+    matches!(response, Output::HandoverPending(pending)
         if pending.handover_owner.0.0 == owner && pending.handover_close_refusal == *refusal)
 }
 
@@ -2548,7 +2548,7 @@ fn handover_owner_ended_is_told_from_live_missing_and_unknown() {
         drop(closing);
         let answer = world.launched("judged", N1, None);
         match &expected {
-            None => assert!(matches!(answer, Response::Started(_)), "{answer:?}"),
+            None => assert!(matches!(answer, Output::Started(_)), "{answer:?}"),
             Some(refusal) => {
                 assert!(handover_pending(&answer, OWNER, refusal), "{answer:?}");
                 assert!(world.pending().is_some());
@@ -2569,7 +2569,7 @@ fn handover_owner_ended_is_told_from_live_missing_and_unknown() {
         }
         assert!(matches!(
             world.launched("ended", N1, None),
-            Response::Started(_)
+            Output::Started(_)
         ));
         assert_eq!(
             world.generations(),
@@ -2628,11 +2628,11 @@ fn a_launch_whose_handover_cannot_move_answers_pending_and_its_rest_takes_it_up(
 /// same; the derived handover (C2 refused before) runs C1 first.
 #[test]
 fn a_pending_handover_is_taken_up_by_the_started_flows_own_handover_write() {
-    let not_owner = |response: &Response| {
+    let not_owner = |response: &Output| {
         matches!(
             response,
-            Response::KeepRefused(signal_flow::HandoverRefusal::NotOwner)
-                | Response::DropRefused(signal_flow::HandoverRefusal::NotOwner)
+            Output::KeepRefused(signal_flow::HandoverRefusal::NotOwner)
+                | Output::DropRefused(signal_flow::HandoverRefusal::NotOwner)
         )
     };
     // The owner still live: refused, the row kept.
@@ -2647,14 +2647,14 @@ fn a_pending_handover_is_taken_up_by_the_started_flows_own_handover_write() {
     );
     // Keep, the owner ended: the transfer, then the write.
     assert!(world.fixture.nexus.store.record_stopped(OWNER).unwrap());
-    assert!(matches!(world.keep("mine"), Response::Kept(_)));
+    assert!(matches!(world.keep("mine"), Output::Kept(_)));
     assert!(world.pending().is_none());
     assert_eq!(world.generations(), vec![(OWNER.into(), N1.into())]);
     // Drop as the first write.
     let world = HandoverWorld::at(Owner::Live);
     world.launched("drop", N1, None);
     assert!(world.fixture.nexus.store.record_stopped(OWNER).unwrap());
-    assert!(matches!(world.drop_section("owned"), Response::Dropped(_)));
+    assert!(matches!(world.drop_section("owned"), Output::Dropped(_)));
     assert!(world.pending().is_none());
     assert_eq!(world.generations(), vec![(OWNER.into(), N1.into())]);
     // The derived handover: C2 refused, no row; the write runs C1 first.
@@ -2672,7 +2672,7 @@ fn a_pending_handover_is_taken_up_by_the_started_flows_own_handover_write() {
     ));
     assert!(world.pending().is_none() && world.outcome("derived").is_none());
     assert!(world.fixture.nexus.store.record_stopped(OWNER).unwrap());
-    assert!(matches!(world.keep("mine"), Response::Kept(_)));
+    assert!(matches!(world.keep("mine"), Output::Kept(_)));
     assert!(matches!(
         world.outcome("derived"),
         Some(LaunchOutcome::Started(_))
@@ -2688,7 +2688,7 @@ fn a_launch_after_a_stop_takes_the_handover_of_the_flow_it_succeeds() {
     let world = HandoverWorld::at(Owner::Ended);
     assert!(matches!(
         world.launched("after-stop", N1, None),
-        Response::Started(_)
+        Output::Started(_)
     ));
     assert_eq!(world.generations(), vec![(OWNER.into(), N1.into())]);
     assert_eq!(world.owner_now().as_deref(), Some(N1));
@@ -2696,17 +2696,17 @@ fn a_launch_after_a_stop_takes_the_handover_of_the_flow_it_succeeds() {
     let world = HandoverWorld::at(Owner::Ended);
     assert!(matches!(
         world.launched("first", N1, None),
-        Response::Started(_)
+        Output::Started(_)
     ));
     let answer = world.launched("second", S, Some(N1));
-    assert!(matches!(&answer, Response::ReapPending(pending)
+    assert!(matches!(&answer, Output::ReapPending(pending)
         if pending.predecessor.0.0 == N1 && pending.reap_standing == ReapStanding::Owed));
     // The pane seen gone: step 3 under the gate.
     {
         let _turn = world.fixture.nexus.dispatch_gate.lock().unwrap();
         assert!(matches!(
             world.fixture.nexus.settle_reap(N1),
-            Some(Response::Replaced(_))
+            Some(Output::Replaced(_))
         ));
     }
     assert_eq!(
@@ -2809,7 +2809,7 @@ fn a_later_start_supersedes_a_pending_handover_and_says_so() {
         }
         let answer = world.launched("id2", N2, None);
         if owner_ends {
-            assert!(matches!(answer, Response::Started(_)), "{answer:?}");
+            assert!(matches!(answer, Output::Started(_)), "{answer:?}");
             assert_eq!(world.generations(), vec![(OWNER.into(), N2.into())]);
             assert!(world.pending().is_none());
         } else {
@@ -2828,8 +2828,8 @@ fn a_later_start_supersedes_a_pending_handover_and_says_so() {
                     && superseded.successor.0.0 == N2
         ));
         assert!(matches!(
-            world.fixture.nexus.dispatch(Query::LaunchStatus(signal_flow::LaunchRequestId("id1".into()))),
-            Response::LaunchInspected(inspection)
+            world.fixture.nexus.dispatch(Input::LaunchStatus(signal_flow::LaunchRequestId("id1".into()))),
+            Output::LaunchInspected(inspection)
                 if matches!(inspection.launch_status_outcome_option, Some(LaunchStatusOutcome::HandoverSuperseded(_)))
         ));
     }
@@ -2847,7 +2847,7 @@ fn a_replacement_supersedes_a_pending_handover_and_a_later_start_settles_its_rea
         &live(OWNER)
     ));
     let answer = world.launched("replace", S, Some(N1));
-    assert!(matches!(&answer, Response::ReapPending(pending) if pending.predecessor.0.0 == N1));
+    assert!(matches!(&answer, Output::ReapPending(pending) if pending.predecessor.0.0 == N1));
     // H3: the PendingHandover retracted, id1 superseded by S.
     assert!(world.pending().is_none());
     assert!(matches!(
@@ -2870,7 +2870,7 @@ fn a_replacement_supersedes_a_pending_handover_and_a_later_start_settles_its_rea
     assert!(world.fixture.nexus.store.record_stopped(OWNER).unwrap());
     assert!(matches!(
         world.launched("later", N2, None),
-        Response::Started(_)
+        Output::Started(_)
     ));
     assert!(
         world
@@ -2940,11 +2940,11 @@ fn a_missing_owner_persists_typed_and_no_event_retries_it() {
     world.rest(N1);
     assert!(matches!(
         world.keep("mine"),
-        Response::KeepRefused(signal_flow::HandoverRefusal::NotOwner)
+        Output::KeepRefused(signal_flow::HandoverRefusal::NotOwner)
     ));
     assert!(matches!(
         world.drop_section("owned"),
-        Response::DropRefused(signal_flow::HandoverRefusal::NotOwner)
+        Output::DropRefused(signal_flow::HandoverRefusal::NotOwner)
     ));
     assert_eq!(world.fixture.nexus.store.faults.attempts().len(), attempts);
     world.fixture.restarted();
@@ -3288,9 +3288,9 @@ fn inspect_lists_pending_reaps_and_handovers_with_missing_and_unknown_typed() {
         match world
             .fixture
             .nexus
-            .dispatch_meta(meta_signal_flow::Query::Inspect(world.address.clone()))
+            .dispatch_meta(meta_signal_flow::Input::Inspect(world.address.clone()))
         {
-            meta_signal_flow::Response::Inspected(inspected) => inspected
+            meta_signal_flow::Output::Inspected(inspected) => inspected
                 .visible_attempt_vector
                 .into_iter()
                 .filter_map(|attempt| match attempt {

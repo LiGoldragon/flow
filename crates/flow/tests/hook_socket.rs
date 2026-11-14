@@ -18,7 +18,7 @@ fn answer_greeting(peer: &mut std::os::unix::net::UnixStream, greet: bool) -> bo
     let greeting = rkyv::from_bytes::<signal_flow::Handshake, rkyv::rancor::Error>(&frame)
         .expect("the first frame is a greeting");
     let receipt = if greet {
-        signal_flow::Query::receipt(&greeting)
+        signal_flow::Input::receipt(&greeting)
     } else {
         signal_flow::HandshakeReceipt::GreetingRefused(
             signal_flow::HandshakeRejection::ContractMismatch(signal_flow::ContractDigest(0)),
@@ -28,7 +28,7 @@ fn answer_greeting(peer: &mut std::os::unix::net::UnixStream, greet: bool) -> bo
     peer.write_all(&(reply.len() as u32).to_be_bytes())
         .and_then(|_| peer.write_all(&reply))
         .expect("receipt written");
-    greeting == signal_flow::Query::greeting()
+    greeting == signal_flow::Input::greeting()
 }
 
 #[test]
@@ -54,11 +54,11 @@ fn the_hook_reports_only_to_its_typed_socket_configuration() {
         peer.read_exact(&mut query).expect("query");
         received
             .send(
-                rkyv::from_bytes::<signal_flow::Query, rkyv::rancor::Error>(&query)
-                    .expect("the query is a signal-flow Query"),
+                rkyv::from_bytes::<signal_flow::Input, rkyv::rancor::Error>(&query)
+                    .expect("the query is a signal-flow Input"),
             )
             .expect("the test receives the query");
-        let reply = rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Response::Reported)
+        let reply = rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Output::Reported)
             .expect("reply encodes");
         peer.write_all(&(reply.len() as u32).to_be_bytes())
             .and_then(|_| peer.write_all(&reply))
@@ -87,7 +87,7 @@ fn the_hook_reports_only_to_its_typed_socket_configuration() {
         receiving
             .try_recv()
             .expect("the hook reached the launching Nexus"),
-        signal_flow::Query::Report(signal_flow::Report_Data {
+        signal_flow::Input::Report(signal_flow::Report_Data {
             flow_id: signal_flow::FlowId("5a4d0b".into()),
             process_option: None,
             event: signal_flow::Event::Stopped(signal_flow::NativeStop {
@@ -173,10 +173,10 @@ fn assistant_content_is_transport_only_for_every_diagnostic_outcome() {
                     peer.read_exact(&mut length).unwrap();
                     let mut bytes = vec![0; u32::from_be_bytes(length) as usize];
                     peer.read_exact(&mut bytes).unwrap();
-                    let query = rkyv::from_bytes::<signal_flow::Query, rkyv::rancor::Error>(&bytes)
+                    let query = rkyv::from_bytes::<signal_flow::Input, rkyv::rancor::Error>(&bytes)
                         .unwrap();
                     let reply =
-                        rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Response::Reported)
+                        rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Output::Reported)
                             .unwrap();
                     peer.write_all(&(reply.len() as u32).to_be_bytes()).unwrap();
                     peer.write_all(&reply).unwrap();
@@ -233,7 +233,7 @@ fn assistant_content_is_transport_only_for_every_diagnostic_outcome() {
                 _ => unreachable!(),
             }
             if let Some(receiver) = receiver {
-                let signal_flow::Query::Report(report) = receiver.join().unwrap() else {
+                let signal_flow::Input::Report(report) = receiver.join().unwrap() else {
                     panic!("Report")
                 };
                 let signal_flow::Event::Stopped(stop) = report.event else {

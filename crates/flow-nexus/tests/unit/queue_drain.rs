@@ -24,13 +24,13 @@ use flow_ethos::Delivery;
 use flow_ethos::State;
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{
-    ProcessIdentity, Query as MetaQuery, QueueDeliveryResolution, QueueResolutionOutcome,
-    ResolverIdentity, Response as MetaResponse, Undecided, VisibleQueueDeliveryStanding,
+    Input as MetaQuery, Output as MetaResponse, ProcessIdentity, QueueDeliveryResolution,
+    QueueResolutionOutcome, ResolverIdentity, Undecided, VisibleQueueDeliveryStanding,
     VisibleResolveQueueDeliveryRejected,
 };
 use signal_flow::{
-    Address, Aspect, Event, Message, Metaflow, Model, NativePrompt, NativeStop, QueueEntry,
-    Report_Data, Request, Response, SentBy,
+    Address, Aspect, Event, Message, Metaflow, Model, NativePrompt, NativeStop, Output, QueueEntry,
+    Report_Data, Request, SentBy,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,7 +104,7 @@ fn report(fixture: &NexusFixture, event: Event) {
             process_option: None,
             event: event.clone(),
         }),
-        Response::Reported
+        Output::Reported
     );
     fixture.nexus.after_report(
         &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
@@ -156,10 +156,10 @@ fn typed_count(fixture: &NexusFixture, body: &str) -> usize {
 fn standings(fixture: &NexusFixture) -> Vec<VisibleQueueDeliveryStanding> {
     match fixture
         .nexus
-        .dispatch_meta(meta_signal_flow::Query::ReadQueueDeliveries(address(
+        .dispatch_meta(meta_signal_flow::Input::ReadQueueDeliveries(address(
             Model::Sol,
         ))) {
-        meta_signal_flow::Response::QueueDeliveriesRead(read) => read
+        meta_signal_flow::Output::QueueDeliveriesRead(read) => read
             .visible_queue_delivery_vector
             .into_iter()
             .map(|delivery| delivery.visible_queue_delivery_standing)
@@ -608,7 +608,7 @@ fn a_foreign_stop_before_confirmation_is_not_a_turn_end() {
             process_option: None,
             event: foreign_stop(),
         }),
-        Response::Reported
+        Output::Reported
     );
     {
         let _gate = fixture.nexus.dispatch_gate.lock().unwrap();

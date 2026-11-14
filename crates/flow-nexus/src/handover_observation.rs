@@ -1,7 +1,7 @@
 //! Ephemeral FIFO observation of handover-generation retirement.
 
 use signal_flow::{
-    Address, HandoverGenerationKey, Response, RetirementChange, RetirementObservationFailure,
+    Address, HandoverGenerationKey, Output, RetirementChange, RetirementObservationFailure,
     RetirementSnapshot,
 };
 use std::{
@@ -58,7 +58,7 @@ pub(crate) trait ObservesHandoverRetirement {
 }
 
 pub(crate) trait ReadsRetirementSubscription {
-    fn next_response(&self) -> Result<Response, String>;
+    fn next_response(&self) -> Result<Output, String>;
     fn disconnect(&self);
     #[cfg(test)]
     fn queued_change_count(&self) -> usize;
@@ -161,7 +161,7 @@ impl ObservesHandoverRetirement for HandoverRetirementObservations {
 }
 
 impl ReadsRetirementSubscription for RetirementSubscription {
-    fn next_response(&self) -> Result<Response, String> {
+    fn next_response(&self) -> Result<Output, String> {
         let mut state = self
             .queue
             .state
@@ -169,10 +169,10 @@ impl ReadsRetirementSubscription for RetirementSubscription {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         loop {
             if let Some(change) = state.changes.pop_front() {
-                return Ok(Response::RetirementChanged(change));
+                return Ok(Output::RetirementChanged(change));
             }
             if let Some(failure) = state.terminal.take() {
-                return Ok(Response::RetirementObservationFailed(failure));
+                return Ok(Output::RetirementObservationFailed(failure));
             }
             if state.disconnected {
                 return Err("the retirement-observing peer disconnected".into());
@@ -293,14 +293,14 @@ mod tests {
         for generation in 0..RETIREMENT_OBSERVATION_CAPACITY as i64 {
             assert_eq!(
                 subscription.next_response().unwrap(),
-                Response::RetirementChanged(RetirementChange::GenerationClosed(Fixture::key(
+                Output::RetirementChanged(RetirementChange::GenerationClosed(Fixture::key(
                     generation
                 )))
             );
         }
         assert_eq!(
             subscription.next_response().unwrap(),
-            Response::RetirementObservationFailed(RetirementObservationFailure::Overflow)
+            Output::RetirementObservationFailed(RetirementObservationFailure::Overflow)
         );
     }
 

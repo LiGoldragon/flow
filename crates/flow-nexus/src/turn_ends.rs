@@ -20,7 +20,7 @@ use crate::store::metaflow::SleepsMetaflows;
 use crate::store::turn_end::RecordsTurnEnds;
 use crate::store::{FlowStore, ReadsFlowRows, StoreError};
 use crate::{HoldsStopRequest, RunningNexus};
-use signal_flow::{Response, TurnEnd};
+use signal_flow::{Output, TurnEnd};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -177,7 +177,7 @@ pub trait ObservesTurnEnds {
     fn observe_turn_ends(
         &self,
         disconnected: &AtomicBool,
-        send: &mut dyn FnMut(&Response) -> Result<(), String>,
+        send: &mut dyn FnMut(&Output) -> Result<(), String>,
     ) -> Result<(), String>;
 }
 
@@ -185,14 +185,14 @@ impl ObservesTurnEnds for RunningNexus {
     fn observe_turn_ends(
         &self,
         disconnected: &AtomicBool,
-        send: &mut dyn FnMut(&Response) -> Result<(), String>,
+        send: &mut dyn FnMut(&Output) -> Result<(), String>,
     ) -> Result<(), String> {
         let changes = self.store.launch_changes.clone();
         let (subscription, opening) = self
             .turn_ends
             .subscribe(&self.store)
             .map_err(|error| error.to_string())?;
-        send(&Response::TurnEndsObserved(opening))?;
+        send(&Output::TurnEndsObserved(opening))?;
         loop {
             let seen = changes.current();
             if disconnected.load(Ordering::Acquire) {
@@ -202,7 +202,7 @@ impl ObservesTurnEnds for RunningNexus {
                 return Err("the Nexus is stopping".into());
             }
             for turn_end in subscription.take() {
-                send(&Response::TurnEnded(turn_end))?;
+                send(&Output::TurnEnded(turn_end))?;
             }
             changes.after(seen);
         }

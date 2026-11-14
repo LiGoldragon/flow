@@ -7,8 +7,8 @@
 use super::NexusFixture;
 use crate::Dispatches;
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
-use meta_signal_flow::{Query as MetaQuery, Response as MetaResponse};
-use signal_flow::{Event, Query, Report_Data, Response, StartRejection};
+use meta_signal_flow::{Input as MetaQuery, Output as MetaResponse};
+use signal_flow::{Event, Input, Output, Report_Data, StartRejection};
 use std::fs;
 
 impl NexusFixture {
@@ -59,8 +59,8 @@ printf '%s\n' "$alias"
             .collect()
     }
 
-    fn report(&self, flow_id: &str, event: Event) -> Response {
-        self.nexus.dispatch(Query::Report(Report_Data {
+    fn report(&self, flow_id: &str, event: Event) -> Output {
+        self.nexus.dispatch(Input::Report(Report_Data {
             flow_id: flow_ethos::FlowId(flow_id.into()),
             process_option: None,
             event,
@@ -79,8 +79,8 @@ fn a_claude_launch_refused_after_reserve_gives_back_its_flow_and_claim() {
     launch.profile.model_name = flow_ethos::ModelName("claude-fixture".into());
     fixture.configure_model_of(&launch.profile);
     assert_eq!(
-        fixture.nexus.dispatch(Query::Start(launch.request())),
-        Response::StartRejected(StartRejection::NativeLaunchRefused(
+        fixture.nexus.dispatch(Input::Start(launch.request())),
+        Output::StartRejected(StartRejection::NativeLaunchRefused(
             signal_flow::NativeLaunchRefusal {
                 native_launch_stage: signal_flow::NativeLaunchStage::Open,
                 native_launch_failure: signal_flow::NativeLaunchFailure::AdapterRefused,
@@ -112,7 +112,7 @@ fn a_claude_launch_refused_after_reserve_gives_back_its_flow_and_claim() {
     );
     assert_eq!(
         fixture.report(&flow_id, Event::Started(None)),
-        Response::Refused(signal_flow::Refusal::Unknown(
+        Output::Refused(signal_flow::Refusal::Unknown(
             signal_flow::Unknown_Data::FlowId(flow_ethos::FlowId(flow_id.clone()))
         ))
     );
@@ -121,8 +121,8 @@ fn a_claude_launch_refused_after_reserve_gives_back_its_flow_and_claim() {
 
     // The settled launch is not reserved again.
     assert_eq!(
-        fixture.nexus.dispatch(Query::Start(launch.request())),
-        Response::StartRejected(StartRejection::NativeLaunchRefused(
+        fixture.nexus.dispatch(Input::Start(launch.request())),
+        Output::StartRejected(StartRejection::NativeLaunchRefused(
             signal_flow::NativeLaunchRefusal {
                 native_launch_stage: signal_flow::NativeLaunchStage::Open,
                 native_launch_failure: signal_flow::NativeLaunchFailure::AdapterRefused,
@@ -141,8 +141,8 @@ fn a_claude_launch_whose_flow_id_cannot_be_claimed_is_refused_before_any_pane() 
     fixture.configure_model_of(&launch.profile);
     let log = fixture.herdr_logging_every_call();
     assert_eq!(
-        fixture.nexus.dispatch(Query::Start(launch.request())),
-        Response::StartRejected(StartRejection::BindingRefused(
+        fixture.nexus.dispatch(Input::Start(launch.request())),
+        Output::StartRejected(StartRejection::BindingRefused(
             signal_flow::BindingRefusal::ClaimUnavailable,
         ))
     );
@@ -156,8 +156,8 @@ fn a_codex_launch_reserves_no_flow_id() {
     let _ = fs::remove_file(&fixture.snapshot_program);
     let launch = fixture.staged_launch("codex-request", None);
     assert_eq!(
-        fixture.nexus.dispatch(Query::Start(launch.request())),
-        Response::StartRejected(StartRejection::NativeLaunchRefused(
+        fixture.nexus.dispatch(Input::Start(launch.request())),
+        Output::StartRejected(StartRejection::NativeLaunchRefused(
             signal_flow::NativeLaunchRefusal {
                 native_launch_stage: signal_flow::NativeLaunchStage::Open,
                 native_launch_failure: signal_flow::NativeLaunchFailure::AdapterRefused,
@@ -209,13 +209,13 @@ esac
         opened_thread_option: None,
     });
     assert_eq!(
-        fixture.nexus.dispatch(Query::Start(launch.request())),
-        Response::StartRejected(expected.clone())
+        fixture.nexus.dispatch(Input::Start(launch.request())),
+        Output::StartRejected(expected.clone())
     );
-    let Response::LaunchInspected(inspection) =
+    let Output::LaunchInspected(inspection) =
         fixture
             .nexus
-            .dispatch(Query::LaunchStatus(signal_flow::LaunchRequestId(
+            .dispatch(Input::LaunchStatus(signal_flow::LaunchRequestId(
                 "herdr-refused-request".into(),
             )))
     else {
@@ -304,7 +304,7 @@ fn a_codex_launch_recovered_after_its_start_binds_to_the_recorded_thread() {
             .record_opened_thread("recovered-request", super::STAGED_SESSION)
             .unwrap()
     );
-    let Response::LaunchPending(attempt) = fixture.nexus.dispatch(Query::Start(launch.request()))
+    let Output::LaunchPending(attempt) = fixture.nexus.dispatch(Input::Start(launch.request()))
     else {
         panic!("the recovered launch is pending with its binding");
     };
@@ -331,13 +331,13 @@ fn a_codex_launch_recovered_without_its_thread_is_refused_at_bind_on_the_wire() 
         native_launch_failure: signal_flow::NativeLaunchFailure::NativeSessionMissing,
     });
     assert_eq!(
-        fixture.nexus.dispatch(Query::Start(launch.request())),
-        Response::StartRejected(expected.clone())
+        fixture.nexus.dispatch(Input::Start(launch.request())),
+        Output::StartRejected(expected.clone())
     );
-    let Response::LaunchInspected(inspection) =
+    let Output::LaunchInspected(inspection) =
         fixture
             .nexus
-            .dispatch(Query::LaunchStatus(signal_flow::LaunchRequestId(
+            .dispatch(Input::LaunchStatus(signal_flow::LaunchRequestId(
                 "unrecorded-request".into(),
             )))
     else {
@@ -369,14 +369,14 @@ fn a_refused_registration_is_reported_with_its_stage() {
     assert_eq!(
         fixture.nexus.settle(
             "registration-request",
-            Response::StartRejected(expected.clone())
+            Output::StartRejected(expected.clone())
         ),
-        Response::StartRejected(expected.clone())
+        Output::StartRejected(expected.clone())
     );
-    let Response::LaunchInspected(inspection) =
+    let Output::LaunchInspected(inspection) =
         fixture
             .nexus
-            .dispatch(Query::LaunchStatus(signal_flow::LaunchRequestId(
+            .dispatch(Input::LaunchStatus(signal_flow::LaunchRequestId(
                 "registration-request".into(),
             )))
     else {
@@ -401,8 +401,8 @@ fn a_codex_start_naming_a_claude_leave_out_is_refused_before_reserve_or_open() {
         signal_flow::LeaveOut::ClaudeMd,
     ]));
     assert_eq!(
-        fixture.nexus.dispatch(Query::Start(launch.request())),
-        Response::StartRejected(StartRejection::LeaveOutRefused(
+        fixture.nexus.dispatch(Input::Start(launch.request())),
+        Output::StartRejected(StartRejection::LeaveOutRefused(
             signal_flow::LeaveOutRefusal::NotForHarness(signal_flow::LeaveOut::ClaudeMd)
         ))
     );

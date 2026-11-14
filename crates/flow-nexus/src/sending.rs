@@ -42,7 +42,7 @@ use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
     Address, CallerIdentity, HarnessKind, HerdrRoute, LaunchProfile, LaunchRequest, Message,
-    PrivateSendResponse, Process, Refusal, Request, Response, SendPayloadSize, SendRequest,
+    Output, PrivateSendResponse, Process, Refusal, Request, SendPayloadSize, SendRequest,
     SendableMessage, SentBy, StartRejection, Unknown_Data,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -126,13 +126,13 @@ impl AdmitsSendPayload for Message {
 /// it runs in, or Unbound for a caller in no flow. It refuses nobody; only
 /// a store that cannot be read answers a refusal.
 pub trait IdentifiesSender {
-    fn sender_of(&self, peer: &Process) -> Result<SentBy, Box<Response>>;
+    fn sender_of(&self, peer: &Process) -> Result<SentBy, Box<Output>>;
 }
 
 impl IdentifiesSender for RunningNexus {
-    fn sender_of(&self, peer: &Process) -> Result<SentBy, Box<Response>> {
+    fn sender_of(&self, peer: &Process) -> Result<SentBy, Box<Output>> {
         let refused = |error: crate::store::StoreError| {
-            Box::new(Response::Refused(Refusal::Store(error.to_string())))
+            Box::new(Output::Refused(Refusal::Store(error.to_string())))
         };
         Ok(match self.process_authority(peer).map_err(refused)? {
             ProcessAuthority::Bound(origin) => self
@@ -173,7 +173,7 @@ pub struct PendingSend {
 }
 
 pub struct SendAnswer {
-    pub response: Response,
+    pub response: Output,
     pub private_response: PrivateSendResponse,
     pub pending: Option<PendingSend>,
     pub(crate) _pending_answer: Option<crate::store::logical_delivery::PendingAnswerHold>,
@@ -227,7 +227,7 @@ pub trait SendsRequests {
     fn send_request(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer;
     /// Delivers every durable request currently queued at `address`,
     /// whoever asks.
-    fn deliver_all(&self, address: Address) -> Response;
+    fn deliver_all(&self, address: Address) -> Output;
     /// The flow the metaflow at `address` is Awake as, when it is live.
     fn live_awake_flow(&self, address: &Address) -> Option<String>;
 }
@@ -281,7 +281,7 @@ impl SendsRequests for RunningNexus {
             let sender = match observed_sender.as_ref() {
                 Ok(sender) => sender.clone(),
                 Err(refusal) => match refusal.as_ref() {
-                    Response::Refused(reason) => {
+                    Output::Refused(reason) => {
                         return PrivateSendResponse::Refused(reason.clone()).into();
                     }
                     response => {
@@ -459,7 +459,7 @@ impl SendsRequests for RunningNexus {
         .map(|value| value.0)
     }
 
-    fn deliver_all(&self, address: Address) -> Response {
+    fn deliver_all(&self, address: Address) -> Output {
         let turn = self
             .dispatch_gate
             .lock()
@@ -468,7 +468,7 @@ impl SendsRequests for RunningNexus {
         let asleep = match self.store.metaflow(&address) {
             Ok(Some(metaflow)) => {
                 if metaflow.queue.0.is_empty() {
-                    return Response::Drained(signal_flow::VisibleDrainOutcome {
+                    return Output::Drained(signal_flow::VisibleDrainOutcome {
                         address: address.clone(),
                         visible_drain_state: signal_flow::VisibleDrainState::Delivered,
                     });
@@ -476,12 +476,12 @@ impl SendsRequests for RunningNexus {
                 metaflow.state == flow_ethos::State::Asleep
             }
             Ok(None) => {
-                return Response::Refused(Refusal::Unknown(Unknown_Data::Address(address)));
+                return Output::Refused(Refusal::Unknown(Unknown_Data::Address(address)));
             }
-            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+            Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
         };
         if let Err(error) = self.store.force_queue_wake(&address) {
-            return Response::Refused(Refusal::Store(error.to_string()));
+            return Output::Refused(Refusal::Store(error.to_string()));
         }
         if !asleep {
             self.drain_all(address.clone());
@@ -492,17 +492,17 @@ impl SendsRequests for RunningNexus {
         }
         match self.store.metaflow(&address) {
             Ok(Some(metaflow)) if metaflow.queue.0.is_empty() => {
-                Response::Drained(signal_flow::VisibleDrainOutcome {
+                Output::Drained(signal_flow::VisibleDrainOutcome {
                     address: address.clone(),
                     visible_drain_state: signal_flow::VisibleDrainState::Delivered,
                 })
             }
-            Ok(Some(_metaflow)) => Response::Drained(signal_flow::VisibleDrainOutcome {
+            Ok(Some(_metaflow)) => Output::Drained(signal_flow::VisibleDrainOutcome {
                 address: address.clone(),
                 visible_drain_state: signal_flow::VisibleDrainState::Held,
             }),
-            Ok(None) => Response::Refused(Refusal::Unknown(Unknown_Data::Address(address))),
-            Err(error) => Response::Refused(Refusal::Store(error.to_string())),
+            Ok(None) => Output::Refused(Refusal::Unknown(Unknown_Data::Address(address))),
+            Err(error) => Output::Refused(Refusal::Store(error.to_string())),
         }
     }
 }
@@ -521,7 +521,7 @@ pub trait LaunchesDeclared {
     /// flow, whoever asks, the Replace of that flow; Err with the refusal
     /// when the Address is undeclared or its model unconfigured. It only
     /// reads; the Start or Replace it names is dispatched as any other.
-    fn declared_launch(&self, launch: LaunchRequest) -> Result<signal_flow::Query, Box<Response>>;
+    fn declared_launch(&self, launch: LaunchRequest) -> Result<signal_flow::Input, Box<Output>>;
     /// The profile and predecessor state one declared request reads, in the
     /// configured Herdr session. A rehearsal uses semantic identities and
     /// performs no Herdr read.
@@ -529,15 +529,15 @@ pub trait LaunchesDeclared {
         &self,
         launch: LaunchRequest,
         rehearsal: bool,
-    ) -> Result<(LaunchProfile, Option<String>), Box<Response>>;
+    ) -> Result<(LaunchProfile, Option<String>), Box<Output>>;
 }
 
 impl LaunchesDeclared for RunningNexus {
-    fn declared_launch(&self, launch: LaunchRequest) -> Result<signal_flow::Query, Box<Response>> {
+    fn declared_launch(&self, launch: LaunchRequest) -> Result<signal_flow::Input, Box<Output>> {
         let (profile, predecessor) = self.declared_profile(launch, false)?;
         Ok(match predecessor {
-            Some(_) => signal_flow::Query::Replace(profile),
-            None => signal_flow::Query::Start(profile),
+            Some(_) => signal_flow::Input::Replace(profile),
+            None => signal_flow::Input::Start(profile),
         })
     }
 
@@ -545,16 +545,16 @@ impl LaunchesDeclared for RunningNexus {
         &self,
         launch: LaunchRequest,
         rehearsal: bool,
-    ) -> Result<(LaunchProfile, Option<String>), Box<Response>> {
+    ) -> Result<(LaunchProfile, Option<String>), Box<Output>> {
         let store_refused = |error: crate::store::StoreError| {
-            Box::new(Response::Refused(Refusal::Store(error.to_string())))
+            Box::new(Output::Refused(Refusal::Store(error.to_string())))
         };
         let address = launch.address;
         // The topic is input: checked before the declaration is looked up.
         {
             use crate::launching::NamesTopic;
             if !address.topic.0.as_str().is_camel_case_topic() {
-                return Err(Box::new(Response::StartRejected(
+                return Err(Box::new(Output::StartRejected(
                     StartRejection::TopicRefused(address.topic.clone()),
                 )));
             }
@@ -564,16 +564,14 @@ impl LaunchesDeclared for RunningNexus {
             .metaflow_declaration(&address)
             .map_err(store_refused)?
         else {
-            return Err(Box::new(Response::StartRejected(
-                StartRejection::Undeclared,
-            )));
+            return Err(Box::new(Output::StartRejected(StartRejection::Undeclared)));
         };
         let Some(model_name) = self
             .store
             .configured_model(&address)
             .map_err(store_refused)?
         else {
-            return Err(Box::new(Response::Refused(Refusal::NotConfigured)));
+            return Err(Box::new(Output::Refused(Refusal::NotConfigured)));
         };
         // A Launch addressed to an Awake metaflow refreshes it: the flow it
         // is Awake as is replaced by the launch, never typed into.
@@ -617,17 +615,17 @@ impl LaunchesDeclared for RunningNexus {
 /// Renders one declared launch's final native invocation without creating
 /// any resource or writing any state.
 pub(crate) trait RehearsesDeclared {
-    fn rehearse_declared(&self, launch: LaunchRequest) -> Response;
+    fn rehearse_declared(&self, launch: LaunchRequest) -> Output;
 }
 
 impl RehearsesDeclared for RunningNexus {
-    fn rehearse_declared(&self, launch: LaunchRequest) -> Response {
-        let rejected = |response: Response| match response {
-            Response::StartRejected(rejection) => Response::RehearseRejected(rejection),
-            Response::Refused(_) => {
-                Response::RehearseRejected(StartRejection::LaunchPersistenceRefused)
+    fn rehearse_declared(&self, launch: LaunchRequest) -> Output {
+        let rejected = |response: Output| match response {
+            Output::StartRejected(rejection) => Output::RehearseRejected(rejection),
+            Output::Refused(_) => {
+                Output::RehearseRejected(StartRejection::LaunchPersistenceRefused)
             }
-            _ => Response::RehearseRejected(StartRejection::LaunchPersistenceRefused),
+            _ => Output::RehearseRejected(StartRejection::LaunchPersistenceRefused),
         };
         let (profile, _) = match self.declared_profile(launch, true) {
             Ok(profile) => profile,
@@ -635,21 +633,21 @@ impl RehearsesDeclared for RunningNexus {
         };
         let harness_arguments = match self.harness_arguments(&profile.address) {
             Ok(arguments) => arguments,
-            Err(rejection) => return Response::RehearseRejected(rejection),
+            Err(rejection) => return Output::RehearseRejected(rejection),
         };
         let composed = match self.perform(Operation::Compose(profile)) {
             Outcome::Composed(composed) => composed,
             Outcome::Failed(Failed_Data::ContextRefused(refusal)) => {
-                return Response::RehearseRejected(StartRejection::ContextRefused(refusal));
+                return Output::RehearseRejected(StartRejection::ContextRefused(refusal));
             }
             Outcome::Failed(Failed_Data::LeaveOutRefused(refusal)) => {
-                return Response::RehearseRejected(StartRejection::LeaveOutRefused(refusal));
+                return Output::RehearseRejected(StartRejection::LeaveOutRefused(refusal));
             }
             Outcome::Failed(Failed_Data::CompositionRefused(refusal)) => {
-                return Response::RehearseRejected(StartRejection::CompositionRefused(refusal));
+                return Output::RehearseRejected(StartRejection::CompositionRefused(refusal));
             }
             _ => {
-                return Response::RehearseRejected(StartRejection::LaunchPersistenceRefused);
+                return Output::RehearseRejected(StartRejection::LaunchPersistenceRefused);
             }
         };
         let resources = HarnessCommandResources::rehearsal(&composed.harness_kind);
@@ -657,7 +655,7 @@ impl RehearsesDeclared for RunningNexus {
             .herdr
             .harness_command(&composed, resources, &harness_arguments)
         {
-            Ok(command) => Response::Rehearsed(signal_flow::Command(command.shell_command())),
+            Ok(command) => Output::Rehearsed(signal_flow::Command(command.shell_command())),
             Err(failure) => {
                 let cause = match failure {
                     crate::herdr::launch::SpawnFailure::Refused(cause) => cause,
@@ -665,7 +663,7 @@ impl RehearsesDeclared for RunningNexus {
                         signal_flow::SpawnRefusalCause::CommandTooLong
                     }
                 };
-                Response::RehearseRejected(StartRejection::HarnessSpawnRefused(
+                Output::RehearseRejected(StartRejection::HarnessSpawnRefused(
                     signal_flow::HarnessSpawnRefusal {
                         spawn_refusal_cause: cause,
                         opened_thread_option: None,
@@ -936,24 +934,24 @@ impl FindsSeat for RunningNexus {
 pub trait BindsSeats {
     /// Binds the seat in the named pane as the metaflow at `address`, from
     /// any caller.
-    fn bind_seat(&self, request: signal_flow::BindSeat_Data) -> Response;
+    fn bind_seat(&self, request: signal_flow::BindSeat_Data) -> Output;
     /// Adopts that seat only when the native session it runs is the one
     /// named.
-    fn adopt(&self, request: signal_flow::Adopt_Data) -> Response;
+    fn adopt(&self, request: signal_flow::Adopt_Data) -> Output;
 }
 
 impl BindsSeats for RunningNexus {
-    fn bind_seat(&self, request: signal_flow::BindSeat_Data) -> Response {
+    fn bind_seat(&self, request: signal_flow::BindSeat_Data) -> Output {
         self.adopt_seat(request.address, &request.seat_pane, None)
     }
 
-    fn adopt(&self, request: signal_flow::Adopt_Data) -> Response {
+    fn adopt(&self, request: signal_flow::Adopt_Data) -> Output {
         match self.adopt_seat(
             request.address,
             &request.seat_pane,
             Some(request.native_session_id.0.as_str()),
         ) {
-            Response::Bound(flow_id) => Response::Adopted(flow_id),
+            Output::Bound(flow_id) => Output::Adopted(flow_id),
             response => response,
         }
     }
@@ -982,7 +980,7 @@ trait AdoptsSeat {
         address: Address,
         pane: &signal_flow::SeatPane,
         expected_session: Option<&str>,
-    ) -> Response;
+    ) -> Output;
 }
 
 impl AdoptsSeat for RunningNexus {
@@ -991,7 +989,7 @@ impl AdoptsSeat for RunningNexus {
         address: Address,
         pane: &signal_flow::SeatPane,
         expected_session: Option<&str>,
-    ) -> Response {
+    ) -> Output {
         let _turn = self
             .dispatch_gate
             .lock()
@@ -1001,7 +999,7 @@ impl AdoptsSeat for RunningNexus {
             crate::store::restart::RecordsRestarts::restart_at(&*self.store, &address),
             Ok(None)
         ) {
-            return Response::Refused(Refusal::Locked);
+            return Output::Refused(Refusal::Locked);
         }
         let pane = crate::caller::CallerPane {
             herdr_session_name: pane.herdr_session_name.0.clone(),
@@ -1017,7 +1015,7 @@ impl AdoptsSeat for RunningNexus {
             && route.herdr_pane_id.0 == pane.herdr_pane_id
             && self.herdr.pane_presence(&node) == crate::herdr::PanePresence::Present
         {
-            return Response::Bound(signal_flow::FlowId(flow_id));
+            return Output::Bound(signal_flow::FlowId(flow_id));
         }
         // A pane no seat is named in is refused, and what it showed is
         // logged as it was read, never made into an identity.
@@ -1026,7 +1024,7 @@ impl AdoptsSeat for RunningNexus {
                 "flow-nexus: BindSeat {address:?} names no seat in pane {:?}: label {:?}, session {:?}, at {}",
                 evidence.pane, evidence.pane_label, evidence.native_session, evidence.observed_at
             );
-            Response::Refused(Refusal::unidentified_with(Process::none(), evidence))
+            Output::Refused(Refusal::unidentified_with(Process::none(), evidence))
         };
         let (seat, native_session_id) = match self.seat_of(&pane) {
             Ok(found) => found,
@@ -1122,7 +1120,7 @@ impl AdoptsSeat for RunningNexus {
         };
         // A seat the Address is Awake as already binds idempotently.
         if self.live_awake_flow(&address).as_deref() == Some(flow_id.as_str()) {
-            return Response::Bound(signal_flow::FlowId(flow_id));
+            return Output::Bound(signal_flow::FlowId(flow_id));
         }
         let binding = meta_signal_flow::FlowBinding {
             flow_id: signal_flow::FlowId(flow_id.clone()),
@@ -1156,9 +1154,9 @@ impl AdoptsSeat for RunningNexus {
                 .store
                 .adopt_existing_flow(node, role, address.clone(), &binding)
             {
-                Ok(ExistingSeatAdoption::Bound(_)) => Response::Bound(signal_flow::FlowId(flow_id)),
-                Ok(ExistingSeatAdoption::Refused(_)) => Response::Refused(Refusal::Taken(address)),
-                Err(error) => Response::Refused(Refusal::Store(error.to_string())),
+                Ok(ExistingSeatAdoption::Bound(_)) => Output::Bound(signal_flow::FlowId(flow_id)),
+                Ok(ExistingSeatAdoption::Refused(_)) => Output::Refused(Refusal::Taken(address)),
+                Err(error) => Output::Refused(Refusal::Store(error.to_string())),
             },
         }
     }

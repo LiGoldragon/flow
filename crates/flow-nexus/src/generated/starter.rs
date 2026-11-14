@@ -340,14 +340,14 @@ pub trait SettlesStartupProgress {
         input_0: N,
         input_1: O,
         input_2: P,
-    ) -> signal_flow::Response;
+    ) -> signal_flow::Output;
     fn advance_startup<N: Profiled, O: DeliveryIntended>(
         &self,
         input_0: N,
         input_1: O,
-    ) -> signal_flow::Response;
+    ) -> signal_flow::Output;
     fn stops_reported<N: Textual>(&self, input: N) -> i64;
-    fn composition_refused<N: OutcomeCarrying>(input: N) -> signal_flow::Response;
+    fn composition_refused<N: OutcomeCarrying>(input: N) -> signal_flow::Output;
 }
 #[rustfmt::skip]
 pub trait NamesLaunchedRoute {

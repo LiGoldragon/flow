@@ -24,8 +24,8 @@ use crate::store::queue_delivery::{
 use crate::store::reminder::RecordsReminders;
 use flow_ethos::{AnswerableTask, FlowId, State};
 use signal_flow::{
-    Address, Aspect, DeliveryState, Message, Model, PrivateSendResponse, Query, QueueEntry,
-    Refusal, Request, Response, SendAcceptance, SendableMessage, SendableRequest, SentBy,
+    Address, Aspect, DeliveryState, Input, Message, Model, Output, PrivateSendResponse, QueueEntry,
+    Refusal, Request, SendAcceptance, SendableMessage, SendableRequest, SentBy,
 };
 use std::fs;
 
@@ -272,12 +272,12 @@ fn a_successor_is_given_its_predecessors_open_requests_and_answers_them_by_their
         .expect("the Task's reminder is held");
     assert!(deadline.due.is_some(), "{deadline:?}");
 
-    let refreshed = fixture.nexus.dispatch(Query::Refresh(at.clone()));
+    let refreshed = fixture.nexus.dispatch(Input::Refresh(at.clone()));
     // The successor started; its predecessor's reap is pending.
     assert!(
         matches!(
             &refreshed,
-            Response::ReapPending(pending)
+            Output::ReapPending(pending)
                 if pending.address == at
                     && pending.predecessor.0.0 == "abc123"
                     && pending.reap_standing == signal_flow::ReapStanding::Owed
@@ -439,8 +439,8 @@ fn a_codex_refresh_carries_its_open_requests_to_its_successor() {
         ),
         None
     );
-    let ordered = fixture.nexus.dispatch(Query::Refresh(at.clone()));
-    assert!(matches!(ordered, Response::RefreshQueued(_)), "{ordered:?}");
+    let ordered = fixture.nexus.dispatch(Input::Refresh(at.clone()));
+    assert!(matches!(ordered, Output::RefreshQueued(_)), "{ordered:?}");
     assert_eq!(world.claude_starts(), 0, "{}", world.calls());
 
     let at_rest = fixture.nexus.codex_events(
@@ -514,12 +514,12 @@ fn a_successor_with_nothing_open_is_given_no_open_requests_line() {
     let at = address(Model::Sol);
     assert_eq!(store.open_requests(&at).unwrap(), Vec::new());
 
-    let refreshed = fixture.nexus.dispatch(Query::Refresh(at.clone()));
+    let refreshed = fixture.nexus.dispatch(Input::Refresh(at.clone()));
     // The successor started; its predecessor's reap is pending.
     assert!(
         matches!(
             &refreshed,
-            Response::ReapPending(pending)
+            Output::ReapPending(pending)
                 if pending.address == at
                     && pending.predecessor.0.0 == "abc123"
                     && pending.reap_standing == signal_flow::ReapStanding::Owed

@@ -11,7 +11,7 @@ use crate::store::ManagesMetaflowState;
 use crate::store::handover::HoldsHandovers;
 use crate::{Connection, ServesConnection};
 use meta_signal_flow::ConfigurationChange;
-use signal_flow::{Address, Aspect, Model, Response, RetirementObservationFailure};
+use signal_flow::{Address, Aspect, Model, Output, RetirementObservationFailure};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::{
@@ -300,11 +300,11 @@ fn post_commit_timeout_reverifies_same_generation_before_removal() {
     );
     assert!(matches!(
         subscription.next_response().unwrap(),
-        Response::RetirementChanged(signal_flow::RetirementChange::ArchiveCommitted(_))
+        Output::RetirementChanged(signal_flow::RetirementChange::ArchiveCommitted(_))
     ));
     assert!(matches!(
         subscription.next_response().unwrap(),
-        Response::RetirementChanged(signal_flow::RetirementChange::GenerationRemoved(_))
+        Output::RetirementChanged(signal_flow::RetirementChange::GenerationRemoved(_))
     ));
     assert!(
         fixture
@@ -559,7 +559,7 @@ fn retirement_scan_read_failure_is_explicitly_incomplete() {
     );
     assert!(matches!(
         subscription.next_response().unwrap(),
-        Response::RetirementObservationFailed(RetirementObservationFailure::MissingEvidence(_))
+        Output::RetirementObservationFailed(RetirementObservationFailure::MissingEvidence(_))
     ));
     assert_eq!(
         fixture
@@ -611,13 +611,13 @@ fn attaching_during_publication_sees_closed_then_archive_then_removed() {
         assert_eq!(retirement.join().unwrap(), Ok(1));
         assert!(matches!(
             subscription.next_response().unwrap(),
-            signal_flow::Response::RetirementChanged(
+            signal_flow::Output::RetirementChanged(
                 signal_flow::RetirementChange::ArchiveCommitted(_)
             )
         ));
         assert!(matches!(
             subscription.next_response().unwrap(),
-            signal_flow::Response::RetirementChanged(
+            signal_flow::Output::RetirementChanged(
                 signal_flow::RetirementChange::GenerationRemoved(_)
             )
         ));

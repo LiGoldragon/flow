@@ -32,7 +32,7 @@ use crate::store::{
 };
 use crate::test_faults::{CrashPoint, InjectsCrashes, RefusedWrite};
 use crate::waking::SleepsAndWakesSeats;
-use signal_flow::{FlowId, FlowLifecycle, Query, ReapStanding, Response};
+use signal_flow::{FlowId, FlowLifecycle, Input, Output, ReapStanding};
 use std::fs;
 use std::time::{Duration, Instant};
 
@@ -50,7 +50,7 @@ trait TakesReapsOver {
     fn owner(&self) -> Option<ReapResponsibility>;
     /// The Replace's outcome.
     fn outcome(&self) -> Option<LaunchOutcome>;
-    fn stop(&self, flow: &str) -> Response;
+    fn stop(&self, flow: &str) -> Output;
     /// W1 and W2 of a launch `id` of `flow` at A, replacing `predecessor`
     /// when named: `flow` is A's receiving flow, its settlement not run.
     fn confirmed_at_address(
@@ -60,7 +60,7 @@ trait TakesReapsOver {
         predecessor: Option<&str>,
     ) -> signal_flow::Launched;
     /// The launch's settlement under the gate, as Start runs it.
-    fn settled(&self, id: &str, launched: signal_flow::Launched) -> Response;
+    fn settled(&self, id: &str, launched: signal_flow::Launched) -> Output;
     /// The flow's rest, under the gate, as `settle_rested` runs it.
     fn rest(&self, flow: &str);
     /// Every generation of A's handover row closed so far.
@@ -103,10 +103,10 @@ impl TakesReapsOver for ReapWorld {
             .unwrap()
     }
 
-    fn stop(&self, flow: &str) -> Response {
+    fn stop(&self, flow: &str) -> Output {
         self.fixture
             .nexus
-            .dispatch(Query::Stop(FlowId(flow.into())))
+            .dispatch(Input::Stop(FlowId(flow.into())))
     }
 
     fn confirmed_at_address(
@@ -137,15 +137,15 @@ impl TakesReapsOver for ReapWorld {
                 .unwrap();
         }
         match self.fixture.nexus.store.confirm_started(flow).unwrap() {
-            Response::Started(launched) => launched,
+            Output::Started(launched) => launched,
             other => panic!("{flow} confirmed as {other:?}"),
         }
     }
 
-    fn settled(&self, id: &str, launched: signal_flow::Launched) -> Response {
+    fn settled(&self, id: &str, launched: signal_flow::Launched) -> Output {
         use crate::launching::LaunchesFlows;
         let _turn = self.fixture.nexus.dispatch_gate.lock().unwrap();
-        self.fixture.nexus.settle(id, Response::Started(launched))
+        self.fixture.nexus.settle(id, Output::Started(launched))
     }
 
     fn rest(&self, flow: &str) {
@@ -296,7 +296,7 @@ fn held_by_the_address(world: &ReapWorld, shown: PaneShown) {
     let snapshots = world.snapshots_of_predecessor();
     assert_eq!(
         world.stop(SUCCESSOR),
-        Response::Stopped(FlowId(SUCCESSOR.into()))
+        Output::Stopped(FlowId(SUCCESSOR.into()))
     );
     assert_eq!(world.owner(), Some(ReapResponsibility::AddressHeld));
     assert_eq!(world.standing(), Some(ReapStanding::CloseRefused));
@@ -331,7 +331,7 @@ fn a_settle_unrecorded_reap_is_settled_by_its_successors_stop() {
         let attempts = world.attempt_count();
         assert_eq!(
             world.stop(SUCCESSOR),
-            Response::Stopped(FlowId(SUCCESSOR.into()))
+            Output::Stopped(FlowId(SUCCESSOR.into()))
         );
         // The one commit: S Stopped, A Asleep, the row finished.
         assert_eq!(
@@ -372,7 +372,7 @@ fn a_settle_unrecorded_reap_is_settled_by_its_successors_stop() {
     assert_eq!(world.fixture.restarted(), first, "the start writes nothing");
     assert_eq!(
         world.stop(SUCCESSOR),
-        Response::StopRejected(signal_flow::StopRejection::AlreadyStopped)
+        Output::StopRejected(signal_flow::StopRejection::AlreadyStopped)
     );
     assert!(!vetted(&world.vet(PREDECESSOR)));
     assert!(!vetted(&world.vet(SUCCESSOR)));
@@ -389,14 +389,14 @@ fn a_launch_after_the_stop_that_settled_a_reap_has_nothing_to_take_over() {
         settle_unrecorded(&world);
         assert_eq!(
             world.stop(SUCCESSOR),
-            Response::Stopped(FlowId(SUCCESSOR.into()))
+            Output::Stopped(FlowId(SUCCESSOR.into()))
         );
     });
     let attempts = world.attempt_count();
     let launched = world.confirmed_at_address("after-stop", LATER, None);
     let answer = world.settled("after-stop", launched);
     assert!(
-        matches!(answer, Response::Started(_) | Response::HandoverPending(_)),
+        matches!(answer, Output::Started(_) | Output::HandoverPending(_)),
         "{answer:?}"
     );
     let since = world.attempts_since(attempts);
@@ -433,7 +433,7 @@ fn a_launch_after_the_stop_that_settled_a_reap_has_nothing_to_take_over() {
     let launched = world.confirmed_at_address("replaces-s", LATER, Some(SUCCESSOR));
     let answer = world.settled("replaces-s", launched);
     assert!(
-        matches!(&answer, Response::ReapPending(pending)
+        matches!(&answer, Output::ReapPending(pending)
             if pending.predecessor.0.0 == SUCCESSOR && pending.reap_standing == ReapStanding::Owed),
         "{answer:?}"
     );
@@ -660,7 +660,7 @@ fn a_crash_after_the_successor_end_commit_is_recovered_from_the_rows_once() {
     ));
     assert_eq!(
         world.stop(SUCCESSOR),
-        Response::Stopped(FlowId(SUCCESSOR.into()))
+        Output::Stopped(FlowId(SUCCESSOR.into()))
     );
     assert_eq!(world.owner(), Some(ReapResponsibility::AddressHeld));
     assert_eq!(world.standing(), Some(ReapStanding::PredecessorUnknown));
@@ -710,7 +710,7 @@ fn a_refused_successor_end_commit_leaves_the_prior_state_for_the_next_end() {
         let attempts = world.attempt_count();
         assert_eq!(
             world.stop(SUCCESSOR),
-            Response::StopRejected(signal_flow::StopRejection::PersistenceRefused),
+            Output::StopRejected(signal_flow::StopRejection::PersistenceRefused),
             "{next}"
         );
         assert_eq!(world.lifecycle(SUCCESSOR), FlowLifecycle::Active, "{next}");
@@ -755,13 +755,13 @@ fn a_refused_successor_end_commit_leaves_the_prior_state_for_the_next_end() {
                 world.show(PaneShown::NoPaneList);
                 assert_eq!(
                     world.stop(SUCCESSOR),
-                    Response::StopRejected(signal_flow::StopRejection::RouteUnavailable)
+                    Output::StopRejected(signal_flow::StopRejection::RouteUnavailable)
                 );
                 assert_eq!(world.lifecycle(SUCCESSOR), FlowLifecycle::Active);
                 world.show(PaneShown::Absent);
                 assert_eq!(
                     world.stop(SUCCESSOR),
-                    Response::Stopped(FlowId(SUCCESSOR.into()))
+                    Output::Stopped(FlowId(SUCCESSOR.into()))
                 );
                 assert_eq!(world.lifecycle(SUCCESSOR), FlowLifecycle::Stopped);
                 assert_eq!(
@@ -776,7 +776,7 @@ fn a_refused_successor_end_commit_leaves_the_prior_state_for_the_next_end() {
                     world
                         .fixture
                         .nexus
-                        .dispatch_meta(meta_signal_flow::Query::Deliver(
+                        .dispatch_meta(meta_signal_flow::Input::Deliver(
                             meta_signal_flow::DeliveryRequest {
                                 delivery_id: meta_signal_flow::DeliveryId(
                                     "to-the-gone-pane".into(),
@@ -786,7 +786,7 @@ fn a_refused_successor_end_commit_leaves_the_prior_state_for_the_next_end() {
                             },
                         ));
                 assert!(
-                    matches!(delivered, meta_signal_flow::Response::DeliveryRejected(_)),
+                    matches!(delivered, meta_signal_flow::Output::DeliveryRejected(_)),
                     "{delivered:?}"
                 );
                 assert_eq!(world.lifecycle(SUCCESSOR), FlowLifecycle::Exited);
@@ -802,7 +802,7 @@ fn a_refused_successor_end_commit_leaves_the_prior_state_for_the_next_end() {
                 assert_eq!(world.owner(), Some(ReapResponsibility::LaunchSuccessor));
                 assert_eq!(
                     world.stop(SUCCESSOR),
-                    Response::Stopped(FlowId(SUCCESSOR.into()))
+                    Output::Stopped(FlowId(SUCCESSOR.into()))
                 );
             }
         }
@@ -836,12 +836,12 @@ fn a_refused_successor_end_commit_leaves_the_prior_state_for_the_next_end() {
         .refuse_next(RefusedWrite::FlowEnded);
     assert_eq!(
         world.stop(SUCCESSOR),
-        Response::StopRejected(signal_flow::StopRejection::PersistenceRefused)
+        Output::StopRejected(signal_flow::StopRejection::PersistenceRefused)
     );
     world.fixture.nexus.store.forget_route(SUCCESSOR);
     assert_eq!(
         world.stop(SUCCESSOR),
-        Response::StopRejected(signal_flow::StopRejection::RouteUnavailable)
+        Output::StopRejected(signal_flow::StopRejection::RouteUnavailable)
     );
     assert_eq!(world.lifecycle(SUCCESSOR), FlowLifecycle::Active);
     assert_eq!(world.standing(), Some(ReapStanding::SettleUnrecorded));
@@ -860,7 +860,7 @@ fn every_end_of_the_successor_reassigns_what_it_owed() {
             "stop" => {
                 assert_eq!(
                     world.stop(SUCCESSOR),
-                    Response::Stopped(FlowId(SUCCESSOR.into()))
+                    Output::Stopped(FlowId(SUCCESSOR.into()))
                 );
                 FlowLifecycle::Stopped
             }
@@ -868,9 +868,9 @@ fn every_end_of_the_successor_reassigns_what_it_owed() {
                 let retired = world
                     .fixture
                     .nexus
-                    .dispatch_meta(meta_signal_flow::Query::Retire(FlowId(SUCCESSOR.into())));
+                    .dispatch_meta(meta_signal_flow::Input::Retire(FlowId(SUCCESSOR.into())));
                 assert!(
-                    matches!(retired, meta_signal_flow::Response::FlowRetired(_)),
+                    matches!(retired, meta_signal_flow::Output::FlowRetired(_)),
                     "{retired:?}"
                 );
                 FlowLifecycle::Retired
@@ -882,7 +882,7 @@ fn every_end_of_the_successor_reassigns_what_it_owed() {
                 let _ = world
                     .fixture
                     .nexus
-                    .dispatch_meta(meta_signal_flow::Query::Deliver(
+                    .dispatch_meta(meta_signal_flow::Input::Deliver(
                         meta_signal_flow::DeliveryRequest {
                             delivery_id: meta_signal_flow::DeliveryId("to-the-gone-pane".into()),
                             flow_id: FlowId(SUCCESSOR.into()),
@@ -917,10 +917,10 @@ fn every_end_of_the_successor_reassigns_what_it_owed() {
                 let refreshed = world
                     .fixture
                     .nexus
-                    .dispatch(Query::Refresh(world.address()));
+                    .dispatch(Input::Refresh(world.address()));
                 assert_eq!(
                     refreshed,
-                    Response::RefreshRejected(signal_flow::RefreshRejection::NotAwake)
+                    Output::RefreshRejected(signal_flow::RefreshRejection::NotAwake)
                 );
                 FlowLifecycle::Exited
             }
@@ -947,7 +947,7 @@ fn a_refused_takeover_commit_leaves_the_address_held_reap_watched_and_the_new_fl
             faults.refuse_next(RefusedWrite::HandoverOwing);
             let launched = world.confirmed_at_address("takes-over", LATER, None);
             let answer = world.settled("takes-over", launched);
-            assert!(matches!(answer, Response::HandoverPending(_)), "{answer:?}");
+            assert!(matches!(answer, Output::HandoverPending(_)), "{answer:?}");
             assert_eq!(world.owner(), Some(ReapResponsibility::AddressHeld));
             assert_eq!(world.standing(), Some(ReapStanding::CloseRefused));
             assert_eq!(
@@ -1148,7 +1148,7 @@ fn a_taken_over_reap_survives_a_restart_under_its_owner() {
             "rest" => world.rest(LATER),
             _ => assert_eq!(
                 world.stop(LATER),
-                Response::Stopped(FlowId(LATER.into())),
+                Output::Stopped(FlowId(LATER.into())),
                 "N's pane positively gone: Stopped with no close"
             ),
         }
@@ -1233,7 +1233,7 @@ fn a_stale_worker_held_at_revalidation_writes_nothing() {
                 match reassigning {
                     Reassigning::SuccessorStop => assert_eq!(
                         world.stop(SUCCESSOR),
-                        Response::Stopped(FlowId(SUCCESSOR.into()))
+                        Output::Stopped(FlowId(SUCCESSOR.into()))
                     ),
                     Reassigning::LaterRest => {
                         world.rest(LATER);
@@ -1331,16 +1331,13 @@ fn delivery_to_a_new_successor_is_never_held_by_a_predecessor_reap() {
         let sent = world
             .fixture
             .nexus
-            .dispatch(Query::Send(signal_flow::SendRequest {
+            .dispatch(Input::Send(signal_flow::SendRequest {
                 address: world.address(),
                 sendable_message: signal_flow::SendableMessage::Soft(
                     signal_flow::SendableRequest::Notice(format!("at {point}")),
                 ),
             }));
-        assert!(
-            matches!(sent, Response::SendAccepted(_)),
-            "{point}: {sent:?}"
-        );
+        assert!(matches!(sent, Output::SendAccepted(_)), "{point}: {sent:?}");
     };
     with_supervisor(&world.fixture, || {
         held_by_the_address(&world, PaneShown::SessionUnreported);
@@ -1442,7 +1439,7 @@ fn one_close_rule_for_every_reap_worker() {
                     hooks.pass_hold.arm();
                     assert_eq!(
                         world.stop(SUCCESSOR),
-                        Response::Stopped(FlowId(SUCCESSOR.into())),
+                        Output::Stopped(FlowId(SUCCESSOR.into())),
                         "{label}"
                     );
                     assert!(hooks.pass_hold.arrived_by(1, deadline()), "{label}");
@@ -1679,7 +1676,7 @@ fn every_receiver_changing_writer_reassigns_in_its_own_commit() {
                         None,
                     );
                     match bound {
-                        Ok(Response::Bound(flow_id)) => Some(flow_id),
+                        Ok(Output::Bound(flow_id)) => Some(flow_id),
                         Err(_) if refused => None,
                         other => panic!("{label}: {other:?}"),
                     }
@@ -1769,7 +1766,7 @@ fn a_missing_owner_is_never_taken_for_the_address() {
     assert_eq!(store.reap_owner(&row).unwrap(), None);
     assert_eq!(
         world.stop(SUCCESSOR),
-        Response::Stopped(FlowId(SUCCESSOR.into()))
+        Output::Stopped(FlowId(SUCCESSOR.into()))
     );
     assert_eq!(world.row(), Some(row.clone()), "the end leaves it");
     let launched = world.confirmed_at_address("after-missing", LATER, None);
@@ -2282,7 +2279,7 @@ fn successor_ended_before_w3(world: &ReapWorld) {
     assert!(is_reap_pending(&world.replace(), ReapStanding::Unrecorded));
     assert_eq!(
         world.stop(SUCCESSOR),
-        Response::Stopped(FlowId(SUCCESSOR.into()))
+        Output::Stopped(FlowId(SUCCESSOR.into()))
     );
     assert!(world.row().is_none());
     assert_eq!(world.outcome(), None);
@@ -2493,7 +2490,7 @@ fn owes_its_own_handover(world: &ReapWorld, id: &str, flow: &str) -> PendingHand
     store.faults.refuse_next(RefusedWrite::StartedSettle);
     let launched = world.confirmed_at_address(id, flow, None);
     let answer = world.settled(id, launched);
-    assert!(matches!(answer, Response::HandoverPending(_)), "{answer:?}");
+    assert!(matches!(answer, Output::HandoverPending(_)), "{answer:?}");
     assert_eq!(
         store.receiving_flow(&world.address()).unwrap(),
         Some(FlowId(flow.into()))
@@ -2818,7 +2815,7 @@ fn forgetting_an_ended_binding_reassigns_the_mixed_rows_in_its_own_commit() {
             },
             None,
         ) {
-            Ok(Response::Bound(flow_id)) => flow_id,
+            Ok(Output::Bound(flow_id)) => flow_id,
             other => panic!("{label}: {other:?}"),
         };
         let owed = |predecessor: &str, standing: ReapStanding| {

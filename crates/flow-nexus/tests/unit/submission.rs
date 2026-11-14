@@ -11,8 +11,8 @@ use crate::Dispatches;
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::message_projection::ProjectsQueueEntry;
 use meta_signal_flow::{
-    Content, DeliveryGrade, DeliveryRejection, DeliveryRequest, InterruptWitness, Letter, Message,
-    Query as MetaQuery, Response as MetaResponse,
+    Content, DeliveryGrade, DeliveryRejection, DeliveryRequest, Input as MetaQuery,
+    InterruptWitness, Letter, Message, Output as MetaResponse,
 };
 use signal_flow::{FlowLifecycle, HarnessKind};
 use std::fs;

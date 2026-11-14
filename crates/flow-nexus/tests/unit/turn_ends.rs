@@ -15,8 +15,8 @@ use crate::store::{FlowStore, ReadsFlowRows};
 use crate::turn_ends::ObservesTurnEnds;
 use flow_ethos::State;
 use signal_flow::{
-    BackgroundTaskKind, Event, HarnessKind, HerdrRouteSelection, Metaflow, Model, NativeStop,
-    ObserveSelection, Query, Report_Data, Response, TurnEnd,
+    BackgroundTaskKind, Event, HarnessKind, HerdrRouteSelection, Input, Metaflow, Model,
+    NativeStop, ObserveSelection, Output, Report_Data, TurnEnd,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -68,7 +68,7 @@ fn report(fixture: &NexusFixture, event: Event) {
             process_option: None,
             event: event.clone(),
         }),
-        Response::Reported
+        Output::Reported
     );
     fixture.nexus.after_report(
         &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
@@ -82,8 +82,8 @@ fn codex(fixture: &NexusFixture, events: Vec<TurnEvent>) {
 
 /// The turn end `frame` carries, checked to be the one of `flow_id`, at
 /// `model`'s Address, on `harness`.
-fn turn_end(frame: Response, flow_id: &str, model: Model, harness: HarnessKind) -> TurnEnd {
-    let Response::TurnEnded(turn_end) = frame else {
+fn turn_end(frame: Output, flow_id: &str, model: Model, harness: HarnessKind) -> TurnEnd {
+    let Output::TurnEnded(turn_end) = frame else {
         panic!("a turn end is sent as TurnEnded, not {frame:?}");
     };
     assert_eq!(turn_end.flow_id.0, flow_id);
@@ -108,7 +108,7 @@ impl Drop for ObserverGoes<'_> {
 }
 
 /// The state a new subscription opens on.
-fn opening(fixture: &NexusFixture) -> Response {
+fn opening(fixture: &NexusFixture) -> Output {
     let mut observed = Vec::new();
     let ended = fixture
         .nexus
@@ -154,7 +154,7 @@ fn a_turn_end_subscriber_receives_the_state_on_open_then_each_turn_end_and_nothi
                 .expect("the observer sends")
         };
 
-        assert_eq!(next(), Response::TurnEndsObserved(vec![]));
+        assert_eq!(next(), Output::TurnEndsObserved(vec![]));
 
         report(&fixture, Event::ToolUsed("Bash".into()));
         report(
@@ -208,12 +208,12 @@ fn a_turn_end_subscriber_receives_the_state_on_open_then_each_turn_end_and_nothi
 
         // A new subscriber opens on the last turn end of each harness,
         // Claude before Codex; a direct Observe answers the same.
-        let last = Response::TurnEndsObserved(vec![claude, codex_end]);
+        let last = Output::TurnEndsObserved(vec![claude, codex_end]);
         assert_eq!(opening(&fixture), last);
         assert_eq!(
             fixture
                 .nexus
-                .dispatch(Query::Observe(ObserveSelection::TurnEnds)),
+                .dispatch(Input::Observe(ObserveSelection::TurnEnds)),
             last
         );
     });
@@ -226,9 +226,9 @@ fn the_state_a_turn_end_subscription_opens_on_outlives_a_reopened_store() {
     use crate::store::{OpensFlowStore, SetsNativeOwnerEnvironmentForTests};
     let mut fixture = NexusFixture::new();
     two_seats(&fixture);
-    assert_eq!(opening(&fixture), Response::TurnEndsObserved(vec![]));
+    assert_eq!(opening(&fixture), Output::TurnEndsObserved(vec![]));
     report(&fixture, claude_stop(&fixture));
-    let Response::TurnEndsObserved(before) = opening(&fixture) else {
+    let Output::TurnEndsObserved(before) = opening(&fixture) else {
         panic!("the opening frame is TurnEndsObserved");
     };
     assert_eq!(before.len(), 1);
@@ -256,5 +256,5 @@ fn the_state_a_turn_end_subscription_opens_on_outlives_a_reopened_store() {
             .is_some(),
         "the reopened store is the fixture's"
     );
-    assert_eq!(opening(&fixture), Response::TurnEndsObserved(before));
+    assert_eq!(opening(&fixture), Output::TurnEndsObserved(before));
 }

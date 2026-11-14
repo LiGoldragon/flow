@@ -111,25 +111,25 @@ impl ProjectsSendFailure for signal_flow::SendFailure {
 }
 
 pub(crate) trait ProjectsSendResponse {
-    fn visible_send_response(&self) -> signal_flow::Response;
+    fn visible_send_response(&self) -> signal_flow::Output;
 }
 
 impl ProjectsSendResponse for signal_flow::PrivateSendResponse {
-    fn visible_send_response(&self) -> signal_flow::Response {
-        use signal_flow::{PrivateSendResponse, Response};
+    fn visible_send_response(&self) -> signal_flow::Output {
+        use signal_flow::{Output, PrivateSendResponse};
         match self {
             PrivateSendResponse::SendAccepted(value) => {
-                Response::SendAccepted(signal_flow::VisibleSendAcceptance {
+                Output::SendAccepted(signal_flow::VisibleSendAcceptance {
                     request_id: value.request_id.clone(),
                     delivery_cursor: value.delivery_cursor,
                     visible_delivery_state: value.delivery_state.visible_delivery_state(),
                 })
             }
-            PrivateSendResponse::Refused(value) => Response::SendRefused(value.visible_refusal()),
+            PrivateSendResponse::Refused(value) => Output::SendRefused(value.visible_refusal()),
             PrivateSendResponse::Sent(value) => {
-                Response::Sent(signal_flow::VisibleSendReceipt(value.request_id.clone()))
+                Output::Sent(signal_flow::VisibleSendReceipt(value.request_id.clone()))
             }
-            PrivateSendResponse::Failed(value) => Response::Failed(value.visible_send_failure()),
+            PrivateSendResponse::Failed(value) => Output::Failed(value.visible_send_failure()),
         }
     }
 }

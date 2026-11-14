@@ -221,10 +221,10 @@ fn configured(place: &Place, home: &Path) {
         .expect("the Nexus configuration commits");
 }
 
-fn write_meta(peer: &mut UnixStream, query: &meta_signal_flow::Query) {
+fn write_meta(peer: &mut UnixStream, query: &meta_signal_flow::Input) {
     use signal::Contracted;
     peer.write_frame(
-        &rkyv::to_bytes::<rkyv::rancor::Error>(&meta_signal_flow::Query::greeting())
+        &rkyv::to_bytes::<rkyv::rancor::Error>(&meta_signal_flow::Input::greeting())
             .expect("greeting encodes"),
     )
     .expect("greeting written");
@@ -234,20 +234,20 @@ fn write_meta(peer: &mut UnixStream, query: &meta_signal_flow::Query) {
     .expect("receipt decodes");
     assert_eq!(
         receipt,
-        signal::HandshakeReceipt::Greeted(meta_signal_flow::Query::contract_digest())
+        signal::HandshakeReceipt::Greeted(meta_signal_flow::Input::contract_digest())
     );
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(query).expect("meta query encodes");
     peer.write_frame(&bytes).expect("meta query written");
 }
 
-fn read_meta(peer: &mut UnixStream) -> meta_signal_flow::Response {
-    rkyv::from_bytes::<meta_signal_flow::Response, rkyv::rancor::Error>(
+fn read_meta(peer: &mut UnixStream) -> meta_signal_flow::Output {
+    rkyv::from_bytes::<meta_signal_flow::Output, rkyv::rancor::Error>(
         &peer.read_frame().expect("meta response"),
     )
     .expect("meta response decodes")
 }
 
-fn meta_call(place: &Place, query: &meta_signal_flow::Query) -> meta_signal_flow::Response {
+fn meta_call(place: &Place, query: &meta_signal_flow::Input) -> meta_signal_flow::Output {
     let mut peer = UnixStream::connect(place.meta_socket()).expect("the meta socket listens");
     write_meta(&mut peer, query);
     read_meta(&mut peer)
@@ -261,7 +261,7 @@ fn metaflows_listed(place: &Place) -> bool {
         use signal_flow::Contracted;
         ordinary
             .write_frame(
-                &rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Query::greeting())
+                &rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Input::greeting())
                     .expect("greeting encodes"),
             )
             .expect("greeting written");
@@ -271,15 +271,15 @@ fn metaflows_listed(place: &Place) -> bool {
         .expect("receipt decodes");
         assert_eq!(
             receipt,
-            signal_flow::HandshakeReceipt::Greeted(signal_flow::Query::contract_digest())
+            signal_flow::HandshakeReceipt::Greeted(signal_flow::Input::contract_digest())
         );
     }
     ordinary
-        .write_query(&signal_flow::Query::Metaflows)
+        .write_query(&signal_flow::Input::Metaflows)
         .expect("Metaflows written");
     matches!(
         ordinary.read_response().expect("Metaflows answered"),
-        signal_flow::Response::Listed(_)
+        signal_flow::Output::Listed(_)
     )
 }
 
@@ -302,8 +302,8 @@ fn two_places_serve_disjoint_sockets_and_memory() {
         assert!(metaflows_listed(place));
     }
     let configuration_of =
-        |place: &Place| match meta_call(place, &meta_signal_flow::Query::Configuration) {
-            meta_signal_flow::Response::Configuration(configuration) => configuration,
+        |place: &Place| match meta_call(place, &meta_signal_flow::Input::Configuration) {
+            meta_signal_flow::Output::Configuration(configuration) => configuration,
             other => panic!("the place returns its Configuration, not {other:?}"),
         };
     assert_eq!(
@@ -358,9 +358,9 @@ fn a_configure_applied_to_a_running_nexus_takes_effect_without_a_restart() {
         .expect("the subscription gives up eventually");
     write_meta(
         &mut subscription,
-        &meta_signal_flow::Query::ObserveConfiguration,
+        &meta_signal_flow::Input::ObserveConfiguration,
     );
-    let meta_signal_flow::Response::Configuration(first) = read_meta(&mut subscription) else {
+    let meta_signal_flow::Output::Configuration(first) = read_meta(&mut subscription) else {
         panic!("the subscription opens with the configuration")
     };
     assert_eq!(
@@ -376,21 +376,21 @@ fn a_configure_applied_to_a_running_nexus_takes_effect_without_a_restart() {
     assert_eq!(
         meta_call(
             &place,
-            &meta_signal_flow::Query::Configure(meta_signal_flow::ConfigurationChange::Nexus(
+            &meta_signal_flow::Input::Configure(meta_signal_flow::ConfigurationChange::Nexus(
                 replaced.clone()
             ))
         ),
-        meta_signal_flow::Response::Configured(meta_signal_flow::ConfigurationChange::Nexus(
+        meta_signal_flow::Output::Configured(meta_signal_flow::ConfigurationChange::Nexus(
             replaced.clone()
         ))
     );
-    let meta_signal_flow::Response::Configuration(second) = read_meta(&mut subscription) else {
+    let meta_signal_flow::Output::Configuration(second) = read_meta(&mut subscription) else {
         panic!("the subscription sees the change")
     };
     assert_eq!(second.configured_nexus.0, replaced);
     // The same Nexus, never restarted, answers with the replaced value.
-    let meta_signal_flow::Response::Configuration(now) =
-        meta_call(&place, &meta_signal_flow::Query::Configuration)
+    let meta_signal_flow::Output::Configuration(now) =
+        meta_call(&place, &meta_signal_flow::Input::Configuration)
     else {
         panic!("the running Nexus answers its Configuration")
     };
@@ -418,8 +418,8 @@ fn environment_overrides_do_not_replace_the_explicit_configuration() {
             ("XDG_RUNTIME_DIR", "/run/elsewhere"),
         ],
     );
-    let meta_signal_flow::Response::Configuration(snapshot) =
-        meta_call(&place, &meta_signal_flow::Query::Configuration)
+    let meta_signal_flow::Output::Configuration(snapshot) =
+        meta_call(&place, &meta_signal_flow::Input::Configuration)
     else {
         panic!("the running Nexus answers its Configuration")
     };

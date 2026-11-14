@@ -14,7 +14,7 @@ use crate::store::metaflow_watch::WatchesMetaflows;
 use crate::store::{AnnouncesLaunchChanges, StoreError};
 use crate::{HoldsStopRequest, RunningNexus};
 use flow_ethos::Metaflow;
-use signal_flow::Response;
+use signal_flow::Output;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// What the subscriber last sent of the metaflows.
@@ -29,7 +29,7 @@ trait SendsMetaflowChanges {
     fn send_changes(
         &mut self,
         listed: Vec<Metaflow>,
-        send: &mut dyn FnMut(&Response) -> Result<(), String>,
+        send: &mut dyn FnMut(&Output) -> Result<(), String>,
     ) -> Result<(), String>;
 }
 
@@ -37,16 +37,16 @@ impl SendsMetaflowChanges for SentMetaflows {
     fn send_changes(
         &mut self,
         listed: Vec<Metaflow>,
-        send: &mut dyn FnMut(&Response) -> Result<(), String>,
+        send: &mut dyn FnMut(&Output) -> Result<(), String>,
     ) -> Result<(), String> {
         for metaflow in &listed {
             if !self.metaflows.contains(metaflow) {
-                send(&Response::MetaflowChanged(metaflow.clone()))?;
+                send(&Output::MetaflowChanged(metaflow.clone()))?;
             }
         }
         for metaflow in &self.metaflows {
             if !listed.iter().any(|now| now.address == metaflow.address) {
-                send(&Response::MetaflowGone(metaflow.address.clone()))?;
+                send(&Output::MetaflowGone(metaflow.address.clone()))?;
             }
         }
         self.metaflows = listed;
@@ -60,7 +60,7 @@ pub trait ObservesMetaflows {
     fn observe_metaflows(
         &self,
         disconnected: &AtomicBool,
-        send: &mut dyn FnMut(&Response) -> Result<(), String>,
+        send: &mut dyn FnMut(&Output) -> Result<(), String>,
     ) -> Result<(), String>;
 }
 
@@ -68,10 +68,10 @@ impl ObservesMetaflows for RunningNexus {
     fn observe_metaflows(
         &self,
         disconnected: &AtomicBool,
-        send: &mut dyn FnMut(&Response) -> Result<(), String>,
+        send: &mut dyn FnMut(&Output) -> Result<(), String>,
     ) -> Result<(), String> {
         let refused =
-            |error: StoreError| Response::Refused(signal_flow::Refusal::Store(error.to_string()));
+            |error: StoreError| Output::Refused(signal_flow::Refusal::Store(error.to_string()));
         if let Err(error) = self.store.watch_metaflows() {
             let message = error.to_string();
             send(&refused(error))?;
@@ -98,7 +98,7 @@ impl ObservesMetaflows for RunningNexus {
                 }
                 (Err(error), Some(_)) => return Err(error.to_string()),
                 (Ok(listed), None) => {
-                    send(&Response::MetaflowsObserved(listed.clone()))?;
+                    send(&Output::MetaflowsObserved(listed.clone()))?;
                     sent = Some(SentMetaflows { metaflows: listed });
                 }
                 (Ok(listed), Some(sent)) => sent.send_changes(listed, send)?,

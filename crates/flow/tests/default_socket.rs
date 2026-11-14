@@ -1,4 +1,4 @@
-//! The CLI is `flow-nexus '<Query>'`: it takes the datom and nothing else.
+//! The CLI is `flow-nexus '<Input>'`: it takes the datom and nothing else.
 //! The place is its configuration's,
 //! `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`, resolved under
 //! `$XDG_RUNTIME_DIR/nexus/` to that place's ordinary socket and to no other,
@@ -33,7 +33,7 @@ fn answer_greeting(peer: &mut std::os::unix::net::UnixStream, greet: bool) -> bo
     let greeting = rkyv::from_bytes::<signal_flow::Handshake, rkyv::rancor::Error>(&frame)
         .expect("the first frame is a greeting");
     let receipt = if greet {
-        signal_flow::Query::receipt(&greeting)
+        signal_flow::Input::receipt(&greeting)
     } else {
         signal_flow::HandshakeReceipt::GreetingRefused(
             signal_flow::HandshakeRejection::ContractMismatch(signal_flow::ContractDigest(0)),
@@ -43,7 +43,7 @@ fn answer_greeting(peer: &mut std::os::unix::net::UnixStream, greet: bool) -> bo
     peer.write_all(&(reply.len() as u32).to_be_bytes())
         .and_then(|_| peer.write_all(&reply))
         .expect("receipt written");
-    greeting == signal_flow::Query::greeting()
+    greeting == signal_flow::Input::greeting()
 }
 
 #[test]
@@ -77,7 +77,7 @@ fn the_client_reaches_only_the_socket_of_the_place_its_configuration_names() {
         peer.read_exact(&mut length).expect("query length");
         let mut query = vec![0; u32::from_be_bytes(length) as usize];
         peer.read_exact(&mut query).expect("query");
-        let reply = rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Response::Listed(vec![]))
+        let reply = rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Output::Listed(vec![]))
             .expect("reply encodes");
         peer.write_all(&(reply.len() as u32).to_be_bytes())
             .and_then(|_| peer.write_all(&reply))
@@ -165,7 +165,7 @@ fn a_missing_configuration_is_refused_naming_its_path() {
     );
 }
 
-/// O4: against a Nexus that refuses its greeting the CLI writes no Query,
+/// O4: against a Nexus that refuses its greeting the CLI writes no Input,
 /// says why and exits 2.
 #[test]
 fn the_flow_cli_stops_at_a_refused_greeting() {

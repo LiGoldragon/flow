@@ -1,3 +1,26 @@
+# Flow 0.56.1: a Codex fresh wake carries its first prompt's batch; a Send whose wake kept its batch is accepted Uncertain
+
+Contracts: signal-flow 63.0.0 and meta-signal-flow 79.0.0, unchanged from
+0.56.0. **Neither the wire nor the stored format changes**; clients need no
+repin and no upgrade runs.
+
+- **A Codex fresh wake carries its batch.** The wake of a Codex flow that
+  starts a fresh thread parks the requests its first prompt carries, as a
+  Claude wake does, anchored at the thread's start (`CodexTurns(None)`). The
+  first answer settles them on the launch's receipt. Before, the wake
+  recorded the seat Awake but reported its batch unsettled
+  (`AwakeNotRecorded`), the Send answered `Failed` `StoreRefused`, and the
+  batch stayed queued to be typed a second time. A launch's batch is
+  recognised by the anchor and by its brief ending with the rendered run.
+- **A Send whose wake started its seat and kept its batch is accepted
+  Uncertain.** When the wake answered `Failed` while its seat is Awake, the
+  Send records the batch the first prompt carried as Uncertain in the
+  store, so no drain types it again, and answers `SendAccepted` Uncertain
+  with no retry cause. A refused record answers `Failed` `StoreRefused`. A
+  request queued behind what the prompt carried is answered as admitted,
+  with a pending Send.
+- No stored format or wire changes.
+
 # Flow 0.56.0: contracts on ethos-zero 27.0.0, Input and Output paired by position; Memory records generated from Ethos
 
 Contracts: signal-flow 63.0.0 (4982eeb) and meta-signal-flow 79.0.0

@@ -227,7 +227,7 @@ impl sema_engine::UpgradeFrom<StoredLaunchOutcomeV9> for StoredLaunchOutcome {
         let launch_request_id = before.launch_request_id.clone();
         match before.upgraded(None, None) {
             Ok((launch_outcome, None)) => sema_engine::Decision::Ready(Self {
-                launch_request_id,
+                launch_request_id: signal_flow::LaunchRequestId(launch_request_id),
                 launch_outcome,
             }),
             Ok((_, Some(_))) => sema_engine::Decision::Refused(ReapUpgradeRefusal::AttemptMissing(
@@ -362,7 +362,7 @@ impl UpgradesReapMemory for FlowStore {
                 reap.owned_as_stands(successor.as_ref(), state.as_ref())
             });
             outcomes.push(StoredLaunchOutcome {
-                launch_request_id: id,
+                launch_request_id: signal_flow::LaunchRequestId(id),
                 launch_outcome: outcome,
             });
             reaps.extend(reap);
@@ -372,14 +372,14 @@ impl UpgradesReapMemory for FlowStore {
             if let Some(flow) = flow_rows
                 .records()
                 .iter()
-                .find(|flow| flow.flow_id == reap.predecessor.0)
+                .find(|flow| flow.flow_id.0 == reap.predecessor.0)
                 && matches!(
-                    flow.lifecycle,
+                    flow.flow_lifecycle,
                     FlowLifecycle::Pending | FlowLifecycle::Active
                 )
             {
                 let mut flow = flow.clone();
-                flow.lifecycle = FlowLifecycle::Stopped;
+                flow.flow_lifecycle = FlowLifecycle::Stopped;
                 stopped.push(flow);
             }
         }

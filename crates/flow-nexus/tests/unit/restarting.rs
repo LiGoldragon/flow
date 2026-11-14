@@ -2610,7 +2610,7 @@ impl OpensSecondNexus for NexusFixture {
         let root = self.directory.path();
         let mut opened = FlowStore::open(&root.join(store)).expect("second store");
         let mut runtime = opened.runtime_configuration().expect("runtime");
-        runtime.source_root = root.to_string_lossy().into_owned();
+        runtime.source_root = flow_ethos::SourceRoot(root.to_string_lossy().into_owned());
         opened.configure_runtime(runtime).expect("source root");
         opened.set_native_owner_environment_for_tests(crate::store::NativeOwnerEnvironment {
             host_id: "isolated-test-host".into(),

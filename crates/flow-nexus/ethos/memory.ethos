@@ -20,10 +20,10 @@
 Memory
 [ signal_flow:[ LaunchRequestId StartRejection ReplaceRejection FlowId HerdrRoute Process NativeSessionId TranscriptPath BackgroundWork NativePrompt Address ReapStanding HandoverCloseRefusal HandoverOwner Successor ]
   flow_nexus:[ LaunchedRecord ReplacedRecord ]
-  signal_flow:[ Metaflow Lock CallerIdentity LaunchAttempt StoreIdentity OrdinarySocketPath MetaSocketPath ]
-  meta_signal_flow:[ ConfigureNexus ConfigureModel ConfigureThreshold ConfigureLeaveOut ConfigureSendServer ConfigureMetaflow ConfigureHarnessFlags HeartbeatConfig DrawBound TryBound HandoverPoliciesConfiguration HandoverArchiveConfiguration HandoverCountConfiguration Duration RestartRecord SendOutcomeRecord Delivery ]
+  signal_flow:[ LogicalDeliveryId Metaflow Lock CallerIdentity LaunchAttempt StoreIdentity OrdinarySocketPath MetaSocketPath FlowType Origin HarnessKind EndpointSelection FlowLifecycle SessionId ]
+  meta_signal_flow:[ ConfigureNexus ConfigureModel ConfigureThreshold ConfigureLeaveOut ConfigureSendServer ConfigureMetaflow ConfigureHarnessFlags HeartbeatConfig DrawBound TryBound HandoverPoliciesConfiguration HandoverArchiveConfiguration HandoverCountConfiguration Duration RestartRecord SendOutcomeRecord Delivery ProcessId ProcessUserId ProcessStartToken ]
   :meta_signal_flow:generated:signal:[ Path ]
-  flow_ethos:[ Minutes ] ]
+  flow_ethos:[ Minutes SourceRoot CodexEndpoint ] ]
 [ LaunchOutcome.[ Started.LaunchedRecord
                   Replaced.ReplacedRecord
                   StartRejected.StartRejection
@@ -115,4 +115,51 @@ Memory
   ; The sockets half of the meta Configuration.
   FlowStoreConfiguration.{ OrdinarySocketPath MetaSocketPath }
   ; The store's flow counter: the number the next flow is minted with.
-  FlowStoreState.{ NextFlowNumber.Integer } ]
+  FlowStoreState.{ NextFlowNumber.Integer }
+  ; One native flow's durable record, keyed by its FlowId: what launched it,
+  ; its native thread once bound, its harness and endpoint, its lifecycle,
+  ; and the generation of its seat.
+  FlowRecord.{ FlowId
+               FlowType
+               Origin
+               Option<SessionId>
+               HarnessKind
+               EndpointSelection
+               FlowLifecycle
+               Generation.Integer }
+  ; The process that proved it owns a native session: its id, user and start
+  ; token, the host and boot it ran on, its harness and the session.
+  NativeOwnerProof.{ ProcessId
+                     ProcessUserId
+                     ProcessStartToken
+                     HostId.String
+                     BootId.String
+                     HarnessKind
+                     NativeSessionId }
+  NativeOwnerProofRecord.{ FlowId NativeOwnerProof }
+  ; A metaflow's process, keyed by its Address.
+  StoredMetaflowProcess.{ Process Address }
+  ; The Herdr route a flow's seat runs in, keyed by its FlowId.
+  FlowHerdrRouteRecord.{ FlowId HerdrRoute }
+  ; How a launch request settled, keyed by the request.
+  StoredLaunchOutcome.{ LaunchRequestId LaunchOutcome }
+  ; The Nexus's runtime half of the meta Configuration: its source root and
+  ; its two Codex endpoints.
+  RuntimeConfiguration.{ SourceRoot
+                         StableCodex.CodexEndpoint
+                         NextCodex.CodexEndpoint }
+  ; The heartbeat's standing for one recipient, keyed by its Address: the
+  ; evidence it last reported, the evidence seen since, and the reminder
+  ; outstanding.
+  StoredHeartbeatStanding.{ Address
+                            BaselineAwake.Integer
+                            BaselineWorking.Option<Integer>
+                            BaselineWorkingComplete.Boolean
+                            BaselineSent.Integer
+                            BaselineQueue.Integer
+                            LatestAwake.Integer
+                            LatestWorking.Option<Integer>
+                            LatestWorkingComplete.Boolean
+                            LatestSent.Integer
+                            LatestQueue.Integer
+                            Option<LogicalDeliveryId> } ]

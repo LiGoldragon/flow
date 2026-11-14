@@ -742,10 +742,16 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     let heartbeat = store.heartbeat_standings().expect("heartbeat rows read");
     assert_eq!(heartbeat.len(), 1);
     assert_eq!(heartbeat[0].address, singleton_recipient);
-    assert_eq!(heartbeat[0].baseline_sent, 6);
-    assert_eq!(heartbeat[0].latest_sent, 6);
     assert_eq!(
-        heartbeat[0].outstanding, None,
+        heartbeat[0].baseline_sent,
+        crate::generated::memory::BaselineSent(6)
+    );
+    assert_eq!(
+        heartbeat[0].latest_sent,
+        crate::generated::memory::LatestSent(6)
+    );
+    assert_eq!(
+        heartbeat[0].logical_delivery_id_option, None,
         "upgrade atomically clears a terminal predecessor heartbeat"
     );
     assert!(
@@ -938,8 +944,9 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         .find(|standing| standing.address == singleton_recipient)
         .expect("moved heartbeat standing remains");
     let fresh_heartbeat = heartbeat
-        .outstanding
-        .as_deref()
+        .logical_delivery_id_option
+        .as_ref()
+        .map(|id| id.0.as_str())
         .expect("the current process admitted a fresh heartbeat");
     assert_ne!(fresh_heartbeat, ids["heartbeat"]);
     let ordinary_sent = reopened
@@ -969,10 +976,14 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         "the fresh tick compares the moved count to current evidence: {reminder}"
     );
     assert_eq!(
-        heartbeat.baseline_sent, ordinary_sent,
+        heartbeat.baseline_sent,
+        crate::generated::memory::BaselineSent(ordinary_sent),
         "admitting the fresh heartbeat advances the sample baseline"
     );
-    assert_eq!(heartbeat.latest_sent, ordinary_sent);
+    assert_eq!(
+        heartbeat.latest_sent,
+        crate::generated::memory::LatestSent(ordinary_sent)
+    );
     let fresh_heartbeat = fresh_heartbeat.to_owned();
     let fresh_heartbeat_request_id = request_binding_for(&reopened, &fresh_heartbeat).request_id;
     drop(reopened);

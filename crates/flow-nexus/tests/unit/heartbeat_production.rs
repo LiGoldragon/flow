@@ -118,7 +118,11 @@ fn durable_worker_path_is_quiet_coalesces_and_excludes_its_own_traffic() {
             .count(),
         1
     );
-    let first_heartbeat = fixture.standing(&awake).outstanding.unwrap();
+    let first_heartbeat = fixture
+        .standing(&awake)
+        .logical_delivery_id_option
+        .unwrap()
+        .0;
     let after_generated = fixture
         .nexus
         .heartbeat_evidence(std::slice::from_ref(&awake))
@@ -132,10 +136,16 @@ fn durable_worker_path_is_quiet_coalesces_and_excludes_its_own_traffic() {
     fixture.nexus.heartbeat_tick(std::slice::from_ref(&awake));
     let coalesced = fixture.standing(&awake);
     assert_eq!(
-        coalesced.outstanding.as_deref(),
+        coalesced
+            .logical_delivery_id_option
+            .as_ref()
+            .map(|id| id.0.as_str()),
         Some(first_heartbeat.as_str())
     );
-    assert_eq!(coalesced.latest_sent, 2);
+    assert_eq!(
+        coalesced.latest_sent,
+        crate::generated::memory::LatestSent(2)
+    );
     assert_eq!(fixture.nexus.store.delivery_purposes().unwrap().len(), 3);
 
     fixture
@@ -147,7 +157,11 @@ fn durable_worker_path_is_quiet_coalesces_and_excludes_its_own_traffic() {
         )
         .unwrap();
     fixture.nexus.heartbeat_tick(std::slice::from_ref(&awake));
-    let followup = fixture.standing(&awake).outstanding.unwrap();
+    let followup = fixture
+        .standing(&awake)
+        .logical_delivery_id_option
+        .unwrap()
+        .0;
     assert_ne!(followup, first_heartbeat);
     assert_eq!(fixture.nexus.store.delivery_purposes().unwrap().len(), 4);
 
@@ -163,7 +177,8 @@ fn durable_worker_path_is_quiet_coalesces_and_excludes_its_own_traffic() {
     assert_eq!(fixture.nexus.store.delivery_purposes().unwrap().len(), 4);
 
     let mut unknown_receipt = fixture.standing(&awake);
-    unknown_receipt.outstanding = Some("unknown-heartbeat".into());
+    unknown_receipt.logical_delivery_id_option =
+        Some(flow_ethos::LogicalDeliveryId("unknown-heartbeat".into()));
     fixture
         .nexus
         .store
@@ -172,8 +187,13 @@ fn durable_worker_path_is_quiet_coalesces_and_excludes_its_own_traffic() {
     fixture.ordinary(&awake, "ordinary three");
     fixture.nexus.heartbeat_tick(std::slice::from_ref(&awake));
     let held = fixture.standing(&awake);
-    assert_eq!(held.outstanding.as_deref(), Some("unknown-heartbeat"));
-    assert_eq!(held.latest_sent, 3);
+    assert_eq!(
+        held.logical_delivery_id_option
+            .as_ref()
+            .map(|id| id.0.as_str()),
+        Some("unknown-heartbeat")
+    );
+    assert_eq!(held.latest_sent, crate::generated::memory::LatestSent(3));
     assert_eq!(fixture.nexus.store.delivery_purposes().unwrap().len(), 5);
 }
 
@@ -183,17 +203,17 @@ fn refused_heartbeat_admission_retains_its_durable_baseline() {
     let absent = NexusFixture::recipient("heartbeatAbsent");
     let standing = StoredHeartbeatStanding {
         address: absent.clone(),
-        baseline_awake: 1,
-        baseline_working: None,
-        baseline_working_complete: false,
-        baseline_sent: 2,
-        baseline_queue: 3,
-        latest_awake: 4,
-        latest_working: None,
-        latest_working_complete: false,
-        latest_sent: 5,
-        latest_queue: 6,
-        outstanding: None,
+        baseline_awake: crate::generated::memory::BaselineAwake(1),
+        baseline_working: crate::generated::memory::BaselineWorking(None),
+        baseline_working_complete: crate::generated::memory::BaselineWorkingComplete(false),
+        baseline_sent: crate::generated::memory::BaselineSent(2),
+        baseline_queue: crate::generated::memory::BaselineQueue(3),
+        latest_awake: crate::generated::memory::LatestAwake(4),
+        latest_working: crate::generated::memory::LatestWorking(None),
+        latest_working_complete: crate::generated::memory::LatestWorkingComplete(false),
+        latest_sent: crate::generated::memory::LatestSent(5),
+        latest_queue: crate::generated::memory::LatestQueue(6),
+        logical_delivery_id_option: None,
     };
     fixture
         .nexus
@@ -224,7 +244,8 @@ fn configuration_churn_preserves_an_unknown_outstanding_delivery() {
     );
     fixture.nexus.sync_heartbeat(std::slice::from_ref(&awake));
     let mut standing = fixture.standing(&awake);
-    standing.outstanding = Some("unknown-heartbeat".into());
+    standing.logical_delivery_id_option =
+        Some(flow_ethos::LogicalDeliveryId("unknown-heartbeat".into()));
     fixture
         .nexus
         .store

@@ -774,7 +774,7 @@ impl JudgesHandoverOwner for FlowStore {
         }
         let flow_id = || flow_ethos::FlowId(owner.to_owned());
         match self.judged_flow(owner) {
-            Ok(Some(flow)) if flow.lifecycle.is_live() => {
+            Ok(Some(flow)) if flow.flow_lifecycle.is_live() => {
                 HandoverOwnerEvidence::Refused(HandoverOwnerRefusal::Live(flow_id()))
             }
             Ok(Some(_)) => HandoverOwnerEvidence::Ended(owner.to_owned()),
@@ -799,13 +799,15 @@ impl JudgesHandoverOwner for FlowStore {
         flow_id: &str,
     ) -> Result<Option<signal_flow::FlowLifecycle>, StoreError> {
         use super::FlowLifecycle;
-        Ok(self.judged_flow(flow_id)?.map(|flow| match flow.lifecycle {
-            FlowLifecycle::Pending => signal_flow::FlowLifecycle::Pending,
-            FlowLifecycle::Active => signal_flow::FlowLifecycle::Active,
-            FlowLifecycle::Stopped => signal_flow::FlowLifecycle::Stopped,
-            FlowLifecycle::Retired => signal_flow::FlowLifecycle::Retired,
-            FlowLifecycle::Exited => signal_flow::FlowLifecycle::Exited,
-        }))
+        Ok(self
+            .judged_flow(flow_id)?
+            .map(|flow| match flow.flow_lifecycle {
+                FlowLifecycle::Pending => signal_flow::FlowLifecycle::Pending,
+                FlowLifecycle::Active => signal_flow::FlowLifecycle::Active,
+                FlowLifecycle::Stopped => signal_flow::FlowLifecycle::Stopped,
+                FlowLifecycle::Retired => signal_flow::FlowLifecycle::Retired,
+                FlowLifecycle::Exited => signal_flow::FlowLifecycle::Exited,
+            }))
     }
 }
 

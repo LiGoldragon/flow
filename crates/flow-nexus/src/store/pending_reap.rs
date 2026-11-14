@@ -292,7 +292,7 @@ impl RecordsPendingReaps for FlowStore {
         // unconfirmed.
         let confirmed = self
             .flow(&binding.flow_id.0)?
-            .is_some_and(|flow| flow.lifecycle != FlowLifecycle::Pending)
+            .is_some_and(|flow| flow.flow_lifecycle != FlowLifecycle::Pending)
             && self.address_hold(&binding.flow_id.0)?.is_none();
         Ok(confirmed.then_some(DerivedReap {
             replacement,
@@ -348,9 +348,9 @@ impl RecordsPendingReaps for FlowStore {
         // read, or that no flow names, records no Stopped.
         if pending.reap_standing == ReapStanding::Owed
             && let Some(mut flow) = self.flow(&predecessor)?
-            && flow.lifecycle.is_live()
+            && flow.flow_lifecycle.is_live()
         {
-            flow.lifecycle = FlowLifecycle::Stopped;
+            flow.flow_lifecycle = FlowLifecycle::Stopped;
             commit = commit.mutate(self.flows, flow);
             commit = self.ended_at_address(&predecessor, commit)?;
             // A receiving predecessor holds no hold: its end puts the

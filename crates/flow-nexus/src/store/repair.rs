@@ -186,8 +186,8 @@ impl RepairsMetaflows for FlowStore {
 
     fn rebind_route(&self, flow_id: &str, route: HerdrRoute) -> Result<(), StoreError> {
         let record = FlowHerdrRouteRecord {
-            flow_id: flow_id.to_owned(),
-            route,
+            flow_id: flow_ethos::FlowId(flow_id.to_owned()),
+            herdr_route: route,
         };
         let commit = self.engine.begin_atomic_commit();
         let commit = match self.herdr_route(flow_id)? {

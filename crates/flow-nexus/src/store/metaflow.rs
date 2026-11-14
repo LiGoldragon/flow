@@ -539,7 +539,7 @@ impl TakesLaunchAddress for FlowStore {
     fn flow_is_live(&self, flow_id: &str) -> Result<bool, StoreError> {
         Ok(self.flow(flow_id)?.is_some_and(|flow| {
             matches!(
-                flow.lifecycle,
+                flow.flow_lifecycle,
                 FlowLifecycle::Pending | FlowLifecycle::Active
             )
         }))

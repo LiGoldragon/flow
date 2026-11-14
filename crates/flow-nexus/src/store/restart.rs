@@ -171,8 +171,8 @@ impl RecordsRestarts for FlowStore {
             return Ok(false);
         }
         let route = FlowHerdrRouteRecord {
-            flow_id: birth.flow_id.clone().0,
-            route: birth.herdr_route.clone(),
+            flow_id: birth.flow_id.clone(),
+            herdr_route: birth.herdr_route.clone(),
         };
         let commit = self
             .engine

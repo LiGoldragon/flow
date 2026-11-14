@@ -1,3 +1,4 @@
+// A unit-test-only edit: the proof that it rebuilds the test build alone.
 //! Wake and drain against the fixture Herdr: an idle seat of any model and
 //! either harness keeps its pane and stays Awake, and work queued for it is
 //! handed into that pane; a seat whose pane is gone is Asleep, and a queued

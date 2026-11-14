@@ -19,9 +19,8 @@ use crate::waking::HoldsWakingMetaflows;
 use crate::{Dispatches, DispatchesSerially};
 use flow_ethos::State;
 use meta_signal_flow::{
-    Input as MetaQuery, InspectRejected_Data, Output as MetaResponse, Rebind_Data,
-    RebindRejected_Data, Rebinding, VisibleAttempt, VisibleQueueDeliveryStanding, Withdraw_Data,
-    WithdrawRejected_Data,
+    Input as MetaQuery, Output as MetaResponse, Rebind_Data, RebindRejected_Data, Rebinding,
+    VisibleAttempt, VisibleQueueDeliveryStanding, Withdraw_Data, WithdrawRejected_Data,
 };
 use signal_flow::{
     Address, Aspect, DeliveryState, HarnessKind, HerdrRoute, HerdrRouteSelection, Lock_Data,
@@ -247,7 +246,7 @@ fn inspect_answers_the_metaflow_whole() {
 
     assert_eq!(
         inspect(&fixture, elsewhere()),
-        MetaResponse::InspectRejected(InspectRejected_Data::UnknownAddress)
+        MetaResponse::InspectRejected
     );
 }
 

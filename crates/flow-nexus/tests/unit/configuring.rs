@@ -460,9 +460,7 @@ fn a_subscription_sees_the_configuration_as_it_changes() {
     let disconnected = AtomicBool::new(false);
     let (frames, received) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
-        let nexus = &nexus;
-        let node = &node;
-        let observer = scope.spawn(move || {
+        let observer = scope.spawn(|| {
             nexus.observe_configuration(&disconnected, &mut |response| {
                 frames
                     .send(response.clone())

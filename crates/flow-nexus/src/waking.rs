@@ -3947,23 +3947,22 @@ impl WakesInParts for RunningNexus {
         // decision is taken under the dispatch gate, as a Soft Send's
         // hand-over at this idle event is: whichever comes first shuts out
         // the other.
+        use crate::store::context::NamesFlowModel;
+        use crate::store::context_warnings::ReadsContextWarningConfiguration;
+        let warning_policy_configured = match self.store.flow_model(flow_id) {
+            Ok(Some(model)) => match self.store.context_warning_policy(&model) {
+                Ok(policy) => policy.is_some(),
+                Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+            },
+            Ok(None) => false,
+            Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+        };
         let refresh_due = match self.store.threshold_standing(flow_id) {
             Ok(crate::store::context::ThresholdStanding::Past { .. }) => true,
             Ok(crate::store::context::ThresholdStanding::Below { refresh, .. }) => {
-                use crate::store::context::NamesFlowModel;
-                use crate::store::context_warnings::ReadsContextWarningConfiguration;
-                // Configured policy already decided Middle/handover and
-                // Emergency in threshold_standing; legacy reminders add none.
-                let configured_warning = match self.store.flow_model(flow_id) {
-                    Ok(Some(model)) => match self.store.context_warning_policy(&model) {
-                        Ok(policy) => policy.is_some(),
-                        Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
-                    },
-                    Ok(None) => false,
-                    Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
-                };
                 use crate::protecting::ProtectsFlows;
-                let warned = !configured_warning
+                use crate::store::context::NamesFlowModel;
+                let warned = !warning_policy_configured
                     && (warned
                         || match self.store.handover_green(&address, flow_id, refresh) {
                             Ok(green) => green,
@@ -4007,7 +4006,7 @@ impl WakesInParts for RunningNexus {
         let closable = match node.harness_kind {
             // A seat due a refresh, or ordered refreshed or restarted, is
             // closed at this idle event whatever it runs.
-            _ if refresh_due || ordered_now => true,
+            _ if ordered_now || (refresh_due && !warning_policy_configured) => true,
             // A Codex seat is handed work through its app-server, so only
             // the app-server's thread status says it rests, whatever its
             // screen shows.
@@ -4043,6 +4042,9 @@ impl WakesInParts for RunningNexus {
         };
         if closable && let Some(order) = ordered {
             return self.replace_as_ordered(order, metaflow, node, turn);
+        }
+        if refresh_due && !closable {
+            return AtStop::Idle;
         }
         if refresh_due {
             let wakes = metaflow

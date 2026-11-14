@@ -2499,7 +2499,10 @@ impl CarriesSignalFrames for UnixStream {
     }
 }
 
+// The unit tests live under tests/unit, which the library's build never
+// reads, so an edit to one rebuilds the test build alone.
 #[cfg(test)]
+#[path = "../tests/unit"]
 mod tests {
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::ReadsHerdrPanes;

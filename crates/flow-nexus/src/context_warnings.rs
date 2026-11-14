@@ -347,6 +347,48 @@ mod tests {
     }
 
     #[test]
+    fn invalid_denominator_share_text_and_duplicate_stage_are_refused() {
+        let mut policy = fixture_policy();
+        policy.context_warning_limit.warning_tokens = WarningTokens(0);
+        assert_eq!(policy.validate(), Err(PolicyRefusal::InvalidWarningTokens));
+        policy.context_warning_limit.warning_tokens = WarningTokens(200_000);
+        policy.warning_boundary_vector[0].remaining_percent = RemainingPercent(100);
+        assert_eq!(
+            policy.validate(),
+            Err(PolicyRefusal::InvalidRemainingPercent)
+        );
+        policy.warning_boundary_vector[0].remaining_percent = RemainingPercent(50);
+        policy.warning_boundary_vector[0].warning_text = WarningText(" ".into());
+        assert_eq!(policy.validate(), Err(PolicyRefusal::WarningTextRefused));
+        policy.warning_boundary_vector[0].warning_text = WarningText("context".into());
+        policy
+            .warning_boundary_vector
+            .push(policy.warning_boundary_vector[0].clone());
+        assert_eq!(policy.validate(), Err(PolicyRefusal::DuplicateStage));
+    }
+
+    #[test]
+    fn negative_observation_does_not_cross_and_large_values_preserve_exact_math() {
+        let mut policy = fixture_policy();
+        let progress = ContextWarningProgress::initial(signal_flow::FlowId("flow".into()));
+        assert!(policy.crossing(&progress, -1).is_none());
+        assert!(!policy.emergency_reached(-1));
+        policy.context_warning_limit.warning_tokens = WarningTokens(i64::MAX);
+        assert!(policy.crossing(&progress, i64::MAX / 2).is_none());
+        assert_eq!(
+            policy
+                .crossing(&progress, i64::MAX / 2 + 1)
+                .unwrap()
+                .selected,
+            WarningStage::Early
+        );
+        assert_eq!(
+            policy.crossing(&progress, i64::MAX).unwrap().selected,
+            WarningStage::Emergency
+        );
+    }
+
+    #[test]
     fn invalid_policy_is_refused_before_any_crossing() {
         let mut policy = fixture_policy();
         policy.warning_boundary_vector[1].remaining_percent = RemainingPercent(60);

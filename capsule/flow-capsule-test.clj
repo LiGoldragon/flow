@@ -300,7 +300,7 @@
 (let [replay ["Configure.Models.[ { Opus haiku } ]"
               "Configure.Nexus.{ /src 60 }"
               "Configure.DefaultMinutes.30"
-              "Configure.Metaflows.[ { { Psyche test Opus } None [ spirit:core ] [] Simplified Explicit.[] Maintained «» [] } ]"]
+              "Configure.Metaflows.[ { { Psyche test Opus } None [] [ spirit:core ] [] Simplified Explicit.[] Maintained «» [] } ]"]
       plan (flow-capsule/seed-plan replay "Configure.Counters.{ 3 2 1 }" "Configure.Counters.{ 2 1 0 }")
       steps (map (juxt :via :datom) plan)]
   (check "the seed declares the Nexus first, through a configuration-only Nexus"
@@ -311,7 +311,7 @@
   (check "the rest of the replay follows configuration-only, in the file's order"
          (= [[:configure-only "Configure.Models.[ { Opus haiku } ]"]
              [:configure-only "Configure.DefaultMinutes.30"]
-             [:configure-only "Configure.Metaflows.[ { { Psyche test Opus } None [ spirit:core ] [] Simplified Explicit.[] Maintained «» [] } ]"]]
+             [:configure-only "Configure.Metaflows.[ { { Psyche test Opus } None [] [ spirit:core ] [] Simplified Explicit.[] Maintained «» [] } ]"]]
             (drop 4 steps)))
   (check "no Counters goes to a configuration-only Nexus"
          (not-any? (fn [[via datom]] (and (= via :configure-only) (str/starts-with? datom "Configure.Counters."))) steps))
@@ -413,8 +413,8 @@
 
 ;; Scenario 20 needs a seat that takes its whole queue on a wake: a Regular
 ;; OnDemand seat (a Simplified seat takes its oldest alone).
-(let [metaflows (str "Configure.Metaflows.[ { { Psyche test Sonnet } None [ spirit:core ] [] Regular Default OnDemand «» [] }"
-                     " { { Psyche test Haiku } None [ spirit:core ] [] Simplified Explicit.[] OnDemand «» [] } ]")]
+(let [metaflows (str "Configure.Metaflows.[ { { Psyche test Sonnet } None [ ClaudeMd ] [ spirit:core ] [] Regular Default OnDemand «» [] }"
+                     " { { Psyche test Haiku } None [] [ spirit:core ] [] Simplified Explicit.[] OnDemand «» [] } ]")]
   (check "a seat's declaration reads its FlowKind and wake policy"
          (= ["Regular" "OnDemand"] (flow-capsule/seat-declaration metaflows "{ Psyche test Sonnet }")))
   (check "a Simplified seat reads as Simplified"

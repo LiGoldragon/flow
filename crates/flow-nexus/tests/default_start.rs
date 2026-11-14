@@ -1,14 +1,14 @@
 //! The service is started with one datom, its place's name. Its place, its
 //! sockets in Runtime and its memory in State, is read from its place file,
 //! `<configuration home>/nexus/<place-name>/flow-nexus.signal`, before any
-//! socket opens, or lies at its defaults where there is no file. A new
+//! socket opens, and by nothing else: with no file it is refused, naming it. A new
 //! memory starts unconfigured; configuration reaches the running Nexus
 //! through its meta socket and takes effect at once. Every wait here is on
 //! an event: the Nexus's READY=1, an answer, or the child's exit, each
 //! bounded by EVENT_WAIT.
 use datom_codec::Datomizable;
 use flow_nexus::CarriesSignalFrames;
-use flow_nexus::place::{FindsPlace, LaysOutPlace, Place, PlaceName};
+use flow_nexus::place::{FindsFlowPlace, LaysOutPlace, Place, PlaceName};
 use flow_nexus::store::ConfiguresOnlyStore;
 use protos::{Compactable, Protosizable};
 use std::{
@@ -101,7 +101,7 @@ fn place_file(home: &Path, place_name: &str) -> PlaceFile {
     ConfigurationHome::under(None, Some(home.as_os_str()))
         .expect("the configuration home")
         .place_file(
-            &<PlaceName as FindsPlace>::nexus_name(),
+            &<PlaceName as FindsFlowPlace>::nexus_name(),
             &PlaceName(place_name.into()),
         )
         .expect("the place file")
@@ -819,46 +819,42 @@ fn a_new_memory_starts_unconfigured_and_is_configured_over_the_meta_socket() {
     assert!(nexus.terminate().success());
 }
 
-/// With no place file the place lies at its defaults:
-/// `$XDG_RUNTIME_DIR/nexus/<place-name>` and
-/// `$XDG_STATE_HOME/nexus/<place-name>`.
+/// With no place file the Nexus is refused, naming the file: the place is
+/// held by the place file alone, so the standard runtime and state
+/// directories, where they would lay a place, are not read, and nothing is
+/// made.
 #[test]
-fn a_place_without_a_place_file_lies_at_its_defaults() {
+fn a_place_without_a_place_file_is_refused_naming_the_file_and_nothing_is_made() {
     let home = tempfile::tempdir().expect("temporary home");
     let runtime = tempfile::tempdir().expect("temporary runtime directory");
     let state = tempfile::tempdir().expect("temporary state home");
-    let place = Place {
-        place_name: PlaceName("main".into()),
-        runtime: flow_nexus::place::Runtime(
-            runtime
-                .path()
-                .join("nexus/main")
-                .to_string_lossy()
-                .into_owned(),
-        ),
-        state: flow_nexus::place::State(
-            state
-                .path()
-                .join("nexus/main")
-                .to_string_lossy()
-                .into_owned(),
-        ),
-    };
-    for directory in [place.runtime_directory(), place.state_directory()] {
-        std::fs::create_dir_all(directory).expect("the declared place directory");
-    }
-    assert!(!place_file(home.path(), "main").path.exists());
-    let nexus = ready(start_named(
-        home.path(),
-        "main",
-        &[
-            ("XDG_RUNTIME_DIR", &runtime.path().to_string_lossy()),
-            ("XDG_STATE_HOME", &state.path().to_string_lossy()),
-        ],
-    ));
-    assert!(place.ordinary_socket().exists() && place.meta_socket().exists());
-    assert!(place.store().exists());
-    assert!(nexus.terminate().success());
+    let place = declared(runtime.path(), state.path());
+    let file = place_file(home.path(), "main");
+    assert!(!file.path.exists());
+    let (status, stderr) = refusal(
+        start_named(
+            home.path(),
+            "main",
+            &[
+                ("XDG_RUNTIME_DIR", &runtime.path().to_string_lossy()),
+                ("XDG_STATE_HOME", &state.path().to_string_lossy()),
+            ],
+        )
+        .0,
+    );
+    assert!(!status.success());
+    assert!(
+        stderr.contains("Missing.") && stderr.contains(&*file.path.to_string_lossy()),
+        "{stderr}"
+    );
+    assert!(!place.store().exists(), "no memory is made");
+    assert!(
+        std::fs::read_dir(place.runtime_directory())
+            .unwrap()
+            .next()
+            .is_none(),
+        "nothing is bound"
+    );
 }
 
 /// A place file that is not one framed Place of this place's, or holds a

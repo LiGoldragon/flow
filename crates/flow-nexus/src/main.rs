@@ -1,5 +1,5 @@
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
-use flow_nexus::place::{FindsPlace, LaysOutPlace, PlaceName, PlaceRefusal};
+use flow_nexus::place::{FindsFlowPlace, LaysOutPlace, PlaceName, ReportsPlaceRefusal};
 use flow_nexus::placed_socket::{PlacedSocket, PlacesSocket};
 use flow_nexus::{
     AnnouncesReadiness, OpensRunningNexus, Readiness, RunningNexus, ServesMeta, ServesOrdinary,
@@ -33,8 +33,9 @@ impl AnswersVersion for [String] {
 
 /// A Nexus is started with one datom, its place's name. Its place, where
 /// its sockets and its memory are, is read from its place file before any
-/// socket opens, or lies at its defaults where there is no file; the
-/// executable holds no configuration, and a new memory starts unconfigured.
+/// socket opens, and by nothing else: with no place file the Nexus is
+/// refused, naming the file. The executable holds no configuration, and a new
+/// memory starts unconfigured.
 trait ParsesPlaceName {
     fn parse_place_name(&self) -> Result<PlaceName, String>;
 }
@@ -53,23 +54,6 @@ impl ParsesPlaceName for [String] {
         Potential::<PlaceName>::from(source.clone())
             .actualize(&mut budget)
             .map_err(|error| format!("invalid place name datom: {error:?}"))
-    }
-}
-
-/// A place refused, as the Nexus reports it: a place file's refusal as its
-/// datom, naming the file.
-trait ReportsPlaceRefusal {
-    fn report(&self) -> String;
-}
-
-impl ReportsPlaceRefusal for PlaceRefusal {
-    fn report(&self) -> String {
-        match self {
-            PlaceRefusal::File(refusal) => refusal.datomize(vec![]).protosize().compact(),
-            PlaceRefusal::Defaults(error) => {
-                format!("no place file, and no default place: {error}")
-            }
-        }
     }
 }
 
@@ -109,7 +93,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let place = match place_name.find_place() {
+    let place = match place_name.find_flow_place() {
         Ok(place) => place,
         Err(refusal) => {
             eprintln!("flow-nexus: {}", refusal.report());

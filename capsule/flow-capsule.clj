@@ -241,9 +241,17 @@
   earlier client."
   [pkg socket]
   (if (= :place (get @package-interface pkg))
-    (let [home (place-configuration-home socket)]
+    (let [home (place-configuration-home socket)
+          place (place-name-of socket)
+          file (str "nexus/" place "/flow-nexus.signal")]
       (fs/create-dirs (str home "/nexus"))
-      (spit (str home "/nexus/flow-nexus.datom") (str "{ " (place-name-of socket) " }\n"))
+      (spit (str home "/nexus/flow-nexus.datom") (str "{ " place " }\n"))
+      ;; The client finds the sockets in the Runtime of the place file the
+      ;; Nexus reads, which lies under the capsule's own configuration home:
+      ;; a home of the place's own holds the same file.
+      (when (and (not= home config-home) (fs/exists? (str config-home "/" file)))
+        (fs/create-dirs (fs/parent (str home "/" file)))
+        (fs/copy (str config-home "/" file) (str home "/" file) {:replace-existing true}))
       {"XDG_CONFIG_HOME" home})
     {}))
 

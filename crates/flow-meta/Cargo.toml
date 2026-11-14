@@ -11,6 +11,7 @@ name = "flow-nexus-meta"
 path = "src/main.rs"
 [dependencies]
 flow-ethos = { path = "../flow-ethos", default-features = false, features = ["datom"] }
+flow-place = { path = "../flow-place" }
 datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09a0526" }
 meta-signal-flow = { workspace = true, features = ["datom"] }
 protos = { git = "https://github.com/LiGoldragon/protos", rev = "c93b598" }
@@ -19,5 +20,7 @@ signal-flow.workspace = true
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "6d4eb74", default-features = false }
 [dev-dependencies]
 tempfile = "3"
+# The place files a CLI test writes, as the Nexus reads them.
+translator = { git = "https://github.com/LiGoldragon/translator", rev = "6892a15b11653a2ef8932a4390b34f5e81583744", features = ["datom"] }
 [build-dependencies]
 ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "f23eacf" }

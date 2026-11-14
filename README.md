@@ -77,12 +77,12 @@ main`. Before any socket opens it reads its place from its place file,
 `$XDG_CONFIG_HOME/nexus/main/flow-nexus.signal` (`~/.config` when the
 variable is unset): one framed signal holding the Place every Nexus shares
 (translator's placement), the place name, Runtime (its sockets `flow.sock`
-and `flow-meta.sock`) and State (its memory `flow.sema`). Where there is no
-file the place lies at its defaults, `$XDG_RUNTIME_DIR/nexus/main` and
-`$XDG_STATE_HOME/nexus/main` (`~/.local/state/nexus/main` when the variable
-is unset); a file that is not one framed Place of this place's, or holds a
-relative directory, is refused naming the file, and the Nexus does not
-start. One tool compiles the place file from datom for every Nexus,
+and `flow-meta.sock`) and State (its memory `flow.sema`). The place file is
+the Place alone, found by the place name and the standard configuration home,
+and nothing else is read to find it: with no file, or one that is not one
+framed Place of this place's or holds a relative directory, the Nexus is
+refused naming the file, and does not start. No default place is resolved
+from `XDG_RUNTIME_DIR` or `XDG_STATE_HOME`. One tool compiles the place file from datom for every Nexus,
 translator's `nexus-configure`:
 
 ```sh
@@ -99,11 +99,14 @@ client takes the datom and nothing else: `flow-nexus '<Query>'` or
 `flow-nexus-meta '<Query>'`, both named after the Nexus. The place is their
 configuration's, one datom at `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`
 (`~/.config/nexus/flow-nexus.datom` when the variable is unset),
-`CliConfiguration.{ PlaceName }`, `{ main }`; the place
-name resolves under `$XDG_RUNTIME_DIR/nexus/` to that place's socket. A
-configuration that is missing, cannot be read or names no place is a typed
-refusal naming the file (`Missing.<path>`, `Unreadable.{ <path> <reason> }`,
-`Invalid.{ <path> <reason> }`, exit 2), and nothing is sent. No place is
+`CliConfiguration.{ PlaceName }`, `{ main }`; the place name locates the
+place file the Nexus reads, `$XDG_CONFIG_HOME/nexus/main/flow-nexus.signal`,
+and the sockets are in the Runtime that file holds (the CLI reads no
+`XDG_RUNTIME_DIR`), so a place whose Runtime is not the default is reached as
+well. A configuration or a place file that is missing, cannot be read or is
+no place is a typed refusal naming the file (`Missing.<path>`,
+`Unreadable.{ <path> <reason> }`, `Invalid.{ <path> <reason> }`, exit 2), and
+nothing is sent. No place is
 ever typed: a second argument is refused. Two places are two names: the
 stable version runs at `main`, a candidate at `next` with its own memory,
 and a version becomes main by being started at `main` once the version

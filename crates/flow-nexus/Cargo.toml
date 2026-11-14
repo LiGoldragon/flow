@@ -14,6 +14,7 @@ flow = { path = "../flow" }
 flow-defaults = { path = "../flow-defaults" }
 flow-native = { path = "../flow-native" }
 flow-ethos.workspace = true
+flow-place = { path = "../flow-place" }
 flow-ethos-before-request-ids = { path = "../flow-ethos-before-request-ids", features = ["datom"] }
 signal-flow-before-request-ids = { path = "../signal-flow-before-request-ids", features = ["datom"] }
 meta-signal-flow-before-request-ids = { path = "../meta-signal-flow-before-request-ids", features = ["datom"] }
@@ -28,7 +29,7 @@ notify = "8"
 # The shared Place every Nexus starts in, and its place file, read before
 # any socket opens (translator 0.6.0); text and unix are the edges the build
 # base's feature set gives it.
-translator = { git = "https://github.com/LiGoldragon/translator", rev = "130c27a7860c715f4aa008433bd7ac9bb685b8aa", features = ["text", "unix"] }
+translator = { git = "https://github.com/LiGoldragon/translator", rev = "6892a15b11653a2ef8932a4390b34f5e81583744", features = ["text", "unix"] }
 libc = "0.2"
 rustix = { version = "1", features = ["fs", "net", "time"] }
 rkyv.workspace = true

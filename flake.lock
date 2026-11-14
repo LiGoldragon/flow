@@ -6,11 +6,11 @@
         "nixpkgs": "nixpkgs"
       },
       "locked": {
-        "lastModified": 1794673592,
-        "narHash": "sha256-K34Qj5fHyc7u2pZXnD+MUIACw7Kmdc3dNzNdcDIA2UM=",
+        "lastModified": 1794680799,
+        "narHash": "sha256-YD7rrofNhn2eKvD+38uQGNW/7CCIw/26REJfmHwZ6jU=",
         "owner": "LiGoldragon",
         "repo": "build-base",
-        "rev": "d58fa6f9f7a509a26cbb383f5cee8a683858cb5a",
+        "rev": "79188c7dc23078878fc662236fb1d23a7af5edaa",
         "type": "github"
       },
       "original": {
@@ -35,21 +35,6 @@
       }
     },
     "crane_2": {
-      "locked": {
-        "lastModified": 1788465171,
-        "narHash": "sha256-Y1/TTVXjYXGF068IThQH9fPSZ0SIE74PABlUxnWTUH0=",
-        "owner": "ipetkov",
-        "repo": "crane",
-        "rev": "eb35abda9f232cc6610b1d1e3200d15c49b7ac54",
-        "type": "github"
-      },
-      "original": {
-        "owner": "ipetkov",
-        "repo": "crane",
-        "type": "github"
-      }
-    },
-    "crane_3": {
       "locked": {
         "lastModified": 1788465171,
         "narHash": "sha256-Y1/TTVXjYXGF068IThQH9fPSZ0SIE74PABlUxnWTUH0=",
@@ -114,20 +99,42 @@
         "type": "github"
       }
     },
-    "curriculum_4": {
+    "datom-codec": {
       "flake": false,
       "locked": {
-        "lastModified": 1792991139,
-        "narHash": "sha256-6AFaGZaXy/3vZRhJernVmFhBGI/o3RVb9IwW/AEIQAk=",
+        "lastModified": 1794257160,
+        "narHash": "sha256-TcRIc4h8i4rFH33WuTEa9IASXY0XP1eGxtkWl6anl6E=",
         "owner": "LiGoldragon",
-        "repo": "Curriculum",
-        "rev": "91acf293a0d0cce1793b458d5377fe78f841e0c1",
+        "repo": "datom-codec",
+        "rev": "09a0526949b043f921b6d3ce115b7f455291f2e2",
         "type": "github"
       },
       "original": {
         "owner": "LiGoldragon",
-        "repo": "Curriculum",
-        "rev": "91acf293a0d0cce1793b458d5377fe78f841e0c1",
+        "repo": "datom-codec",
+        "type": "github"
+      }
+    },
+    "ethos-zero": {
+      "inputs": {
+        "base": [
+          "translator",
+          "base"
+        ],
+        "datom-codec": "datom-codec",
+        "protos": "protos"
+      },
+      "locked": {
+        "lastModified": 1794277716,
+        "narHash": "sha256-wbHITBEhDb1teeoEiCnxo66VQR4J42VKOTZNallViFA=",
+        "owner": "LiGoldragon",
+        "repo": "ethos-zero",
+        "rev": "18e2ea6bba64ce8bc478941ca4e16d134c76d04f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "LiGoldragon",
+        "repo": "ethos-zero",
         "type": "github"
       }
     },
@@ -183,28 +190,6 @@
           "nixpkgs"
         ],
         "rust-analyzer-src": "rust-analyzer-src_3"
-      },
-      "locked": {
-        "lastModified": 1789644068,
-        "narHash": "sha256-wt1Mee04mQYtOPolRGHbZFb3CyHKidFryurtWuOZOao=",
-        "owner": "nix-community",
-        "repo": "fenix",
-        "rev": "f8ac2cd5626cc565f546e1053ab4591cfe0b3ea9",
-        "type": "github"
-      },
-      "original": {
-        "owner": "nix-community",
-        "repo": "fenix",
-        "type": "github"
-      }
-    },
-    "fenix_4": {
-      "inputs": {
-        "nixpkgs": [
-          "unconfigured-flow",
-          "nixpkgs"
-        ],
-        "rust-analyzer-src": "rust-analyzer-src_4"
       },
       "locked": {
         "lastModified": 1789644068,
@@ -289,19 +274,19 @@
         "type": "github"
       }
     },
-    "nixpkgs_4": {
+    "protos": {
+      "flake": false,
       "locked": {
-        "lastModified": 1786599213,
-        "narHash": "sha256-yNJd40f11EzXBjSByCB7IPpeFFAdeoSKKM67dGkfFoU=",
+        "lastModified": 1794256958,
+        "narHash": "sha256-64lMjBC1Kly7o0PsvfNdXW7Hk1dpzyZyr5BX3Oe/PAM=",
         "owner": "LiGoldragon",
-        "repo": "nixpkgs",
-        "rev": "0e251e24a4f24e036a084b6b4b2d2491af4167f4",
+        "repo": "protos",
+        "rev": "c93b598025984f8a73e70aa18b8e8a6fdfdfdfd8",
         "type": "github"
       },
       "original": {
         "owner": "LiGoldragon",
-        "ref": "main",
-        "repo": "nixpkgs",
+        "repo": "protos",
         "type": "github"
       }
     },
@@ -310,7 +295,7 @@
         "base": "base",
         "curriculum": "curriculum",
         "migration-predecessor": "migration-predecessor",
-        "unconfigured-flow": "unconfigured-flow_2"
+        "translator": "translator"
       }
     },
     "rust-analyzer-src": {
@@ -364,20 +349,24 @@
         "type": "github"
       }
     },
-    "rust-analyzer-src_4": {
-      "flake": false,
+    "translator": {
+      "inputs": {
+        "base": [
+          "base"
+        ],
+        "ethos-zero": "ethos-zero"
+      },
       "locked": {
-        "lastModified": 1789506595,
-        "narHash": "sha256-YCeFChL7C5GWwnped2TXDjxfwa5MhlqRzq8De2lMat0=",
-        "owner": "rust-lang",
-        "repo": "rust-analyzer",
-        "rev": "fa88768e772857f332bc8383e3a1c5a4212f9a6e",
+        "lastModified": 1794680776,
+        "narHash": "sha256-/jovRKGD76mtvuq2KXySQ25F6BB58OO76/84aIBBFOE=",
+        "owner": "LiGoldragon",
+        "repo": "translator",
+        "rev": "6892a15b11653a2ef8932a4390b34f5e81583744",
         "type": "github"
       },
       "original": {
-        "owner": "rust-lang",
-        "ref": "nightly",
-        "repo": "rust-analyzer",
+        "owner": "LiGoldragon",
+        "repo": "translator",
         "type": "github"
       }
     },
@@ -387,28 +376,6 @@
         "curriculum": "curriculum_3",
         "fenix": "fenix_3",
         "nixpkgs": "nixpkgs_3"
-      },
-      "locked": {
-        "lastModified": 1793398358,
-        "narHash": "sha256-7nb1xsS2E95ZlwqVUObefTzuBYXfwRaflVvzysvLthQ=",
-        "owner": "LiGoldragon",
-        "repo": "flow",
-        "rev": "d3ab87ee18b1dd30947d5f0089f5abb4bafa80d5",
-        "type": "github"
-      },
-      "original": {
-        "owner": "LiGoldragon",
-        "repo": "flow",
-        "rev": "d3ab87ee18b1dd30947d5f0089f5abb4bafa80d5",
-        "type": "github"
-      }
-    },
-    "unconfigured-flow_2": {
-      "inputs": {
-        "crane": "crane_3",
-        "curriculum": "curriculum_4",
-        "fenix": "fenix_4",
-        "nixpkgs": "nixpkgs_4"
       },
       "locked": {
         "lastModified": 1793398358,

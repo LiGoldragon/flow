@@ -473,7 +473,7 @@ fn predecessor_start_argument(runtime: &Path, store: &Path) -> String {
 /// a `flow.sema`, in the store's directory, written to its place file under
 /// `home`'s configuration home; the Nexus is started with the place's name.
 fn place_argument(home: &Path, runtime: &Path, store: &Path) -> String {
-    use crate::place::{FindsPlace, Place, PlaceName, Runtime, State};
+    use crate::place::{FindsFlowPlace, Place, PlaceName, Runtime, State};
     use translator::place_file::{
         ConfigurationHome, LocatesConfigurationHome, LocatesPlaceFile, WritesPlaceFile,
     };

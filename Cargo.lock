@@ -267,11 +267,13 @@ dependencies = [
  "ethos-zero 29.0.0",
  "flow-ethos",
  "flow-native",
+ "flow-place",
  "protos",
  "rkyv",
  "serde_json",
  "signal-flow 63.0.0",
  "tempfile",
+ "translator",
 ]
 
 [[package]]
@@ -303,12 +305,14 @@ dependencies = [
  "datom-codec",
  "ethos-zero 29.0.0",
  "flow-ethos",
+ "flow-place",
  "meta-signal-flow 79.0.0",
  "protos",
  "rkyv",
  "signal",
  "signal-flow 63.0.0",
  "tempfile",
+ "translator",
 ]
 
 [[package]]
@@ -330,6 +334,7 @@ dependencies = [
  "flow-ethos",
  "flow-ethos-before-request-ids",
  "flow-native",
+ "flow-place",
  "getrandom",
  "libc",
  "meta-signal-flow 77.0.0",
@@ -354,6 +359,17 @@ dependencies = [
  "thiserror",
  "translator",
  "tungstenite",
+]
+
+[[package]]
+name = "flow-place"
+version = "0.56.2"
+dependencies = [
+ "datom-codec",
+ "flow-ethos",
+ "protos",
+ "tempfile",
+ "translator",
 ]
 
 [[package]]
@@ -1099,7 +1115,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 [[package]]
 name = "translator"
 version = "0.6.0"
-source = "git+https://github.com/LiGoldragon/translator?rev=130c27a7860c715f4aa008433bd7ac9bb685b8aa#130c27a7860c715f4aa008433bd7ac9bb685b8aa"
+source = "git+https://github.com/LiGoldragon/translator?rev=6892a15b11653a2ef8932a4390b34f5e81583744#6892a15b11653a2ef8932a4390b34f5e81583744"
 dependencies = [
  "datom-codec",
  "libc",

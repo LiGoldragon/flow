@@ -1,19 +1,30 @@
 # Unreleased (primary-pko0): the Nexus reads its place from its place file and holds no configuration
 
-translator 0.6.0 (130c27a), on build base pko0-e3a7d1 (97ba18e). **The daemon's
-start changes.**
+translator 0.6.0 (6892a15), on build base d58fa6f plus translator (79188c7). **The
+daemon's and the CLIs' start change.**
 
 - **The daemon is started with its place's name**, one datom:
   `flow-nexus-daemon main`, in place of the place datom. Before any socket
   opens it reads its place from `$XDG_CONFIG_HOME/nexus/<place-name>/flow-nexus.signal`
   (`$HOME/.config` when the variable is unset or empty), one framed signal
-  holding the Place every Nexus shares, translator's placement. Where there
-  is no file the place lies at its defaults, `$XDG_RUNTIME_DIR/nexus/<place-name>`
-  and `$XDG_STATE_HOME/nexus/<place-name>` (`$HOME/.local/state` when unset);
-  a file that is not one framed Place of this place's, or holds a relative
-  directory, is refused naming the file. The place file is compiled from
+  holding the Place every Nexus shares, translator's placement. The place
+  file is the only place: with no file, or one that is not one framed Place of
+  this place's or holds a relative directory, the daemon is refused naming the
+  file (`Missing.<path>` for a file that is not there). No place is resolved
+  from `XDG_RUNTIME_DIR` or `XDG_STATE_HOME`. The place file is compiled from
   datom by translator's `nexus-configure`, the same tool for every Nexus, and
   in Nix is its own derivation, translator's `lib.<system>.mkPlaceFile`.
+- **The CLIs read the same place file.** `flow-nexus` and `flow-nexus-meta`
+  take the place name from their configuration, `flow-nexus.datom`
+  (`CliConfiguration.{ PlaceName }`), as before, and find the sockets in the
+  Runtime of that place's place file, `$XDG_CONFIG_HOME/nexus/<place-name>/flow-nexus.signal`.
+  They no longer read `XDG_RUNTIME_DIR`, and with no place file they are
+  refused, naming it, and send nothing. A deployment writes the place file for
+  every place it starts, and the versioned clients' configuration home holds it
+  beside `flow-nexus.datom`. The place is found in one new member, `flow-place`,
+  shared by the daemon and both CLIs; flow-ethos keeps the CLI configuration
+  and the socket names, and loses `RuntimeRoot`, `CliEnvironment` and
+  `ResolvesCliPlace`.
 - **The executable holds no configuration.** The
   `executable-default-configuration` feature, the configured package's
   recompiled daemon, `lib.<system>.mkFlowPackage` and `nix/mk-flow-package.nix`

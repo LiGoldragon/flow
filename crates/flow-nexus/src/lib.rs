@@ -331,280 +331,11 @@ impl Dispatches for RunningNexus {
     }
 
     fn dispatch_from(&self, query: Input, origin: Origin) -> Output {
-        match query {
-            Input::Acknowledge(keys) => {
-                use crate::store::logical_delivery::RecordsLogicalDeliveries;
-                match self.store.acknowledge_deliver_calls(&keys) {
-                    Ok(()) => Output::Acknowledged,
-                    Err(error) => Output::Refused(signal_flow::Refusal::Store(error.to_string())),
-                }
-            }
-            Input::ArchiveRequest(request_id) => {
-                use crate::store::RecordsLogicalDeliveries;
-                match self.store.archive_request(&request_id.0) {
-                    Ok(Ok(())) => Output::RequestArchived(request_id),
-                    Ok(Err(rejection)) => Output::ArchiveRejected(rejection),
-                    Err(_) => Output::ArchiveRejected(signal_flow::ArchiveRejection::StoreRefused),
-                }
-            }
-            Input::Start(profile) => {
-                let launch_request_id = profile.launch_request_id.clone();
-                if let Some(settled) = self.settled(&profile) {
-                    return settled;
-                }
-                // A caller's new launch is admitted before anything of it is
-                // written: a camelCase topic.
-                match self.admission_refusal(&profile) {
-                    Ok(None) => {}
-                    Ok(Some(rejection)) => return Output::StartRejected(rejection),
-                    Err(_) => {
-                        return Output::StartRejected(StartRejection::LaunchPersistenceRefused);
-                    }
-                }
-                let response = self.start(profile, origin);
-                self.settle(&launch_request_id.0, response)
-            }
-            // Off the gate: the replacement takes it under the metaflow's
-            // lock.
-            Input::Replace(profile) => match self.admission_refusal(&profile) {
-                Ok(None) => {
-                    use crate::waking::RefreshesMetaflows;
-                    self.replace_held(profile, origin)
-                }
-                Ok(Some(rejection)) => {
-                    Output::ReplaceRejected(signal_flow::ReplaceRejection::LaunchRefused(rejection))
-                }
-                Err(_) => Output::ReplaceRejected(signal_flow::ReplaceRejection::LaunchRefused(
-                    StartRejection::LaunchPersistenceRefused,
-                )),
-            },
-            Input::DeliverAll(address) => self.deliver_all(address),
-            Input::BindSeat(request) => self.bind_seat(request),
-            Input::Adopt(request) => self.adopt(request),
-            // An observation streams over a connection; a direct dispatch
-            // answers its opening frame once, as a read.
-            Input::ObserveSends(_) => {
-                use crate::store::logical_delivery::RecordsLogicalDeliveries;
-                self.store.read_every_delivery_snapshot(None).map_or_else(
-                    |error| Output::Refused(signal_flow::Refusal::Store(error.to_string())),
-                    |observation| {
-                        Output::SendsObserved(
-                            crate::message_projection::ProjectsSendObservation::visible_send_observation(
-                                &observation,
-                            ),
-                        )
-                    },
-                )
-            }
-            Input::ObserveSender(forwarded) => {
-                use crate::observe_sends::ObservesLogicalSends;
-                use crate::store::logical_delivery::RecordsLogicalDeliveries;
-                let observed = self.observation_sender(&forwarded).and_then(|sender| {
-                    self.store
-                        .read_logical_delivery_snapshots(&sender, None)
-                        .map_err(|error| {
-                            Box::new(Output::Refused(signal_flow::Refusal::Store(
-                                error.to_string(),
-                            )))
-                        })
-                });
-                match observed {
-                    Ok(observation) => Output::SendsObserved(
-                        crate::message_projection::ProjectsSendObservation::visible_send_observation(
-                            &observation,
-                        ),
-                    ),
-                    Err(refusal) => *refusal,
-                }
-            }
-            Input::ObserveDeliveries(_) => {
-                use crate::store::logical_delivery::RecordsLogicalDeliveries;
-                self.store.read_message_delivery_snapshots(None).map_or_else(
-                    |error| Output::Refused(signal_flow::Refusal::Store(error.to_string())),
-                    |observation| {
-                        Output::SendsObserved(
-                            crate::message_projection::ProjectsSendObservation::visible_send_observation(
-                                &observation,
-                            ),
-                        )
-                    },
-                )
-            }
-            Input::Send(send) => self.send_request(send, None).response,
-            Input::Launch(launch) => match self.declared_launch(launch) {
-                Ok(query) => self.dispatch_from(query, origin),
-                Err(refusal) => *refusal,
-            },
-            Input::Rehearse(launch) => self.rehearse_declared(launch),
-            Input::LaunchStatus(launch_request_id) => self.launch_status(&launch_request_id.0),
-            // Over a connection Observe streams; a direct dispatch answers the
-            // subscription's opening frame.
-            Input::Observe(ObserveSelection::Launch(launch_request_id)) => {
-                self.launch_status(&launch_request_id.0)
-            }
-            Input::Observe(ObserveSelection::Agent(flow_id)) => self.agent_observation(&flow_id.0),
-            Input::Observe(ObserveSelection::Undecodable) => {
-                use crate::store::undecodable_frame::RecordsUndecodableFrames;
-                match self.store.undecodable_frames() {
-                    Ok(frames) => Output::UndecodableObserved(frames),
-                    Err(error) => Output::Refused(signal_flow::Refusal::Store(error.to_string())),
-                }
-            }
-            Input::Observe(ObserveSelection::TurnEnds) => {
-                use crate::store::turn_end::RecordsTurnEnds;
-                match self.store.last_turn_ends() {
-                    Ok(turn_ends) => Output::TurnEndsObserved(turn_ends),
-                    Err(error) => Output::Refused(signal_flow::Refusal::Store(error.to_string())),
-                }
-            }
-            Input::Observe(ObserveSelection::Metaflows) => {
-                use crate::store::metaflow_watch::WatchesMetaflows;
-                match self.store.available_metaflows() {
-                    Ok(metaflows) => Output::MetaflowsObserved(metaflows),
-                    Err(error) => Output::Refused(signal_flow::Refusal::Store(error.to_string())),
-                }
-            }
-            Input::Observe(ObserveSelection::Retirement(address)) => {
-                use crate::store::handover::HoldsHandovers;
-                match self.store.observe_handover_retirement(&address) {
-                    Ok(subscription) => {
-                        let response = Output::RetirementObserved(subscription.snapshot.clone());
-                        self.store.handover_observations.detach(&subscription);
-                        response
-                    }
-                    Err(error) => Output::RetirementObservationFailed(
-                        signal_flow::RetirementObservationFailure::MissingEvidence(
-                            error.to_string(),
-                        ),
-                    ),
-                }
-            }
-            // Off the gate: the refresh takes it for each of its steps.
-            Input::Refresh(address) => {
-                use crate::waking::RefreshesMetaflows;
-                self.refresh(&address)
-            }
-            // Off the gate: the restart takes it for each of its steps.
-            Input::Restart(flow_id) => {
-                use crate::restarting::RestartsFlows;
-                self.restart(&flow_id.0)
-            }
-            Input::Keep(request) => self.keep_handover(request),
-            Input::Drop(request) => self.drop_handover(request),
-            Input::Glance(address) => self.glance_handover(address),
-            Input::Read(address) => self.read_handover(address),
-            Input::ResolveRecipient(flow_id) => {
-                match self.store.apply(Input::ResolveRecipient(flow_id)) {
-                    Ok(Output::RecipientResolved(node)) => Output::RecipientResolved(
-                        self.herdr
-                            .refresh_route(self.herdr.claude_daemon.refreshed(node)),
-                    ),
-                    Ok(response) => response,
-                    Err(error) => Output::Refused(signal_flow::Refusal::Store(error.to_string())),
-                }
-            }
-            Input::Stop(flow_id) => {
-                let node = match self.store.flow_node(&flow_id.0) {
-                    Ok(Some(node)) => node,
-                    Ok(None) => {
-                        return Output::StopRejected(signal_flow::StopRejection::UnknownFlow);
-                    }
-                    Err(error) => {
-                        return Output::Refused(signal_flow::Refusal::Store(error.to_string()));
-                    }
-                };
-                // A flow under a restart record is stopped as its restart
-                // stands: its FlowId, session and queue are kept.
-                {
-                    use crate::restarting::RestartsFlows;
-                    use crate::store::restart::RecordsRestarts;
-                    match self.store.restart_record(&flow_id.0) {
-                        Ok(None) => {}
-                        Ok(Some(record)) => return self.stop_restarting(record),
-                        Err(error) => {
-                            return Output::Refused(signal_flow::Refusal::Store(error.to_string()));
-                        }
-                    }
-                }
-                // A Retired seat is gone already, so there is nothing left
-                // for Stop to close: AlreadyStopped is what it answers.
-                if !node.flow_lifecycle.is_live() {
-                    return Output::StopRejected(signal_flow::StopRejection::AlreadyStopped);
-                }
-                // The route is the flow's recorded Herdr pane: a Pending flow
-                // whose launch was refused, or a seat not ready for a prompt,
-                // is stopped when Herdr still shows its binding there.
-                let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
-                    return Output::StopRejected(signal_flow::StopRejection::RouteUnavailable);
-                };
-                match self.herdr.pane_presence(&node) {
-                    herdr::PanePresence::Present | herdr::PanePresence::Bare => {
-                        // No write is left half-typed into a pane as it
-                        // closes.
-                        let closed = {
-                            let _lease = self.pane_leases.hold(route);
-                            self.perform(Operation::Close(node.clone()))
-                        };
-                        if closed != Outcome::Closed {
-                            return Output::StopRejected(signal_flow::StopRejection::CloseRefused);
-                        }
-                    }
-                    // Positively gone: the route is recorded and a readable
-                    // snapshot, with its roster and its pane list, shows
-                    // neither the binding nor the pane. The flow is recorded
-                    // Stopped with no close, so a Stop retried after its
-                    // record was refused re-runs the end and what it owes.
-                    herdr::PanePresence::Absent => {}
-                    herdr::PanePresence::Unknown => {
-                        return Output::StopRejected(signal_flow::StopRejection::RouteUnavailable);
-                    }
-                }
-                if self.perform(Operation::Record(Record_Data::Stopped(flow_id.clone())))
-                    != Outcome::Recorded
-                {
-                    return Output::StopRejected(signal_flow::StopRejection::PersistenceRefused);
-                }
-                Output::Stopped(flow_id)
-            }
-            // A dispatch without a connection has no peer to read.
-            Input::ResolveCaller(claim) => self.resolve_caller(None, claim),
-            Input::Report(report) => self.report(report),
-            Input::Current(address) => {
-                use crate::waking::RestsEndedAwake;
-                self.rest_ended_awake(&address);
-                self.store
-                    .current_metaflow(&address)
-                    .unwrap_or_else(|error| {
-                        Output::Refused(signal_flow::Refusal::Store(error.to_string()))
-                    })
-            }
-            query @ (Input::Bind(_)
-            | Input::Identify(_)
-            | Input::IdentifyThread(_)
-            | Input::Lock(_)
-            | Input::Deliver(_)
-            | Input::Release(_)) => {
-                use crate::metaflow::DispatchesMetaflowPeer;
-                self.dispatch_metaflow_peer(query, None).response
-            }
-            Input::Cancel(request_id) => self.cancel(&request_id),
-            Input::Silence(request_id) => self.silence(&request_id),
-            Input::Clear(address) => self.clear(&address),
-            Input::ClearAll => self.clear_all(),
-            Input::Push(push) => self.push(&push.address, &push.priority),
-            Input::Queues => self.queues(),
-            Input::Hot => self.hot(),
-            // No calling process stands behind it: Unbound asks.
-            Input::Remind(remind) => self.remind(remind, signal_flow::SentBy::Unbound),
-            Input::Answer(request_id) => self.answer(&request_id),
-            Input::Metaflows => {
-                use crate::store::metaflow_watch::WatchesMetaflows;
-                self.store.available_metaflows().map_or_else(
-                    |error| Output::Refused(signal_flow::Refusal::Store(error.to_string())),
-                    Output::Listed,
-                )
-            }
-        }
+        use signal_flow::Answerable;
+        query.answer(&OrdinaryCall {
+            nexus: self,
+            origin,
+        })
     }
 
     fn handover_writer(
@@ -711,308 +442,1091 @@ impl Dispatches for RunningNexus {
         query: meta_signal_flow::Input,
         resolver: Option<meta_signal_flow::ResolverIdentity>,
     ) -> meta_signal_flow::Output {
-        match query {
-            meta_signal_flow::Input::DebugDelivery(request_id) => {
-                use crate::store::logical_delivery::RecordsLogicalDeliveries;
-                match self.store.debug_delivery(&request_id) {
-                    Ok(Some(delivery)) => meta_signal_flow::Output::DeliveryDebugged(delivery),
-                    Ok(None) => meta_signal_flow::Output::DebugDeliveryRejected(
-                        meta_signal_flow::DebugDeliveryRejected_Data::UnknownRequest,
-                    ),
-                    Err(_) => meta_signal_flow::Output::DebugDeliveryRejected(
-                        meta_signal_flow::DebugDeliveryRejected_Data::StoreRefused,
-                    ),
-                }
-            }
-            // A direct dispatch of the subscription answers its first frame;
-            // a meta connection streams the rest (`serve_meta`).
-            meta_signal_flow::Input::Configuration
-            | meta_signal_flow::Input::ObserveConfiguration => {
-                use observe_configuration::ObservesConfiguration;
-                self.configuration_response()
-            }
-            // A declared family replaces the committed family whole, and
-            // this Nexus takes the changed configuration at once.
-            meta_signal_flow::Input::Configure(change) => {
-                self.configure_meta(store::ConfigurationEdit::Declare(Box::new(change)))
-            }
-            meta_signal_flow::Input::ConsumeReset(request) => self
-                .codex_endpoints
-                .current()
-                .next
-                .model_names
-                .first()
-                .ok_or(())
-                .and_then(|model| {
-                    self.codex_endpoints
-                        .current()
-                        .adapter_for(model)
-                        .map_err(|_| ())
-                })
-                .and_then(|adapter| adapter.consume_reset_credit(&request).map_err(|_| ()))
-                .map(meta_signal_flow::Output::ResetConsumed)
-                .unwrap_or(meta_signal_flow::Output::ResetRejected(
-                    meta_signal_flow::ResetRejection::AdapterUnavailable,
-                )),
-            // A seat Flow lost. Retire keeps the row, its origin and its
-            // history, and takes the flow out of receiving: it is not a
-            // delete. No pane outlives its flow: a pane still there, its
-            // harness running the flow's own session or none, is closed in
-            // the same event, under its lease. A close Herdr refuses
-            // answers CloseRefused and records nothing: the flow is not
-            // retired while its pane stays. The flow a Maintained metaflow
-            // is Awake as is not retired: Retire answers Maintained and
-            // changes nothing, and the declaration's continuity is changed
-            // first. Privileged, because it changes what Flow holds of a
-            // flow without that flow acting.
-            meta_signal_flow::Input::Retire(flow_id) => {
-                let node = match self.store.flow_node(&flow_id.0) {
-                    Ok(Some(node)) => node,
-                    Ok(None) => {
-                        return meta_signal_flow::Output::RetireRejected(
-                            meta_signal_flow::RetireRejection::UnknownFlow,
-                        );
-                    }
-                    Err(_) => {
-                        return meta_signal_flow::Output::RetireRejected(
-                            meta_signal_flow::RetireRejection::StoreRefused,
-                        );
-                    }
-                };
-                if !node.flow_lifecycle.is_live() {
-                    return meta_signal_flow::Output::RetireRejected(
-                        meta_signal_flow::RetireRejection::AlreadyGone,
-                    );
-                }
-                // A restart that may still start a harness, or is running,
-                // keeps its Address: only a Failed one is retired, and its
-                // record goes with the flow.
-                {
-                    use crate::store::restart::RecordsRestarts;
-                    match self.store.restart_record(&flow_id.0) {
-                        Ok(None) => {}
-                        Ok(Some(record))
-                            if matches!(
-                                record.restart_phase,
-                                meta_signal_flow::RestartPhase::Failed(_)
-                            ) => {}
-                        Ok(Some(_)) => {
-                            return meta_signal_flow::Output::RetireRejected(
-                                meta_signal_flow::RetireRejection::RestartUnresolved,
-                            );
-                        }
-                        Err(_) => {
-                            return meta_signal_flow::Output::RetireRejected(
-                                meta_signal_flow::RetireRejection::StoreRefused,
-                            );
-                        }
-                    }
-                }
-                {
-                    use crate::store::metaflow::SleepsMetaflows;
-                    use crate::store::successor::ReadsContinuity;
-                    let maintained = self.store.metaflow_awake_as(&flow_id.0).and_then(|awake| {
-                        awake
-                            .map(|metaflow| self.store.continuity(&metaflow.address))
-                            .transpose()
-                    });
-                    match maintained {
-                        Ok(Some(meta_signal_flow::Continuity::Maintained)) => {
-                            return meta_signal_flow::Output::RetireRejected(
-                                meta_signal_flow::RetireRejection::Maintained,
-                            );
-                        }
-                        Ok(_) => {}
-                        Err(_) => {
-                            return meta_signal_flow::Output::RetireRejected(
-                                meta_signal_flow::RetireRejection::StoreRefused,
-                            );
-                        }
-                    }
-                }
-                if let HerdrRouteSelection::Available(route) = &node.herdr_route_selection
-                    && matches!(
-                        self.herdr.pane_presence(&node),
-                        herdr::PanePresence::Present | herdr::PanePresence::Bare
-                    )
-                {
-                    let closed = {
-                        let _lease = self.pane_leases.hold(route);
-                        self.perform(Operation::Close(node.clone()))
-                    };
-                    if closed != Outcome::Closed {
-                        return meta_signal_flow::Output::RetireRejected(
-                            meta_signal_flow::RetireRejection::CloseRefused,
-                        );
-                    }
-                }
-                if self.perform(Operation::Record(Record_Data::Retired(flow_id.clone())))
-                    != Outcome::Recorded
-                {
-                    return meta_signal_flow::Output::RetireRejected(
-                        meta_signal_flow::RetireRejection::StoreRefused,
-                    );
-                }
-                match self.store.flow_node(&flow_id.0) {
-                    Ok(Some(retired)) => meta_signal_flow::Output::FlowRetired(retired),
-                    Ok(None) | Err(_) => meta_signal_flow::Output::RetireRejected(
-                        meta_signal_flow::RetireRejection::StoreRefused,
-                    ),
-                }
-            }
-            // The meta surface restarts and refreshes as the ordinary socket
-            // does; each runs off the gate and takes it for its steps.
-            meta_signal_flow::Input::Restart(flow_id) => {
-                use crate::restarting::RestartsFlows;
-                self.restart(&flow_id.0).into_meta()
-            }
-            meta_signal_flow::Input::Refresh(address) => {
-                use crate::waking::RefreshesMetaflows;
-                self.refresh(&address).into_meta()
-            }
-            meta_signal_flow::Input::MetaBindExisting(request) => {
-                let container = request.flow_container;
-                if !container.is_well_formed() || !container.socket_is_live() {
-                    return meta_signal_flow::Output::BindExistingRejected(
-                        meta_signal_flow::BindExistingRejection::ContainerUnavailable,
-                    );
-                }
-                if !container.process_identity.is_live_process() {
-                    return meta_signal_flow::Output::BindExistingRejected(
-                        meta_signal_flow::BindExistingRejection::ContainerIdentityMismatch,
-                    );
-                }
+        use meta_signal_flow::Answerable;
+        query.answer(&MetaCall {
+            nexus: self,
+            resolver,
+        })
+    }
+}
 
-                let binding = request.flow_binding;
-                let flow_id = binding.flow_id.clone();
-                let refusal = |reason| {
-                    meta_signal_flow::FlowBindingResult::Refused(
-                        meta_signal_flow::RefusedFlowBinding {
-                            flow_id: flow_id.clone(),
-                            flow_binding_refusal_reason: reason,
-                        },
-                    )
-                };
-                let result = match self.verified_seat_node(
-                    &container.herdr_session_name.0,
-                    &request.address,
-                    &binding,
-                ) {
-                    Err(reason) => refusal(reason),
-                    Ok(node) => {
-                        let role = signal_flow::CallerIdentity {
-                            flow_id: flow_id.clone(),
-                            aspect: binding.aspect.clone(),
-                            model_name: binding.model_name.clone(),
-                        };
-                        match self
-                            .store
-                            .adopt_existing_flow(node, role, request.address, &binding)
-                        {
-                            Ok(store::ExistingSeatAdoption::Bound(_)) => {
-                                meta_signal_flow::FlowBindingResult::Bound(
-                                    meta_signal_flow::BoundFlowBinding {
-                                        flow_id,
-                                        flow_lifecycle:
-                                            meta_signal_flow::FlowLifecycle::AdoptedActive,
-                                    },
-                                )
-                            }
-                            Ok(store::ExistingSeatAdoption::Refused(reason)) => refusal(reason),
-                            Err(_) => {
-                                return meta_signal_flow::Output::BindExistingRejected(
-                                    meta_signal_flow::BindExistingRejection::StoreRefused,
-                                );
-                            }
-                        }
+/// A running Nexus answering one ordinary input, from the caller whose
+/// origin a Start, a Replace or a Launch records. The generated
+/// `Answerable` dispatch calls one capability per input; each yields the
+/// output at its input's position, and any other answer as its error arm.
+struct OrdinaryCall<'nexus> {
+    nexus: &'nexus RunningNexus,
+    origin: Origin,
+}
+
+impl signal_flow::Answering for OrdinaryCall<'_> {
+    fn start(
+        &self,
+        launch_profile: &signal_flow::LaunchProfile,
+    ) -> Result<signal_flow::Launched, Output> {
+        let nexus = self.nexus;
+        let answered = match nexus.settled(launch_profile) {
+            Some(settled) => settled,
+            None => {
+                // A caller's new launch is admitted before anything of it
+                // is written: a camelCase topic.
+                match nexus.admission_refusal(launch_profile) {
+                    Ok(None) => {}
+                    Ok(Some(rejection)) => return Err(Output::StartRejected(rejection)),
+                    Err(_) => {
+                        return Err(Output::StartRejected(
+                            StartRejection::LaunchPersistenceRefused,
+                        ));
                     }
+                }
+                let response = nexus.start(launch_profile.clone(), self.origin.clone());
+                nexus.settle(&launch_profile.launch_request_id.0, response)
+            }
+        };
+        match answered {
+            Output::Started(launched) => Ok(launched),
+            other => Err(other),
+        }
+    }
+
+    // Off the gate: the refresh takes it for each of its steps.
+    fn refresh(&self, address: &signal_flow::Address) -> Result<signal_flow::Refreshed, Output> {
+        use crate::waking::RefreshesMetaflows;
+        match self.nexus.refresh(address) {
+            Output::Refreshed(refreshed) => Ok(refreshed),
+            other => Err(other),
+        }
+    }
+
+    fn resolve_recipient(
+        &self,
+        recipient_resolution_request: &signal_flow::RecipientResolutionRequest,
+    ) -> Result<FlowNode, Output> {
+        let nexus = self.nexus;
+        match nexus.store.apply(Input::ResolveRecipient(
+            recipient_resolution_request.clone(),
+        )) {
+            Ok(Output::RecipientResolved(node)) => Ok(nexus
+                .herdr
+                .refresh_route(nexus.herdr.claude_daemon.refreshed(node))),
+            Ok(response) => Err(response),
+            Err(error) => Err(Output::Refused(signal_flow::Refusal::Store(
+                error.to_string(),
+            ))),
+        }
+    }
+
+    fn stop(&self, flow_id: &signal_flow::FlowId) -> Result<signal_flow::FlowId, Output> {
+        let nexus = self.nexus;
+        let node = match nexus.store.flow_node(&flow_id.0) {
+            Ok(Some(node)) => node,
+            Ok(None) => {
+                return Err(Output::StopRejected(
+                    signal_flow::StopRejection::UnknownFlow,
+                ));
+            }
+            Err(error) => {
+                return Err(Output::Refused(signal_flow::Refusal::Store(
+                    error.to_string(),
+                )));
+            }
+        };
+        // A flow under a restart record is stopped as its restart stands:
+        // its FlowId, session and queue are kept.
+        {
+            use crate::restarting::RestartsFlows;
+            use crate::store::restart::RecordsRestarts;
+            match nexus.store.restart_record(&flow_id.0) {
+                Ok(None) => {}
+                Ok(Some(record)) => {
+                    return match nexus.stop_restarting(record) {
+                        Output::Stopped(stopped) => Ok(stopped),
+                        other => Err(other),
+                    };
+                }
+                Err(error) => {
+                    return Err(Output::Refused(signal_flow::Refusal::Store(
+                        error.to_string(),
+                    )));
+                }
+            }
+        }
+        // A Retired seat is gone already, so there is nothing left for Stop
+        // to close: AlreadyStopped is what it answers.
+        if !node.flow_lifecycle.is_live() {
+            return Err(Output::StopRejected(
+                signal_flow::StopRejection::AlreadyStopped,
+            ));
+        }
+        // The route is the flow's recorded Herdr pane: a Pending flow whose
+        // launch was refused, or a seat not ready for a prompt, is stopped
+        // when Herdr still shows its binding there.
+        let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
+            return Err(Output::StopRejected(
+                signal_flow::StopRejection::RouteUnavailable,
+            ));
+        };
+        match nexus.herdr.pane_presence(&node) {
+            herdr::PanePresence::Present | herdr::PanePresence::Bare => {
+                // No write is left half-typed into a pane as it closes.
+                let closed = {
+                    let _lease = nexus.pane_leases.hold(route);
+                    nexus.perform(Operation::Close(node.clone()))
                 };
-                meta_signal_flow::Output::BoundExisting(meta_signal_flow::BoundExisting {
-                    flow_container: container,
-                    flow_binding_result: result,
+                if closed != Outcome::Closed {
+                    return Err(Output::StopRejected(
+                        signal_flow::StopRejection::CloseRefused,
+                    ));
+                }
+            }
+            // Positively gone: the route is recorded and a readable
+            // snapshot, with its roster and its pane list, shows neither the
+            // binding nor the pane. The flow is recorded Stopped with no
+            // close, so a Stop retried after its record was refused re-runs
+            // the end and what it owes.
+            herdr::PanePresence::Absent => {}
+            herdr::PanePresence::Unknown => {
+                return Err(Output::StopRejected(
+                    signal_flow::StopRejection::RouteUnavailable,
+                ));
+            }
+        }
+        if nexus.perform(Operation::Record(Record_Data::Stopped(flow_id.clone())))
+            != Outcome::Recorded
+        {
+            return Err(Output::StopRejected(
+                signal_flow::StopRejection::PersistenceRefused,
+            ));
+        }
+        Ok(flow_id.clone())
+    }
+
+    // Off the gate: the replacement takes it under the metaflow's lock.
+    fn replace(
+        &self,
+        launch_profile: &signal_flow::LaunchProfile,
+    ) -> Result<signal_flow::Replaced, Output> {
+        let nexus = self.nexus;
+        let answered = match nexus.admission_refusal(launch_profile) {
+            Ok(None) => {
+                use crate::waking::RefreshesMetaflows;
+                nexus.replace_held(launch_profile.clone(), self.origin.clone())
+            }
+            Ok(Some(rejection)) => {
+                Output::ReplaceRejected(signal_flow::ReplaceRejection::LaunchRefused(rejection))
+            }
+            Err(_) => Output::ReplaceRejected(signal_flow::ReplaceRejection::LaunchRefused(
+                StartRejection::LaunchPersistenceRefused,
+            )),
+        };
+        match answered {
+            Output::Replaced(replaced) => Ok(replaced),
+            other => Err(other),
+        }
+    }
+
+    fn launch_status(
+        &self,
+        launch_request_id: &signal_flow::LaunchRequestId,
+    ) -> Result<signal_flow::LaunchInspection, Output> {
+        match self.nexus.launch_status(&launch_request_id.0) {
+            Output::LaunchInspected(inspection) => Ok(inspection),
+            other => Err(other),
+        }
+    }
+
+    // Over a connection Observe streams; a direct dispatch answers the
+    // subscription's opening frame. Observe.Agent's is the output at
+    // Observe's position; every other selection's is its own output.
+    fn observe(
+        &self,
+        observe_selection: &ObserveSelection,
+    ) -> Result<signal_flow::AgentObservation, Output> {
+        let nexus = self.nexus;
+        let opening = match observe_selection {
+            ObserveSelection::Launch(launch_request_id) => {
+                nexus.launch_status(&launch_request_id.0)
+            }
+            ObserveSelection::Agent(flow_id) => nexus.agent_observation(&flow_id.0),
+            ObserveSelection::Undecodable => {
+                use crate::store::undecodable_frame::RecordsUndecodableFrames;
+                match nexus.store.undecodable_frames() {
+                    Ok(frames) => Output::UndecodableObserved(frames),
+                    Err(error) => Output::Refused(signal_flow::Refusal::Store(error.to_string())),
+                }
+            }
+            ObserveSelection::TurnEnds => {
+                use crate::store::turn_end::RecordsTurnEnds;
+                match nexus.store.last_turn_ends() {
+                    Ok(turn_ends) => Output::TurnEndsObserved(turn_ends),
+                    Err(error) => Output::Refused(signal_flow::Refusal::Store(error.to_string())),
+                }
+            }
+            ObserveSelection::Metaflows => {
+                use crate::store::metaflow_watch::WatchesMetaflows;
+                match nexus.store.available_metaflows() {
+                    Ok(metaflows) => Output::MetaflowsObserved(metaflows),
+                    Err(error) => Output::Refused(signal_flow::Refusal::Store(error.to_string())),
+                }
+            }
+            ObserveSelection::Retirement(address) => {
+                use crate::store::handover::HoldsHandovers;
+                match nexus.store.observe_handover_retirement(address) {
+                    Ok(subscription) => {
+                        let response = Output::RetirementObserved(subscription.snapshot.clone());
+                        nexus.store.handover_observations.detach(&subscription);
+                        response
+                    }
+                    Err(error) => Output::RetirementObservationFailed(
+                        signal_flow::RetirementObservationFailure::MissingEvidence(
+                            error.to_string(),
+                        ),
+                    ),
+                }
+            }
+        };
+        match opening {
+            Output::AgentObserved(observation) => Ok(observation),
+            other => Err(other),
+        }
+    }
+
+    // A dispatch without a connection has no peer to read.
+    fn resolve_caller(
+        &self,
+        flow_id_option: &Option<signal_flow::FlowId>,
+    ) -> Result<signal_flow::CallerIdentity, Output> {
+        match self.nexus.resolve_caller(None, flow_id_option.clone()) {
+            Output::CallerResolved(caller) => Ok(caller),
+            other => Err(other),
+        }
+    }
+
+    fn report(&self, report: &signal_flow::Report_Data) -> Result<(), Output> {
+        match self.nexus.report(report.clone()) {
+            Output::Reported => Ok(()),
+            other => Err(other),
+        }
+    }
+
+    fn lock(&self, lock: &signal_flow::Lock_Data) -> Result<signal_flow::Lock, Output> {
+        match self
+            .nexus
+            .dispatch_metaflow_peer(Input::Lock(lock.clone()), None)
+            .response
+        {
+            Output::Locked(held) => Ok(held),
+            other => Err(other),
+        }
+    }
+
+    fn bind(&self, bind: &signal_flow::Bind_Data) -> Result<signal_flow::FlowId, Output> {
+        match self
+            .nexus
+            .dispatch_metaflow_peer(Input::Bind(bind.clone()), None)
+            .response
+        {
+            Output::Bound(flow_id) => Ok(flow_id),
+            other => Err(other),
+        }
+    }
+
+    fn identify(&self, process: &Process) -> Result<signal_flow::Address, Output> {
+        match self
+            .nexus
+            .dispatch_metaflow_peer(Input::Identify(process.clone()), None)
+            .response
+        {
+            Output::Identified(address) => Ok(address),
+            other => Err(other),
+        }
+    }
+
+    fn deliver(
+        &self,
+        deliver: &signal_flow::Deliver_Data,
+    ) -> Result<signal_flow::VisibleSendAcceptance, Output> {
+        match self
+            .nexus
+            .dispatch_metaflow_peer(Input::Deliver(deliver.clone()), None)
+            .response
+        {
+            Output::SendAccepted(acceptance) => Ok(acceptance),
+            other => Err(other),
+        }
+    }
+
+    fn acknowledge(&self, deliver_key_vector: &Vec<signal_flow::DeliverKey>) -> Result<(), Output> {
+        use crate::store::logical_delivery::RecordsLogicalDeliveries;
+        self.nexus
+            .store
+            .acknowledge_deliver_calls(deliver_key_vector)
+            .map_err(|error| Output::Refused(signal_flow::Refusal::Store(error.to_string())))
+    }
+
+    fn archive_request(
+        &self,
+        request_id: &signal_flow::RequestId,
+    ) -> Result<signal_flow::RequestId, Output> {
+        use crate::store::RecordsLogicalDeliveries;
+        match self.nexus.store.archive_request(&request_id.0) {
+            Ok(Ok(())) => Ok(request_id.clone()),
+            Ok(Err(rejection)) => Err(Output::ArchiveRejected(rejection)),
+            Err(_) => Err(Output::ArchiveRejected(
+                signal_flow::ArchiveRejection::StoreRefused,
+            )),
+        }
+    }
+
+    fn release(&self, lock: &signal_flow::Lock) -> Result<(), Output> {
+        match self
+            .nexus
+            .dispatch_metaflow_peer(Input::Release(lock.clone()), None)
+            .response
+        {
+            Output::Released => Ok(()),
+            other => Err(other),
+        }
+    }
+
+    fn current(&self, address: &signal_flow::Address) -> Result<signal_flow::Current_Data, Output> {
+        use crate::waking::RestsEndedAwake;
+        let nexus = self.nexus;
+        nexus.rest_ended_awake(address);
+        match nexus.store.current_metaflow(address) {
+            Ok(Output::Current(current)) => Ok(current),
+            Ok(other) => Err(other),
+            Err(error) => Err(Output::Refused(signal_flow::Refusal::Store(
+                error.to_string(),
+            ))),
+        }
+    }
+
+    fn metaflows(&self) -> Result<Vec<signal_flow::Metaflow>, Output> {
+        use crate::store::metaflow_watch::WatchesMetaflows;
+        self.nexus
+            .store
+            .available_metaflows()
+            .map_err(|error| Output::Refused(signal_flow::Refusal::Store(error.to_string())))
+    }
+
+    // IdentifyThread answers Identified, the output at Identify's position:
+    // its own position holds an output it never gives, so its answer is
+    // always the error arm.
+    fn identify_thread(
+        &self,
+        identify_thread: &signal_flow::IdentifyThread_Data,
+    ) -> Result<signal_flow::PromptDeliveryIntent, Output> {
+        Err(self
+            .nexus
+            .dispatch_metaflow_peer(Input::IdentifyThread(identify_thread.clone()), None)
+            .response)
+    }
+
+    // An accepted Send answers SendAccepted, the output at Deliver's
+    // position; Sent is the one at Send's.
+    fn send(
+        &self,
+        send_request: &signal_flow::SendRequest,
+    ) -> Result<signal_flow::VisibleSendReceipt, Output> {
+        match self.nexus.send_request(send_request.clone(), None).response {
+            Output::Sent(receipt) => Ok(receipt),
+            other => Err(other),
+        }
+    }
+
+    // An observation streams over a connection; a direct dispatch answers
+    // its opening frame once, as a read.
+    fn observe_sends(
+        &self,
+        _delivery_cursor_option: &Option<signal_flow::DeliveryCursor>,
+    ) -> Result<signal_flow::VisibleSendObservation, Output> {
+        use crate::store::logical_delivery::RecordsLogicalDeliveries;
+        self.nexus
+            .store
+            .read_every_delivery_snapshot(None)
+            .map(|observation| {
+                crate::message_projection::ProjectsSendObservation::visible_send_observation(
+                    &observation,
+                )
+            })
+            .map_err(|error| Output::Refused(signal_flow::Refusal::Store(error.to_string())))
+    }
+
+    // ObserveSender's opening frame is SendsObserved, the output at
+    // ObserveSends's position; SendChanged, at its own, follows over a
+    // connection only, so a direct dispatch answers the error arm.
+    fn observe_sender(
+        &self,
+        observe_sender: &signal_flow::ObserveSender_Data,
+    ) -> Result<signal_flow::VisibleDeliverySnapshot, Output> {
+        use crate::observe_sends::ObservesLogicalSends;
+        use crate::store::logical_delivery::RecordsLogicalDeliveries;
+        let nexus = self.nexus;
+        let observed = nexus.observation_sender(observe_sender).and_then(|sender| {
+            nexus
+                .store
+                .read_logical_delivery_snapshots(&sender, None)
+                .map_err(|error| {
+                    Box::new(Output::Refused(signal_flow::Refusal::Store(
+                        error.to_string(),
+                    )))
                 })
-            }
-            meta_signal_flow::Input::Deliver(request) => self.deliver(request),
-            meta_signal_flow::Input::Vet(request) => self.vet(&request),
-            meta_signal_flow::Input::Command(request) => self.command(request),
-            meta_signal_flow::Input::ResolvePeer(identity) => self.resolve_peer(&identity),
-            meta_signal_flow::Input::ReadEvents(flow_id) => self.read_events(flow_id),
-            meta_signal_flow::Input::ReadQueueDeliveries(address) => {
-                self.read_queue_deliveries(address)
-            }
-            meta_signal_flow::Input::ObserveLegacyArchive => {
-                use store::queue_delivery::AccountsQueueDelivery;
-                match self.store.observe_legacy_archive() {
-                    Ok(archive) => meta_signal_flow::Output::LegacyArchiveObserved(
-                        archive
-                            .iter()
-                            .map(crate::message_projection::ProjectsLegacyArchiveEntry::visible_legacy_archive_entry)
-                            .collect(),
-                    ),
-                    Err(error) => meta_signal_flow::Output::ObserveLegacyArchiveRejected(
-                        meta_signal_flow::StoreRefusal::Store(error.to_string()),
-                    ),
-                }
-            }
-            meta_signal_flow::Input::ReadSendOutcomes => match self.store.read_send_outcomes() {
-                Ok(records) => meta_signal_flow::Output::SendOutcomesRead(
-                    records
-                        .iter()
-                        .map(crate::message_projection::ProjectsSendOutcomeRecord::visible_send_outcome_record)
-                        .collect(),
+        });
+        Err(match observed {
+            Ok(observation) => Output::SendsObserved(
+                crate::message_projection::ProjectsSendObservation::visible_send_observation(
+                    &observation,
                 ),
-                Err(_) => meta_signal_flow::Output::ReadSendOutcomesRejected(
-                    meta_signal_flow::ReadSendOutcomesRejected_Data::StoreRefused,
-                ),
-            },
-            meta_signal_flow::Input::Debug(address) => match self.store.debug_snapshot(&address) {
-                Ok(snapshot) => meta_signal_flow::Output::Debugged(snapshot),
-                Err(error) => meta_signal_flow::Output::Refused(
-                    meta_signal_flow::StoreRefusal::Store(error.to_string()),
-                ),
-            },
-            // Whoever resolves it is recorded; a peer that could not be
-            // read is process 0.
-            meta_signal_flow::Input::ResolveQueueDelivery(resolution) => {
-                use crate::peer::NamesMetaPeer;
-                let resolver = resolver.unwrap_or_else(|| self.meta_resolver(None));
-                self.resolve_queue_delivery(resolution, resolver)
+            ),
+            Err(refusal) => *refusal,
+        })
+    }
+
+    // ObserveDeliveries's opening frame is SendsObserved, the output at
+    // ObserveSends's position: its own position holds an output it never
+    // gives, so its answer is always the error arm.
+    fn observe_deliveries(
+        &self,
+        _delivery_cursor_option: &Option<signal_flow::DeliveryCursor>,
+    ) -> Result<StartRejection, Output> {
+        use crate::store::logical_delivery::RecordsLogicalDeliveries;
+        Err(self
+            .nexus
+            .store
+            .read_message_delivery_snapshots(None)
+            .map_or_else(
+                |error| Output::Refused(signal_flow::Refusal::Store(error.to_string())),
+                |observation| {
+                    Output::SendsObserved(
+                        crate::message_projection::ProjectsSendObservation::visible_send_observation(
+                            &observation,
+                        ),
+                    )
+                },
+            ))
+    }
+
+    fn deliver_all(
+        &self,
+        address: &signal_flow::Address,
+    ) -> Result<signal_flow::VisibleDrainOutcome, Output> {
+        match self.nexus.deliver_all(address.clone()) {
+            Output::Drained(drained) => Ok(drained),
+            other => Err(other),
+        }
+    }
+
+    // A Launch is the Start or the Replace its declaration names, answered
+    // as that input is. A Launch that starts answers Started, the output at
+    // Start's position; LaunchPending is the one at Launch's.
+    fn launch(
+        &self,
+        launch_request: &signal_flow::LaunchRequest,
+    ) -> Result<signal_flow::LaunchAttempt, Output> {
+        use signal_flow::Answerable;
+        let answered = match self.nexus.declared_launch(launch_request.clone()) {
+            Ok(declared) => declared.answer(self),
+            Err(refusal) => *refusal,
+        };
+        match answered {
+            Output::LaunchPending(attempt) => Ok(attempt),
+            other => Err(other),
+        }
+    }
+
+    fn rehearse(
+        &self,
+        launch_request: &signal_flow::LaunchRequest,
+    ) -> Result<signal_flow::Command, Output> {
+        match self.nexus.rehearse_declared(launch_request.clone()) {
+            Output::Rehearsed(command) => Ok(command),
+            other => Err(other),
+        }
+    }
+
+    // BindSeat answers Bound, the output at Bind's position: its own
+    // position holds an output it never gives, so its answer is always the
+    // error arm.
+    fn bind_seat(&self, bind_seat: &signal_flow::BindSeat_Data) -> Result<StartRejection, Output> {
+        Err(self.nexus.bind_seat(bind_seat.clone()))
+    }
+
+    fn adopt(&self, adopt: &signal_flow::Adopt_Data) -> Result<signal_flow::FlowId, Output> {
+        match self.nexus.adopt(adopt.clone()) {
+            Output::Adopted(flow_id) => Ok(flow_id),
+            other => Err(other),
+        }
+    }
+
+    // Off the gate: the restart takes it for each of its steps.
+    fn restart(&self, flow_id: &signal_flow::FlowId) -> Result<signal_flow::FlowId, Output> {
+        use crate::restarting::RestartsFlows;
+        match self.nexus.restart(&flow_id.0) {
+            Output::Restarted(restarted) => Ok(restarted),
+            other => Err(other),
+        }
+    }
+
+    fn keep(&self, keep: &signal_flow::Keep_Data) -> Result<signal_flow::Kept_Data, Output> {
+        match self.nexus.keep_handover(keep.clone()) {
+            Output::Kept(kept) => Ok(kept),
+            other => Err(other),
+        }
+    }
+
+    fn drop(&self, drop: &signal_flow::Drop_Data) -> Result<signal_flow::Dropped_Data, Output> {
+        match self.nexus.drop_handover(drop.clone()) {
+            Output::Dropped(dropped) => Ok(dropped),
+            other => Err(other),
+        }
+    }
+
+    fn glance(&self, address: &signal_flow::Address) -> Result<Vec<signal_flow::Heading>, Output> {
+        match self.nexus.glance_handover(address.clone()) {
+            Output::Glanced(headings) => Ok(headings),
+            other => Err(other),
+        }
+    }
+
+    fn read(&self, address: &signal_flow::Address) -> Result<Vec<signal_flow::Section>, Output> {
+        match self.nexus.read_handover(address.clone()) {
+            Output::Handover(sections) => Ok(sections),
+            other => Err(other),
+        }
+    }
+
+    fn cancel(
+        &self,
+        request_id: &signal_flow::RequestId,
+    ) -> Result<signal_flow::RequestId, Output> {
+        match self.nexus.cancel(request_id) {
+            Output::Cancelled(cancelled) => Ok(cancelled),
+            other => Err(other),
+        }
+    }
+
+    fn silence(
+        &self,
+        request_id: &signal_flow::RequestId,
+    ) -> Result<signal_flow::RequestId, Output> {
+        match self.nexus.silence(request_id) {
+            Output::Silenced(silenced) => Ok(silenced),
+            other => Err(other),
+        }
+    }
+
+    fn clear(&self, address: &signal_flow::Address) -> Result<Vec<signal_flow::RequestId>, Output> {
+        match self.nexus.clear(address) {
+            Output::Cleared(cleared) => Ok(cleared),
+            other => Err(other),
+        }
+    }
+
+    // ClearAll answers Cleared, the output at Clear's position: its own
+    // position holds an output it never gives, so its answer is always the
+    // error arm.
+    fn clear_all(&self) -> Result<signal_flow::RefreshRejection, Output> {
+        Err(self.nexus.clear_all())
+    }
+
+    fn push(&self, push: &signal_flow::Push_Data) -> Result<Vec<signal_flow::RequestId>, Output> {
+        match self.nexus.push(&push.address, &push.priority) {
+            Output::Pushed(pushed) => Ok(pushed),
+            other => Err(other),
+        }
+    }
+
+    fn queues(&self) -> Result<Vec<signal_flow::Queue>, Output> {
+        match self.nexus.queues() {
+            Output::Queues(queues) => Ok(queues),
+            other => Err(other),
+        }
+    }
+
+    fn hot(&self) -> Result<Vec<signal_flow::Warmth>, Output> {
+        match self.nexus.hot() {
+            Output::Hot(warmth) => Ok(warmth),
+            other => Err(other),
+        }
+    }
+
+    // No calling process stands behind it: Unbound asks.
+    fn remind(&self, remind: &signal_flow::Remind_Data) -> Result<signal_flow::RequestId, Output> {
+        match self
+            .nexus
+            .remind(remind.clone(), signal_flow::SentBy::Unbound)
+        {
+            Output::Reminded(reminded) => Ok(reminded),
+            other => Err(other),
+        }
+    }
+
+    fn answer(
+        &self,
+        request_id: &signal_flow::RequestId,
+    ) -> Result<signal_flow::VisibleNativeInput, Output> {
+        match OperatesOnRequestsAndQueues::answer(self.nexus, request_id) {
+            Output::Answered(answer) => Ok(answer),
+            other => Err(other),
+        }
+    }
+}
+
+/// A running Nexus answering one meta input, from the meta peer as the
+/// Nexus read it: whoever resolves a queue delivery is recorded. The
+/// generated `Answerable` dispatch calls one capability per input; each
+/// yields the output at its input's position, and any other answer as its
+/// error arm.
+struct MetaCall<'nexus> {
+    nexus: &'nexus RunningNexus,
+    resolver: Option<meta_signal_flow::ResolverIdentity>,
+}
+
+impl meta_signal_flow::Answering for MetaCall<'_> {
+    // A direct dispatch of the subscription answers its first frame; a meta
+    // connection streams the rest (`serve_meta`).
+    fn configuration(
+        &self,
+    ) -> Result<meta_signal_flow::ConfigurationSnapshot, meta_signal_flow::Output> {
+        use observe_configuration::ObservesConfiguration;
+        match self.nexus.configuration_response() {
+            meta_signal_flow::Output::Configuration(snapshot) => Ok(snapshot),
+            other => Err(other),
+        }
+    }
+
+    // A declared family replaces the committed family whole, and this Nexus
+    // takes the changed configuration at once.
+    fn configure(
+        &self,
+        configuration_change: &meta_signal_flow::ConfigurationChange,
+    ) -> Result<meta_signal_flow::ConfigurationChange, meta_signal_flow::Output> {
+        match self
+            .nexus
+            .configure_meta(store::ConfigurationEdit::Declare(Box::new(
+                configuration_change.clone(),
+            ))) {
+            meta_signal_flow::Output::Configured(change) => Ok(change),
+            other => Err(other),
+        }
+    }
+
+    fn consume_reset(
+        &self,
+        reset_request: &meta_signal_flow::ResetRequest,
+    ) -> Result<meta_signal_flow::ResetOutcome, meta_signal_flow::Output> {
+        let nexus = self.nexus;
+        nexus
+            .codex_endpoints
+            .current()
+            .next
+            .model_names
+            .first()
+            .ok_or(())
+            .and_then(|model| {
+                nexus
+                    .codex_endpoints
+                    .current()
+                    .adapter_for(model)
+                    .map_err(|_| ())
+            })
+            .and_then(|adapter| adapter.consume_reset_credit(reset_request).map_err(|_| ()))
+            .map_err(|()| {
+                meta_signal_flow::Output::ResetRejected(
+                    meta_signal_flow::ResetRejection::AdapterUnavailable,
+                )
+            })
+    }
+
+    fn register_flow(&self, flow_node: &FlowNode) -> Result<FlowNode, meta_signal_flow::Output> {
+        let nexus = self.nexus;
+        if !nexus.herdr.validate_registration(flow_node) {
+            return Err(meta_signal_flow::Output::FlowRegistrationRejected(
+                meta_signal_flow::FlowRegistrationRejection::UnknownOrUnclaimedIdentity,
+            ));
+        }
+        match nexus.store.register_flow(flow_node.clone()) {
+            Ok(store::FlowRegistration::Registered(node)) => Ok(*node),
+            Ok(store::FlowRegistration::ConflictingBinding) => {
+                Err(meta_signal_flow::Output::FlowRegistrationRejected(
+                    meta_signal_flow::FlowRegistrationRejection::ConflictingBinding,
+                ))
             }
-            meta_signal_flow::Input::Remove(removal) => {
-                self.configure_meta(store::ConfigurationEdit::Remove(removal))
-            }
-            meta_signal_flow::Input::Inspect(address) => {
-                use crate::repairing::RepairsFromMeta;
-                self.inspect(address)
-            }
-            meta_signal_flow::Input::Rebind(rebind) => {
-                use crate::repairing::RepairsFromMeta;
-                self.rebind(rebind)
-            }
-            meta_signal_flow::Input::Withdraw(withdraw) => {
-                use crate::repairing::RepairsFromMeta;
-                self.withdraw(withdraw)
-            }
-            meta_signal_flow::Input::RegisterFlow(flow_node) => {
-                if !self.herdr.validate_registration(&flow_node) {
-                    return meta_signal_flow::Output::FlowRegistrationRejected(
-                        meta_signal_flow::FlowRegistrationRejection::UnknownOrUnclaimedIdentity,
-                    );
-                }
-                match self.store.register_flow(flow_node) {
-                    Ok(store::FlowRegistration::Registered(node)) => {
-                        meta_signal_flow::Output::FlowRegistered(*node)
-                    }
-                    Ok(store::FlowRegistration::ConflictingBinding) => {
-                        meta_signal_flow::Output::FlowRegistrationRejected(
-                            meta_signal_flow::FlowRegistrationRejection::ConflictingBinding,
+            Err(_) => Err(meta_signal_flow::Output::FlowRegistrationRejected(
+                meta_signal_flow::FlowRegistrationRejection::StoreRefused,
+            )),
+        }
+    }
+
+    fn meta_bind_existing(
+        &self,
+        meta_bind_existing: &meta_signal_flow::MetaBindExisting,
+    ) -> Result<meta_signal_flow::BoundExisting, meta_signal_flow::Output> {
+        let nexus = self.nexus;
+        let request = meta_bind_existing.clone();
+        let container = request.flow_container;
+        if !container.is_well_formed() || !container.socket_is_live() {
+            return Err(meta_signal_flow::Output::BindExistingRejected(
+                meta_signal_flow::BindExistingRejection::ContainerUnavailable,
+            ));
+        }
+        if !container.process_identity.is_live_process() {
+            return Err(meta_signal_flow::Output::BindExistingRejected(
+                meta_signal_flow::BindExistingRejection::ContainerIdentityMismatch,
+            ));
+        }
+
+        let binding = request.flow_binding;
+        let flow_id = binding.flow_id.clone();
+        let refusal = |reason| {
+            meta_signal_flow::FlowBindingResult::Refused(meta_signal_flow::RefusedFlowBinding {
+                flow_id: flow_id.clone(),
+                flow_binding_refusal_reason: reason,
+            })
+        };
+        let result = match nexus.verified_seat_node(
+            &container.herdr_session_name.0,
+            &request.address,
+            &binding,
+        ) {
+            Err(reason) => refusal(reason),
+            Ok(node) => {
+                let role = signal_flow::CallerIdentity {
+                    flow_id: flow_id.clone(),
+                    aspect: binding.aspect.clone(),
+                    model_name: binding.model_name.clone(),
+                };
+                match nexus
+                    .store
+                    .adopt_existing_flow(node, role, request.address, &binding)
+                {
+                    Ok(store::ExistingSeatAdoption::Bound(_)) => {
+                        meta_signal_flow::FlowBindingResult::Bound(
+                            meta_signal_flow::BoundFlowBinding {
+                                flow_id,
+                                flow_lifecycle: meta_signal_flow::FlowLifecycle::AdoptedActive,
+                            },
                         )
                     }
-                    Err(_) => meta_signal_flow::Output::FlowRegistrationRejected(
-                        meta_signal_flow::FlowRegistrationRejection::StoreRefused,
-                    ),
+                    Ok(store::ExistingSeatAdoption::Refused(reason)) => refusal(reason),
+                    Err(_) => {
+                        return Err(meta_signal_flow::Output::BindExistingRejected(
+                            meta_signal_flow::BindExistingRejection::StoreRefused,
+                        ));
+                    }
                 }
             }
+        };
+        Ok(meta_signal_flow::BoundExisting {
+            flow_container: container,
+            flow_binding_result: result,
+        })
+    }
+
+    // A seat Flow lost. Retire keeps the row, its origin and its history,
+    // and takes the flow out of receiving: it is not a delete. No pane
+    // outlives its flow: a pane still there, its harness running the flow's
+    // own session or none, is closed in the same event, under its lease. A
+    // close Herdr refuses answers CloseRefused and records nothing: the flow
+    // is not retired while its pane stays. The flow a Maintained metaflow is
+    // Awake as is not retired: Retire answers Maintained and changes
+    // nothing, and the declaration's continuity is changed first.
+    // Privileged, because it changes what Flow holds of a flow without that
+    // flow acting.
+    fn retire(&self, flow_id: &signal_flow::FlowId) -> Result<FlowNode, meta_signal_flow::Output> {
+        let nexus = self.nexus;
+        let rejected = meta_signal_flow::Output::RetireRejected;
+        let node = match nexus.store.flow_node(&flow_id.0) {
+            Ok(Some(node)) => node,
+            Ok(None) => return Err(rejected(meta_signal_flow::RetireRejection::UnknownFlow)),
+            Err(_) => return Err(rejected(meta_signal_flow::RetireRejection::StoreRefused)),
+        };
+        if !node.flow_lifecycle.is_live() {
+            return Err(rejected(meta_signal_flow::RetireRejection::AlreadyGone));
+        }
+        // A restart that may still start a harness, or is running, keeps its
+        // Address: only a Failed one is retired, and its record goes with the
+        // flow.
+        {
+            use crate::store::restart::RecordsRestarts;
+            match nexus.store.restart_record(&flow_id.0) {
+                Ok(None) => {}
+                Ok(Some(record))
+                    if matches!(
+                        record.restart_phase,
+                        meta_signal_flow::RestartPhase::Failed(_)
+                    ) => {}
+                Ok(Some(_)) => {
+                    return Err(rejected(
+                        meta_signal_flow::RetireRejection::RestartUnresolved,
+                    ));
+                }
+                Err(_) => return Err(rejected(meta_signal_flow::RetireRejection::StoreRefused)),
+            }
+        }
+        {
+            use crate::store::metaflow::SleepsMetaflows;
+            use crate::store::successor::ReadsContinuity;
+            let maintained = nexus.store.metaflow_awake_as(&flow_id.0).and_then(|awake| {
+                awake
+                    .map(|metaflow| nexus.store.continuity(&metaflow.address))
+                    .transpose()
+            });
+            match maintained {
+                Ok(Some(meta_signal_flow::Continuity::Maintained)) => {
+                    return Err(rejected(meta_signal_flow::RetireRejection::Maintained));
+                }
+                Ok(_) => {}
+                Err(_) => return Err(rejected(meta_signal_flow::RetireRejection::StoreRefused)),
+            }
+        }
+        if let HerdrRouteSelection::Available(route) = &node.herdr_route_selection
+            && matches!(
+                nexus.herdr.pane_presence(&node),
+                herdr::PanePresence::Present | herdr::PanePresence::Bare
+            )
+        {
+            let closed = {
+                let _lease = nexus.pane_leases.hold(route);
+                nexus.perform(Operation::Close(node.clone()))
+            };
+            if closed != Outcome::Closed {
+                return Err(rejected(meta_signal_flow::RetireRejection::CloseRefused));
+            }
+        }
+        if nexus.perform(Operation::Record(Record_Data::Retired(flow_id.clone())))
+            != Outcome::Recorded
+        {
+            return Err(rejected(meta_signal_flow::RetireRejection::StoreRefused));
+        }
+        match nexus.store.flow_node(&flow_id.0) {
+            Ok(Some(retired)) => Ok(retired),
+            Ok(None) | Err(_) => Err(rejected(meta_signal_flow::RetireRejection::StoreRefused)),
+        }
+    }
+
+    // The meta surface restarts and refreshes as the ordinary socket does;
+    // each runs off the gate and takes it for its steps.
+    fn restart(
+        &self,
+        flow_id: &signal_flow::FlowId,
+    ) -> Result<signal_flow::FlowId, meta_signal_flow::Output> {
+        use crate::restarting::RestartsFlows;
+        match self.nexus.restart(&flow_id.0).into_meta() {
+            meta_signal_flow::Output::Restarted(restarted) => Ok(restarted),
+            other => Err(other),
+        }
+    }
+
+    fn refresh(
+        &self,
+        address: &signal_flow::Address,
+    ) -> Result<signal_flow::Refreshed, meta_signal_flow::Output> {
+        use crate::waking::RefreshesMetaflows;
+        match self.nexus.refresh(address).into_meta() {
+            meta_signal_flow::Output::Refreshed(refreshed) => Ok(refreshed),
+            other => Err(other),
+        }
+    }
+
+    fn deliver(
+        &self,
+        delivery_request: &meta_signal_flow::DeliveryRequest,
+    ) -> Result<meta_signal_flow::VisibleDelivery, meta_signal_flow::Output> {
+        match DeliversMessages::deliver(self.nexus, delivery_request.clone()) {
+            meta_signal_flow::Output::Delivered(delivery) => Ok(delivery),
+            other => Err(other),
+        }
+    }
+
+    fn vet(
+        &self,
+        delivery_request: &meta_signal_flow::DeliveryRequest,
+    ) -> Result<(), meta_signal_flow::Output> {
+        match self.nexus.vet(delivery_request) {
+            meta_signal_flow::Output::Vetted => Ok(()),
+            other => Err(other),
+        }
+    }
+
+    fn command(
+        &self,
+        command_request: &meta_signal_flow::CommandRequest,
+    ) -> Result<meta_signal_flow::CommandOutcome, meta_signal_flow::Output> {
+        match self.nexus.command(command_request.clone()) {
+            meta_signal_flow::Output::Commanded(outcome) => Ok(outcome),
+            other => Err(other),
+        }
+    }
+
+    fn resolve_peer(
+        &self,
+        process_identity: &meta_signal_flow::ProcessIdentity,
+    ) -> Result<signal_flow::CallerIdentity, meta_signal_flow::Output> {
+        match self.nexus.resolve_peer(process_identity) {
+            meta_signal_flow::Output::PeerResolved(caller) => Ok(caller),
+            other => Err(other),
+        }
+    }
+
+    fn read_events(
+        &self,
+        flow_id: &signal_flow::FlowId,
+    ) -> Result<meta_signal_flow::EventsRead_Data, meta_signal_flow::Output> {
+        match self.nexus.read_events(flow_id.clone()) {
+            meta_signal_flow::Output::EventsRead(events) => Ok(events),
+            other => Err(other),
+        }
+    }
+
+    fn read_queue_deliveries(
+        &self,
+        address: &signal_flow::Address,
+    ) -> Result<meta_signal_flow::QueueDeliveriesRead_Data, meta_signal_flow::Output> {
+        match self.nexus.read_queue_deliveries(address.clone()) {
+            meta_signal_flow::Output::QueueDeliveriesRead(deliveries) => Ok(deliveries),
+            other => Err(other),
+        }
+    }
+
+    fn read_send_outcomes(
+        &self,
+    ) -> Result<Vec<meta_signal_flow::VisibleSendOutcomeRecord>, meta_signal_flow::Output> {
+        self.nexus
+            .store
+            .read_send_outcomes()
+            .map(|records| {
+                records
+                    .iter()
+                    .map(crate::message_projection::ProjectsSendOutcomeRecord::visible_send_outcome_record)
+                    .collect()
+            })
+            .map_err(|_| {
+                meta_signal_flow::Output::ReadSendOutcomesRejected(
+                    meta_signal_flow::ReadSendOutcomesRejected_Data::StoreRefused,
+                )
+            })
+    }
+
+    fn observe_legacy_archive(
+        &self,
+    ) -> Result<Vec<meta_signal_flow::VisibleLegacyArchiveEntry>, meta_signal_flow::Output> {
+        use store::queue_delivery::AccountsQueueDelivery;
+        self.nexus
+            .store
+            .observe_legacy_archive()
+            .map(|archive| {
+                archive
+                    .iter()
+                    .map(crate::message_projection::ProjectsLegacyArchiveEntry::visible_legacy_archive_entry)
+                    .collect()
+            })
+            .map_err(|error| {
+                meta_signal_flow::Output::ObserveLegacyArchiveRejected(
+                    meta_signal_flow::StoreRefusal::Store(error.to_string()),
+                )
+            })
+    }
+
+    fn debug(
+        &self,
+        address: &signal_flow::Address,
+    ) -> Result<meta_signal_flow::DebugSnapshot, meta_signal_flow::Output> {
+        self.nexus.store.debug_snapshot(address).map_err(|error| {
+            meta_signal_flow::Output::Refused(meta_signal_flow::StoreRefusal::Store(
+                error.to_string(),
+            ))
+        })
+    }
+
+    // Whoever resolves it is recorded; a peer that could not be read is
+    // process 0.
+    fn resolve_queue_delivery(
+        &self,
+        queue_delivery_resolution: &meta_signal_flow::QueueDeliveryResolution,
+    ) -> Result<meta_signal_flow::QueueDeliveryResolved_Data, meta_signal_flow::Output> {
+        use crate::peer::NamesMetaPeer;
+        let nexus = self.nexus;
+        let resolver = self
+            .resolver
+            .clone()
+            .unwrap_or_else(|| nexus.meta_resolver(None));
+        match nexus.resolve_queue_delivery(queue_delivery_resolution.clone(), resolver) {
+            meta_signal_flow::Output::QueueDeliveryResolved(resolved) => Ok(resolved),
+            other => Err(other),
+        }
+    }
+
+    fn inspect(
+        &self,
+        address: &signal_flow::Address,
+    ) -> Result<meta_signal_flow::Inspected_Data, meta_signal_flow::Output> {
+        use crate::repairing::RepairsFromMeta;
+        match self.nexus.inspect(address.clone()) {
+            meta_signal_flow::Output::Inspected(inspected) => Ok(inspected),
+            other => Err(other),
+        }
+    }
+
+    fn debug_delivery(
+        &self,
+        request_id: &signal_flow::RequestId,
+    ) -> Result<meta_signal_flow::DeliveryDebugged_Data, meta_signal_flow::Output> {
+        use crate::store::logical_delivery::RecordsLogicalDeliveries;
+        match self.nexus.store.debug_delivery(request_id) {
+            Ok(Some(delivery)) => Ok(delivery),
+            Ok(None) => Err(meta_signal_flow::Output::DebugDeliveryRejected(
+                meta_signal_flow::DebugDeliveryRejected_Data::UnknownRequest,
+            )),
+            Err(_) => Err(meta_signal_flow::Output::DebugDeliveryRejected(
+                meta_signal_flow::DebugDeliveryRejected_Data::StoreRefused,
+            )),
+        }
+    }
+
+    fn rebind(
+        &self,
+        rebind: &meta_signal_flow::Rebind_Data,
+    ) -> Result<signal_flow::Address, meta_signal_flow::Output> {
+        use crate::repairing::RepairsFromMeta;
+        match self.nexus.rebind(rebind.clone()) {
+            meta_signal_flow::Output::Rebound(address) => Ok(address),
+            other => Err(other),
+        }
+    }
+
+    fn withdraw(
+        &self,
+        withdraw: &meta_signal_flow::Withdraw_Data,
+    ) -> Result<(), meta_signal_flow::Output> {
+        use crate::repairing::RepairsFromMeta;
+        match self.nexus.withdraw(withdraw.clone()) {
+            meta_signal_flow::Output::Withdrawn => Ok(()),
+            other => Err(other),
+        }
+    }
+
+    // ObserveConfiguration answers Configuration, the output at
+    // Configuration's position; Unconfigured is the one at its own.
+    fn observe_configuration(&self) -> Result<(), meta_signal_flow::Output> {
+        use observe_configuration::ObservesConfiguration;
+        match self.nexus.configuration_response() {
+            meta_signal_flow::Output::Unconfigured => Ok(()),
+            other => Err(other),
+        }
+    }
+
+    fn remove(
+        &self,
+        removal: &meta_signal_flow::Removal,
+    ) -> Result<meta_signal_flow::Removal, meta_signal_flow::Output> {
+        match self
+            .nexus
+            .configure_meta(store::ConfigurationEdit::Remove(removal.clone()))
+        {
+            meta_signal_flow::Output::Removed(removed) => Ok(removed),
+            other => Err(other),
         }
     }
 }

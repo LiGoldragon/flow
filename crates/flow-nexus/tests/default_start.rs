@@ -787,20 +787,22 @@ fn a_new_memory_starts_unconfigured_and_is_configured_over_the_meta_socket() {
     let nexus = start_ready(home.path(), &place, &[]);
     assert!(place.store().exists(), "the new memory is made");
     assert_eq!(
-        meta_call(&place, &meta_signal_flow::Query::Configuration),
-        meta_signal_flow::Response::Unconfigured
+        meta_call(&place, &meta_signal_flow::Input::Configuration),
+        meta_signal_flow::Output::Unconfigured
     );
     assert_eq!(
         meta_call(
             &place,
-            &meta_signal_flow::Query::Configure(meta_signal_flow::ConfigurationChange::Nexus(
+            &meta_signal_flow::Input::Configure(meta_signal_flow::ConfigurationChange::Nexus(
                 configuration(home.path())
             ))
         ),
-        meta_signal_flow::Response::Configured(meta_signal_flow::ConfigureOutcome::Replaced)
+        meta_signal_flow::Output::Configured(meta_signal_flow::ConfigurationChange::Nexus(
+            configuration(home.path())
+        ))
     );
-    let meta_signal_flow::Response::Configuration(now) =
-        meta_call(&place, &meta_signal_flow::Query::Configuration)
+    let meta_signal_flow::Output::Configuration(now) =
+        meta_call(&place, &meta_signal_flow::Input::Configuration)
     else {
         panic!("the configured Nexus answers its Configuration")
     };
@@ -810,8 +812,8 @@ fn a_new_memory_starts_unconfigured_and_is_configured_over_the_meta_socket() {
 
     // A memory that exists keeps its configuration across a start.
     let nexus = start_ready(home.path(), &place, &[]);
-    let meta_signal_flow::Response::Configuration(kept) =
-        meta_call(&place, &meta_signal_flow::Query::Configuration)
+    let meta_signal_flow::Output::Configuration(kept) =
+        meta_call(&place, &meta_signal_flow::Input::Configuration)
     else {
         panic!("the restarted Nexus answers its Configuration")
     };

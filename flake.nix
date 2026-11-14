@@ -467,6 +467,11 @@
           # flow-nexus-meta; the place file is its own derivation
           # (translator's lib.<system>.mkPlaceFile).
           default = context.workspaceBinaries;
+          # translator's nexus-configure, built as this flake's own crates are
+          # (its base follows Flow's): the one tool that compiles a place
+          # written in datom into the place file the Nexus and its clients
+          # read, which a deployment runs where it knows the runtime directory.
+          nexus-configure = translator.packages.${system}.nexus-configure;
           # The flow-nexus library test executable, from its test build, so a
           # test kept out of every check (one that needs a store no repository
           # holds, named at run time) can be run by name where a build runs.

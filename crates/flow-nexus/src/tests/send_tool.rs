@@ -129,7 +129,7 @@ fn send_request(
     })
 }
 
-fn tool_call(thread: &str, call: &str, body: &str) -> ToolCall {
+pub(super) fn tool_call(thread: &str, call: &str, body: &str) -> ToolCall {
     ToolCall {
         tool_call_key: ToolCallKey {
             thread_id: crate::generated::send_tool::ThreadId(thread.into()),

@@ -96,16 +96,20 @@ impl Default for ThreadLedger {
 }
 
 /// What one event did, gathered while it is applied.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct LedgerStep {
     ended: Vec<CodexTurnId>,
     reconcile: Reconcile,
     exceeded: Option<CodexTurnId>,
 }
 
-impl Default for Reconcile {
+impl Default for LedgerStep {
     fn default() -> Self {
-        Reconcile(false)
+        Self {
+            ended: Vec::new(),
+            reconcile: Reconcile(false),
+            exceeded: None,
+        }
     }
 }
 

@@ -91,7 +91,7 @@ fn counters(fixture: &NexusFixture) -> String {
         .expect("the snapshot ends with a struct");
     // The counters and the two request bounds; the HarnessHook follows.
     snapshot[open + 1..snapshot.len() - 2]
-        .trim_end_matches(" Unconfigured")
+        .trim_end_matches(" Unconfigured [] []")
         .to_owned()
 }
 

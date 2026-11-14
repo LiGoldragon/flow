@@ -1007,7 +1007,7 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     let nexus = fixture.open();
     let seeded = ask(&nexus, "Configuration");
     assert!(
-        seeded.ends_with(" None 30 None [] { 1 3 1 } 64 3 Unconfigured }"),
+        seeded.ends_with(" None 30 None [] { 1 3 1 } 64 3 Unconfigured [] [] }"),
         "seeded at 30: {seeded}"
     );
     assert_eq!(
@@ -1036,14 +1036,14 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     }
     let declared = ask(&nexus, "Configuration");
     assert!(
-        declared.ends_with(" None 45 None [] { 1 3 1 } 64 3 Unconfigured }"),
+        declared.ends_with(" None 45 None [] { 1 3 1 } 64 3 Unconfigured [] [] }"),
         "{declared}"
     );
     drop(nexus);
     let reopened = fixture.open();
     let kept = ask(&reopened, "Configuration");
     assert!(
-        kept.ends_with(" None 45 None [] { 1 3 1 } 64 3 Unconfigured }"),
+        kept.ends_with(" None 45 None [] { 1 3 1 } 64 3 Unconfigured [] [] }"),
         "kept across a reopen: {kept}"
     );
 }
@@ -1080,7 +1080,7 @@ fn configured_counters_are_kept_across_a_reopen() {
     let reopened = fixture.open();
     let kept = ask(&reopened, "Configuration");
     assert!(
-        kept.ends_with(" None 30 None [] { 120 45 300 } 64 3 Unconfigured }"),
+        kept.ends_with(" None 30 None [] { 120 45 300 } 64 3 Unconfigured [] [] }"),
         "kept across a reopen: {kept}"
     );
     assert_eq!(
@@ -2159,12 +2159,19 @@ fn dispatch_orders_rebind_and_transport_free_warning_admission_both_ways() {
     let mut successor = node.clone();
     successor.flow_id = flow_ethos::FlowId("fresh-warning-flow".into());
     successor.session_id = signal_flow::SessionId("fresh-warning-session".into());
-    successor.herdr_route_selection = HerdrRouteSelection::Unavailable;
+    if let HerdrRouteSelection::Available(route) = &mut successor.herdr_route_selection {
+        route.herdr_pane_id = signal_flow::HerdrPaneId("w1:p4".into());
+        route.herdr_agent_name = signal_flow::HerdrAgentName("warning-successor".into());
+        route.herdr_terminal_id = signal_flow::HerdrTerminalId("warning-successor-terminal".into());
+    }
     successor.origin = Origin::Flow(FlowOrigin {
         flow_id: successor.flow_id.clone(),
         session_id: successor.session_id.clone(),
     });
-    nexus.store.register_flow(successor.clone()).unwrap();
+    assert!(matches!(
+        nexus.store.register_flow(successor.clone()).unwrap(),
+        crate::store::FlowRegistration::Registered(_)
+    ));
     assert_eq!(
         nexus
             .store

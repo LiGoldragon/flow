@@ -214,6 +214,8 @@ impl ObservesContextWithDispatch for crate::RunningNexus {
             ContextWarning_Data, Operation, Outcome, Record_Data, Record_Data_Context_Data, Tokens,
         };
         use crate::performing::Performs;
+        use crate::store::context::NamesFlowModel;
+        use crate::store::context_warnings::ReadsContextWarningConfiguration;
         use crate::store::metaflow::SleepsMetaflows;
         use crate::store::{NamesLiveFlow, ReadsFlowRows};
         if tokens < 0 {
@@ -225,7 +227,19 @@ impl ObservesContextWithDispatch for crate::RunningNexus {
         if current.session_id != observed.session_id
             || current.harness_kind != observed.harness_kind
             || !current.flow_lifecycle.is_live()
-            || !matches!(
+        {
+            return;
+        }
+        let configured = match self.store.flow_model(&observed.flow_id.0) {
+            Ok(Some(model)) => match self.store.context_warning_policy(&model) {
+                Ok(policy) => policy.is_some(),
+                Err(_) => return,
+            },
+            Ok(None) => false,
+            Err(_) => return,
+        };
+        if configured
+            && !matches!(
                 self.store.metaflow_awake_as(&observed.flow_id.0),
                 Ok(Some(_))
             )

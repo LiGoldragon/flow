@@ -9962,6 +9962,9 @@ mod tests {
                 .iter()
                 .chain(
                     [
+                        super::context_warnings::POLICY_TABLE,
+                        super::context_warnings::HOOK_TABLE,
+                        super::context_warnings::PROGRESS_TABLE,
                         super::OPTIONAL_REQUEST_ID_TABLE,
                         super::OPTIONAL_STORE_IDENTITY_TABLE,
                         super::OPTIONAL_DELIVER_CALL_TABLE,

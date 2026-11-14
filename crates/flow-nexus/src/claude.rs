@@ -854,6 +854,29 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn persisted_context_ignores_incomplete_invalid_and_sidechain_usage() {
+        use super::ReadsUsageLines;
+        let last = r#"{"type":"assistant","message":{"usage":{"input_tokens":12,"cache_read_input_tokens":30,"cache_creation_input_tokens":8}}}"#;
+        assert_eq!(last.last_context_tokens(), Some(50));
+        for pending in [
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":90"#,
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":"unknown"}}}"#,
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":-1}}}"#,
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":9223372036854775807,"cache_read_input_tokens":1}}}"#,
+            r#"{"type":"assistant","isSidechain":true,"message":{"usage":{"input_tokens":90}}}"#,
+            r#"{"type":"user","message":{"usage":{"input_tokens":90}}}"#,
+        ] {
+            assert_eq!(pending.last_context_tokens(), None);
+            assert_eq!(format!("{last}\n{pending}").last_context_tokens(), Some(50));
+        }
+        let completed = r#"{"type":"assistant","message":{"usage":{"input_tokens":90}}}"#;
+        assert_eq!(
+            format!("{last}\n{completed}").last_context_tokens(),
+            Some(90)
+        );
+    }
+
     /// A session's transcript is found under its project, by its session
     /// id alone.
     #[test]

@@ -3961,7 +3961,6 @@ impl WakesInParts for RunningNexus {
             Ok(crate::store::context::ThresholdStanding::Past { .. }) => true,
             Ok(crate::store::context::ThresholdStanding::Below { refresh, .. }) => {
                 use crate::protecting::ProtectsFlows;
-                use crate::store::context::NamesFlowModel;
                 let warned = !warning_policy_configured
                     && (warned
                         || match self.store.handover_green(&address, flow_id, refresh) {

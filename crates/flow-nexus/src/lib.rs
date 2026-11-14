@@ -1643,16 +1643,16 @@ trait StartsUnconfigured {
 
 impl StartsUnconfigured for ConfiguredRunner {
     fn unconfigured() -> Self {
-        let none = store::CodexEndpointConfiguration {
-            client_path: String::new(),
-            home: String::new(),
-            socket: String::new(),
-            model_names: Vec::new(),
+        let none = || flow_ethos::CodexEndpoint {
+            client_path: flow_ethos::ClientPath(String::new()),
+            home: flow_ethos::Home(String::new()),
+            control_socket_path: flow_ethos::ControlSocketPath(String::new()),
+            model_name_vector: Vec::new(),
         };
         let runtime = store::RuntimeConfiguration {
-            source_root: String::new(),
-            stable_codex: none.clone(),
-            next_codex: none,
+            source_root: flow_ethos::SourceRoot(String::new()),
+            stable_codex: store::StableCodex(none()),
+            next_codex: store::NextCodex(none()),
         };
         Self {
             codex_endpoints: CodexEndpoints::from(&runtime),

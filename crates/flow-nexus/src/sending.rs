@@ -1183,6 +1183,9 @@ pub(crate) trait CompletesDirectSends {
         acceptance: signal_flow::SendAcceptance,
         lease: &crate::waking::WakingLease<'_>,
     ) -> SendAnswer;
+    /// Whether the request `logical_id` still waits in the queue of the
+    /// metaflow at `address`.
+    fn queued_here(&self, address: &Address, logical_id: &signal_flow::LogicalDeliveryId) -> bool;
     /// The attempt still to settle that carried `logical_id`: the one
     /// outstanding, else the latest parked once its payload was typed.
     fn carrying_attempt(
@@ -1297,6 +1300,16 @@ impl CompletesDirectSends for RunningNexus {
         }
         Ok(Some(lease))
     }
+    fn queued_here(&self, address: &Address, logical_id: &signal_flow::LogicalDeliveryId) -> bool {
+        matches!(
+            self.store.metaflow(address),
+            Ok(Some(metaflow)) if metaflow
+                .queue
+                .0
+                .iter()
+                .any(|entry| entry.logical_delivery_id == *logical_id)
+        )
+    }
     fn carrying_attempt(
         &self,
         address: &Address,
@@ -1321,20 +1334,34 @@ impl CompletesDirectSends for RunningNexus {
         use crate::store::AnnouncesLaunchChanges;
         use signal_flow::{DeliveryState, SendFailure, SendFailureReason};
         use std::time::{Duration, Instant};
+        let logical_id = acceptance.logical_delivery_id.clone();
         // A configured sleeping recipient starts through the existing
         // fresh Curriculum composition. The Address lease prevents another
         // wake or submission while this direct operation owns its request.
-        if self.live_awake_flow(address).is_none() {
-            let _ = self.wake(address.clone());
-        }
+        // The fresh flow's first prompt carries the queue, this request
+        // with it: what the wake answers is this request's hand-over.
+        let woken = self
+            .live_awake_flow(address)
+            .is_none()
+            .then(|| self.wake(address.clone()));
         // Subscribe before input. File events only schedule the existing
         // exact session/inode/cursor/content correlation, never delivery.
         let _receipt_watch = self.direct_receipt_watch(address);
-        let outcome = {
-            let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
-            crate::waking::DrainsHeldSeats::drain_all_held(self, address.clone(), lease)
+        let outcome = match woken {
+            // Its first prompt carried the request: it is never typed again.
+            Some(woken @ crate::generated::operation::Outcome::Woken(_))
+                if !self.queued_here(address, &logical_id) =>
+            {
+                woken
+            }
+            // A wake that did not start the flow, or started it and could
+            // not record what its first prompt carried, types nothing more.
+            Some(refused @ crate::generated::operation::Outcome::Failed(_)) => refused,
+            _ => {
+                let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+                crate::waking::DrainsHeldSeats::drain_all_held(self, address.clone(), lease)
+            }
         };
-        let logical_id = acceptance.logical_delivery_id.clone();
         // Waiting is a disposition, not a failed attempt: admission already
         // made the request durable. Preserve its exact acceptance while no
         // native attempt exists, and let the ordinary pending path schedule

@@ -1,3 +1,47 @@
+# Flow 0.54.8: a request a wake's first prompt carried is never typed again
+
+Builds on 0.54.7, on the same contracts (signal-flow 61.0.0, meta-signal-flow
+77.0.0) and build base. No stored format change.
+
+- **A wake's first prompt is a hand-over awaiting its receipt.** A fresh
+  wake's launch answers `Started` once Herdr has submitted the first prompt,
+  which carries the queued batch; Claude can write that prompt to its
+  transcript after `Started` (318 ms after, in primary-2y7c). The wake looked
+  for the receipt once and, finding none, kept the batch queued and answered
+  `AwakeNotRecorded` though the metaflow was recorded Awake. Now the batch
+  leaves the queue as Uncertain attempts of the woken Claude session,
+  anchored at the session's start, so it is never typed again, and the wake
+  answers `Woken`. The launch's own receipt settles every request the prompt
+  carried, on whichever event comes first: the session's first reported
+  prompt (`PromptSubmitted`), the transcript showing the prompt and the
+  flow's first answer (read by a waiting direct Send on the transcript's
+  change, and at the seat's next rest), or the Nexus's start.
+  `AwakeNotRecorded` now means the store refused.
+- **A direct Send uses its wake's answer.** A Send that wakes its recipient
+  no longer drains what the first prompt carried: it waits for that
+  prompt's receipt and answers `Sent.<RequestId>`, or `SendAccepted …
+  Uncertain` when the receipt has not come within its wait; never
+  `NotSent`. A wake that did not start the flow types nothing more, and the
+  Send reports that wake's refusal. Before, the drain typed the request again
+  into the busy new pane, Herdr refused it, the request ended
+  `Failed.Direct` and a later `Done` for it was refused `Unresolved`.
+- **A due wake** (`wake_due`) leaves the carried batch out of the queue the
+  same way, so the turn end after it types only what arrived since.
+- Codex wakes are unchanged: their first prompt's receipt is still awaited
+  once.
+
+Witnesses (tests/waking.rs):
+`a_direct_send_its_wake_carried_is_sent_on_the_receipt_that_lands_after_the_wake`,
+`a_due_wake_whose_receipt_lands_late_never_types_its_carried_request_again`;
+the ordinary wake, its receipt observed in time, is
+`a_queued_order_wakes_fresh_then_drains_the_whole_queue`, unchanged.
+
+## Stored format
+
+No stored format changes. Rollback to 0.54.7 opens the same memory; an
+Uncertain attempt 0.54.8 parked for a wake's batch stays parked under 0.54.7
+and settles only by an answer or an owner's resolution.
+
 # Flow 0.54.7: every Codex rest settles; routing follows the succession; a reap is owed at once and finished outside the dispatch gate; every connection greets
 
 Contracts: signal-flow 61.0.0 (4871bb8) and meta-signal-flow 77.0.0

@@ -1939,6 +1939,246 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
     assert_eq!(old.flow_lifecycle, FlowLifecycle::Stopped);
 }
 
+/// The Psyche core Opus, which sends the direct requests below.
+fn psyche_core_opus() -> Address {
+    Address {
+        aspect: Aspect::Psyche,
+        topic: flow_ethos::Topic("core".into()),
+        model: Model::Opus,
+    }
+}
+
+/// The rows a woken flow's first prompt was taken with, which the fixture
+/// Claude held (`startup-rows-later`), written to its transcript now.
+fn startup_rows_land(fixture: &NexusFixture, world: &FreshWorld) {
+    use std::io::Write;
+    let held = fs::read_to_string(world.state.join("held-startup-rows"))
+        .expect("the first prompt's rows are held");
+    let transcript = fixture
+        .directory
+        .path()
+        .join("native-transcripts/claude/-home-li-primary")
+        .join(format!("{}.jsonl", world.session()));
+    fs::OpenOptions::new()
+        .append(true)
+        .open(transcript)
+        .expect("the woken session's transcript")
+        .write_all(held.as_bytes())
+        .expect("the rows land");
+}
+
+/// The prompts typed into a pane after its first: each `agent prompt`.
+fn later_prompts(world: &FreshWorld) -> Vec<String> {
+    world
+        .calls()
+        .lines()
+        .filter(|line| line.contains("agent prompt"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The first-prompt parts the woken pane took.
+fn startup_prompts(world: &FreshWorld) -> usize {
+    fs::read_to_string(world.state.join("startup-prompts"))
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
+/// A direct MiddleAbrupt Task to an asleep Claude metaflow wakes it, and the
+/// woken flow's first prompt carries the Task. Herdr answers that prompt
+/// submitted before Claude writes it to its transcript, so the wake finds
+/// no receipt yet, and Herdr refuses every later prompt into the busy pane.
+/// The Task is typed once: it leaves the queue awaiting its receipt, the
+/// reply is Sent once the transcript shows the prompt taken, and the woken
+/// flow's Done for it is admitted.
+#[test]
+fn a_direct_send_its_wake_carried_is_sent_on_the_receipt_that_lands_after_the_wake() {
+    use crate::sending::SendsRequests;
+    use crate::store::AnnouncesLaunchChanges;
+    use crate::store::queue_delivery::AccountsQueueDelivery;
+    use std::time::{Duration, Instant};
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let world = fixture.fresh_claude_world();
+    fs::write(world.state.join("startup-rows-later"), "").unwrap();
+    fs::write(world.state.join("prompt-refused"), "").unwrap();
+    let sender = psyche_core_opus();
+    let peer = BoundPeer::spawn();
+    peer.bind(&fixture, sender.clone());
+
+    let task = Request::Task(flow_ethos::AnswerableTask {
+        minutes: flow_ethos::Minutes(300),
+        string: "Carry bead primary-rt9q.".into(),
+    });
+    let answer = std::thread::scope(|scope| {
+        let (fixture, world, at) = (&fixture, &world, &at);
+        // Claude writes the first prompt's rows once the wake has looked
+        // for their receipt: once an attempt holds the request.
+        let lands = scope.spawn(move || {
+            let store = &fixture.nexus.store;
+            assert!(
+                store.launch_changes.until_holds(
+                    Instant::now() + Duration::from_secs(60),
+                    &mut || !store
+                        .unsettled_deliveries(at)
+                        .unwrap_or_default()
+                        .is_empty(),
+                ),
+                "no attempt ever held the request; Herdr calls: {}",
+                world.calls()
+            );
+            startup_rows_land(fixture, world);
+        });
+        let answer = fixture.nexus.send_request(
+            signal_flow::SendRequest {
+                address: at.clone(),
+                sendable_message: super::sendable_message(Message::MiddleAbrupt(task)),
+            },
+            Some(&peer.process()),
+        );
+        lands.join().expect("the rows land");
+        answer
+    });
+
+    let signal_flow::Response::Sent(receipt) = &answer.response else {
+        panic!(
+            "the request the first prompt carried is Sent: {:?}; Herdr calls: {}",
+            answer.response,
+            world.calls()
+        );
+    };
+    assert_eq!(startup_prompts(&world), 1, "{}", world.calls());
+    assert!(
+        later_prompts(&world).is_empty(),
+        "the carried request is never typed again: {}",
+        world.calls()
+    );
+    let woken = stored(&fixture, Model::Sol);
+    let State::Awake(flow_id) = &woken.state else {
+        panic!("the woken flow receives: {woken:?}")
+    };
+    assert_ne!(flow_id.0, "abc123");
+    assert!(woken.queue.0.is_empty(), "{woken:?}");
+    let debugged = fixture
+        .nexus
+        .store
+        .debug_delivery(&receipt.0)
+        .unwrap()
+        .expect("the request is held");
+    assert!(
+        matches!(
+            debugged.delivery_snapshot.delivery_state,
+            signal_flow::DeliveryState::Delivered(_)
+        ),
+        "{debugged:?}"
+    );
+    assert!(
+        debugged
+            .receipt
+            .0
+            .as_ref()
+            .is_some_and(|native| native.native_session_id.0 == world.session()),
+        "{debugged:?}"
+    );
+
+    // The woken flow answers by the id the Task was delivered with.
+    let done = fixture
+        .nexus
+        .store
+        .resolve_sendable_message(signal_flow::SendableMessage::Soft(
+            signal_flow::SendableRequest::Done(signal_flow::SendableRequest_Done_Data {
+                request_id: receipt.0.clone(),
+                string: "Carried.".into(),
+            }),
+        ))
+        .expect("the Done resolves")
+        .expect("the Done names an open request");
+    let admitted = fixture.nexus.store.accept_logical_delivery(
+        &sender,
+        SentBy::Sender(at.clone()),
+        Delivery::Queue,
+        done,
+        None,
+    );
+    assert!(
+        matches!(
+            admitted,
+            Ok(signal_flow::PrivateSendResponse::SendAccepted(_))
+        ),
+        "{admitted:?}"
+    );
+    peer.end();
+}
+
+/// A wake a queued request makes due, whose first prompt's receipt lands
+/// after the wake looked for it, leaves the request it carried out of the
+/// queue: the turn end after it types only what arrived since, and the
+/// carried request is Delivered on the receipt.
+#[test]
+fn a_due_wake_whose_receipt_lands_late_never_types_its_carried_request_again() {
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Model::Sol,
+        State::Asleep,
+        vec!["abc123"],
+        vec![Request::Order("A".into())],
+    ));
+    let carried = stored(&fixture, Model::Sol).queue.0[0].clone();
+    let world = fixture.fresh_claude_world();
+    fs::write(world.state.join("startup-rows-later"), "").unwrap();
+
+    fixture.nexus.wake_due(at.clone());
+    let woken = stored(&fixture, Model::Sol);
+    let State::Awake(flow_id) = woken.state.clone() else {
+        panic!(
+            "the wake starts a fresh flow: {woken:?}; Herdr calls: {}",
+            world.calls()
+        )
+    };
+    assert_ne!(flow_id.0, "abc123");
+    assert!(
+        woken.queue.0.is_empty(),
+        "the first prompt carried A: {woken:?}"
+    );
+    assert!(later_prompts(&world).is_empty(), "{}", world.calls());
+
+    // The receipt lands, D arrives, and the woken flow's turn ends.
+    startup_rows_land(&fixture, &world);
+    let mut arrived = stored(&fixture, Model::Sol);
+    arrived.queue.0.push(Request::Order("D".into()).unsent());
+    fixture.nexus.store.seed_metaflow(arrived);
+    fixture.nexus.settle_stopped(&flow_id.0);
+
+    assert_eq!(startup_prompts(&world), 1, "{}", world.calls());
+    let later = later_prompts(&world);
+    assert_eq!(later.len(), 1, "D alone is typed: {}", world.calls());
+    assert!(
+        later[0].contains(" D }") && !later[0].contains(" A }"),
+        "the turn end types D, never A again: {later:?}"
+    );
+    let snapshot = fixture
+        .nexus
+        .store
+        .logical_delivery_snapshot(&carried.logical_delivery_id)
+        .unwrap()
+        .expect("A is held");
+    assert!(
+        matches!(
+            snapshot.delivery_state,
+            signal_flow::DeliveryState::Delivered(_)
+        ),
+        "A settles on its first prompt's receipt: {snapshot:?}"
+    );
+}
+
 /// A lease is a capability of its owning waking registry, not merely an
 /// address-shaped token that another registry may reuse.
 #[test]
@@ -4008,6 +4248,8 @@ case "$*" in
     printf '%s\n' '{{"result":{{}}}}' ;;
   *"agent read"*) printf '%s\n' '❯ ' ;;
   *"agent prompt"*)
+    # PROMPT_REFUSED: Herdr refuses every prompt into the pane before input.
+    if [ -f "$S/prompt-refused" ]; then printf '%s\n' '{{"error":{{"code":"agent_blocked","message":"the agent is working"}}}}' >&2; exit 1; fi
     s=$(cat "$S/session"); t='{claude_root}/'"$s"'.jsonl'
     escaped=$(printf '%s' "$6" | sed ':a;N;$!ba;s/\\/\\\\/g;s/"/\\"/g;s/\n/\\n/g')
     # With rows-later, Claude has not yet written the user row: it is held
@@ -4063,6 +4305,20 @@ esac
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default();
                 let session = fs::read_to_string(served_state.join("session")).unwrap_or_default();
+                // Each first-prompt part the pane took, one line each.
+                let _ = fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(served_state.join("startup-prompts"))
+                    .and_then(|mut file| writeln!(file, "{session}"));
+                // With STARTUP_ROWS_LATER, Claude has not yet written the
+                // part's rows when Herdr answers: they are held for the test
+                // to append.
+                let written = if served_state.join("startup-rows-later").exists() {
+                    served_state.join("held-startup-rows")
+                } else {
+                    served_root.join(format!("{session}.jsonl"))
+                };
                 let rows = [
                     serde_json::json!({"type":"user","sessionId":session,"message":{"role":"user","content":text}}),
                     serde_json::json!({"type":"assistant","sessionId":session,"uuid":"fresh-answer","message":{"model":"claude-fixture","content":[{"type":"text","text":"Woken."}]}}),
@@ -4070,7 +4326,7 @@ esac
                 let _ = fs::OpenOptions::new()
                     .append(true)
                     .create(true)
-                    .open(served_root.join(format!("{session}.jsonl")))
+                    .open(written)
                     .and_then(|mut file| rows.iter().try_for_each(|row| writeln!(file, "{row}")));
                 let _ = stream.write_all(
                     b"{\"id\":\"flow:prompt\",\"result\":{\"type\":\"agent_prompted\"}}\n",

@@ -584,6 +584,17 @@ At its start the Nexus wakes every metaflow due a wake, so a Nexus that died
 between the commit and the wake leaves none owed. A wake already running for
 the metaflow absorbs the request: it drains what arrives during it.
 
+A wake's fresh flow takes the queued batch in its first prompt. Its launch
+answers `Started` once that prompt is submitted, and Claude may write it to
+the transcript later; a batch whose receipt is not yet seen leaves the queue
+as Uncertain attempts of the woken session, anchored at the session's start,
+so nothing types it again, and the wake answers `Woken`. The launch's
+receipt, the first prompt the session reports or the transcript showing the
+prompt and the flow's first answer, settles every request the prompt
+carried, at the first event that reads it. A direct Send that woke its
+recipient waits for that receipt and is never typed into the new pane a
+second time.
+
 A Codex seat runs no hook and reports no Stop; its turn ends are its
 app-server's. Every connection Flow keeps on a Codex thread (the launch's
 opening connection, then the Nexus's responder) reads that thread's

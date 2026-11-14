@@ -1622,6 +1622,7 @@ impl OpensRunningNexus for RunningNexus {
                 .with_source_root(&configured.source_root)
                 .with_codex_endpoints(configured.codex_endpoints.clone())
                 .with_harness_hook(&snapshot.configured_harness_hook.0)
+                .with_harness_hook_events(snapshot.configured_harness_hook_events.0.clone())
                 .with_ordinary_socket(&ordinary_socket),
             // A launch's context is composed by the Curriculum Nexus at the
             // socket the configuration names.
@@ -1741,6 +1742,12 @@ impl AppliesConfiguration for RunningNexus {
             );
             self.codex_endpoints
                 .replace(configured.codex_endpoints.clone());
+        }
+        if before.is_none_or(|before| {
+            before.configured_harness_hook_events != now.configured_harness_hook_events
+        }) {
+            self.herdr
+                .configure_harness_hook_events(&now.configured_harness_hook_events.0);
         }
         if composing_changed {
             self.composer

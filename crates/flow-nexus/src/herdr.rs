@@ -136,6 +136,7 @@ pub struct HerdrCli {
     /// Stop in every Claude flow Flow launches ([`HookChoice`]), as the
     /// configuration's HarnessHook names it.
     pub(crate) harness_hook: crate::live::Live<PathBuf>,
+    pub(crate) harness_hook_events: crate::live::Live<Vec<meta_signal_flow::HarnessHookEvent>>,
     /// This Nexus's own ordinary socket, carried in every Claude hook's
     /// typed configuration so its reports return to the launching Nexus.
     pub(crate) ordinary_socket: PathBuf,
@@ -213,6 +214,7 @@ impl Default for HerdrCli {
                 }
                 .harness_hook(),
             ),
+            harness_hook_events: Live::holding(Vec::new()),
             ordinary_socket: defaults.ordinary_socket_path(),
             held_system_prompts: Default::default(),
             title_wait: std::time::Duration::from_secs(10),
@@ -400,6 +402,8 @@ pub trait ConfiguresHerdrCli {
     /// The hook command the configuration names, or the `flow-nexus-hook` beside
     /// this executable (`HookChoice`).
     fn with_harness_hook(self, configured: &meta_signal_flow::HarnessHookConfiguration) -> Self;
+    fn with_harness_hook_events(self, events: Vec<meta_signal_flow::HarnessHookEvent>) -> Self;
+    fn configure_harness_hook_events(&self, events: &[meta_signal_flow::HarnessHookEvent]);
     /// Takes a changed configuration at once: the Codex endpoints, the
     /// flows directory under the source root and the hook command each
     /// next use reads.
@@ -418,6 +422,15 @@ pub trait ConfiguresHerdrCli {
 }
 
 impl ConfiguresHerdrCli for HerdrCli {
+    fn with_harness_hook_events(mut self, events: Vec<meta_signal_flow::HarnessHookEvent>) -> Self {
+        self.harness_hook_events = Live::holding(events);
+        self
+    }
+
+    fn configure_harness_hook_events(&self, events: &[meta_signal_flow::HarnessHookEvent]) {
+        self.harness_hook_events.replace(events.to_vec());
+    }
+
     fn with_codex_endpoints(mut self, codex_endpoints: CodexEndpoints) -> Self {
         self.codex_endpoints = Live::holding(codex_endpoints);
         self
@@ -491,6 +504,13 @@ impl ConfiguresHerdrCli for HerdrCli {
                 &fixture_root.join("claude-home"),
             ),
             harness_hook: Live::holding(PathBuf::from("/fixture/bin/flow-nexus-hook")),
+            harness_hook_events: Live::holding(vec![
+                meta_signal_flow::HarnessHookEvent::SessionStart,
+                meta_signal_flow::HarnessHookEvent::PostToolUse,
+                meta_signal_flow::HarnessHookEvent::UserPromptSubmit,
+                meta_signal_flow::HarnessHookEvent::Stop,
+                meta_signal_flow::HarnessHookEvent::SessionEnd,
+            ]),
             ordinary_socket: PathBuf::from("/fixture/run/flow-next/flow/flow.sock"),
             held_system_prompts: Default::default(),
             title_wait: std::time::Duration::from_secs(2),

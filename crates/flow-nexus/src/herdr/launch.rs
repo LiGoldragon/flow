@@ -463,9 +463,8 @@ pub(crate) trait PreparesClaudePane {
     /// user settings name a non-auto default mode and no other settings
     /// source names one. Flag settings are such a source: naming the mode the
     /// launch already runs in suppresses the offer without touching any
-    /// settings file. They also carry the harness hook: `flow-nexus-hook` on
-    /// SessionStart, every PostToolUse, UserPromptSubmit, Stop and
-    /// SessionEnd, so each harness event reaches Flow as a Report: a Stop is
+    /// settings file. They carry the hook command on exactly the configured
+    /// native events, each reaching Flow as a Report: a Stop is
     /// the flow's turn end, a submitted prompt the receipt of a queued
     /// request, and a session's end the flow's exit.
     /// A launch that leaves out the attribution reminder sets the
@@ -507,15 +506,25 @@ impl PreparesClaudePane for HerdrCli {
                 "command": command,
             }]
         }]);
+        let mut hooks = serde_json::Map::new();
+        for event in self.harness_hook_events.current().iter() {
+            use meta_signal_flow::HarnessHookEvent;
+            let name = match event {
+                HarnessHookEvent::SessionStart => "SessionStart",
+                HarnessHookEvent::PostToolUse => "PostToolUse",
+                HarnessHookEvent::UserPromptSubmit => "UserPromptSubmit",
+                HarnessHookEvent::Stop => "Stop",
+                HarnessHookEvent::SessionEnd => "SessionEnd",
+            };
+            let setting = match event {
+                HarnessHookEvent::PostToolUse => every_tool.clone(),
+                _ => hook.clone(),
+            };
+            hooks.insert(name.into(), setting);
+        }
         let mut settings = serde_json::json!({
             "permissions": { "defaultMode": "bypassPermissions" },
-            "hooks": {
-                "SessionStart": hook,
-                "PostToolUse": every_tool,
-                "UserPromptSubmit": hook,
-                "Stop": hook,
-                "SessionEnd": hook,
-            }
+            "hooks": hooks,
         });
         if lean.attribution_off() {
             settings["attribution"] = serde_json::json!({ "commit": "", "pr": "" });
@@ -3541,9 +3550,42 @@ printf '%s\n' "$alias"
     }
 
     #[test]
+    fn hook_settings_install_exactly_the_authoritative_vector() {
+        use meta_signal_flow::HarnessHookEvent;
+        let adapter = HerdrCli::default();
+        let lean = launch(HarnessKind::Claude).lean_start();
+        let empty: serde_json::Value =
+            serde_json::from_str(&adapter.claude_flag_settings(&lean)).unwrap();
+        assert!(empty["hooks"].as_object().unwrap().is_empty());
+        adapter.configure_harness_hook_events(&[
+            HarnessHookEvent::Stop,
+            HarnessHookEvent::PostToolUse,
+        ]);
+        let selected: serde_json::Value =
+            serde_json::from_str(&adapter.claude_flag_settings(&lean)).unwrap();
+        assert_eq!(selected["hooks"].as_object().unwrap().len(), 2);
+        assert!(selected["hooks"].get("Stop").is_some());
+        assert_eq!(selected["hooks"]["PostToolUse"][0]["matcher"], "*");
+        assert!(selected["hooks"].get("SessionStart").is_none());
+        assert!(selected["hooks"].get("UserPromptSubmit").is_none());
+        assert!(selected["hooks"].get("SessionEnd").is_none());
+        adapter.configure_harness_hook_events(&[]);
+        let cleared: serde_json::Value =
+            serde_json::from_str(&adapter.claude_flag_settings(&lean)).unwrap();
+        assert!(cleared["hooks"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
     fn every_claude_hook_command_carries_the_typed_nexus_socket() {
         let adapter = HerdrCli::default()
-            .with_ordinary_socket(Path::new("/fixture/run/flow-next/flow/flow.sock"));
+            .with_ordinary_socket(Path::new("/fixture/run/flow-next/flow/flow.sock"))
+            .with_harness_hook_events(vec![
+                meta_signal_flow::HarnessHookEvent::SessionStart,
+                meta_signal_flow::HarnessHookEvent::PostToolUse,
+                meta_signal_flow::HarnessHookEvent::UserPromptSubmit,
+                meta_signal_flow::HarnessHookEvent::Stop,
+                meta_signal_flow::HarnessHookEvent::SessionEnd,
+            ]);
         let settings: serde_json::Value = serde_json::from_str(
             &adapter.claude_flag_settings(&launch(HarnessKind::Claude).lean_start()),
         )

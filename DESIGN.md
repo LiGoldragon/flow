@@ -612,7 +612,17 @@ work is queued for a seat whose thread rests, the seat is settled as a Stop
 settles a Claude seat: under the dispatch gate the oldest queued request is
 handed to its thread, sender first, and the thread then holds that work
 until a turn that began after it completes; with nothing queued the seat
-sleeps or stays Awake as its metaflow's Continuity names. A seat
+sleeps or stays Awake as its metaflow's Continuity names. A HardAbrupt
+typed after Flow pressed the interrupt keys into a working seat cut short
+the turn the thread was in, and the letter starts the next turn: the cut
+turn's completion is its late end and rests nothing, and the turn the
+delivery started is the one whose completion rests the seat. The cut turn
+is the one the thread's events showed it in when the keys were pressed; it
+ended before the letter when Flow saw the agent leave Working, and
+otherwise only its own `interrupted` completion says it was cut, since an
+interrupt that did not take leaves the letter steered into it. Work typed
+with no interrupt is steered into the running turn, and that turn's
+completion rests the seat. A seat
 whose thread is in a turn is never drained, whatever its screen shows, and
 work queued meanwhile waits for the completion. A seat that only holds its
 Address is settled at its confirmation when its thread rests. The state is

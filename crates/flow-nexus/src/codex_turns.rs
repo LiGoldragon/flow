@@ -24,6 +24,14 @@
 //! dispatch gate and reads the thread's turn under it, so a completion seen
 //! twice, or by two connections, types once.
 //!
+//! A delivery Flow types after pressing the interrupt keys into a working
+//! seat cuts short the turn the thread was in, and the typed letter starts
+//! the next turn. The cut turn's completion is that turn's late end, never
+//! the thread's rest: the turn the delivery started is the one whose
+//! completion rests the seat. A delivery typed with no interrupt is steered
+//! into the running turn, and that turn's completion ends it and rests the
+//! seat.
+//!
 //! The state is memory only. A Nexus that starts again reads each live
 //! thread's status from its responder's `thread/resume`. The first
 //! authoritative `Resumed(Idle)` a thread shows after a Nexus start settles
@@ -36,6 +44,7 @@ use crate::store::metaflow::SleepsMetaflows;
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
 use crate::turn_ends::RecordsTurnEnd;
 use crate::waking::{AtStop, HoldsWakingMetaflows, NotesStopsAtConfirmation, SleepsAndWakesSeats};
+use meta_signal_flow::InterruptWitness;
 use signal_flow::{Address, FlowId, FlowNode, HarnessKind};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -57,7 +66,11 @@ pub enum ThreadTurn {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnEvent {
     Started(String),
+    /// A `turn/completed` whose turn ran to its end, or failed.
     Completed(String),
+    /// A `turn/completed` whose turn the app-server reports `interrupted`:
+    /// cut short by an interrupt, Flow's or a person's.
+    Interrupted(String),
     /// A `thread/status/changed` notification.
     Status(ThreadStatus),
     /// The status a `thread/resume` answered: the thread as it is now.
@@ -92,6 +105,9 @@ struct ThreadState {
     /// Whether this Nexus process has read a `Resumed(Idle)` of the thread:
     /// the first one after a start settles, a later one alone does not.
     resumed: bool,
+    /// The turn Flow's last interrupting delivery cut short, until its
+    /// completion is read or the thread rests.
+    interrupted: Option<InterruptedTurn>,
 }
 
 impl Default for ThreadState {
@@ -100,7 +116,44 @@ impl Default for ThreadState {
             turn: ThreadTurn::Unknown,
             completed: VecDeque::new(),
             resumed: false,
+            interrupted: None,
         }
+    }
+}
+
+/// The turn a thread was in when Flow pressed the interrupt keys to type a
+/// delivery. The letter starts the next turn, so this turn's completion is
+/// its late end and not the thread's rest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InterruptedTurn {
+    /// The turn's id, when an event had named it; None when only an
+    /// `active` status had shown the thread in a turn.
+    turn: Option<String>,
+    /// Whether Flow saw the agent leave Working before it typed: the turn
+    /// had then ended before the letter, however its completion reads.
+    left_working: bool,
+}
+
+/// Whether a turn's completion is the late end of the turn Flow cut short.
+trait RecognisesLateEnd {
+    /// `turn` completed, `cut_short` when its completion reads
+    /// `interrupted`, while the thread stood at `standing`.
+    fn ended_by(&self, turn: &str, cut_short: bool, standing: &ThreadTurn) -> bool;
+}
+
+impl RecognisesLateEnd for InterruptedTurn {
+    fn ended_by(&self, turn: &str, cut_short: bool, standing: &ThreadTurn) -> bool {
+        let this_turn = match &self.turn {
+            Some(interrupted) => interrupted == turn,
+            // A turn of no known id: while the thread still holds the typed
+            // letter, no turn has started since the delivery, so the one
+            // completing is the turn that was running when it was typed.
+            None => *standing == ThreadTurn::Delivered,
+        };
+        // An interrupt not seen taking may have left the turn running with
+        // the letter steered into it: only its own `interrupted` completion
+        // says it was cut short.
+        this_turn && (self.left_working || cut_short)
     }
 }
 
@@ -134,7 +187,13 @@ impl ReadsTurnEvent for serde_json::Value {
         };
         match self.get("method").and_then(serde_json::Value::as_str)? {
             "turn/started" => turn().map(TurnEvent::Started),
-            "turn/completed" => turn().map(TurnEvent::Completed),
+            "turn/completed" => match params
+                .pointer("/turn/status")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("interrupted") => turn().map(TurnEvent::Interrupted),
+                _ => turn().map(TurnEvent::Completed),
+            },
             "thread/status/changed" => params
                 .get("status")
                 .and_then(|status| status.thread_status())
@@ -164,8 +223,10 @@ pub trait TracksCodexTurns {
     /// Applies one event: whether it brought the thread to rest, and
     /// whether it ended a turn for the first time.
     fn observe(&self, thread: &str, event: TurnEvent) -> TurnObservation;
-    /// Flow typed work into the seat on `thread`.
-    fn delivered(&self, thread: &str);
+    /// Flow typed work into the seat on `thread`, after pressing the
+    /// interrupt keys as `interrupt` witnesses: an interrupt that was
+    /// pressed cut short the turn the thread was in.
+    fn delivered(&self, thread: &str, interrupt: &InterruptWitness);
     fn turn(&self, thread: &str) -> ThreadTurn;
 }
 
@@ -177,6 +238,7 @@ impl TracksCodexTurns for CodexTurns {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let state = threads.entry(thread.to_owned()).or_default();
         let was_resting = state.turn == ThreadTurn::Resting;
+        let cut_short = matches!(event, TurnEvent::Interrupted(_));
         let mut ended = false;
         // Whether this event's rest is a rest the seat settles at; only a
         // re-subscription's Idle with no turn seen in between is not.
@@ -186,9 +248,18 @@ impl TracksCodexTurns for CodexTurns {
                 // A start read after its own completion changes nothing.
                 if !state.completed.contains(&turn) {
                     state.turn = ThreadTurn::Running(Some(turn));
+                    // A cut turn of no known id is told only while no turn
+                    // has started since its delivery.
+                    if state
+                        .interrupted
+                        .as_ref()
+                        .is_some_and(|interrupted| interrupted.turn.is_none())
+                    {
+                        state.interrupted = None;
+                    }
                 }
             }
-            TurnEvent::Completed(turn) => {
+            TurnEvent::Completed(turn) | TurnEvent::Interrupted(turn) => {
                 if state.completed.contains(&turn) {
                     return TurnObservation {
                         rested: false,
@@ -200,11 +271,21 @@ impl TracksCodexTurns for CodexTurns {
                 if state.completed.len() > REMEMBERED_TURNS {
                     state.completed.pop_front();
                 }
-                match &state.turn {
-                    // Another turn is the one the thread is in: an earlier
-                    // turn's late end does not bring it to rest.
-                    ThreadTurn::Running(Some(running)) if *running != turn => {}
-                    _ => state.turn = ThreadTurn::Resting,
+                let late = state
+                    .interrupted
+                    .as_ref()
+                    .is_some_and(|interrupted| interrupted.ended_by(&turn, cut_short, &state.turn));
+                if late {
+                    // The turn Flow cut short to type a delivery: the turn
+                    // the delivery starts is the one whose end rests it.
+                    state.interrupted = None;
+                } else {
+                    match &state.turn {
+                        // Another turn is the one the thread is in: an
+                        // earlier turn's late end does not bring it to rest.
+                        ThreadTurn::Running(Some(running)) if *running != turn => {}
+                        _ => state.turn = ThreadTurn::Resting,
+                    }
                 }
             }
             TurnEvent::Status(ThreadStatus::Idle) => {
@@ -238,19 +319,38 @@ impl TracksCodexTurns for CodexTurns {
             TurnEvent::Status(ThreadStatus::Unavailable)
             | TurnEvent::Resumed(ThreadStatus::Unavailable) => state.turn = ThreadTurn::Unknown,
         }
+        // A thread at rest holds no cut turn still to end.
+        if state.turn == ThreadTurn::Resting {
+            state.interrupted = None;
+        }
         TurnObservation {
             rested: !was_resting && state.turn == ThreadTurn::Resting && settles,
             ended,
         }
     }
 
-    fn delivered(&self, thread: &str) {
-        self.threads
+    fn delivered(&self, thread: &str, interrupt: &InterruptWitness) {
+        let mut threads = self
+            .threads
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .entry(thread.to_owned())
-            .or_default()
-            .turn = ThreadTurn::Delivered;
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = threads.entry(thread.to_owned()).or_default();
+        // Typed under the dispatch gate, as every event is applied: the
+        // turn the thread is in now is the turn it was in when the keys
+        // were pressed. A letter typed with no interrupt cuts nothing, and
+        // leaves a turn cut before it still to end.
+        match (interrupt, &state.turn) {
+            (InterruptWitness::NotRequested, _) => {}
+            (witness, ThreadTurn::Running(turn)) => {
+                state.interrupted = Some(InterruptedTurn {
+                    turn: turn.clone(),
+                    left_working: *witness == InterruptWitness::Observed,
+                });
+            }
+            // No event showed the thread in a turn: none is known cut.
+            (_, _) => state.interrupted = None,
+        }
+        state.turn = ThreadTurn::Delivered;
     }
 
     fn turn(&self, thread: &str) -> ThreadTurn {

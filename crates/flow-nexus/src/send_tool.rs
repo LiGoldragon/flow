@@ -992,7 +992,7 @@ impl ServesLaunchCalls for RunningNexus {
             && let Some(signal @ crate::compacting::CodexContextSignal::TokenUsage(_)) =
                 request.context_signal(&thread)
         {
-            self.codex_context_signal(&thread, signal);
+            self.codex_context_signal_with_dispatch(&thread, signal);
             return Ok(());
         }
         if request.get("method").and_then(serde_json::Value::as_str) != Some("item/tool/call") {

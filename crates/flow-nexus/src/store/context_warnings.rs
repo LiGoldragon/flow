@@ -270,6 +270,170 @@ impl ReadsContextWarningProgress for FlowStore {
     }
 }
 
+/// A recorded native observation, supplied while the runtime holds dispatch.
+/// The latest owner, model, policy and durable stages are read at admission.
+pub(crate) struct ContextWarningAdmission {
+    pub(crate) flow_id: signal_flow::FlowId,
+    pub(crate) tokens: signal_flow::Tokens,
+}
+
+pub(crate) struct PreparedContextWarning {
+    progress: ContextWarningProgress,
+    crossing: crate::context_warnings::WarningCrossing,
+    existing: bool,
+    pub(crate) message: flow_ethos::Message,
+}
+
+pub(crate) trait PreparesContextWarningAdmission {
+    fn prepare_context_warning(
+        &self,
+        metaflow: &flow_ethos::Metaflow,
+        observation: ContextWarningAdmission,
+    ) -> Result<Option<PreparedContextWarning>, StoreError>;
+    fn commit_context_warning(
+        &self,
+        prepared: PreparedContextWarning,
+        delivery_id: signal_flow::LogicalDeliveryId,
+        commit: sema_engine::AtomicCommit,
+    ) -> sema_engine::AtomicCommit;
+}
+
+/// Admission has no native transport. The runtime owns dispatch exclusion
+/// until this returns and releases it before announcing delivery work.
+pub(crate) trait AdmitsContextWarnings {
+    fn admit_context_warning(
+        &self,
+        observation: ContextWarningAdmission,
+    ) -> Result<Option<signal_flow::PrivateSendResponse>, StoreError>;
+}
+
+impl PreparesContextWarningAdmission for FlowStore {
+    fn prepare_context_warning(
+        &self,
+        metaflow: &flow_ethos::Metaflow,
+        observation: ContextWarningAdmission,
+    ) -> Result<Option<PreparedContextWarning>, StoreError> {
+        use super::context::{NamesFlowModel, RecordsContextSize};
+        use crate::context_warnings::TracksContextWarnings;
+        if observation.tokens.0 < 0
+            || metaflow.state != flow_ethos::MetaflowState::Awake(observation.flow_id.clone())
+            || self.context_size(&observation.flow_id.0)? != Some(observation.tokens.0)
+        {
+            return Ok(None);
+        }
+        let Some(model) = self.flow_model(&observation.flow_id.0)? else {
+            return Ok(None);
+        };
+        let Some(policy) = self.context_warning_policy(&model)? else {
+            return Ok(None);
+        };
+        let Some(node) = self.flow_node(&observation.flow_id.0)? else {
+            return Ok(None);
+        };
+        let native_projection = match node.harness_kind {
+            signal_flow::HarnessKind::Codex => {
+                meta_signal_flow::ContextUsageProjection::CodexLastTotal
+            }
+            signal_flow::HarnessKind::Claude => {
+                meta_signal_flow::ContextUsageProjection::ClaudeCompletedInputWithCache
+            }
+        };
+        if !node.flow_lifecycle.is_live()
+            || policy.context_usage_projection != native_projection
+            || policy
+                .context_warning_limit
+                .context_boundary_evidence
+                .harness_kind
+                != node.harness_kind
+        {
+            return Ok(None);
+        }
+        let held = self.warning_progress(&observation.flow_id.0)?;
+        let existing = held.is_some();
+        let progress = held.unwrap_or_else(|| ContextWarningProgress::initial(observation.flow_id));
+        let Some(crossing) = policy.crossing(&progress, observation.tokens.0) else {
+            return Ok(None);
+        };
+        let Some(boundary) = policy.boundary(&crossing.selected) else {
+            return Ok(None);
+        };
+        let Some(text) = policy.warning_text(&crossing.selected, observation.tokens.0) else {
+            return Ok(None);
+        };
+        let request = flow_ethos::Request::Notice(text);
+        let message = match boundary.warning_priority {
+            meta_signal_flow::WarningPriority::Soft => flow_ethos::Message::Soft(request),
+            meta_signal_flow::WarningPriority::MiddleAbrupt => {
+                flow_ethos::Message::MiddleAbrupt(request)
+            }
+            meta_signal_flow::WarningPriority::HardAbrupt => {
+                flow_ethos::Message::HardAbrupt(request)
+            }
+        };
+        Ok(Some(PreparedContextWarning {
+            progress,
+            crossing,
+            existing,
+            message,
+        }))
+    }
+
+    fn commit_context_warning(
+        &self,
+        prepared: PreparedContextWarning,
+        delivery_id: signal_flow::LogicalDeliveryId,
+        commit: sema_engine::AtomicCommit,
+    ) -> sema_engine::AtomicCommit {
+        use crate::context_warnings::TracksContextWarnings;
+        let next = prepared.progress.admitted(prepared.crossing, delivery_id);
+        if prepared.existing {
+            commit.mutate(self.warning_progress, next)
+        } else {
+            commit.assert(self.warning_progress, next)
+        }
+    }
+}
+
+impl AdmitsContextWarnings for FlowStore {
+    fn admit_context_warning(
+        &self,
+        observation: ContextWarningAdmission,
+    ) -> Result<Option<signal_flow::PrivateSendResponse>, StoreError> {
+        use super::logical_delivery::{LogicalDeliveryTransition, RecordsLogicalDeliveries};
+        use super::metaflow::SleepsMetaflows;
+        let Some(metaflow) = self.metaflow_awake_as(&observation.flow_id.0)? else {
+            return Ok(None);
+        };
+        // This preview avoids allocating a request for an unchanged stage.
+        // Logical admission repeats the judgment under its write gates.
+        let Some(preview) = self.prepare_context_warning(
+            &metaflow,
+            ContextWarningAdmission {
+                flow_id: observation.flow_id.clone(),
+                tokens: observation.tokens.clone(),
+            },
+        )?
+        else {
+            return Ok(None);
+        };
+        self.accept_logical_delivery_for_with_transition(
+            &metaflow.address,
+            flow_ethos::SentBy::Flow,
+            flow_ethos::Delivery::Queue,
+            preview.message,
+            None,
+            LogicalDeliveryTransition {
+                purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
+                context_warning: Some(observation),
+                handover_reminder: None,
+                deliver_call: None,
+                upgrade_notice: None,
+            },
+        )
+        .map(Some)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

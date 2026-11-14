@@ -1985,3 +1985,148 @@ fn warning_configuration_is_validated_persisted_and_removed_per_model() {
             .is_empty()
     );
 }
+
+/// Pure store/operation fixtures: no harness is launched and no submission
+/// stands for receipt. Dispatch custody is explicit at each operation.
+#[test]
+fn warning_admission_binds_actual_delivery_and_survives_reopen_and_policy_removal() {
+    use crate::context_warnings::tests::fixture_policy;
+    use crate::generated::memory::WarningStageState;
+    use crate::generated::operation::{
+        ContextWarning_Data, Record_Data, Record_Data_Context_Data, Tokens,
+    };
+    use crate::store::SeedsRole;
+    use crate::store::context_warnings::ReadsContextWarningProgress;
+    use crate::store::metaflow::SleepsMetaflows;
+    use crate::store::repair::RepairsMetaflows;
+    use meta_signal_flow::WarningStage;
+
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let flow_id = ConfiguredStore::flow_node().flow_id;
+    let mut policy = fixture_policy();
+    policy.context_usage_projection =
+        meta_signal_flow::ContextUsageProjection::ClaudeCompletedInputWithCache;
+    policy
+        .context_warning_limit
+        .context_boundary_evidence
+        .harness_kind = HarnessKind::Claude;
+    nexus.store.seed_role(signal_flow::CallerIdentity {
+        flow_id: flow_id.clone(),
+        aspect: Aspect::Field,
+        model_name: policy.model_name.clone(),
+    });
+    assert_eq!(
+        nexus
+            .store
+            .rebind_current_flow(&ConfiguredStore::message(), &flow_id.0)
+            .unwrap(),
+        Ok(())
+    );
+    configures(
+        &nexus,
+        ConfigurationChange::ContextWarningPolicy(policy.clone()),
+    );
+    let notice = {
+        let _dispatch = nexus.dispatch_gate.lock().unwrap();
+        assert_eq!(
+            nexus.perform(Operation::Record(Record_Data::Context(
+                Record_Data_Context_Data {
+                    flow_id: flow_id.clone(),
+                    tokens: Tokens(180_000),
+                }
+            ))),
+            Outcome::Recorded
+        );
+        let Outcome::ContextWarningAdmitted(id) =
+            nexus.perform(Operation::ContextWarning(ContextWarning_Data {
+                flow_id: flow_id.clone(),
+                tokens: Tokens(180_000),
+            }))
+        else {
+            panic!("crossing admits one notice")
+        };
+        id
+    };
+    let progress = nexus.store.warning_progress(&flow_id.0).unwrap().unwrap();
+    for row in &progress.warning_stage_progress_vector {
+        assert_eq!(
+            row.warning_stage_state,
+            if row.warning_stage == WarningStage::Emergency {
+                WarningStageState::Admitted(notice.clone())
+            } else {
+                WarningStageState::Passed
+            }
+        );
+    }
+    let queue = nexus
+        .store
+        .metaflow(&ConfiguredStore::message())
+        .unwrap()
+        .unwrap()
+        .queue
+        .0;
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0].logical_delivery_id, notice);
+    assert_eq!(
+        queue[0].message,
+        flow_ethos::Message::HardAbrupt(flow_ethos::Request::Notice(
+            policy
+                .warning_boundary_vector
+                .iter()
+                .find(|row| row.warning_stage == WarningStage::Emergency)
+                .unwrap()
+                .warning_text
+                .0
+                .clone()
+        ))
+    );
+    let before = store_bytes(&fixture);
+    {
+        let _dispatch = nexus.dispatch_gate.lock().unwrap();
+        assert_eq!(
+            nexus.perform(Operation::ContextWarning(ContextWarning_Data {
+                flow_id: flow_id.clone(),
+                tokens: Tokens(180_000),
+            })),
+            Outcome::ContextWarningUnchanged
+        );
+    }
+    assert_eq!(store_bytes(&fixture), before);
+    assert!(matches!(
+        nexus.dispatch_meta(meta_signal_flow::Input::Remove(
+            meta_signal_flow::Removal::ContextWarning(policy.model_name.clone())
+        )),
+        MetaResponse::Removed(_)
+    ));
+    assert_eq!(
+        nexus.store.warning_progress(&flow_id.0).unwrap(),
+        Some(progress.clone())
+    );
+    drop(nexus);
+    let reopened = fixture.open();
+    configures(&reopened, ConfigurationChange::ContextWarningPolicy(policy));
+    let _dispatch = reopened.dispatch_gate.lock().unwrap();
+    assert_eq!(
+        reopened.perform(Operation::ContextWarning(ContextWarning_Data {
+            flow_id: flow_id.clone(),
+            tokens: Tokens(180_000),
+        })),
+        Outcome::ContextWarningUnchanged
+    );
+    assert_eq!(
+        reopened.store.warning_progress(&flow_id.0).unwrap(),
+        Some(progress)
+    );
+    assert_eq!(
+        reopened
+            .store
+            .metaflow(&ConfiguredStore::message())
+            .unwrap()
+            .unwrap()
+            .queue
+            .0
+            .len(),
+        1
+    );
+}

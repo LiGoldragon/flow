@@ -22,9 +22,7 @@
 //! The warning is a journal line at warning priority.
 
 use crate::RunningNexus;
-use crate::generated::operation::{Operation, Outcome, Record_Data, Record_Data_Context_Data};
 use crate::model::RunsModel;
-use crate::performing::Performs;
 use crate::store::compaction::{Compaction, Investigation, RecordsCompactions};
 use crate::store::context::RecordsContextSize;
 use crate::store::metaflow::SleepsMetaflows;
@@ -281,6 +279,8 @@ pub trait WatchesCompactions {
     fn session_rebound(&self, flow_id: &str);
     /// A Codex thread's app-server reported a context signal.
     fn codex_context_signal(&self, thread: &str, signal: CodexContextSignal);
+    /// Launch responder already holds dispatch; only usage is admitted here.
+    fn codex_context_signal_with_dispatch(&self, thread: &str, signal: CodexContextSignal);
     /// A Compact was typed into the flow: its next Codex compaction is the
     /// one asked for.
     fn compaction_requested(&self, flow_id: &str);
@@ -341,18 +341,9 @@ impl WatchesCompactions for RunningNexus {
         };
         match signal {
             CodexContextSignal::TokenUsage(tokens) => {
-                if self.perform(Operation::Record(Record_Data::Context(
-                    Record_Data_Context_Data {
-                        flow_id: node.flow_id.clone(),
-                        tokens: crate::generated::operation::Tokens(tokens),
-                    },
-                ))) != Outcome::Recorded
-                {
-                    eprintln!(
-                        "flow-nexus: flow {} context size not recorded",
-                        node.flow_id.0
-                    );
-                }
+                let _dispatch = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+                use crate::context_warnings::ObservesContextWithDispatch;
+                self.observe_context_with_dispatch(&node, tokens);
             }
             CodexContextSignal::Compacted(item) => {
                 let asked = self
@@ -366,6 +357,15 @@ impl WatchesCompactions for RunningNexus {
                     self.raise_compaction(&node, &item, pre_tokens);
                 }
             }
+        }
+    }
+
+    fn codex_context_signal_with_dispatch(&self, thread: &str, signal: CodexContextSignal) {
+        if let CodexContextSignal::TokenUsage(tokens) = signal
+            && let Some(node) = self.codex_flow_on_thread(thread)
+        {
+            use crate::context_warnings::ObservesContextWithDispatch;
+            self.observe_context_with_dispatch(&node, tokens);
         }
     }
 

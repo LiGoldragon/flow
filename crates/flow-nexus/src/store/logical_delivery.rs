@@ -406,6 +406,7 @@ impl HoldsAdmissionAnswers for FlowStore {
 /// changes and lifecycle transitions have one durability boundary.
 pub(crate) struct LogicalDeliveryTransition {
     pub(crate) purpose: crate::heartbeat::DeliveryPurpose,
+    pub(crate) context_warning: Option<super::context_warnings::ContextWarningAdmission>,
     pub(crate) handover_reminder: Option<crate::store::handover_reminders::HandoverReminder>,
     pub(crate) deliver_call: Option<DeliverCallSpec>,
     pub(crate) upgrade_notice: Option<crate::store::request_id_upgrade::UpgradeNoticeAdmission>,
@@ -872,6 +873,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 handover_reminder: None,
                 deliver_call: Some(spec),
                 upgrade_notice: None,
+                context_warning: None,
             },
         )
     }
@@ -1930,6 +1932,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 handover_reminder: None,
                 deliver_call: None,
                 upgrade_notice: None,
+                context_warning: None,
             },
         )
     }
@@ -1950,6 +1953,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 handover_reminder: Some(reminder),
                 deliver_call: None,
                 upgrade_notice: None,
+                context_warning: None,
             },
         )
     }
@@ -1979,6 +1983,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             handover_reminder,
             deliver_call,
             upgrade_notice,
+            context_warning,
         } = transition;
         let admission = if deliver_call.is_some() {
             DeliveryAdmission::Message
@@ -1990,6 +1995,15 @@ impl RecordsLogicalDeliveries for FlowStore {
         // state witness; refuse the stale attempt before creating a second
         // logical Notice.
         if let Some(expected) = handover_reminder.as_ref() {
+            use super::context_warnings::ReadsContextWarningConfiguration;
+            if self
+                .context_warning_policy(&expected.model_name.0)?
+                .is_some()
+            {
+                return Ok(signal_flow::PrivateSendResponse::Refused(
+                    Refusal::Unresolved,
+                ));
+            }
             let stale = || {
                 signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(Unknown_Data::Address(
                     address.clone(),
@@ -2024,6 +2038,24 @@ impl RecordsLogicalDeliveries for FlowStore {
                 Unknown_Data::Address(address.clone()),
             )));
         };
+        // Dispatch is held by the observation caller. These store gates then
+        // keep the live policy/progress judgment and admission one transition.
+        let warning = match context_warning {
+            Some(observation) => {
+                use super::context_warnings::PreparesContextWarningAdmission;
+                let Some(prepared) = self.prepare_context_warning(&stored.metaflow, observation)?
+                else {
+                    return Ok(signal_flow::PrivateSendResponse::Refused(
+                        Refusal::Unresolved,
+                    ));
+                };
+                Some(prepared)
+            }
+            None => None,
+        };
+        let message = warning
+            .as_ref()
+            .map_or(message, |prepared| prepared.message.clone());
         let request = match &message {
             Message::HardAbrupt(request)
             | Message::MiddleAbrupt(request)
@@ -2297,6 +2329,12 @@ impl RecordsLogicalDeliveries for FlowStore {
                 commit.mutate(self.request_id_upgrade.upgrade_assignments, row)
             }
             None => commit,
+        };
+        let commit = if let Some(prepared) = warning {
+            use super::context_warnings::PreparesContextWarningAdmission;
+            self.commit_context_warning(prepared, LogicalDeliveryId(id.clone()), commit)
+        } else {
+            commit
         };
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();

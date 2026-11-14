@@ -628,6 +628,24 @@ impl Performs for RunningNexus {
                     false => Outcome::Failed(Failed_Data::HerdrRefused),
                 }
             }
+            Operation::ContextWarning(observation) => {
+                use crate::store::context_warnings::{
+                    AdmitsContextWarnings, ContextWarningAdmission,
+                };
+                match self.store.admit_context_warning(ContextWarningAdmission {
+                    flow_id: observation.flow_id,
+                    tokens: signal_flow::Tokens(observation.tokens.0),
+                }) {
+                    Ok(Some(signal_flow::PrivateSendResponse::SendAccepted(accepted))) => {
+                        Outcome::ContextWarningAdmitted(accepted.logical_delivery_id)
+                    }
+                    Ok(None)
+                    | Ok(Some(signal_flow::PrivateSendResponse::Refused(
+                        signal_flow::Refusal::Unresolved,
+                    ))) => Outcome::ContextWarningUnchanged,
+                    _ => Outcome::Failed(Failed_Data::StoreRefused),
+                }
+            }
             Operation::Wake(address) => self.wake(address),
             Operation::Drain(address) => self.drain(address),
         }

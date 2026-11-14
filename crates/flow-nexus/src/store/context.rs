@@ -152,6 +152,51 @@ pub trait JudgesThreshold {
 
 impl JudgesThreshold for FlowStore {
     fn threshold_standing(&self, flow_id: &str) -> Result<ThresholdStanding, StoreError> {
+        use super::context_warnings::{
+            ReadsContextWarningConfiguration, ReadsContextWarningProgress,
+        };
+        use crate::context_warnings::{JudgesContextWarnings, TracksContextWarnings};
+        if let Some(model) = self.flow_model(flow_id)?
+            && let Some(policy) = self.context_warning_policy(&model)?
+        {
+            let Some(context) = self.context_size(flow_id)? else {
+                return Ok(ThresholdStanding::Unmeasured);
+            };
+            let refresh = policy
+                .stage_tokens(&meta_signal_flow::WarningStage::Middle)
+                .ok_or(StoreError::StateInvariant)?;
+            let progress = self.warning_progress(flow_id)?.unwrap_or_else(|| {
+                super::context_warnings::ContextWarningProgress::initial(signal_flow::FlowId(
+                    flow_id.into(),
+                ))
+            });
+            let emergency = !progress.unreached(&meta_signal_flow::WarningStage::Emergency)
+                || policy.emergency_reached(context);
+            let middle =
+                !progress.unreached(&meta_signal_flow::WarningStage::Middle) || context >= refresh;
+            use super::handover::HoldsHandovers;
+            use super::metaflow::SleepsMetaflows;
+            let qualified = if middle {
+                match self.metaflow_awake_as(flow_id)? {
+                    Some(metaflow) => self.handover_memory(&metaflow.address)?.is_some_and(|row| {
+                        row.flow_id_option.as_ref().map(|id| id.0.as_str()) == Some(flow_id)
+                            && matches!(row.touch_option, Some(signal_flow::Touch::Known(touch))
+                                if touch.flow_id.0 == flow_id && touch.tokens.0 >= refresh)
+                    }),
+                    None => false,
+                }
+            } else {
+                false
+            };
+            use crate::protecting::ProtectsFlows;
+            return Ok(if !(emergency || qualified) {
+                ThresholdStanding::Below { context, refresh }
+            } else if self.protected_address(flow_id)?.is_some() {
+                ThresholdStanding::Protected { context, refresh }
+            } else {
+                ThresholdStanding::Past { context, refresh }
+            });
+        }
         let threshold = match self.flow_model(flow_id)? {
             Some(model) => self.configured_threshold(&model)?,
             None => None,

@@ -131,6 +131,13 @@ pub enum Record_Data {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ContextWarning_Data {
+    pub flow_id: signal_flow::FlowId,
+    pub tokens: Tokens,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Register_Data {
     pub flow_node: signal_flow::FlowNode,
     pub caller_identity: signal_flow::CallerIdentity,
@@ -163,6 +170,7 @@ pub enum Operation {
     Compose(signal_flow::LaunchProfile),
     Reserve(Reserve_Data),
     Record(Record_Data),
+    ContextWarning(ContextWarning_Data),
     Register(Register_Data),
     Confirm(signal_flow::FlowId),
     Open(Open_Data),
@@ -213,6 +221,8 @@ pub enum Outcome {
     Composed(signal_flow::ComposedLaunch),
     Reserved(Reserved_Data),
     Recorded,
+    ContextWarningAdmitted(signal_flow::LogicalDeliveryId),
+    ContextWarningUnchanged,
     Registered(signal_flow::FlowNode),
     Started(signal_flow::Launched),
     Opened(signal_flow::HerdrPaneBinding),

@@ -22,6 +22,7 @@ pub(crate) trait JudgesContextWarnings {
     ) -> Option<WarningCrossing>;
     fn boundary(&self, stage: &WarningStage) -> Option<&WarningBoundary>;
     fn emergency_reached(&self, context_tokens: i64) -> bool;
+    fn stage_tokens(&self, stage: &WarningStage) -> Option<i64>;
     fn warning_text(&self, stage: &WarningStage, context_tokens: i64) -> Option<String>;
 }
 
@@ -136,6 +137,14 @@ impl JudgesContextWarnings for ContextWarningPolicy {
                 })
     }
 
+    fn stage_tokens(&self, stage: &WarningStage) -> Option<i64> {
+        self.validate().ok()?;
+        let boundary = self.boundary(stage)?;
+        let numerator = i128::from(self.context_warning_limit.warning_tokens.0)
+            * (100 - i128::from(boundary.remaining_percent.0));
+        i64::try_from((numerator + 99) / 100).ok()
+    }
+
     fn warning_text(&self, stage: &WarningStage, context_tokens: i64) -> Option<String> {
         self.validate().ok()?;
         let boundary = self.boundary(stage)?;
@@ -190,6 +199,91 @@ impl TracksContextWarnings for ContextWarningProgress {
             }
         }
         self
+    }
+}
+
+/// Observation already owns the runtime dispatch turn. Record.Context and
+/// warning admission happen together in that turn, with no native transport.
+pub(crate) trait ObservesContextWithDispatch {
+    fn observe_context_with_dispatch(&self, observed: &signal_flow::FlowNode, tokens: i64);
+}
+
+impl ObservesContextWithDispatch for crate::RunningNexus {
+    fn observe_context_with_dispatch(&self, observed: &signal_flow::FlowNode, tokens: i64) {
+        use crate::generated::operation::{
+            ContextWarning_Data, Operation, Outcome, Record_Data, Record_Data_Context_Data, Tokens,
+        };
+        use crate::performing::Performs;
+        use crate::store::ReadsFlowRows;
+        use crate::store::metaflow::SleepsMetaflows;
+        if tokens < 0 {
+            return;
+        }
+        let Ok(Some(current)) = self.store.flow_node(&observed.flow_id.0) else {
+            return;
+        };
+        if current.session_id != observed.session_id
+            || current.harness_kind != observed.harness_kind
+            || !current.flow_lifecycle.is_live()
+            || !matches!(
+                self.store.metaflow_awake_as(&observed.flow_id.0),
+                Ok(Some(_))
+            )
+        {
+            return;
+        }
+        if self.perform(Operation::Record(Record_Data::Context(
+            Record_Data_Context_Data {
+                flow_id: observed.flow_id.clone(),
+                tokens: Tokens(tokens),
+            },
+        ))) == Outcome::Recorded
+        {
+            if matches!(
+                self.perform(Operation::ContextWarning(ContextWarning_Data {
+                    flow_id: observed.flow_id.clone(),
+                    tokens: Tokens(tokens),
+                })),
+                Outcome::Failed(_)
+            ) {
+                eprintln!("flow-nexus: context warning admission failed");
+            }
+        } else {
+            eprintln!("flow-nexus: context size not recorded");
+        }
+    }
+}
+
+/// A named attributed ToolUsed/Stop event reads the last persisted call.
+/// Claude may still be writing the current call: this preserves that lag.
+pub(crate) trait ObservesClaudeContext {
+    fn observe_claude_context(&self, flow_id: &str);
+}
+
+impl ObservesClaudeContext for crate::RunningNexus {
+    fn observe_claude_context(&self, flow_id: &str) {
+        use crate::claude::MeasuresClaudeContext;
+        use crate::store::ReadsFlowRows;
+        use crate::waking::ReadsClaudeDelivery;
+        use signal_flow::HarnessKind;
+        let Ok(Some(node)) = self.store.flow_node(flow_id) else {
+            return;
+        };
+        if node.harness_kind != HarnessKind::Claude {
+            return;
+        }
+        let Some(tokens) = self
+            .claude_transcript(&node)
+            .and_then(|transcript| transcript.context_tokens())
+        else {
+            eprintln!("flow-nexus: flow {flow_id} stopped with no context size readable");
+            return;
+        };
+        // Reading the persisted last call precedes exclusion; the held
+        // observer revalidates its native session and current owner.
+        let _dispatch = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+        use crate::context_warnings::ObservesContextWithDispatch;
+        self.observe_context_with_dispatch(&node, tokens);
     }
 }
 

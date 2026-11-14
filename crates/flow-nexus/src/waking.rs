@@ -104,7 +104,6 @@ use crate::delivery::{DeliversMessages, FindsDeliveryTarget, ReadsLeasedPane};
 use crate::generated::memory::{Device, Inode, Offset};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
-    Record_Data_Context_Data,
 };
 use crate::generated::starter::ProfilesFreshSeat;
 use crate::herdr::pane::{PaneAgent, WritesPane};
@@ -781,7 +780,6 @@ trait WakesInParts {
     fn last_launch_profile(&self, flow_id: &str) -> Option<LaunchProfile>;
     /// Writes the context size the flow's native transcript shows now, the
     /// size a Compact of the flow is judged by.
-    fn record_context_at_stop(&self, flow_id: &str);
     /// Refuses a wake while a pane already runs this flow's native session:
     /// SessionLive when one does, HerdrUnreadable when Herdr is unreadable.
     fn refuse_live_session(&self, node: &FlowNode, sessions: &[String]) -> Result<(), WakeRefusal>;
@@ -3559,31 +3557,6 @@ impl WakesInParts for RunningNexus {
             .flatten()
     }
 
-    fn record_context_at_stop(&self, flow_id: &str) {
-        let Ok(Some(node)) = self.store.flow_node(flow_id) else {
-            return;
-        };
-        if node.harness_kind != HarnessKind::Claude {
-            return;
-        }
-        let Some(tokens) = self
-            .claude_transcript(&node)
-            .and_then(|transcript| transcript.context_tokens())
-        else {
-            eprintln!("flow-nexus: flow {flow_id} stopped with no context size readable");
-            return;
-        };
-        if self.perform(Operation::Record(Record_Data::Context(
-            Record_Data_Context_Data {
-                flow_id: signal_flow::FlowId(flow_id.to_owned()),
-                tokens: crate::generated::operation::Tokens(tokens),
-            },
-        ))) != Outcome::Recorded
-        {
-            eprintln!("flow-nexus: flow {flow_id} context size not recorded");
-        }
-    }
-
     fn refuse_live_session(&self, node: &FlowNode, sessions: &[String]) -> Result<(), WakeRefusal> {
         let mut checked = HashSet::new();
         for herdr_session_name in sessions {
@@ -3900,7 +3873,7 @@ impl WakesInParts for RunningNexus {
     }
 
     fn settle_rested(&self, flow_id: &str) -> AtStop {
-        self.record_context_at_stop(flow_id);
+        crate::context_warnings::ObservesClaudeContext::observe_claude_context(self, flow_id);
         // Whether the flow was sent its handover warning before this idle
         // event: one warned only by this event's own reminder pass has yet
         // to read it, and is refreshed at its next idle event.
@@ -3978,12 +3951,25 @@ impl WakesInParts for RunningNexus {
         let refresh_due = match self.store.threshold_standing(flow_id) {
             Ok(crate::store::context::ThresholdStanding::Past { .. }) => true,
             Ok(crate::store::context::ThresholdStanding::Below { refresh, .. }) => {
-                use crate::protecting::ProtectsFlows;
-                let warned = warned
-                    || match self.store.handover_green(&address, flow_id, refresh) {
-                        Ok(green) => green,
+                use crate::store::context::NamesFlowModel;
+                use crate::store::context_warnings::ReadsContextWarningConfiguration;
+                // Configured policy already decided Middle/handover and
+                // Emergency in threshold_standing; legacy reminders add none.
+                let configured_warning = match self.store.flow_model(flow_id) {
+                    Ok(Some(model)) => match self.store.context_warning_policy(&model) {
+                        Ok(policy) => policy.is_some(),
                         Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
-                    };
+                    },
+                    Ok(None) => false,
+                    Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+                };
+                use crate::protecting::ProtectsFlows;
+                let warned = !configured_warning
+                    && (warned
+                        || match self.store.handover_green(&address, flow_id, refresh) {
+                            Ok(green) => green,
+                            Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+                        });
                 warned
                     && match self.store.protected_address(flow_id) {
                         Ok(protected) => protected.is_none(),

@@ -2150,6 +2150,14 @@ fn a_v9_store_with_a_refused_reap_upgrades_in_one_commit() {
         upgraded,
         "a second open is a no-op"
     );
+    // The chain's next step, which the configured open runs after this
+    // one, takes the family from v10 on to the current format.
+    {
+        use crate::store::recovery_upgrade::UpgradesRecoveryMemory;
+        let mut engine = evolving_engine(&path);
+        crate::store::FlowStore::upgrade_recovery_memory(&mut engine)
+            .expect("v10 upgrades to the current family");
+    }
     world.fixture.restarted();
     let id = world.launch.profile.launch_request_id.0.clone();
     assert!(matches!(

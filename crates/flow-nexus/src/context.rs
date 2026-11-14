@@ -29,32 +29,23 @@ use crate::generated::curriculum::{
     CallerMetaflow, ContextProvenance, Outcome as CurriculumOutcome, Query as CurriculumQuery,
     StartupComposition, StartupPlacement, StartupSelection, Target,
 };
+use crate::generated::emission::{CurriculumExchange, Emittable};
 pub use crate::generated::starter::{
-    ComposesFlowContext, ContextRequest, ContextRequesting, CurriculumQuerying, CutsRenderedText,
-    ExchangesCurriculumFrames, OpensCurriculumComposer, ProvenanceListing, ReadsVerifiedContext,
-    SelectsStartup, StartupComposing, Textual, VerifiesContext,
+    ComposesFlowContext, ContextRequest, ContextRequesting, CutsRenderedText,
+    OpensCurriculumComposer, ProvenanceListing, ReadsVerifiedContext, SelectsStartup,
+    StartupComposing, Textual, VerifiesContext,
 };
 use crate::model::RunsModel;
 use sha2::{Digest, Sha256};
 use signal_flow::{Address, Aspect, ContextRefusal, HarnessKind};
-use std::{
-    io::{Read, Write},
-    os::unix::net::UnixStream,
-    path::PathBuf,
-    time::Duration,
-};
+use std::path::PathBuf;
 
 /// The Curriculum Nexus, asked over its Unix socket: one big-endian u32
 /// length-prefixed rkyv `Query` frame out, one `Outcome` frame back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurriculumComposer {
-    socket: PathBuf,
+    pub(crate) socket: PathBuf,
 }
-
-/// How long one composition may take on the Curriculum socket.
-const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(30);
-/// The largest Curriculum answer frame read: generous for two texts.
-const ANSWER_FRAME_LIMIT: usize = 64 * 1024 * 1024;
 /// The opening line of a rendered context text.
 pub const CONTEXT_OPENING: &str = "These are your skills, given here; do not reload them.";
 
@@ -121,29 +112,35 @@ impl ResolvesModule for ContextComposer {
 /// answer that cannot be read, or any other refusal is Unreachable.
 impl ResolvesModule for CurriculumComposer {
     fn resolve_module(&self, identity: &signal_flow::ModuleIdentity) -> ModuleStanding {
-        match self.exchange(CurriculumQuery::ResolveSources(vec![
-            crate::generated::curriculum::ModuleIdentity(identity.0.clone()),
-        ])) {
-            Ok(CurriculumOutcome::ResolvedSources(modules))
+        match CurriculumQuery::ResolveSources(vec![crate::generated::curriculum::ModuleIdentity(
+            identity.0.clone(),
+        )])
+        .emit(self)
+        {
+            CurriculumExchange::Answered(CurriculumOutcome::ResolvedSources(modules))
                 if modules
                     .iter()
                     .any(|module| module.module_identity.0 == identity.0) =>
             {
                 ModuleStanding::Held
             }
-            Ok(CurriculumOutcome::ResolvedSources(_)) => ModuleStanding::Unknown,
-            Ok(CurriculumOutcome::Rejected(reason)) if reason.starts_with("missing module") => {
+            CurriculumExchange::Answered(CurriculumOutcome::ResolvedSources(_)) => {
                 ModuleStanding::Unknown
             }
-            Ok(CurriculumOutcome::Rejected(reason)) => {
+            CurriculumExchange::Answered(CurriculumOutcome::Rejected(reason))
+                if reason.starts_with("missing module") =>
+            {
+                ModuleStanding::Unknown
+            }
+            CurriculumExchange::Answered(CurriculumOutcome::Rejected(reason)) => {
                 eprintln!(
                     "flow-nexus: Curriculum could not resolve {}: {reason}",
                     identity.0
                 );
                 ModuleStanding::Unreachable
             }
-            Ok(_) => ModuleStanding::Unreachable,
-            Err(error) => {
+            CurriculumExchange::Answered(_) => ModuleStanding::Unreachable,
+            CurriculumExchange::Unexchanged(error) => {
                 eprintln!(
                     "flow-nexus: Curriculum unreachable resolving {}: {error}",
                     identity.0
@@ -213,67 +210,36 @@ impl SelectsStartup for ContextRequest {
     }
 }
 
-/// One big-endian u32 length-prefixed rkyv `Query` frame out, one
-/// `Outcome` frame back.
-impl ExchangesCurriculumFrames for CurriculumComposer {
-    fn exchange<N: CurriculumQuerying>(&self, input: N) -> Result<CurriculumOutcome, String> {
-        let request = rkyv::to_bytes::<rkyv::rancor::Error>(&input.query())
-            .map_err(|error| format!("query not archived: {error}"))?;
-        let length = u32::try_from(request.len()).map_err(|_| "query frame too large")?;
-        let mut stream = UnixStream::connect(&self.socket)
-            .map_err(|error| format!("Curriculum socket unreachable: {error}"))?;
-        stream
-            .set_read_timeout(Some(EXCHANGE_TIMEOUT))
-            .and_then(|_| stream.set_write_timeout(Some(EXCHANGE_TIMEOUT)))
-            .map_err(|error| error.to_string())?;
-        stream
-            .write_all(&length.to_be_bytes())
-            .and_then(|_| stream.write_all(&request))
-            .and_then(|_| stream.flush())
-            .map_err(|error| format!("query not written: {error}"))?;
-        let mut prefix = [0_u8; 4];
-        stream
-            .read_exact(&mut prefix)
-            .map_err(|error| format!("answer not read: {error}"))?;
-        let length = u32::from_be_bytes(prefix) as usize;
-        if length > ANSWER_FRAME_LIMIT {
-            return Err("answer frame exceeds its limit".into());
-        }
-        let mut frame = vec![0_u8; length];
-        stream
-            .read_exact(&mut frame)
-            .map_err(|error| format!("answer not read: {error}"))?;
-        rkyv::from_bytes::<CurriculumOutcome, rkyv::rancor::Error>(&frame)
-            .map_err(|error| format!("answer unreadable: {error}"))
-    }
-}
-
 impl ComposesFlowContext for CurriculumComposer {
     fn compose_flow_context<N: ContextRequesting>(
         &self,
         input: N,
     ) -> Result<StartupComposition, ContextRefusal> {
-        match self.exchange(CurriculumQuery::ComposeStartup(
-            input.context_request().startup_selection(),
-        )) {
-            Ok(CurriculumOutcome::StartupComposed(composition)) => Ok(composition),
+        match CurriculumQuery::ComposeStartup(input.context_request().startup_selection())
+            .emit(self)
+        {
+            CurriculumExchange::Answered(CurriculumOutcome::StartupComposed(composition)) => {
+                Ok(composition)
+            }
             // Curriculum names a remembered flow whose records it could not
             // read "record missing".
-            Ok(CurriculumOutcome::Rejected(reason)) if reason.starts_with("record missing") => {
+            CurriculumExchange::Answered(CurriculumOutcome::Rejected(reason))
+                if reason.starts_with("record missing") =>
+            {
                 eprintln!("flow-nexus: Curriculum found no records: {reason}");
                 Err(ContextRefusal::RecordMissing)
             }
-            Ok(CurriculumOutcome::Rejected(reason)) => {
+            CurriculumExchange::Answered(CurriculumOutcome::Rejected(reason)) => {
                 eprintln!("flow-nexus: Curriculum rejected the context request: {reason}");
                 Err(ContextRefusal::ComposerRejected(reason))
             }
-            Ok(_) => {
+            CurriculumExchange::Answered(_) => {
                 eprintln!("flow-nexus: Curriculum answered the context request with another reply");
                 Err(ContextRefusal::ComposerRejected(
                     "Curriculum answered the context request with another reply".into(),
                 ))
             }
-            Err(error) => {
+            CurriculumExchange::Unexchanged(error) => {
                 eprintln!("flow-nexus: context composer unavailable: {error}");
                 Err(ContextRefusal::ComposerUnavailable)
             }

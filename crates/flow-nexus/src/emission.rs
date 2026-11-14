@@ -3,8 +3,9 @@
 //! external call and observes its outcome.
 
 use crate::generated::emission::{
-    AgentStatus, AgentTarget, AgentWait, Emittable, Focus, HerdrCommand, HerdrSessionCommand,
-    MetadataSource, OutputSource, Printout, ProcessReply, ScreenFormat, Stderr, Stdout,
+    AgentStatus, AgentTarget, AgentWait, CurriculumExchange, Emittable, Focus, HerdrCommand,
+    HerdrSessionCommand, MetadataSource, OutputSource, Printout, ProcessReply, ScreenFormat,
+    Stderr, Stdout,
 };
 use crate::herdr::HerdrCli;
 use crate::herdr::launch::NamesHerdrHarness;
@@ -437,5 +438,65 @@ impl AddressesHerdrSession for HerdrCommand {
             herdr_session_name: herdr_session_name.clone(),
             herdr_session_command,
         })
+    }
+}
+
+/// How long one exchange may take on the Curriculum socket.
+const CURRICULUM_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// The largest Curriculum answer frame read: generous for two texts.
+const CURRICULUM_ANSWER_FRAME_LIMIT: usize = 64 * 1024 * 1024;
+
+/// One query to the Curriculum Nexus: one big-endian u32 length-prefixed
+/// rkyv `Query` frame out on a fresh connection, one `Outcome` frame back.
+impl Emittable<crate::context::CurriculumComposer> for crate::CurriculumQuery {
+    fn emit(&self, composer: &crate::context::CurriculumComposer) -> CurriculumExchange {
+        match self.framed_exchange(&composer.socket) {
+            Ok(outcome) => CurriculumExchange::Answered(outcome),
+            Err(error) => CurriculumExchange::Unexchanged(error),
+        }
+    }
+}
+
+/// The frames of one Curriculum exchange, written and read on the socket;
+/// the error is the transport's own account of the step that failed.
+trait ExchangesCurriculumFrame {
+    fn framed_exchange(&self, socket: &std::path::Path)
+    -> Result<crate::CurriculumOutcome, String>;
+}
+
+impl ExchangesCurriculumFrame for crate::CurriculumQuery {
+    fn framed_exchange(
+        &self,
+        socket: &std::path::Path,
+    ) -> Result<crate::CurriculumOutcome, String> {
+        use std::io::{Read, Write};
+        let request = rkyv::to_bytes::<rkyv::rancor::Error>(self)
+            .map_err(|error| format!("query not archived: {error}"))?;
+        let length = u32::try_from(request.len()).map_err(|_| "query frame too large")?;
+        let mut stream = std::os::unix::net::UnixStream::connect(socket)
+            .map_err(|error| format!("Curriculum socket unreachable: {error}"))?;
+        stream
+            .set_read_timeout(Some(CURRICULUM_EXCHANGE_TIMEOUT))
+            .and_then(|_| stream.set_write_timeout(Some(CURRICULUM_EXCHANGE_TIMEOUT)))
+            .map_err(|error| error.to_string())?;
+        stream
+            .write_all(&length.to_be_bytes())
+            .and_then(|_| stream.write_all(&request))
+            .and_then(|_| stream.flush())
+            .map_err(|error| format!("query not written: {error}"))?;
+        let mut prefix = [0_u8; 4];
+        stream
+            .read_exact(&mut prefix)
+            .map_err(|error| format!("answer not read: {error}"))?;
+        let length = u32::from_be_bytes(prefix) as usize;
+        if length > CURRICULUM_ANSWER_FRAME_LIMIT {
+            return Err("answer frame exceeds its limit".into());
+        }
+        let mut frame = vec![0_u8; length];
+        stream
+            .read_exact(&mut frame)
+            .map_err(|error| format!("answer not read: {error}"))?;
+        rkyv::from_bytes::<crate::CurriculumOutcome, rkyv::rancor::Error>(&frame)
+            .map_err(|error| format!("answer unreadable: {error}"))
     }
 }

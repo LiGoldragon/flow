@@ -26,7 +26,7 @@ Library
                  ContextRefusal SystemPrompt HerdrPaneBinding
                  PromptDeliveryResult Output Launched
                  NativeLaunchFailure ]
-  flow_nexus:[ StartupSelection StartupComposition ContextProvenance CurriculumQuery CurriculumOutcome CompositionError VerifiedContext OperationOutcome CallerProcess ]
+  flow_nexus:[ StartupSelection StartupComposition ContextProvenance CompositionError VerifiedContext OperationOutcome CallerProcess ]
   serde_json:JsonValue.Value ]
 [ ; The flows a launch remembers, as Flow resolved its Remembering: their
   ; raw vision and notion records are composed into its first message.
@@ -66,7 +66,6 @@ Library
   LeaveOutListing.[ leave_outs.[ LeaveOuts ] ]
   ContextRequesting.[ context_request.[ ContextRequest ] ]
   StartupComposing.[ composition.[ StartupComposition ] ]
-  CurriculumQuerying.[ query.[ CurriculumQuery ] ]
   ProvenanceListing.[ provenance.[ Vector<ContextProvenance> ] ]
   SegmentListing.[ segments.[ Vector<String> ] ]
   PartNumbering.[ part_number.[ Integer ]
@@ -83,7 +82,6 @@ Library
   ComposesFlowContext.[ compose_flow_context.{ [ ContextRequesting ] [ Result<StartupComposition ContextRefusal> ] } ]
   OpensCurriculumComposer.[ at:{ [ Textual ] [ Self ] } ]
   SelectsStartup.[ startup_selection.[ StartupSelection ] ]
-  ExchangesCurriculumFrames.[ exchange.{ [ CurriculumQuerying ] [ Result<CurriculumOutcome String> ] } ]
   VerifiesContext.[ verified:{ [ ContextRequesting StartupComposing ] [ Result<Self ContextRefusal> ] } ]
   ReadsVerifiedContext.[ address.[ Address ]
                          system_text.[ String ]

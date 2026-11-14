@@ -45,6 +45,22 @@ pub enum CompositionError {
     LeaveOut(LeaveOutRefusal),
     #[error("the Psyche core presentation prompt is unavailable: {0}")]
     PresentationPromptUnavailable(String),
+    #[error("successor recovery could not be read for {predecessor:?} at {address:?}: {reason}")]
+    RecoveryUnavailable {
+        address: Address,
+        predecessor: signal_flow::FlowId,
+        reason: String,
+    },
+    #[error(
+        "successor recovery predecessor does not match {expected_predecessor:?} at {address:?}"
+    )]
+    RecoveryPredecessorMismatch {
+        address: Address,
+        recorded_address: Address,
+        expected_predecessor: signal_flow::FlowId,
+        intent_predecessor: signal_flow::FlowId,
+        recovery_predecessor: signal_flow::FlowId,
+    },
     #[error("the handover of {predecessor} could not be read: {fault:?}")]
     HandoverUnreadable {
         predecessor: String,
@@ -64,6 +80,7 @@ pub struct LaunchComposer {
     context: ContextComposer,
     presentation_prompt_option: Option<String>,
     handover: Arc<dyn YieldsHandover>,
+    successor_recovery: Arc<dyn ReadsSuccessorRecovery>,
 }
 
 /// A launch composer resolves a module through the context composer it
@@ -140,11 +157,55 @@ impl ComposesPresentationRole for LaunchComposer {
     }
 }
 
+pub trait ReadsSuccessorRecovery: std::fmt::Debug + Send + Sync {
+    fn successor_intent(
+        &self,
+        address: &Address,
+    ) -> Result<Option<crate::generated::memory::SuccessorIntent>, crate::store::StoreError>;
+    fn successor_recovery_text(
+        &self,
+    ) -> Result<meta_signal_flow::SuccessorRecoveryText, crate::store::StoreError>;
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct FixtureSuccessorRecovery {
+    pub intent: Option<crate::generated::memory::SuccessorIntent>,
+    pub text: meta_signal_flow::SuccessorRecoveryText,
+}
+#[cfg(test)]
+impl Default for FixtureSuccessorRecovery {
+    fn default() -> Self {
+        Self {
+            intent: None,
+            text: meta_signal_flow::SuccessorRecoveryText(String::new()),
+        }
+    }
+}
+#[cfg(test)]
+impl ReadsSuccessorRecovery for FixtureSuccessorRecovery {
+    fn successor_intent(
+        &self,
+        _address: &Address,
+    ) -> Result<Option<crate::generated::memory::SuccessorIntent>, crate::store::StoreError> {
+        Ok(self.intent.clone())
+    }
+    fn successor_recovery_text(
+        &self,
+    ) -> Result<meta_signal_flow::SuccessorRecoveryText, crate::store::StoreError> {
+        Ok(self.text.clone())
+    }
+}
+
 pub trait OpensLaunchComposer {
-    fn with_context(context: ContextComposer) -> Self;
+    fn with_context(
+        context: ContextComposer,
+        successor_recovery: Arc<dyn ReadsSuccessorRecovery>,
+    ) -> Self;
     fn with_presentation_prompt(
         context: ContextComposer,
         presentation_prompt_option: Option<String>,
+        successor_recovery: Arc<dyn ReadsSuccessorRecovery>,
     ) -> Self;
     /// The composer with another source of predecessors' handovers, in place
     /// of the files of [`HandoverFile`].
@@ -152,22 +213,28 @@ pub trait OpensLaunchComposer {
 }
 
 impl OpensLaunchComposer for LaunchComposer {
-    fn with_context(context: ContextComposer) -> Self {
+    fn with_context(
+        context: ContextComposer,
+        successor_recovery: Arc<dyn ReadsSuccessorRecovery>,
+    ) -> Self {
         Self {
             context,
             presentation_prompt_option: None,
             handover: Arc::new(HandoverFile),
+            successor_recovery,
         }
     }
 
     fn with_presentation_prompt(
         context: ContextComposer,
         presentation_prompt_option: Option<String>,
+        successor_recovery: Arc<dyn ReadsSuccessorRecovery>,
     ) -> Self {
         Self {
             context,
             presentation_prompt_option,
             handover: Arc::new(HandoverFile),
+            successor_recovery,
         }
     }
 
@@ -190,11 +257,64 @@ pub enum HandoverRoot<'a> {
     Unresolved,
 }
 
+trait ReadsEmergencyPredecessor {
+    fn emergency_predecessor(
+        &self,
+        profile: &LaunchProfile,
+    ) -> Result<
+        Option<crate::generated::memory::EmergencyRefreshWithoutHandover_Data>,
+        CompositionError,
+    >;
+}
+impl ReadsEmergencyPredecessor for LaunchComposer {
+    fn emergency_predecessor(
+        &self,
+        profile: &LaunchProfile,
+    ) -> Result<
+        Option<crate::generated::memory::EmergencyRefreshWithoutHandover_Data>,
+        CompositionError,
+    > {
+        let Some(predecessor) = profile.flow_id_option.as_ref() else {
+            return Ok(None);
+        };
+        let Some(intent) = self
+            .successor_recovery
+            .successor_intent(&profile.address)
+            .map_err(|error| CompositionError::RecoveryUnavailable {
+                address: profile.address.clone(),
+                predecessor: predecessor.clone(),
+                reason: error.to_string(),
+            })?
+        else {
+            return Ok(None);
+        };
+        let crate::generated::memory::SuccessionCause::EmergencyRefreshWithoutHandover(provenance) =
+            intent.succession_cause
+        else {
+            return Ok(None);
+        };
+        if intent.address != profile.address
+            || intent.predecessor.0 != predecessor.0
+            || provenance.flow_id != *predecessor
+        {
+            return Err(CompositionError::RecoveryPredecessorMismatch {
+                address: profile.address.clone(),
+                recorded_address: intent.address,
+                expected_predecessor: predecessor.clone(),
+                intent_predecessor: signal_flow::FlowId(intent.predecessor.0),
+                recovery_predecessor: provenance.flow_id,
+            });
+        }
+        Ok(Some(provenance))
+    }
+}
+
 trait ReadsHandover {
     fn handover_text(
         &self,
         profile: &LaunchProfile,
         launch_root: HandoverRoot<'_>,
+        recovery: Option<&crate::generated::memory::EmergencyRefreshWithoutHandover_Data>,
     ) -> Result<Option<String>, CompositionError>;
 }
 
@@ -209,6 +329,7 @@ impl ReadsHandover for LaunchComposer {
         &self,
         profile: &LaunchProfile,
         launch_root: HandoverRoot<'_>,
+        recovery: Option<&crate::generated::memory::EmergencyRefreshWithoutHandover_Data>,
     ) -> Result<Option<String>, CompositionError> {
         let Some(predecessor) = profile
             .flow_id_option
@@ -234,7 +355,27 @@ impl ReadsHandover for LaunchComposer {
             .handover(&profile.address, predecessor, launch_root)
         {
             Handover::Text(text) => Ok(Some(text)),
-            Handover::Absent => Ok(None),
+            Handover::Absent => {
+                match recovery {
+                    None => Ok(None),
+                    Some(provenance) => {
+                        let text =
+                            self.successor_recovery
+                                .successor_recovery_text()
+                                .map_err(|error| CompositionError::RecoveryUnavailable {
+                                    address: profile.address.clone(),
+                                    predecessor: signal_flow::FlowId(predecessor.to_owned()),
+                                    reason: error.to_string(),
+                                })?;
+                        let cause = crate::generated::memory::SuccessionCause::EmergencyRefreshWithoutHandover(provenance.clone());
+                        Ok(Some(format!(
+                            "{}\n\n{}",
+                            text.0,
+                            cause.datomize(Vec::new()).protosize().compact()
+                        )))
+                    }
+                }
+            }
             Handover::Unreadable(fault) => Err(refused(fault)),
         }
     }
@@ -703,6 +844,7 @@ impl ComposesInRoot for LaunchComposer {
         } else {
             harnessed.brief()
         };
+        let recovery = self.emergency_predecessor(&harnessed.launch_profile)?;
         let mut segments = verified.user_segments();
         // The raw records of the flows the launch remembers follow its
         // prompt modules, as one segment, ahead of the brief.
@@ -718,17 +860,19 @@ impl ComposesInRoot for LaunchComposer {
             // instruction remains the first user message; an empty one does
             // not create a context-only startup turn.
             let system_prompt = self.launch_system_prompt(&harnessed, &verified, &segments)?;
-            let handover = if brief.is_empty() {
+            let handover = if brief.is_empty() && recovery.is_none() {
                 None
             } else {
-                self.handover_text(&harnessed.launch_profile, launch_root)?
+                self.handover_text(&harnessed.launch_profile, launch_root, recovery.as_ref())?
             };
             let brief = match &handover {
                 Some(handover) => vec![brief].placed_last(handover).concat(),
                 None => brief,
             };
             let brief = match open_requests.successor_text(&harnessed.launch_profile) {
-                Some(open) if !brief.is_empty() => vec![brief].placed_last(&open).concat(),
+                Some(open) if !brief.is_empty() || recovery.is_some() => {
+                    vec![brief].placed_last(&open).concat()
+                }
                 _ => brief,
             };
             let parts = if brief.is_empty() {
@@ -755,7 +899,9 @@ impl ComposesInRoot for LaunchComposer {
         // The handover follows the brief, and the open requests follow the
         // handover, the last piece of the message.
         let mut pieces = segments.joined_with(&brief);
-        if let Some(handover) = &self.handover_text(&harnessed.launch_profile, launch_root)? {
+        if let Some(handover) =
+            &self.handover_text(&harnessed.launch_profile, launch_root, recovery.as_ref())?
+        {
             pieces = pieces.placed_last(handover);
         }
         if let Some(open) = open_requests.successor_text(&harnessed.launch_profile) {
@@ -956,16 +1102,17 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn fixture_composer() -> LaunchComposer {
-        LaunchComposer::with_context(crate::context::ContextComposer(std::sync::Arc::new(
-            FixtureComposer::from(
+        LaunchComposer::with_context(
+            crate::context::ContextComposer(std::sync::Arc::new(FixtureComposer::from(
                 &[
                     ("spirit:core:0", "Spirit body."),
                     ("intent:flow:0", "Intent body."),
                     ("operation:main-flow:0", "Main flow body."),
                     ("knowledge:flow:0", "Knowledge body."),
                 ][..],
-            ),
-        )))
+            ))),
+            std::sync::Arc::new(crate::composition::FixtureSuccessorRecovery::default()),
+        )
     }
 
     fn fixture_composer_with_presentation(prompt: Option<String>) -> LaunchComposer {
@@ -979,6 +1126,7 @@ pub(crate) mod tests {
                 ][..],
             ))),
             prompt,
+            std::sync::Arc::new(crate::composition::FixtureSuccessorRecovery::default()),
         )
     }
 
@@ -1003,9 +1151,10 @@ pub(crate) mod tests {
         context
             .records
             .insert("e3c8c1".into(), "## Notion\nA crazy idea.\n".into());
-        let composer = LaunchComposer::with_context(crate::context::ContextComposer(
-            std::sync::Arc::new(context),
-        ));
+        let composer = LaunchComposer::with_context(
+            crate::context::ContextComposer(std::sync::Arc::new(context)),
+            std::sync::Arc::new(crate::composition::FixtureSuccessorRecovery::default()),
+        );
         let composed = composer
             .compose(
                 HarnessedProfile {
@@ -1163,9 +1312,12 @@ pub(crate) mod tests {
             .map(|(name, body)| (*name, body.as_str()))
             .collect::<Vec<_>>();
         (
-            LaunchComposer::with_context(crate::context::ContextComposer(std::sync::Arc::new(
-                FixtureComposer::from(&held[..]),
-            ))),
+            LaunchComposer::with_context(
+                crate::context::ContextComposer(std::sync::Arc::new(FixtureComposer::from(
+                    &held[..],
+                ))),
+                std::sync::Arc::new(crate::composition::FixtureSuccessorRecovery::default()),
+            ),
             names,
         )
     }
@@ -1592,9 +1744,10 @@ pub(crate) mod tests {
                 ("operation:main-flow:0", "Main flow body."),
             ][..],
         );
-        let composer = LaunchComposer::with_context(crate::context::ContextComposer(
-            std::sync::Arc::new(context),
-        ));
+        let composer = LaunchComposer::with_context(
+            crate::context::ContextComposer(std::sync::Arc::new(context)),
+            std::sync::Arc::new(crate::composition::FixtureSuccessorRecovery::default()),
+        );
         let mut profile = fixture_profile();
         profile.system_modules = signal_flow::SystemModules(vec![
             signal_flow::ModuleIdentity("spirit:core:0".into()),
@@ -1639,15 +1792,16 @@ pub(crate) mod tests {
     #[test]
     fn a_system_prompt_past_one_argument_is_composed_whole() {
         let large_intent = "b".repeat(140_000);
-        let composer = LaunchComposer::with_context(crate::context::ContextComposer(
-            std::sync::Arc::new(FixtureComposer::from(
+        let composer = LaunchComposer::with_context(
+            crate::context::ContextComposer(std::sync::Arc::new(FixtureComposer::from(
                 &[
                     ("spirit:core:0", "Spirit body."),
                     ("intent:large:0", large_intent.as_str()),
                     ("knowledge:small:0", "Knowledge body."),
                 ][..],
-            )),
-        ));
+            ))),
+            std::sync::Arc::new(crate::composition::FixtureSuccessorRecovery::default()),
+        );
         let mut profile = fixture_profile();
         profile.system_modules = signal_flow::SystemModules(vec![
             signal_flow::ModuleIdentity("spirit:core:0".into()),
@@ -1746,9 +1900,10 @@ pub(crate) mod tests {
                 ("knowledge:flow:1", "VERSION_ONE"),
             ][..],
         );
-        let composer = LaunchComposer::with_context(crate::context::ContextComposer(
-            std::sync::Arc::new(context),
-        ));
+        let composer = LaunchComposer::with_context(
+            crate::context::ContextComposer(std::sync::Arc::new(context)),
+            std::sync::Arc::new(crate::composition::FixtureSuccessorRecovery::default()),
+        );
         for (identity, wanted, other) in [
             ("knowledge:flow:0", "VERSION_ZERO", "VERSION_ONE"),
             ("knowledge:flow:1", "VERSION_ONE", "VERSION_ZERO"),
@@ -1924,5 +2079,191 @@ pub(crate) mod tests {
         );
         assert!(HarnessKind::part_header((1, 3)).contains("part 3 of 3"));
         assert!(!HarnessKind::part_header((1, 3)).contains("seat"));
+    }
+
+    #[derive(Debug)]
+    struct RecoveryHandoverFixture {
+        value: Handover,
+    }
+    impl YieldsHandover for RecoveryHandoverFixture {
+        fn handover(&self, _address: &Address, _predecessor: &str, _root: &Path) -> Handover {
+            self.value.clone()
+        }
+    }
+
+    fn recovery_composer(
+        profile: &LaunchProfile,
+        path: Option<signal_flow::TranscriptPath>,
+        text: &str,
+    ) -> LaunchComposer {
+        let mut composer = fixture_composer();
+        composer.successor_recovery = Arc::new(FixtureSuccessorRecovery {
+            intent: Some(crate::generated::memory::SuccessorIntent {
+                address: profile.address.clone(),
+                predecessor: crate::generated::memory::Predecessor(
+                    profile.flow_id_option.as_ref().unwrap().0.clone(),
+                ),
+                succession_cause:
+                    crate::generated::memory::SuccessionCause::EmergencyRefreshWithoutHandover(
+                        crate::generated::memory::EmergencyRefreshWithoutHandover_Data {
+                            flow_id: profile.flow_id_option.clone().unwrap(),
+                            transcript_path_option: path,
+                        },
+                    ),
+                launch_request_id: profile.launch_request_id.clone(),
+            }),
+            text: meta_signal_flow::SuccessorRecoveryText(text.into()),
+        });
+        composer.with_handover_source(Arc::new(RecoveryHandoverFixture {
+            value: Handover::Absent,
+        }))
+    }
+
+    #[test]
+    fn both_composers_render_configured_emergency_recovery_with_or_without_path_and_brief() {
+        let open_requests = [signal_flow::QueueEntry {
+            logical_delivery_id: flow_ethos::LogicalDeliveryId(
+                "logical-delivery-recovery-open".into(),
+            ),
+            request_id: flow_ethos::RequestId("open".into()),
+            sent_by: signal_flow::SentBy::Flow,
+            delivery: flow_ethos::Delivery::Queue,
+            message: signal_flow::Message::Soft(signal_flow::Request::Order(
+                "Continue the open request.".into(),
+            )),
+        }];
+        for kind in [
+            signal_flow::FlowKind::Regular,
+            signal_flow::FlowKind::Simplified,
+        ] {
+            for harness in [HarnessKind::Codex, HarnessKind::Claude] {
+                for brief in ["", "Continue the task."] {
+                    for path in [
+                        None,
+                        Some(signal_flow::TranscriptPath(
+                            "/native/predecessor.jsonl".into(),
+                        )),
+                    ] {
+                        for text in [
+                            "Initial configured guidance.",
+                            "Changed configured guidance.",
+                        ] {
+                            let mut profile = fixture_profile();
+                            profile.flow_kind = kind.clone();
+                            profile.instruction_prompt.0 = brief.into();
+                            let composer = recovery_composer(&profile, path.clone(), text);
+                            let composed = composer
+                                .compose_in_root(
+                                    HarnessedProfile {
+                                        remembered_flows:
+                                            crate::generated::starter::RememberedFlows(Vec::new()),
+                                        harness_kind: harness.clone(),
+                                        launch_profile: profile,
+                                    },
+                                    Vec::<LeaveOut>::new(),
+                                    HandoverRoot::At(Path::new("/fixture")),
+                                    &open_requests,
+                                )
+                                .unwrap();
+                            let body = composed.first_prompt_payload.first_prompt_body.0;
+                            assert!(body.contains(text), "{body}");
+                            assert!(
+                                body.find(text).unwrap()
+                                    < body.find("Continue the open request.").unwrap(),
+                                "{body}"
+                            );
+                            assert!(body.contains("EmergencyRefreshWithoutHandover"), "{body}");
+                            assert!(body.contains("1b8ac0"), "{body}");
+                            assert_eq!(
+                                body.contains("/native/predecessor.jsonl"),
+                                path.is_some(),
+                                "{body}"
+                            );
+                            assert!(!composed.first_prompt_payload.prompt_part_vector.is_empty());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_requires_the_matching_typed_emergency_cause_and_prefers_a_real_handover() {
+        let profile = fixture_profile();
+        let composer = recovery_composer(&profile, None, "Configured recovery.");
+        for ordinary in [
+            crate::generated::memory::SuccessionCause::Refresh,
+            crate::generated::memory::SuccessionCause::Ordered,
+            crate::generated::memory::SuccessionCause::Exit,
+            crate::generated::memory::SuccessionCause::Replace,
+        ] {
+            let mut source = FixtureSuccessorRecovery {
+                intent: composer
+                    .successor_recovery
+                    .successor_intent(&profile.address)
+                    .unwrap(),
+                text: meta_signal_flow::SuccessorRecoveryText("Configured recovery.".into()),
+            };
+            source.intent.as_mut().unwrap().succession_cause = ordinary;
+            let mut ordinary_composer = fixture_composer();
+            ordinary_composer.successor_recovery = Arc::new(source);
+            let composed = ordinary_composer
+                .compose_in_root(
+                    HarnessedProfile {
+                        remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
+                        harness_kind: HarnessKind::Claude,
+                        launch_profile: profile.clone(),
+                    },
+                    Vec::<LeaveOut>::new(),
+                    HandoverRoot::At(Path::new("/fixture")),
+                    &[],
+                )
+                .unwrap();
+            assert!(
+                !composed
+                    .first_prompt_payload
+                    .first_prompt_body
+                    .0
+                    .contains("Configured recovery.")
+            );
+        }
+        let composer = composer.with_handover_source(Arc::new(RecoveryHandoverFixture {
+            value: Handover::Text("Actual predecessor handover.".into()),
+        }));
+        let composed = composer
+            .compose_in_root(
+                HarnessedProfile {
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
+                    harness_kind: HarnessKind::Claude,
+                    launch_profile: profile.clone(),
+                },
+                Vec::<LeaveOut>::new(),
+                HandoverRoot::At(Path::new("/fixture")),
+                &[],
+            )
+            .unwrap();
+        assert!(
+            composed
+                .first_prompt_payload
+                .first_prompt_body
+                .0
+                .contains("Actual predecessor handover.")
+        );
+        assert!(
+            !composed
+                .first_prompt_payload
+                .first_prompt_body
+                .0
+                .contains("Configured recovery.")
+        );
+        let mut unrelated = profile.clone();
+        unrelated.flow_id_option = Some(signal_flow::FlowId("another-predecessor".into()));
+        assert!(matches!(
+            composer.emergency_predecessor(&unrelated),
+            Err(CompositionError::RecoveryPredecessorMismatch { .. })
+        ));
+        let mut fresh = profile;
+        fresh.flow_id_option = None;
+        assert!(composer.emergency_predecessor(&fresh).unwrap().is_none());
     }
 }

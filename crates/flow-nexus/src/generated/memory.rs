@@ -220,6 +220,7 @@ pub struct StoredHandoverConfiguration {
     pub handover_archive_configuration: meta_signal_flow::HandoverArchiveConfiguration,
     pub handover_count_configuration: meta_signal_flow::HandoverCountConfiguration,
     pub duration: meta_signal_flow::Duration,
+    pub successor_recovery_text: meta_signal_flow::SuccessorRecoveryText,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -894,11 +895,19 @@ pub struct Reminder {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct EmergencyRefreshWithoutHandover_Data {
+    pub flow_id: signal_flow::FlowId,
+    pub transcript_path_option: std::option::Option<signal_flow::TranscriptPath>,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum SuccessionCause {
     Refresh,
     Exit,
     Ordered,
     Replace,
+    EmergencyRefreshWithoutHandover(EmergencyRefreshWithoutHandover_Data),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

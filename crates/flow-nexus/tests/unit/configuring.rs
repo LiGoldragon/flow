@@ -615,6 +615,7 @@ fn each_family_is_its_last_declaration() {
     assert_eq!(
         snapshot(&reopened),
         ConfigurationSnapshot {
+            successor_recovery_text: <meta_signal_flow::SuccessorRecoveryText as crate::store::handover_configuration::SeedsSuccessorRecoveryText>::initial(),
             configured_nexus: nexus_before,
             configured_models: meta_signal_flow::ConfiguredModels(models),
             configured_thresholds: meta_signal_flow::ConfiguredThresholds(thresholds),
@@ -2349,4 +2350,206 @@ fn warning_refresh_requires_qualified_middle_handover_or_emergency_and_respects_
         nexus.store.threshold_standing(&id.0).unwrap(),
         ThresholdStanding::Past { .. }
     ));
+}
+
+#[test]
+fn recovery_text_is_seeded_configured_preserved_by_other_setters_and_reopened() {
+    use crate::store::handover_configuration::{
+        ReadsHandoverConfiguration, SeedsSuccessorRecoveryText,
+    };
+    use meta_signal_flow::SuccessorRecoveryText;
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    assert_eq!(
+        snapshot(&nexus).successor_recovery_text,
+        SuccessorRecoveryText::initial()
+    );
+    let changed = SuccessorRecoveryText("Changed recovery guidance.".into());
+    configures(
+        &nexus,
+        ConfigurationChange::SuccessorRecoveryText(changed.clone()),
+    );
+    {
+        use crate::store::AnnouncesLaunchChanges;
+        let before = nexus.configuration_changes.current();
+        configures(
+            &nexus,
+            ConfigurationChange::SuccessorRecoveryText(changed.clone()),
+        );
+        assert_eq!(
+            nexus.configuration_changes.current(),
+            before,
+            "equal configuration is unchanged"
+        );
+    }
+    let refresh_model = flow_ethos::ModelName("recoveryModel".into());
+    configures(
+        &nexus,
+        ConfigurationChange::Refresh(ConfigureThreshold {
+            model_name: refresh_model.clone(),
+            refresh_threshold: meta_signal_flow::RefreshThreshold(123456),
+        }),
+    );
+    assert!(matches!(
+        nexus.dispatch_meta(meta_signal_flow::Input::Remove(
+            meta_signal_flow::Removal::Refresh(refresh_model)
+        )),
+        MetaResponse::Removed(_)
+    ));
+    assert_eq!(snapshot(&nexus).successor_recovery_text, changed);
+
+    for other in [
+        ConfigurationChange::HandoverPolicies(vec![]),
+        ConfigurationChange::HandoverArchive(meta_signal_flow::generated::signal::Path(
+            "/archive/new".into(),
+        )),
+        ConfigurationChange::HandoverCount(3),
+        ConfigurationChange::PublicationDeadline(meta_signal_flow::Duration(12345)),
+    ] {
+        configures(&nexus, other);
+        assert_eq!(snapshot(&nexus).successor_recovery_text, changed);
+        assert_eq!(nexus.store.successor_recovery_text().unwrap(), changed);
+    }
+    assert!(matches!(
+        configure(&nexus, ConfigurationChange::HandoverCount(-1)),
+        MetaResponse::ConfigureRefused(_)
+    ));
+    assert_eq!(snapshot(&nexus).successor_recovery_text, changed);
+    drop(nexus);
+    let nexus = fixture.open();
+    assert_eq!(snapshot(&nexus).successor_recovery_text, changed);
+    configures(
+        &nexus,
+        ConfigurationChange::SuccessorRecoveryText(SuccessorRecoveryText(String::new())),
+    );
+    drop(nexus);
+    assert_eq!(snapshot(&fixture.open()).successor_recovery_text.0, "");
+}
+
+#[test]
+fn recovery_configuration_subscription_announces_the_new_value() {
+    use crate::observe_configuration::ObservesConfiguration;
+    use crate::store::AnnouncesLaunchChanges;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let disconnected = AtomicBool::new(false);
+    let (sent, received) = std::sync::mpsc::channel();
+    let changed = meta_signal_flow::SuccessorRecoveryText("Subscribed recovery guidance.".into());
+    std::thread::scope(|scope| {
+        let observer = scope.spawn(|| {
+            nexus.observe_configuration(&disconnected, &mut |response| {
+                sent.send(response.clone())
+                    .map_err(|error| error.to_string())
+            })
+        });
+        let MetaResponse::Configuration(initial) = received
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap()
+        else {
+            panic!("initial snapshot")
+        };
+        assert_ne!(initial.successor_recovery_text, changed);
+        configures(
+            &nexus,
+            ConfigurationChange::SuccessorRecoveryText(changed.clone()),
+        );
+        let MetaResponse::Configuration(current) = received
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap()
+        else {
+            panic!("changed snapshot")
+        };
+        assert_eq!(current.successor_recovery_text, changed);
+        disconnected.store(true, Ordering::Release);
+        nexus.configuration_changes.announce();
+        assert!(observer.join().unwrap().is_err());
+    });
+}
+
+#[test]
+fn one_live_store_value_reaches_both_composers_without_reconstructing_the_source() {
+    use crate::composition::{ComposesInRoot, HandoverRoot, LaunchComposer, OpensLaunchComposer};
+    use crate::store::successor::{OwesSuccessors, SuccessionCause, SuccessorIntent};
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let profile = crate::composition::tests::fixture_profile();
+    nexus
+        .store
+        .owe_successor(SuccessorIntent {
+            address: profile.address.clone(),
+            predecessor: crate::generated::memory::Predecessor(
+                profile.flow_id_option.as_ref().unwrap().0.clone(),
+            ),
+            succession_cause: SuccessionCause::EmergencyRefreshWithoutHandover(
+                crate::generated::memory::EmergencyRefreshWithoutHandover_Data {
+                    flow_id: profile.flow_id_option.clone().unwrap(),
+                    transcript_path_option: None,
+                },
+            ),
+            launch_request_id: profile.launch_request_id.clone(),
+        })
+        .unwrap();
+    let source = std::sync::Arc::new(crate::MemoryHandoverSource(nexus.store.clone()));
+    let modules = [
+        ("spirit:core:0", "Spirit body."),
+        ("intent:flow:0", "Intent body."),
+        ("operation:main-flow:0", "Main flow body."),
+        ("knowledge:flow:0", "Knowledge body."),
+    ];
+    let composer = LaunchComposer::with_context(
+        crate::context::ContextComposer(std::sync::Arc::new(
+            crate::context::FixtureComposer::from(&modules[..]),
+        )),
+        source.clone(),
+    )
+    .with_handover_source(source);
+    let root = tempfile::tempdir().unwrap();
+    for text in ["Live initial guidance.", "Live changed guidance."] {
+        configures(
+            &nexus,
+            ConfigurationChange::SuccessorRecoveryText(meta_signal_flow::SuccessorRecoveryText(
+                text.into(),
+            )),
+        );
+        for kind in [
+            signal_flow::FlowKind::Regular,
+            signal_flow::FlowKind::Simplified,
+        ] {
+            for brief in ["", "Continue."] {
+                let mut next = profile.clone();
+                next.flow_kind = kind.clone();
+                next.instruction_prompt.0 = brief.into();
+                let composed =
+                    composer
+                        .compose_in_root(
+                            crate::composition::HarnessedProfile {
+                                remembered_flows: crate::generated::starter::RememberedFlows(
+                                    Vec::new(),
+                                ),
+                                harness_kind: HarnessKind::Claude,
+                                launch_profile: next,
+                            },
+                            Vec::<signal_flow::LeaveOut>::new(),
+                            HandoverRoot::At(root.path()),
+                            &[],
+                        )
+                        .unwrap();
+                assert!(
+                    composed
+                        .first_prompt_payload
+                        .first_prompt_body
+                        .0
+                        .contains(text)
+                );
+                assert!(
+                    composed
+                        .first_prompt_payload
+                        .first_prompt_body
+                        .0
+                        .contains("1b8ac0")
+                );
+            }
+        }
+    }
 }

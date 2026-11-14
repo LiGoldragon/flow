@@ -51,6 +51,7 @@ pub(crate) mod send_server;
 pub(crate) mod sent;
 mod staged_open;
 pub(crate) mod successor;
+pub(crate) mod successor_upgrade;
 pub(crate) mod turn_end;
 pub(crate) mod undecodable_frame;
 pub(crate) use crate::generated::memory::{
@@ -1530,6 +1531,8 @@ pub enum StoreError {
     HandoverConfigurationRefused(meta_signal_flow::HandoverConfigurationRefusal),
     #[error("handover configuration upgrade failed: {0}")]
     HandoverConfigurationUpgrade(String),
+    #[error("successor intent upgrade failed: {0}")]
+    SuccessorIntentUpgrade(String),
     #[error("0.54.2 Memory upgrade failed: {0}")]
     LivingUpgrade(String),
     #[error("harness event Memory upgrade failed: {0}")]
@@ -1844,6 +1847,7 @@ pub struct ConfiguredFamilies {
     pub handover_archive: meta_signal_flow::HandoverArchiveConfiguration,
     pub handover_count: meta_signal_flow::HandoverCountConfiguration,
     pub publication_deadline: meta_signal_flow::Duration,
+    pub successor_recovery_text: meta_signal_flow::SuccessorRecoveryText,
     pub request_id_draws: meta_signal_flow::DrawBound,
     pub announcement_tries: meta_signal_flow::TryBound,
 }
@@ -1856,6 +1860,7 @@ pub trait CompletesSnapshot {
 impl CompletesSnapshot for ConfiguredFamilies {
     fn with_counters(self, counters: ConfigureCounters) -> ConfigurationSnapshot {
         ConfigurationSnapshot {
+            successor_recovery_text: self.successor_recovery_text,
             configured_nexus: meta_signal_flow::ConfiguredNexus(self.nexus),
             configured_models: meta_signal_flow::ConfiguredModels(self.models),
             configured_thresholds: meta_signal_flow::ConfiguredThresholds(self.thresholds),
@@ -2720,7 +2725,7 @@ impl OpensFlowStore for FlowStore {
         let launch_cleanups = engine.register_table(launch_cleanups_descriptor)?;
         let compactions = engine.register_table(compactions_descriptor)?;
         let reminders = engine.register_table(reminders_descriptor)?;
-        let successor_intents = engine.register_table(successor_intents_descriptor)?;
+        let successor_intents = <successor::SuccessorIntent as successor_upgrade::UpgradesSuccessorIntent>::upgrade_or_register(&mut engine).map_err(StoreError::SuccessorIntentUpgrade)?;
         let queue_delivery =
             QueueDeliveryTables::register(&mut engine, queue_delivery_descriptors)?;
         let send_outcomes = SendOutcomeTables::register(&mut engine, send_outcome_descriptors)?;
@@ -5538,7 +5543,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
             ),
             "flow_nexus_meta_handover_configuration" => (
                 "flow-nexus-handover-configuration",
-                "flow-nexus-handover-configuration-v2",
+                "flow-nexus-handover-configuration-v3",
             ),
             "flow_nexus_handovers" => (handover::HANDOVER_FAMILY, handover::HANDOVER_SCHEMA),
             "flow_nexus_handover_reminders" => (
@@ -5690,15 +5695,22 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                 let (family, schema_hash) = FlowStore::metaflow_declaration_v6_identity();
                 identity.family().as_str() == family && identity.schema_hash() == schema_hash
             };
-        before_living
+        let before_recovery_cause = table_key == successor::SUCCESSOR_INTENT_TABLE_NAME.as_str()
+            && identity.table_name() == table_key
+            && identity.family().as_str() == successor::SUCCESSOR_INTENT_FAMILY
+            && identity.schema_hash() == SchemaHash::for_label("flow-nexus-successor-intent-v3");
+        before_recovery_cause
+            || before_living
             || before_event_metadata
             || before_pending_reaps
             || before_leave_outs
             || FlowStore::current_flow_family_identity(table_key).is_some_and(
                 |(family, schema_hash)| {
                     let predecessor_handover = table_key == OPTIONAL_HANDOVER_TABLE
-                        && identity.schema_hash()
-                            == SchemaHash::for_label("flow-nexus-handover-configuration-v1");
+                        && (identity.schema_hash()
+                            == SchemaHash::for_label("flow-nexus-handover-configuration-v1")
+                            || identity.schema_hash()
+                                == SchemaHash::for_label("flow-nexus-handover-configuration-v2"));
                     identity.table_name() == table_key
                         && identity.family().as_str() == family
                         && (identity.schema_hash() == schema_hash || predecessor_handover)
@@ -6101,6 +6113,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
             handover_archive: handover.handover_archive_configuration,
             handover_count: handover.handover_count_configuration,
             publication_deadline: handover.duration,
+            successor_recovery_text: handover.successor_recovery_text,
             request_id_draws: meta_signal_flow::DrawBound(request_id_draws),
             announcement_tries: meta_signal_flow::TryBound(announcement_tries),
         }))
@@ -6496,6 +6509,22 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
             ConfigurationChange::HarnessHookEvents(events) => {
                 Self::configure_hooks(engine, &tables.context_warnings, events)
             }
+            ConfigurationChange::SuccessorRecoveryText(text) => {
+                let old = engine
+                    .match_records(QueryPlan::all(tables.handover))?
+                    .records()
+                    .first()
+                    .cloned()
+                    .ok_or(StoreError::StateInvariant)?;
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.handover,
+                    vec![handover_configuration::StoredHandoverConfiguration {
+                        successor_recovery_text: text,
+                        ..old
+                    }],
+                )
+            }
             ConfigurationChange::HandoverPolicies(policies) => {
                 if policies
                     .iter()
@@ -6537,6 +6566,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                         handover_archive_configuration: old.handover_archive_configuration,
                         handover_count_configuration: old.handover_count_configuration,
                         duration: old.duration,
+                        successor_recovery_text: old.successor_recovery_text,
                     }],
                 )
             }
@@ -6556,6 +6586,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                             meta_signal_flow::HandoverArchiveConfiguration::Configured(path),
                         handover_count_configuration: old.handover_count_configuration,
                         duration: old.duration,
+                        successor_recovery_text: old.successor_recovery_text,
                     }],
                 )
             }
@@ -6580,6 +6611,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                         handover_count_configuration:
                             meta_signal_flow::HandoverCountConfiguration::Configured(count),
                         duration: old.duration,
+                        successor_recovery_text: old.successor_recovery_text,
                     }],
                 )
             }
@@ -6603,6 +6635,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                         handover_archive_configuration: old.handover_archive_configuration,
                         handover_count_configuration: old.handover_count_configuration,
                         duration,
+                        successor_recovery_text: old.successor_recovery_text,
                     }],
                 )
             }

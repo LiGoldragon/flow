@@ -2693,6 +2693,7 @@ impl OpensSecondNexus for NexusFixture {
                         ][..],
                     ),
                 )),
+                std::sync::Arc::new(crate::composition::FixtureSuccessorRecovery::default()),
             )),
             dispatch_gate: std::sync::Mutex::new(()),
             pane_leases: crate::delivery::lease::PaneLeases::default(),
@@ -3265,11 +3266,12 @@ impl SocketCurriculum {
     fn composer(&self) -> crate::composition::LaunchComposer {
         use crate::composition::OpensLaunchComposer;
         use crate::context::OpensCurriculumComposer;
-        crate::composition::LaunchComposer::with_context(crate::context::ContextComposer(
-            std::sync::Arc::new(crate::context::CurriculumComposer::at(
-                self.socket.to_string_lossy().as_ref(),
+        crate::composition::LaunchComposer::with_context(
+            crate::context::ContextComposer(std::sync::Arc::new(
+                crate::context::CurriculumComposer::at(self.socket.to_string_lossy().as_ref()),
             )),
-        ))
+            std::sync::Arc::new(crate::composition::FixtureSuccessorRecovery::default()),
+        )
     }
 
     /// Each caller Address asked, as its three words.
@@ -3634,10 +3636,12 @@ fn restart_composition_against_curriculum_socket() {
     let expect = std::env::var("RESTART_PROOF_EXPECT").expect("refused or composed");
     let seats = fs::read_to_string(std::env::var("RESTART_PROOF_SEATS").expect("seats")).unwrap();
     let mut fixture = NexusFixture::new();
-    *fixture.nexus.composer.edit() =
-        crate::composition::LaunchComposer::with_context(crate::context::ContextComposer(
-            std::sync::Arc::new(crate::context::CurriculumComposer::at(socket.as_str())),
-        ));
+    *fixture.nexus.composer.edit() = crate::composition::LaunchComposer::with_context(
+        crate::context::ContextComposer(std::sync::Arc::new(
+            crate::context::CurriculumComposer::at(socket.as_str()),
+        )),
+        std::sync::Arc::new(crate::composition::FixtureSuccessorRecovery::default()),
+    );
     let words = |text: &str| {
         text.split_whitespace()
             .map(|word| signal_flow::ModuleIdentity(word.to_owned()))

@@ -21,7 +21,7 @@ Memory
 [ signal_flow:[ LaunchRequestId StartRejection ReplaceRejection FlowId HerdrRoute Process NativeSessionId TranscriptPath BackgroundWork NativePrompt Address ReapStanding HandoverCloseRefusal HandoverOwner Successor ]
   flow_nexus:[ LaunchedRecord ReplacedRecord ]
   signal_flow:[ LogicalDeliveryId Metaflow Lock CallerIdentity LaunchAttempt StoreIdentity OrdinarySocketPath MetaSocketPath FlowType Origin HarnessKind EndpointSelection FlowLifecycle SessionId HerdrPaneId DeliverKey SendAcceptance DeliverySnapshot DeliveryCursor RequestId SentBy VisibleNativeInput Section Touch HerdrPaneBinding LaunchProfile TurnEnd UndecodableFrame Tokens ModelName HandoverGeneration ]
-  meta_signal_flow:[ ContextWarningLimit ContextUsageProjection WarningBoundary WarningStage HarnessHookEvent ConfigureNexus ConfigureModel ConfigureThreshold ConfigureSendServer ConfigureMetaflow ConfigureHarnessFlags HeartbeatConfig DrawBound TryBound HandoverPoliciesConfiguration HandoverArchiveConfiguration HandoverCountConfiguration Duration RestartRecord SendOutcomeRecord Delivery ProcessId ProcessUserId ProcessStartToken DeliveryId HarnessProfile MetaAspects MessageNexusPath RequestDigest QueueRequestId QueueAttemptId QueueEvidence AbsenceProof Undecided QueueResolutionRecord EveryMinutes ReminderText ]
+  meta_signal_flow:[ SuccessorRecoveryText ContextWarningLimit ContextUsageProjection WarningBoundary WarningStage HarnessHookEvent ConfigureNexus ConfigureModel ConfigureThreshold ConfigureSendServer ConfigureMetaflow ConfigureHarnessFlags HeartbeatConfig DrawBound TryBound HandoverPoliciesConfiguration HandoverArchiveConfiguration HandoverCountConfiguration Duration RestartRecord SendOutcomeRecord Delivery ProcessId ProcessUserId ProcessStartToken DeliveryId HarnessProfile MetaAspects MessageNexusPath RequestDigest QueueRequestId QueueAttemptId QueueEvidence AbsenceProof Undecided QueueResolutionRecord EveryMinutes ReminderText ]
   :meta_signal_flow:generated:signal:[ Path ]
   :std:boxed:[ Box ]
   flow_ethos:[ Minutes SourceRoot CodexEndpoint ] ]
@@ -103,7 +103,8 @@ Memory
   StoredHandoverConfiguration.{ HandoverPoliciesConfiguration
                                 HandoverArchiveConfiguration
                                 HandoverCountConfiguration
-                                Duration }
+                                Duration
+                                SuccessorRecoveryText }
   ; The durable address-indexed Metaflow. Its state and queue are separate
   ; from native Flow launch records: an address remains asleep after the
   ; process it named is gone.
@@ -318,7 +319,9 @@ Memory
   ; rested; it ended without Flow or an owner ending it, its pane gone; a
   ; Refresh ordered from outside ended it; or a Replace ended it, its
   ; successor the Replace's own launch.
-  SuccessionCause.[ Refresh Exit Ordered Replace ]
+  SuccessionCause.[ Refresh Exit Ordered Replace
+                     ; Emergency recovery always names its predecessor; its path may be absent.
+                     EmergencyRefreshWithoutHandover.{ FlowId Option<TranscriptPath> } ]
   ; The successor an Address is owed, keyed by the Address.
   SuccessorIntent.{ Address Predecessor SuccessionCause LaunchRequestId }
   ; One turn end a harness reported, keyed by its turn.

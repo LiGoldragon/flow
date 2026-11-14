@@ -1064,7 +1064,7 @@ rec {
           }
           {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow 81.0.0";
+            packageId = "meta-signal-flow 82.0.0";
             features = [ "datom" ];
           }
           {
@@ -1183,7 +1183,7 @@ rec {
           }
           {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow 81.0.0";
+            packageId = "meta-signal-flow 82.0.0";
             features = [ "datom" ];
           }
           {
@@ -1839,15 +1839,15 @@ rec {
         };
         resolvedDefaultFeatures = [ "datom" "default" ];
       };
-      "meta-signal-flow 81.0.0" = rec {
+      "meta-signal-flow 82.0.0" = rec {
         crateName = "meta-signal-flow";
-        version = "81.0.0";
+        version = "82.0.0";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-flow";
-          rev = "cf65bbd7a3829d0f18438b8538128ca7242f659f";
-          sha256 = "0fv789mfwh5iczji8438i0ivbygacgv2ickang2yx5y92k96n10d";
+          rev = "570b173cbd943001b611439606a439d194a3b824";
+          sha256 = "0dswmwal5x565kazb1nqzb7rpnmbvl6d5v8v9iapwci97lgzdab2";
         };
         libName = "meta_signal_flow";
         dependencies = [

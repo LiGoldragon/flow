@@ -1,3 +1,23 @@
+# Recovery-text consumer candidate (unreleased)
+
+This contribution follows the independently gated meta-signal-flow82 producer
+`570b173cbd943001b611439606a439d194a3b824` and canonical build-base
+`3d8eedd897251bd321b4e1cd625668397896c12d`. It is not a live switch.
+
+- Handover configuration familyV2 upgrades toV3, retaining frozenV1 support.
+  Its one new SuccessorRecoveryText value is seeded on initialization/upgrade;
+  explicit updates, including empty text, survive reopen and other setters.
+- Successor intent familyV3 upgrades toV4. Every old cause retains its ordinary
+  meaning; old Refresh is never synthesized as emergency. The new emergency
+  cause carries predecessorFlowId and optional validated transcript path.
+- Production composition requires its live recovery capability at construction.
+  Both startup branches, including simplified empty instructions, consume the
+  same configured value/provenance only for the matching emergency cause.
+- Warning runtime capture/rest/on-demand/retry integration belongs to the named
+  Opus k7jy integration lane. Until that delta and the combined immutable full
+  gate are accepted, this candidate does not prove complete recovery behavior.
+  No native Codex/Claude proof or deployment is claimed.
+
 # Flow 0.56.2: Flow's external calls are typed Emissions generated from Ethos
 
 Contracts: signal-flow 63.0.0 and meta-signal-flow 79.0.0, unchanged from

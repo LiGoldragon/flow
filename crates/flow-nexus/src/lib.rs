@@ -231,6 +231,22 @@ impl crate::handover::YieldsHandover for MemoryHandoverSource {
     }
 }
 
+impl crate::composition::ReadsSuccessorRecovery for MemoryHandoverSource {
+    fn successor_intent(
+        &self,
+        address: &signal_flow::Address,
+    ) -> Result<Option<crate::generated::memory::SuccessorIntent>, StoreError> {
+        use crate::store::successor::OwesSuccessors;
+        self.0.successor_intent(address)
+    }
+    fn successor_recovery_text(
+        &self,
+    ) -> Result<meta_signal_flow::SuccessorRecoveryText, StoreError> {
+        use crate::store::handover_configuration::ReadsHandoverConfiguration;
+        self.0.successor_recovery_text()
+    }
+}
+
 trait ReadsMemoryHandoverSource {
     fn store_handover(
         &self,
@@ -1687,13 +1703,15 @@ trait ComposesFromConfiguration {
 
 impl ComposesFromConfiguration for ConfiguredRunner {
     fn composer(&self, store: Arc<FlowStore>) -> LaunchComposer {
+        let handover_source = Arc::new(MemoryHandoverSource(store));
         LaunchComposer::with_presentation_prompt(
             context::ContextComposer(std::sync::Arc::new(CurriculumComposer::at(
                 &self.curriculum_nexus_path,
             ))),
             self.presentation_prompt_option.clone(),
+            handover_source.clone(),
         )
-        .with_handover_source(Arc::new(MemoryHandoverSource(store)))
+        .with_handover_source(handover_source)
     }
 }
 
@@ -3894,8 +3912,9 @@ mod tests {
                 host_id: "isolated-test-host".into(),
                 boot_id: "isolated-test-boot".into(),
             });
+            let store = Arc::new(store);
             let nexus = RunningNexus {
-                store: store.into(),
+                store: store.clone(),
                 codex_endpoints: Live::holding(codex_endpoints.clone()),
                 herdr: HerdrCli::at(snapshot_program.clone(), flows_root)
                     .with_codex_endpoints(codex_endpoints),
@@ -3908,6 +3927,7 @@ mod tests {
                             ("knowledge:flow:0", "Knowledge body."),
                         ][..],
                     ))),
+                    Arc::new(MemoryHandoverSource(store)),
                 )),
                 dispatch_gate: std::sync::Mutex::new(()),
                 pane_leases: crate::delivery::lease::PaneLeases::default(),

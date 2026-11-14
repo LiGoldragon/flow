@@ -1,7 +1,7 @@
 pub(crate) use crate::generated::memory::StoredHandoverConfiguration;
 use meta_signal_flow::{
     Duration, HandoverArchiveConfiguration, HandoverCountConfiguration,
-    HandoverPoliciesConfiguration,
+    HandoverPoliciesConfiguration, SuccessorRecoveryText,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::TableName;
@@ -31,6 +31,48 @@ impl MemoryDefinition for StoredHandoverConfigurationV1 {
     }
 }
 
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredHandoverConfigurationV2 {
+    pub handover_policies_configuration: HandoverPoliciesConfiguration,
+    pub handover_archive_configuration: HandoverArchiveConfiguration,
+    pub handover_count_configuration: HandoverCountConfiguration,
+    pub duration: Duration,
+}
+impl EngineRecord for StoredHandoverConfigurationV2 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new("handover")
+    }
+}
+impl MemoryDefinition for StoredHandoverConfigurationV2 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-handover-configuration-v2")
+    }
+}
+
+pub(crate) trait SeedsSuccessorRecoveryText {
+    fn initial() -> Self;
+}
+impl SeedsSuccessorRecoveryText for SuccessorRecoveryText {
+    fn initial() -> Self {
+        Self("Your predecessor reached its emergency context threshold and was refreshed at rest without writing a handover. Recover what your open requests need from its transcript before you continue.".into())
+    }
+}
+impl UpgradeFrom<StoredHandoverConfigurationV2> for StoredHandoverConfiguration {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(before: StoredHandoverConfigurationV2) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            handover_policies_configuration: before.handover_policies_configuration,
+            handover_archive_configuration: before.handover_archive_configuration,
+            handover_count_configuration: before.handover_count_configuration,
+            duration: before.duration,
+            successor_recovery_text: SuccessorRecoveryText::initial(),
+        })
+    }
+}
+
 impl UpgradeFrom<StoredHandoverConfigurationV1> for StoredHandoverConfiguration {
     type Refusal = std::convert::Infallible;
     fn upgrade_from(predecessor: StoredHandoverConfigurationV1) -> Decision<Self, Self::Refusal> {
@@ -39,6 +81,7 @@ impl UpgradeFrom<StoredHandoverConfigurationV1> for StoredHandoverConfiguration 
             handover_archive_configuration: predecessor.archive,
             handover_count_configuration: predecessor.count,
             duration: meta_signal_flow::Duration(60_000),
+            successor_recovery_text: SuccessorRecoveryText::initial(),
         })
     }
 }
@@ -50,10 +93,10 @@ impl EngineRecord for StoredHandoverConfiguration {
 }
 impl MemoryDefinition for StoredHandoverConfiguration {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(2)
+        MemoryVersion::new(3)
     }
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-handover-configuration-v2")
+        SchemaHash::for_label("flow-nexus-handover-configuration-v3")
     }
 }
 pub(crate) trait DescribesHandoverConfiguration {
@@ -67,6 +110,7 @@ impl DescribesHandoverConfiguration for StoredHandoverConfiguration {
             Self::schema_hash(),
         )
         .with_predecessor::<StoredHandoverConfigurationV1>()
+        .with_predecessor::<StoredHandoverConfigurationV2>()
     }
 }
 pub(crate) trait DefaultsToUnconfigured {
@@ -79,11 +123,13 @@ impl DefaultsToUnconfigured for StoredHandoverConfiguration {
             handover_archive_configuration: HandoverArchiveConfiguration::Unconfigured,
             handover_count_configuration: HandoverCountConfiguration::Unconfigured,
             duration: meta_signal_flow::Duration(60_000),
+            successor_recovery_text: SuccessorRecoveryText::initial(),
         }
     }
 }
 
 pub(crate) trait ReadsHandoverConfiguration {
+    fn successor_recovery_text(&self) -> Result<SuccessorRecoveryText, super::StoreError>;
     fn handover_policies(&self) -> Result<HandoverPoliciesConfiguration, super::StoreError>;
     fn handover_archive(&self) -> Result<HandoverArchiveConfiguration, super::StoreError>;
     fn handover_count(&self) -> Result<HandoverCountConfiguration, super::StoreError>;
@@ -91,6 +137,17 @@ pub(crate) trait ReadsHandoverConfiguration {
 }
 
 impl ReadsHandoverConfiguration for super::FlowStore {
+    fn successor_recovery_text(&self) -> Result<SuccessorRecoveryText, super::StoreError> {
+        let rows = self.engine.match_records(sema_engine::QueryPlan::key(
+            self.meta_configuration_tables.handover,
+            RecordKey::new("handover"),
+        ))?;
+        match rows.records() {
+            [row] => Ok(row.successor_recovery_text.clone()),
+            _ => Err(super::StoreError::StateInvariant),
+        }
+    }
+
     fn handover_policies(&self) -> Result<HandoverPoliciesConfiguration, super::StoreError> {
         use sema_engine::{QueryPlan, RecordKey};
         let rows = self
@@ -167,9 +224,24 @@ impl UpgradesHandoverConfiguration for StoredHandoverConfiguration {
     ) -> Result<TableReference<StoredHandoverConfiguration>, String> {
         let descriptor =
             <StoredHandoverConfiguration as DescribesHandoverConfiguration>::descriptor();
-        match engine
-            .upgrade_table::<StoredHandoverConfigurationV1, StoredHandoverConfiguration>(descriptor)
-        {
+        let predecessor = engine.list_tables().into_iter().find(|table| {
+            table.identity().table_name() == HANDOVER_CONFIGURATION_TABLE_NAME.as_str()
+        });
+        let outcome = match predecessor {
+            Some(table)
+                if table.identity().schema_hash()
+                    == StoredHandoverConfigurationV1::schema_hash() =>
+            {
+                engine.upgrade_table::<StoredHandoverConfigurationV1, StoredHandoverConfiguration>(
+                    descriptor,
+                )
+            }
+            _ => engine
+                .upgrade_table::<StoredHandoverConfigurationV2, StoredHandoverConfiguration>(
+                    descriptor,
+                ),
+        };
+        match outcome {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
             UpgradeOutcome::Refused(refusal) => Err(format!(
@@ -210,6 +282,10 @@ mod tests {
             HandoverCountConfiguration::Configured(3)
         );
         assert_eq!(current.duration, meta_signal_flow::Duration(60_000));
+        assert_eq!(
+            current.successor_recovery_text,
+            SuccessorRecoveryText::initial()
+        );
     }
 
     #[test]
@@ -294,6 +370,10 @@ mod tests {
                 assert_eq!(current.handover_count_configuration, predecessor.count);
                 assert_eq!(current.duration, meta_signal_flow::Duration(60_000));
                 assert_eq!(
+                    current.successor_recovery_text,
+                    SuccessorRecoveryText::initial()
+                );
+                assert_eq!(
                     engine
                         .match_records(QueryPlan::key(handovers, sibling.record_key()))
                         .unwrap()
@@ -326,6 +406,79 @@ mod tests {
                 StoredHandoverConfiguration::upgrade_or_register(&mut engine).unwrap();
             let handovers = engine.register_table(handover_descriptor.clone()).unwrap();
             assert_current(&engine, configuration, handovers);
+        }
+    }
+
+    #[test]
+    fn persisted_v2_upgrade_preserves_configuration_and_never_reseeds_changed_text() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("handover-v2.sema");
+        let old = StoredHandoverConfigurationV2 {
+            handover_policies_configuration: HandoverPoliciesConfiguration::Unconfigured,
+            handover_archive_configuration: HandoverArchiveConfiguration::Configured(
+                meta_signal_flow::generated::signal::Path("/v2/archive".into()),
+            ),
+            handover_count_configuration: HandoverCountConfiguration::Configured(7),
+            duration: Duration(12345),
+        };
+        {
+            let mut engine = Engine::open(EngineOpen::new(&path, SchemaVersion::new(1))).unwrap();
+            let descriptor = TableDescriptor::<StoredHandoverConfigurationV2>::new(
+                HANDOVER_CONFIGURATION_TABLE_NAME,
+                FamilyName::new("flow-nexus-handover-configuration"),
+                StoredHandoverConfigurationV2::schema_hash(),
+            );
+            let table = engine.register_table(descriptor).unwrap();
+            engine.assert(Assertion::new(table, old.clone())).unwrap();
+        }
+        {
+            let mut engine = Engine::open(
+                EngineOpen::new(&path, SchemaVersion::new(1))
+                    .with_family(&StoredHandoverConfiguration::descriptor()),
+            )
+            .unwrap();
+            let table = StoredHandoverConfiguration::upgrade_or_register(&mut engine).unwrap();
+            let row = engine
+                .match_records(QueryPlan::key(table, RecordKey::new("handover")))
+                .unwrap()
+                .records()[0]
+                .clone();
+            assert_eq!(
+                row.handover_archive_configuration,
+                old.handover_archive_configuration
+            );
+            assert_eq!(
+                row.handover_count_configuration,
+                old.handover_count_configuration
+            );
+            assert_eq!(row.duration, old.duration);
+            assert_eq!(
+                row.successor_recovery_text,
+                SuccessorRecoveryText::initial()
+            );
+            let mut changed = row;
+            changed.successor_recovery_text = SuccessorRecoveryText("After migration.".into());
+            engine
+                .mutate_keyed(sema_engine::KeyedMutation::new(
+                    table,
+                    RecordKey::new("handover"),
+                    changed,
+                ))
+                .unwrap();
+        }
+        {
+            let mut engine = Engine::open(
+                EngineOpen::new(&path, SchemaVersion::new(1))
+                    .with_family(&StoredHandoverConfiguration::descriptor()),
+            )
+            .unwrap();
+            let table = StoredHandoverConfiguration::upgrade_or_register(&mut engine).unwrap();
+            let row = engine
+                .match_records(QueryPlan::key(table, RecordKey::new("handover")))
+                .unwrap()
+                .records()[0]
+                .clone();
+            assert_eq!(row.successor_recovery_text.0, "After migration.");
         }
     }
 }

@@ -208,6 +208,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ethos-zero"
+version = "29.0.0"
+source = "git+https://github.com/LiGoldragon/ethos-zero?rev=f23eacf#f23eacf338a90ce4a6dea011554724fa6488fcc9"
+dependencies = [
+ "datom-codec",
+ "prettyplease",
+ "proc-macro2",
+ "protos",
+ "quote",
+ "rkyv",
+ "syn 3.0.5",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -224,7 +238,7 @@ name = "flow"
 version = "0.56.2"
 dependencies = [
  "datom-codec",
- "ethos-zero 27.0.0",
+ "ethos-zero 29.0.0",
  "flow-ethos",
  "flow-native",
  "protos",
@@ -243,7 +257,7 @@ name = "flow-ethos"
 version = "0.56.2"
 dependencies = [
  "datom-codec",
- "ethos-zero 27.0.0",
+ "ethos-zero 29.0.0",
  "protos",
  "rkyv",
 ]
@@ -261,7 +275,7 @@ name = "flow-meta"
 version = "0.56.2"
 dependencies = [
  "datom-codec",
- "ethos-zero 27.0.0",
+ "ethos-zero 29.0.0",
  "flow-ethos",
  "meta-signal-flow 79.0.0",
  "protos",
@@ -284,7 +298,7 @@ version = "0.56.2"
 dependencies = [
  "base64",
  "datom-codec",
- "ethos-zero 27.0.0",
+ "ethos-zero 29.0.0",
  "flow",
  "flow-defaults",
  "flow-ethos",

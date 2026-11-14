@@ -23,7 +23,7 @@ pub enum HerdrCommand {
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct RunInPane_Data {
     pub herdr_pane_id: signal_flow::HerdrPaneId,
-    pub shell_line: ShellLine,
+    pub claude_environment: ClaudeEnvironment,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -55,7 +55,6 @@ pub struct DisplayAgent(pub String);
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct ReportPaneMetadata_Data {
     pub herdr_pane_id: signal_flow::HerdrPaneId,
-    pub metadata_source: MetadataSource,
     pub display_agent: DisplayAgent,
 }
 #[rustfmt::skip]
@@ -112,17 +111,10 @@ pub struct WaitForAgent_Data {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub enum ScreenFormat {
-    Ansi,
-}
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct ReadAgent_Data {
     pub herdr_pane_id: signal_flow::HerdrPaneId,
     pub output_source: OutputSource,
     pub line_count: LineCount,
-    pub screen_format: ScreenFormat,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -159,12 +151,6 @@ pub enum HerdrSessionCommand {
     PromptAgent(PromptAgent_Data),
 }
 #[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub enum ShellLine {
-    PrepareClaudeEnvironment(ClaudeEnvironment),
-}
-#[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct ReadinessMarker(pub String);
@@ -195,12 +181,6 @@ pub struct Milliseconds(pub i64);
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Label(pub String);
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub enum MetadataSource {
-    Flow,
-}
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
@@ -275,17 +255,10 @@ pub struct CodexSocket(pub String);
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub enum CodexTitle {
-    ThreadTitle,
-}
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct CodexCommandLine {
     pub codex_socket: CodexSocket,
     pub model_name: flow_ethos::ModelName,
     pub effort: signal_flow::Effort,
-    pub codex_title: CodexTitle,
     pub lean_start: flow_nexus::generated::starter::LeanStart,
     pub configured_harness_arguments: ConfiguredHarnessArguments,
     pub native_session_id_option: std::option::Option<signal_flow::NativeSessionId>,
@@ -382,21 +355,15 @@ pub struct ArchivePath(pub String);
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct HerdrSocketCall {
     pub herdr_session_name: signal_flow::HerdrSessionName,
-    pub herdr_socket_request: HerdrSocketRequest,
+    pub prompt_agent_by_name: PromptAgentByName,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct PromptAgentByName_Data {
+pub struct PromptAgentByName {
     pub launch_request_id: signal_flow::LaunchRequestId,
     pub herdr_agent_name: signal_flow::HerdrAgentName,
     pub prompt_text: PromptText,
-}
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub enum HerdrSocketRequest {
-    PromptAgentByName(PromptAgentByName_Data),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

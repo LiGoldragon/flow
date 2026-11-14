@@ -3,6 +3,7 @@
   "git+https://github.com/LiGoldragon/datom-codec?rev=09a0526#datom-codec-derive@0.32.3": "18cplyk9f5nrqs35fgqpimfi507l38qvkmkx3z2qm2vwi1rlii2d",
   "git+https://github.com/LiGoldragon/ethos-zero?rev=1976e45#22.0.0": "12b6np5n8knlpv2rb98g0m04n6xxaprd8n5hy4wgw658h5vg216j",
   "git+https://github.com/LiGoldragon/ethos-zero?rev=8c95310#27.0.0": "1nqshn23ibbnnadi10wj79dn6wcjjkgfav6qkwsa7jg6r9m87v76",
+  "git+https://github.com/LiGoldragon/ethos-zero?rev=f23eacf#29.0.0": "15wh2r0ljqvjqrh8hc8av4p8210nsdyl9iwhb5zh6k467r59ymm8",
   "git+https://github.com/LiGoldragon/memory?rev=51d7927c872f0df12791bad8d39a4db6433b01a1#sema@0.1.1": "0yhm0k3a2b08c9b1rgymppxd3mgfli235d7p71v8f0h18ddvn3g1",
   "git+https://github.com/LiGoldragon/meta-signal-flow?rev=cdb4e7df3e52065c8c28c6f936e2f6f6fa285c9b#79.0.0": "0ak9sl2hwx2djbcwa2y56fs4hkhv8rkmwz98k70c9shdp5igyal2",
   "git+https://github.com/LiGoldragon/meta-signal-flow?rev=e72f5552816477e1acfaab6cd7515bc5f807edff#77.0.0": "0xabqrkn86dl252mh6s9g2raw88ppf9c48pwbshis7n3dndhkc43",

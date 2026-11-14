@@ -231,15 +231,15 @@ trait RefusesStartup {
     fn start_store_refusal_datom(path: &str, reason: &str) -> Result<String, String> {
         let path = path.to_owned().datomize(vec![]).protosize().compact();
         let reason = reason.to_owned().datomize(vec![]).protosize().compact();
-        // StartRefusal is the Rust root type; the Store payload is its datom.
-        let source = format!("Store.{{ {path} {reason} }}");
+        // The refusal is one StoreRefusal datom: the path, then the reason.
+        let source = format!("{{ {path} {reason} }}");
         let mut budget = Budget {
             remaining: 65_536,
             reader: ReaderBudget::try_from(65_536).expect("a constant reader budget"),
             depth: 0,
             maximum_depth: 1_024,
         };
-        Potential::<flow_ethos::StartRefusal>::from(source)
+        Potential::<flow_ethos::StoreRefusal>::from(source)
             .actualize(&mut budget)
             .map(|refusal| refusal.datomize(vec![]).protosize().compact())
             .map_err(|error| format!("cannot encode typed Flow Start refusal: {error:?}"))
@@ -337,10 +337,11 @@ mod tests {
             depth: 0,
             maximum_depth: 1_024,
         };
-        let parsed = Potential::<flow_ethos::StartRefusal>::from(refusal.clone())
+        let parsed = Potential::<flow_ethos::StoreRefusal>::from(refusal.clone())
             .actualize(&mut budget)
             .expect("refusal datom parses as the authored type");
-        assert!(refusal.starts_with("Store.{ "));
+        assert!(refusal.starts_with("{ "));
+        assert!(!refusal.starts_with("Store."));
         assert!(!refusal.starts_with("StartRefusal."));
         assert!(!refusal.starts_with("Refused.Store."));
         assert_eq!(

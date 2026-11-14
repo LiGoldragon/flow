@@ -3,10 +3,10 @@
 //! external call and observes its outcome.
 
 use crate::generated::emission::{
-    AgentStatus, AgentTarget, AgentWait, ClaudeSessionStart, CodexTitle, CurriculumExchange,
+    AgentStatus, AgentTarget, AgentWait, ClaudeEnvironment, ClaudeSessionStart, CurriculumExchange,
     Emittable, FlowIdentityClaim, Focus, GitCommand, GitRevision, HarnessCommandLine, HerdrCommand,
-    HerdrSessionCommand, HerdrSocketCall, HerdrSocketReply, HerdrSocketRequest, MetadataSource,
-    OutputSource, Printout, ProcessReply, ScreenFormat, ShellLine, Stderr, Stdout,
+    HerdrSessionCommand, HerdrSocketCall, HerdrSocketReply, OutputSource, Printout, ProcessReply,
+    PromptAgentByName, Stderr, Stdout,
 };
 use crate::herdr::HerdrCli;
 use crate::herdr::launch::NamesHerdrHarness;
@@ -53,7 +53,7 @@ impl SpeaksHerdr for HerdrSessionCommand {
                 "pane".into(),
                 "run".into(),
                 run.herdr_pane_id.0.clone(),
-                run.shell_line.shell_text(),
+                run.claude_environment.shell_text(),
             ],
             HerdrSessionCommand::WaitForPaneOutput(wait) => vec![
                 "pane".into(),
@@ -80,8 +80,8 @@ impl SpeaksHerdr for HerdrSessionCommand {
                     "report-metadata".into(),
                     report.herdr_pane_id.0.clone(),
                     "--source".into(),
+                    "flow".into(),
                 ];
-                words.extend(report.metadata_source.herdr_words());
                 words.extend(["--display-agent".into(), report.display_agent.0.clone()]);
                 words
             }
@@ -154,8 +154,7 @@ impl SpeaksHerdr for HerdrSessionCommand {
                 ];
                 words.extend(read.output_source.herdr_words());
                 words.extend(["--lines".into(), read.line_count.0.to_string()]);
-                words.push("--format".into());
-                words.extend(read.screen_format.herdr_words());
+                words.extend(["--format".into(), "ansi".into()]);
                 words
             }
             HerdrSessionCommand::PromptAgent(prompt) => {
@@ -187,27 +186,11 @@ impl SpeaksHerdr for OutputSource {
     }
 }
 
-impl SpeaksHerdr for MetadataSource {
-    fn herdr_words(&self) -> Vec<String> {
-        match self {
-            MetadataSource::Flow => vec!["flow".into()],
-        }
-    }
-}
-
 impl SpeaksHerdr for Focus {
     fn herdr_words(&self) -> Vec<String> {
         match self {
             Focus::Focused => Vec::new(),
             Focus::Unfocused => vec!["--no-focus".into()],
-        }
-    }
-}
-
-impl SpeaksHerdr for ScreenFormat {
-    fn herdr_words(&self) -> Vec<String> {
-        match self {
-            ScreenFormat::Ansi => vec!["ansi".into()],
         }
     }
 }
@@ -257,30 +240,26 @@ pub(crate) trait SpeaksShell {
 /// variable the lean start sets, then prints its marker. The hook's typed
 /// configuration in Claude's flag settings carries the Nexus socket
 /// separately.
-impl SpeaksShell for ShellLine {
+impl SpeaksShell for ClaudeEnvironment {
     fn shell_text(&self) -> String {
         use crate::generated::starter::RendersLeanStart;
         use crate::herdr::launch::{PreparesClaudePane, QuotesForShell};
-        match self {
-            ShellLine::PrepareClaudeEnvironment(environment) => {
-                let flow_id = environment
-                    .flow_id_option
-                    .as_ref()
-                    .map(|flow_id| format!(" && export FLOW_ID={}", flow_id.0))
-                    .unwrap_or_default();
-                let leave_outs = environment
-                    .lean_start
-                    .environment()
-                    .iter()
-                    .map(|variable| format!(" && export {}", variable.shell_quoted()))
-                    .collect::<String>();
-                format!(
-                    "unset {}{flow_id}{leave_outs} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
-                    <HerdrCli as PreparesClaudePane>::CLAUDE_INHERITED_ENVIRONMENT.join(" "),
-                    environment.readiness_marker.0
-                )
-            }
-        }
+        let flow_id = self
+            .flow_id_option
+            .as_ref()
+            .map(|flow_id| format!(" && export FLOW_ID={}", flow_id.0))
+            .unwrap_or_default();
+        let leave_outs = self
+            .lean_start
+            .environment()
+            .iter()
+            .map(|variable| format!(" && export {}", variable.shell_quoted()))
+            .collect::<String>();
+        format!(
+            "unset {}{flow_id}{leave_outs} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
+            <HerdrCli as PreparesClaudePane>::CLAUDE_INHERITED_ENVIRONMENT.join(" "),
+            self.readiness_marker.0
+        )
     }
 }
 
@@ -331,8 +310,12 @@ impl SpeaksHarness for HarnessCommandLine {
                     "-c".into(),
                     format!("model_reasoning_effort={}", codex.effort.0),
                     "-c".into(),
+                    // The Codex TUI's terminal title items: the thread title
+                    // alone. The items codex-tui 0.161.0-alpha.2 accepts in
+                    // `[tui].terminal_title` include `project-name`,
+                    // `current-dir`, `run-state` and `thread-title`.
+                    "tui.terminal_title=[\"thread-title\"]".into(),
                 ];
-                words.extend(codex.codex_title.harness_words());
                 words.extend(codex.lean_start.arguments());
                 words.extend(codex.configured_harness_arguments.0.iter().cloned());
                 if let Some(thread) = &codex.native_session_id_option {
@@ -350,17 +333,6 @@ impl SpeaksHarness for ClaudeSessionStart {
             ClaudeSessionStart::Unchosen => Vec::new(),
             ClaudeSessionStart::Chosen(session) => vec!["--session-id".into(), session.0.clone()],
             ClaudeSessionStart::Resumed(session) => vec!["--resume".into(), session.0.clone()],
-        }
-    }
-}
-
-/// The Codex TUI's terminal title items: the thread title alone. The items
-/// codex-tui 0.161.0-alpha.2 accepts in `[tui].terminal_title` include
-/// `project-name`, `current-dir`, `run-state` and `thread-title`.
-impl SpeaksHarness for CodexTitle {
-    fn harness_words(&self) -> Vec<String> {
-        match self {
-            CodexTitle::ThreadTitle => vec!["tui.terminal_title=[\"thread-title\"]".into()],
         }
     }
 }
@@ -765,7 +737,7 @@ impl ExchangesHerdrSocketLine for HerdrSocketCall {
     fn exchanged_line(&self, herdr: &HerdrCli) -> Result<HerdrSocketReply, String> {
         use crate::generated::starter::PromptsThroughHerdrSocket;
         use std::io::{BufRead, Write};
-        let mut line = serde_json::to_string(&self.herdr_socket_request.request_body())
+        let mut line = serde_json::to_string(&self.prompt_agent_by_name.request_body())
             .map_err(|error| format!("Herdr prompt request not encoded: {error}"))?;
         line.push('\n');
         if line.len() > crate::composition::HERDR_REQUEST_LINE_LIMIT {
@@ -803,19 +775,17 @@ trait SpeaksHerdrSocket {
     fn request_body(&self) -> serde_json::Value;
 }
 
-impl SpeaksHerdrSocket for HerdrSocketRequest {
+impl SpeaksHerdrSocket for PromptAgentByName {
     fn request_body(&self) -> serde_json::Value {
-        match self {
-            // Herdr's `agent.prompt` for the named agent types the text,
-            // then Enter.
-            HerdrSocketRequest::PromptAgentByName(prompt) => serde_json::json!({
-                "id": format!("flow:prompt:{}", prompt.launch_request_id.0),
-                "method": "agent.prompt",
-                "params": {
-                    "target": prompt.herdr_agent_name.0,
-                    "text": prompt.prompt_text.0,
-                }
-            }),
-        }
+        // Herdr's `agent.prompt` for the named agent types the text, then
+        // Enter.
+        serde_json::json!({
+            "id": format!("flow:prompt:{}", self.launch_request_id.0),
+            "method": "agent.prompt",
+            "params": {
+                "target": self.herdr_agent_name.0,
+                "text": self.prompt_text.0,
+            }
+        })
     }
 }

@@ -39,10 +39,10 @@ Emission
                         ClosePane.HerdrPaneId
                         GetPane.HerdrPaneId
                         ReadPaneProcesses.HerdrPaneId
-                        RunInPane.{ HerdrPaneId ShellLine }
+                        RunInPane.{ HerdrPaneId ClaudeEnvironment }
                         WaitForPaneOutput.{ HerdrPaneId OutputMatch.String OutputSource LineCount Milliseconds }
                         RenamePane.{ HerdrPaneId Label }
-                        ReportPaneMetadata.{ HerdrPaneId MetadataSource DisplayAgent.String }
+                        ReportPaneMetadata.{ HerdrPaneId DisplayAgent.String }
                         SendKeys.{ HerdrPaneId Vector<KeyName> }
                         CreateWorkspace.{ WorkingDirectory.String LaunchRequestId Focus.[ Focused Unfocused ] }
                         RenameWorkspace.{ HerdrWorkspaceId Label }
@@ -50,21 +50,18 @@ Emission
                         StartAgent.{ HerdrAgentName HarnessKind HerdrPaneId Milliseconds Option<CodexExecutable> HarnessCommandLine }
                         WaitForAgent.{ AgentTarget AgentWait }
                         GetAgent.AgentTarget
-                        ReadAgent.{ HerdrPaneId OutputSource LineCount ScreenFormat.[ Ansi ] }
+                        ReadAgent.{ HerdrPaneId OutputSource LineCount }
                         PromptAgent.{ HerdrPaneId PromptText.String Option<AgentWait> } ]
-  ; The shell line typed into a pane before its harness runs.
-  ShellLine.[ PrepareClaudeEnvironment.ClaudeEnvironment ]
-  ; Claude's environment: the Flow ID Reserve gave the launch, if any, the
-  ; parts its lean start leaves out by environment, and the marker the line
-  ; prints once it has run.
+  ; Claude's environment, the shell line typed into a pane before its
+  ; harness runs: the Flow ID Reserve gave the launch, if any, the parts its
+  ; lean start leaves out by environment, and the marker the line prints
+  ; once it has run.
   ClaudeEnvironment.{ Option<FlowId> LeanStart ReadinessMarker.String }
   ; Which of a pane's output a read or a wait looks at.
   OutputSource.[ Visible RecentUnwrapped ]
   LineCount.Integer
   Milliseconds.Integer
   Label.String
-  ; Who reports a pane's metadata: Flow itself.
-  MetadataSource.[ Flow ]
   ; An agent is named by its pane, or by the agent name Flow gave it.
   AgentTarget.[ Pane.HerdrPaneId Agent.HerdrAgentName ]
   AgentStatus.[ Working Idle Done Blocked ]
@@ -83,7 +80,7 @@ Emission
   ; Codex: the app-server socket it attaches to, its model and effort, the
   ; terminal title it shows, the parts it starts without, the configured
   ; arguments, and the opened thread it resumes.
-  CodexCommandLine.{ CodexSocket.String ModelName Effort CodexTitle.[ ThreadTitle ] LeanStart ConfiguredHarnessArguments Option<NativeSessionId> }
+  CodexCommandLine.{ CodexSocket.String ModelName Effort LeanStart ConfiguredHarnessArguments Option<NativeSessionId> }
   ; The arguments the configuration adds, as a person wrote them.
   ConfiguredHarnessArguments.Vector<String>
   Printout.{ Stdout.String Stderr.String }
@@ -112,9 +109,9 @@ Emission
   GitBlob.String
   ArchivePath.String
   ; A request on the socket of the session it names.
-  HerdrSocketCall.{ HerdrSessionName HerdrSocketRequest }
+  HerdrSocketCall.{ HerdrSessionName PromptAgentByName }
   ; Prompt the agent with the text, for the launch whose part it is.
-  HerdrSocketRequest.[ PromptAgentByName.{ LaunchRequestId HerdrAgentName PromptText } ]
+  PromptAgentByName.{ LaunchRequestId HerdrAgentName PromptText }
   ; Answered: Herdr's reply line, which carries a result. Refused: the error
   ; Herdr answered with. Unexchanged: the socket was not found or reached,
   ; or the request was too long or not written, or the reply not read.

@@ -2266,3 +2266,80 @@ fn dispatch_orders_rebind_and_transport_free_warning_admission_both_ways() {
         None
     );
 }
+
+#[test]
+fn warning_refresh_requires_qualified_middle_handover_or_emergency_and_respects_protection() {
+    use crate::context_warnings::tests::fixture_policy;
+    use crate::store::SeedsRole;
+    use crate::store::context::{JudgesThreshold, RecordsContextSize, ThresholdStanding};
+    use crate::store::handover::HoldsHandovers;
+    use crate::store::repair::RepairsMetaflows;
+
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let id = ConfiguredStore::flow_node().flow_id;
+    let address = ConfiguredStore::message();
+    let policy = fixture_policy();
+    nexus.store.seed_role(signal_flow::CallerIdentity {
+        flow_id: id.clone(),
+        aspect: Aspect::Field,
+        model_name: policy.model_name.clone(),
+    });
+    assert_eq!(
+        nexus.store.rebind_current_flow(&address, &id.0).unwrap(),
+        Ok(())
+    );
+    configures(&nexus, ConfigurationChange::ContextWarningPolicy(policy));
+    for tokens in [100_000, 150_000, 179_999] {
+        nexus.store.record_context_size(&id.0, tokens).unwrap();
+        assert!(matches!(
+            nexus.store.threshold_standing(&id.0).unwrap(),
+            ThresholdStanding::Below { .. }
+        ));
+    }
+    nexus.store.ensure_live_handover(&address, &id.0).unwrap();
+    let write = |tokens| {
+        nexus
+            .store
+            .keep_handover(
+                &address,
+                &address,
+                signal_flow::Section {
+                    title: signal_flow::Title("warning fixture".into()),
+                    description: signal_flow::Description("measured handover".into()),
+                    body: signal_flow::Body("fixture; no native successor proof".into()),
+                },
+                signal_flow::Touch::Known(signal_flow::Known_Data {
+                    flow_id: id.clone(),
+                    tokens: signal_flow::Tokens(tokens),
+                    timestamp: signal_flow::Timestamp(10),
+                }),
+            )
+            .unwrap();
+    };
+    write(149_999);
+    assert!(matches!(
+        nexus.store.threshold_standing(&id.0).unwrap(),
+        ThresholdStanding::Below { .. }
+    ));
+    write(150_000);
+    assert!(matches!(
+        nexus.store.threshold_standing(&id.0).unwrap(),
+        ThresholdStanding::Past { .. }
+    ));
+    configures(
+        &nexus,
+        ConfigurationChange::ProtectedAddresses(vec![address.clone()]),
+    );
+    assert!(matches!(
+        nexus.store.threshold_standing(&id.0).unwrap(),
+        ThresholdStanding::Protected { .. }
+    ));
+    configures(&nexus, ConfigurationChange::ProtectedAddresses(vec![]));
+    write(100_000);
+    nexus.store.record_context_size(&id.0, 180_000).unwrap();
+    assert!(matches!(
+        nexus.store.threshold_standing(&id.0).unwrap(),
+        ThresholdStanding::Past { .. }
+    ));
+}

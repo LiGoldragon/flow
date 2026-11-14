@@ -1,11 +1,15 @@
-//! The service is started with one datom, its place: its sockets in Runtime,
-//! its memory in State. Configuration reaches the running Nexus through its
-//! meta socket and takes effect at once; nothing is read from the
-//! environment for either. Every wait here is on an event: the Nexus's
-//! READY=1, an answer, or the child's exit, each bounded by EVENT_WAIT.
+//! The service is started with one datom, its place's name. Its place, its
+//! sockets in Runtime and its memory in State, is read from its place file,
+//! `<configuration home>/nexus/<place-name>/flow-nexus.signal`, before any
+//! socket opens, or lies at its defaults where there is no file. A new
+//! memory starts unconfigured; configuration reaches the running Nexus
+//! through its meta socket and takes effect at once. Every wait here is on
+//! an event: the Nexus's READY=1, an answer, or the child's exit, each
+//! bounded by EVENT_WAIT.
 use datom_codec::Datomizable;
 use flow_nexus::CarriesSignalFrames;
-use flow_nexus::place::{LaysOutPlace, Place};
+use flow_nexus::place::{FindsPlace, LaysOutPlace, Place, PlaceName};
+use translator::place_file::{PlaceFile, WritesPlaceFile};
 use flow_nexus::store::ConfiguresOnlyStore;
 use protos::{Compactable, Protosizable};
 use std::{
@@ -72,11 +76,11 @@ impl StartedNexus {
 /// lays it out, `<runtime>/nexus/main`, and its State `state`.
 fn place(runtime: &Path, state: &Path) -> Place {
     Place {
-        place_name: flow_nexus::generated::library::PlaceName("main".into()),
-        runtime: flow_nexus::generated::library::Runtime(
+        place_name: flow_nexus::place::PlaceName("main".into()),
+        runtime: flow_nexus::place::Runtime(
             runtime.join("nexus/main").to_string_lossy().into_owned(),
         ),
-        state: flow_nexus::generated::library::State(state.to_string_lossy().into_owned()),
+        state: flow_nexus::place::State(state.to_string_lossy().into_owned()),
     }
 }
 
@@ -90,33 +94,37 @@ fn declared(runtime: &Path, state: &Path) -> Place {
     place
 }
 
-/// The literal argv the shell writes, independent of Place's serializer.
-/// These fixture paths are temporary ASCII paths without string delimiters.
-fn place_argument(place: &Place) -> String {
-    format!(
-        "{{ «{}» «{}» «{}» }}",
-        place.place_name.0, place.runtime.0, place.state.0
-    )
+/// The place file of `place` under `home`'s configuration home,
+/// `<home>/.config`: the file the Nexus reads its place from.
+fn place_file(home: &Path, place_name: &str) -> PlaceFile {
+    use translator::place_file::{ConfigurationHome, LocatesConfigurationHome, LocatesPlaceFile};
+    ConfigurationHome::under(None, Some(home.as_os_str()))
+        .expect("the configuration home")
+        .place_file(
+            &<PlaceName as FindsPlace>::nexus_name(),
+            &PlaceName(place_name.into()),
+        )
+        .expect("the place file")
 }
 
 /// Starts the Nexus in its place with `environment` added to an otherwise
-/// empty environment and the notify socket systemd would give it.
+/// empty environment and the notify socket systemd would give it: its place
+/// is written to its place file, and it is started with its place's name.
 fn start(home: &Path, place: &Place, environment: &[(&str, &str)]) -> (StartedNexus, UnixDatagram) {
-    start_daemon(
-        Path::new(env!("CARGO_BIN_EXE_flow-nexus-daemon")),
-        home,
-        place,
-        environment,
-    )
+    place_file(home, &place.place_name.0)
+        .write_place(place)
+        .expect("the place file is written");
+    start_named(home, &place.place_name.0, environment)
 }
 
-/// Starts the given daemon executable as `start` starts this crate's.
-fn start_daemon(
-    daemon: &Path,
+/// Starts the Nexus with the place name alone, whatever its place file
+/// holds or whether there is one.
+fn start_named(
     home: &Path,
-    place: &Place,
+    place_name: &str,
     environment: &[(&str, &str)],
 ) -> (StartedNexus, UnixDatagram) {
+    let daemon = Path::new(env!("CARGO_BIN_EXE_flow-nexus-daemon"));
     let notify_directory = tempfile::tempdir().expect("notify directory");
     let notify_path = notify_directory.path().join("notify.sock");
     let notify = UnixDatagram::bind(&notify_path).expect("the notify socket binds");
@@ -133,9 +141,9 @@ fn start_daemon(
         command.env(name, value);
     }
     let child = command
-        .arg(place_argument(place))
+        .arg(place_name)
         .spawn()
-        .expect("flow-nexus spawns with its place");
+        .expect("flow-nexus spawns with its place's name");
     (
         StartedNexus {
             child: Some(child),
@@ -493,7 +501,7 @@ fn a_live_nexus_socket_is_never_taken_over() {
 
     // A second Nexus at the same Runtime, with memory of its own.
     let intruding = Place {
-        state: flow_nexus::generated::library::State(
+        state: flow_nexus::place::State(
             other_state.path().to_string_lossy().into_owned(),
         ),
         ..place.clone()
@@ -526,7 +534,7 @@ fn a_nexus_whose_place_is_absent_is_refused_and_makes_nothing() {
     let absent_state = state_root.path().join("nexus/main");
     let place = declared(runtime.path(), state.path());
     let place = Place {
-        state: flow_nexus::generated::library::State(absent_state.to_string_lossy().into_owned()),
+        state: flow_nexus::place::State(absent_state.to_string_lossy().into_owned()),
         ..place
     };
     let (nexus, _notify) = start(home.path(), &place, &[]);
@@ -753,34 +761,138 @@ fn each_socket_appears_at_its_name_only_listening() {
     assert!(leftovers.iter().all(|leftover| leftover.exists()));
 }
 
-/// The configured package's daemon is built against this crate's library and
-/// test build, never compiled with them again: its check runs this one test
-/// against that daemon, named by FLOW_NEXUS_CONFIGURED_DAEMON.
+/// The child's exit and what it wrote to stderr.
+fn refusal(nexus: StartedNexus) -> (ExitStatus, String) {
+    let mut nexus = nexus;
+    let mut stderr = String::new();
+    let pipe = nexus.child().stderr.take();
+    let status = nexus.exit();
+    if let Some(mut pipe) = pipe {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    (status, stderr)
+}
+
+/// A new memory: the Nexus makes it empty, starts unconfigured, binds and
+/// announces readiness, answers Unconfigured, and is configured by the
+/// replay over its meta socket, taking each Configure as it commits.
 #[test]
-#[ignore = "run by the configured package's check, against its daemon"]
-fn configured_executable_seeds_only_its_fresh_typed_nexus_row() {
-    let daemon = std::env::var_os("FLOW_NEXUS_CONFIGURED_DAEMON")
-        .expect("FLOW_NEXUS_CONFIGURED_DAEMON names the configured daemon");
+fn a_new_memory_starts_unconfigured_and_is_configured_over_the_meta_socket() {
     let home = tempfile::tempdir().expect("temporary home");
     let runtime = tempfile::tempdir().expect("temporary runtime directory");
     let state = tempfile::tempdir().expect("dedicated state directory");
     let place = declared(runtime.path(), state.path());
+    assert!(!place.store().exists());
 
-    // A fresh memory: the Nexus starts with the configuration built into it,
-    // and binds and announces readiness before anything is configured.
-    let nexus = ready(start_daemon(Path::new(&daemon), home.path(), &place, &[]));
+    let nexus = start_ready(home.path(), &place, &[]);
+    assert!(place.store().exists(), "the new memory is made");
+    assert_eq!(
+        meta_call(&place, &meta_signal_flow::Query::Configuration),
+        meta_signal_flow::Response::Unconfigured
+    );
+    assert_eq!(
+        meta_call(
+            &place,
+            &meta_signal_flow::Query::Configure(meta_signal_flow::ConfigurationChange::Nexus(
+                configuration(home.path())
+            ))
+        ),
+        meta_signal_flow::Response::Configured(meta_signal_flow::ConfigureOutcome::Replaced)
+    );
+    let meta_signal_flow::Response::Configuration(now) =
+        meta_call(&place, &meta_signal_flow::Query::Configuration)
+    else {
+        panic!("the configured Nexus answers its Configuration")
+    };
+    assert_eq!(now.configured_nexus.0, configuration(home.path()));
     assert!(metaflows_listed(&place));
     assert!(nexus.terminate().success());
 
-    let store = flow_nexus::store::ConfigurationOnlyStore::open(&place.store())
-        .expect("configured store reopens");
-    let snapshot = store
-        .configuration_snapshot()
-        .expect("snapshot reads")
-        .expect("fresh executable seeded Nexus");
-    assert_eq!(snapshot.nexus.lease, flow_ethos::Lease(60));
-    assert!(snapshot.nexus.message_nexus_path_option.is_none());
-    assert!(snapshot.nexus.message_nexus_binary_option.is_none());
+    // A memory that exists keeps its configuration across a start.
+    let nexus = start_ready(home.path(), &place, &[]);
+    let meta_signal_flow::Response::Configuration(kept) =
+        meta_call(&place, &meta_signal_flow::Query::Configuration)
+    else {
+        panic!("the restarted Nexus answers its Configuration")
+    };
+    assert_eq!(kept.configured_nexus.0, configuration(home.path()));
+    assert!(nexus.terminate().success());
+}
+
+/// With no place file the place lies at its defaults:
+/// `$XDG_RUNTIME_DIR/nexus/<place-name>` and
+/// `$XDG_STATE_HOME/nexus/<place-name>`.
+#[test]
+fn a_place_without_a_place_file_lies_at_its_defaults() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let runtime = tempfile::tempdir().expect("temporary runtime directory");
+    let state = tempfile::tempdir().expect("temporary state home");
+    let place = Place {
+        place_name: PlaceName("main".into()),
+        runtime: flow_nexus::place::Runtime(
+            runtime.path().join("nexus/main").to_string_lossy().into_owned(),
+        ),
+        state: flow_nexus::place::State(
+            state.path().join("nexus/main").to_string_lossy().into_owned(),
+        ),
+    };
+    for directory in [place.runtime_directory(), place.state_directory()] {
+        std::fs::create_dir_all(directory).expect("the declared place directory");
+    }
+    assert!(!place_file(home.path(), "main").path.exists());
+    let nexus = ready(start_named(
+        home.path(),
+        "main",
+        &[
+            ("XDG_RUNTIME_DIR", &runtime.path().to_string_lossy()),
+            ("XDG_STATE_HOME", &state.path().to_string_lossy()),
+        ],
+    ));
+    assert!(place.ordinary_socket().exists() && place.meta_socket().exists());
+    assert!(place.store().exists());
+    assert!(nexus.terminate().success());
+}
+
+/// A place file that is not one framed Place of this place's, or holds a
+/// relative directory, is refused naming the file, and nothing is made.
+#[test]
+fn a_place_file_that_is_not_this_place_is_refused_naming_it() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let runtime = tempfile::tempdir().expect("temporary runtime directory");
+    let state = tempfile::tempdir().expect("dedicated state directory");
+    let place = declared(runtime.path(), state.path());
+    let file = place_file(home.path(), "main");
+
+    let next = Place {
+        place_name: PlaceName("next".into()),
+        ..place.clone()
+    };
+    let next_file = place_file(home.path(), "next");
+    next_file.write_place(&next).expect("written");
+    std::fs::create_dir_all(file.path.parent().unwrap()).unwrap();
+    std::fs::rename(&next_file.path, &file.path).unwrap();
+    let (status, stderr) = refusal(start_named(home.path(), "main", &[]).0);
+    assert!(!status.success());
+    assert!(
+        stderr.contains("Invalid.") && stderr.contains(&*file.path.to_string_lossy()),
+        "{stderr}"
+    );
+
+    std::fs::write(&file.path, b"{ main /run /state }").unwrap();
+    let (status, stderr) = refusal(start_named(home.path(), "main", &[]).0);
+    assert!(!status.success());
+    assert!(
+        stderr.contains("Undecodable.") && stderr.contains(&*file.path.to_string_lossy()),
+        "{stderr}"
+    );
+    assert!(!place.store().exists(), "no memory is made");
+    assert!(
+        std::fs::read_dir(place.runtime_directory())
+            .unwrap()
+            .next()
+            .is_none(),
+        "nothing is bound"
+    );
 }
 
 #[test]

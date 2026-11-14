@@ -1,3 +1,30 @@
+# Unreleased (primary-pko0): the Nexus reads its place from its place file and holds no configuration
+
+translator 0.6.0 (130c27a), on build base pko0-e3a7d1 (97ba18e). **The daemon's
+start changes.**
+
+- **The daemon is started with its place's name**, one datom:
+  `flow-nexus-daemon main`, in place of the place datom. Before any socket
+  opens it reads its place from `$XDG_CONFIG_HOME/nexus/<place-name>/flow-nexus.signal`
+  (`$HOME/.config` when the variable is unset or empty), one framed signal
+  holding the Place every Nexus shares, translator's placement. Where there
+  is no file the place lies at its defaults, `$XDG_RUNTIME_DIR/nexus/<place-name>`
+  and `$XDG_STATE_HOME/nexus/<place-name>` (`$HOME/.local/state` when unset);
+  a file that is not one framed Place of this place's, or holds a relative
+  directory, is refused naming the file. The place file is compiled from
+  datom by translator's `nexus-configure`, the same tool for every Nexus, and
+  in Nix is its own derivation, translator's `lib.<system>.mkPlaceFile`.
+- **The executable holds no configuration.** The
+  `executable-default-configuration` feature, the configured package's
+  recompiled daemon, `lib.<system>.mkFlowPackage` and `nix/mk-flow-package.nix`
+  are gone; `packages.default` is Flow, built once. A new memory is made empty
+  and the Nexus starts unconfigured: it binds, announces readiness, answers
+  `Unconfigured`, and refuses what needs a configuration until the meta socket
+  configures it. A release replays the configuration through `flow-nexus-meta`,
+  `Configure.Nexus` first; a memory that exists keeps its configuration.
+- Flow's own Place (`crates/flow-nexus/ethos/library.ethos`) is gone: the
+  Place is translator's.
+
 # Flow 0.54.7: every Codex rest settles; routing follows the succession; a reap is owed at once and finished outside the dispatch gate; every connection greets
 
 Contracts: signal-flow 61.0.0 (4871bb8) and meta-signal-flow 77.0.0

@@ -14,9 +14,14 @@
       url = "github:LiGoldragon/Curriculum";
       flake = false;
     };
-    # The public default remains the last unconfigured Flow artifact while
-    # callers move explicitly to lib.<system>.mkFlowPackage.
-    unconfigured-flow.url = "github:LiGoldragon/flow/d3ab87ee18b1dd30947d5f0089f5abb4bafa80d5";
+    # The shared Place every Nexus starts in and nexus-configure, the tool
+    # that compiles it into the place file the Nexus reads at start. Its
+    # revision is the one Cargo.lock locks (checks.translator-pin), and it is
+    # built on Flow's build base, so its crates are Flow's.
+    translator = {
+      url = "github:LiGoldragon/translator";
+      inputs.base.follows = "base";
+    };
     # The accepted 0.53.2 Flow, built by its own flake, whose Memory the
     # request-id migration check evolves. The lock holds its commit, f7d2336,
     # and the flake refuses any other (predecessorRevision below).
@@ -34,7 +39,7 @@
       self,
       base,
       curriculum,
-      unconfigured-flow,
+      translator,
       migration-predecessor,
     }:
     let
@@ -356,8 +361,7 @@
             # The capsule runner's own logic that runs no capsule: where a run
             # keeps its witnesses and what it copies there before teardown,
             # and its waits on their events (inotify, pidfd, a socket). The
-            # tests run the workspace's own binaries (the invocation
-            # composers), which the unconfigured default lacks.
+            # tests run the workspace's own binaries, the package itself.
             capsule-witnesses =
               pkgs.runCommand "flow-capsule-witnesses"
                 {
@@ -395,6 +399,12 @@
                   export FLOW_MIGRATION_SOURCE_REV="${sourceRevision}"
                   sha256sum "$FLOW_MIGRATION_PREDECESSOR_BIN" "$FLOW_MIGRATION_CURRENT_BIN"
                 '';
+            # The translator Flow's flake builds nexus-configure from is the
+            # one Cargo.lock locks for the Nexus.
+            translator-pin = pkgs.runCommand "flow-translator-pin" { nativeBuildInputs = [ pkgs.gnugrep ]; } ''
+              grep -F 'translator?rev=${translator.rev}#${translator.rev}' ${./Cargo.lock}
+              touch "$out"
+            '';
             flow-request-id-immutable-contract-pins =
               pkgs.runCommand "flow-request-id-immutable-contract-pins" { nativeBuildInputs = [ pkgs.gnugrep ]; }
                 ''
@@ -444,22 +454,6 @@
         };
     in
     {
-      lib = forSystems (
-        system:
-        let
-          context = mkContext system;
-        in
-        {
-          mkFlowPackage = import ./nix/mk-flow-package.nix {
-            inherit lib version;
-            inherit (context) pkgs processCheck binaries;
-            flowNexus = context.members.flow-nexus;
-            members = lib.attrValues (removeAttrs context.commands [ "flow-nexus" ]);
-            memberChecks = lib.attrValues context.memberChecks;
-          };
-        }
-      );
-
       packages = forSystems (
         system:
         let
@@ -468,10 +462,12 @@
         in
         context.members
         // {
-          # Intentionally the last unconfigured artifact. A 0.43 package
-          # is built only through lib.<system>.mkFlowPackage with an explicit
-          # defaultConfiguration; production has supplied none yet.
-          default = unconfigured-flow.packages.${system}.default;
+          # Flow, built once: its binaries hold no configuration. The
+          # daemon reads its place from its place file at start, and a new
+          # memory is configured by replaying the configuration through
+          # flow-nexus-meta; the place file is its own derivation
+          # (translator's lib.<system>.mkPlaceFile).
+          default = context.workspaceBinaries;
           # The flow-nexus library test executable, from its test build, so a
           # test kept out of every check (one that needs a store no repository
           # holds, named at run time) can be run by name where a build runs.
@@ -503,6 +499,7 @@
               echo "#!${pkgs.runtimeShell}"
               echo "export FLOW_CAPSULE_INOTIFYWAIT=${pkgs.inotify-tools}/bin/inotifywait"
               echo "export FLOW_CAPSULE_WAITPID=${lib.getExe' pkgs.util-linux "waitpid"}"
+              echo "export FLOW_CAPSULE_NEXUS_CONFIGURE=${translator.packages.${system}.nexus-configure}/bin/nexus-configure"
               echo "exec $out/libexec/flow-capsule/flow-capsule \"\$@\""
             } > "$out/bin/flow-capsule"
             chmod +x "$out/bin/flow-capsule"
@@ -519,44 +516,7 @@
 
       # Every check, the base's cargo-nix with the ones above; checks.default
       # is all of them, so a green default is the whole gate.
-      checks = forSystems (
-        system:
-        (mkContext system).workspace.checks
-        // {
-          # The package a deployment builds: the executable with a default
-          # configuration composed into its Rust, so a contract change that
-          # breaks that composition fails here and not at a deployment.
-          configured-package = self.lib.${system}.mkFlowPackage {
-            defaultConfiguration = {
-              sourceRoot = "/home/example/primary";
-              runtimeDirectory = "/run/user/1000/nexus/main";
-              stableCodex = {
-                clientPath = "/nix/store/example-codex-stable-flow-client/bin/codex-stable-flow-client";
-                home = "/home/example/.codex-next";
-                controlSocketPath = "/home/example/.codex-next/app-server-control/app-server-control.sock";
-                roster = [ "gpt-5.6-sol" ];
-              };
-              nextCodex = {
-                clientPath = "/nix/store/example-codex-next-flow-client/bin/codex-next-flow-client";
-                home = "/home/example/.codex-next-candidate";
-                controlSocketPath = "/home/example/.codex-next-candidate/app-server-control/app-server-control.sock";
-                roster = [ "gpt-6-astra" ];
-              };
-              harnessProfiles = [
-                {
-                  harnessKind = "Claude";
-                  commandSigils = [ "/" ];
-                  interruptKeys = [ "esc" ];
-                  submitKeys = [ "enter" ];
-                }
-              ];
-              metaAspects = [ "Psyche" ];
-              presentationPrompt = null;
-              herdrSession = "default";
-            };
-          };
-        }
-      );
+      checks = forSystems (system: (mkContext system).workspace.checks);
 
       devShells = forSystems (
         system:

@@ -316,7 +316,7 @@ impl PreparesContextWarningAdmission for FlowStore {
         use super::context::{NamesFlowModel, RecordsContextSize};
         use crate::context_warnings::TracksContextWarnings;
         if observation.tokens.0 < 0
-            || metaflow.state != flow_ethos::MetaflowState::Awake(observation.flow_id.clone())
+            || metaflow.state != flow_ethos::State::Awake(observation.flow_id.clone())
             || self.context_size(&observation.flow_id.0)? != Some(observation.tokens.0)
         {
             return Ok(None);

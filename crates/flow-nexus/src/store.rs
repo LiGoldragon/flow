@@ -71,7 +71,7 @@ pub(crate) use crate::generated::memory::{
 use address_hold::HoldsLaunchAddress;
 use context_warnings::{
     ConfiguresContextWarnings, ContextWarningConfigurationTables, DescribesWarningRecord,
-    ProjectsWarningPolicy, RegistersContextWarningConfiguration,
+    HookConfigurationOrigin, ProjectsWarningPolicy, RegistersContextWarningConfiguration,
 };
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
@@ -5257,7 +5257,7 @@ impl WritesFlowStore for FlowStore {
 }
 
 /// Store identity, catalogue validation and committed-record operations.
-pub(crate) trait ReadsFlowMemory {
+pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
     fn aspect_key(aspect: &Aspect) -> &'static str {
         match aspect {
             Aspect::Psyche => "Psyche",

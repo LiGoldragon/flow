@@ -1309,7 +1309,6 @@ impl RestartsInSteps for RunningNexus {
                     prompt_fd: Some(format!("/proc/{}/fd/{}", std::process::id(), i32::MAX)),
                     claude_session: None,
                     claude_resume: Some(record.native_session_id.clone().0),
-                    codex_title: None,
                     thread: None,
                 }
             }
@@ -1332,7 +1331,6 @@ impl RestartsInSteps for RunningNexus {
                     prompt_fd: None,
                     claude_session: None,
                     claude_resume: None,
-                    codex_title: Some(crate::herdr::launch::CODEX_TERMINAL_TITLE.into()),
                     thread: Some(record.native_session_id.clone().0),
                 }
             }

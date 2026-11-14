@@ -84,8 +84,6 @@ impl RehearsalFixture for Fixture {
             prompt_fd: (harness == &HarnessKind::Claude).then(|| "/proc/self/fd/17".into()),
             claude_session: (harness == &HarnessKind::Claude).then(|| "claude-session".into()),
             claude_resume: None,
-            codex_title: (harness == &HarnessKind::Codex)
-                .then(|| "tui.terminal_title=['thread-name']".into()),
             thread: (harness == &HarnessKind::Codex).then(|| "codex-thread".into()),
         }
     }
@@ -105,7 +103,6 @@ impl RehearsalFixture for Fixture {
                 "<flow-id>" => actual.claude_title.clone().unwrap(),
                 "<prompt-fd>" => actual.prompt_fd.clone().unwrap(),
                 "<claude-session>" => actual.claude_session.clone().unwrap(),
-                "<title>" => actual.codex_title.clone().unwrap(),
                 "<thread>" => actual.thread.clone().unwrap(),
                 other => other.to_owned(),
             };

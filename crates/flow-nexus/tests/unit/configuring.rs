@@ -1340,6 +1340,12 @@ fn with_permaflow(
     expected
 }
 
+/// One Amend's Change and what it does to the permaflow it names.
+type AmendStep = (
+    meta_signal_flow::Change,
+    Box<dyn Fn(&mut ConfigureMetaflow)>,
+);
+
 /// Configure.Amend changes one value of one permaflow alone: each Change
 /// changes exactly its one field of that permaflow, and the whole rest of
 /// the store, the other permaflow, every other family and the running
@@ -1350,7 +1356,7 @@ fn each_amend_changes_exactly_its_one_value_and_nothing_else() {
     let (_fixture, mut nexus, alpha, beta) = amend_world();
     *nexus.composer.edit() = crate::composition::tests::fixture_composer();
     let mut expected = alpha.clone();
-    let steps: Vec<(Change, Box<dyn Fn(&mut ConfigureMetaflow)>)> = vec![
+    let steps: Vec<AmendStep> = vec![
         (
             Change::Purpose(meta_signal_flow::Purpose("Alpha after".into())),
             Box::new(|row: &mut ConfigureMetaflow| {

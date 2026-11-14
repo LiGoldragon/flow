@@ -88,7 +88,7 @@ fn prepared(fixture: &NexusFixture) -> String {
     else {
         panic!("the oldest request is prepared")
     };
-    attempt.attempt_id
+    attempt.queue_attempt_id.0
 }
 
 fn inspect(fixture: &NexusFixture, at: Address) -> MetaResponse {
@@ -496,7 +496,7 @@ fn withdraw_takes_one_request_out_and_closes_its_attempt() {
             .queue_delivery_attempt(&attempt_id)
             .unwrap()
             .expect("the attempt is kept")
-            .phase,
+            .queue_delivery_phase,
         QueueDeliveryPhase::Uncertain(None),
         "a hand-over that may have reached the seat is never taken for absent"
     );

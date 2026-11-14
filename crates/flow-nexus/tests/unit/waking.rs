@@ -2256,8 +2256,14 @@ fn a_simplified_wake_sends_the_first_abrupt_request_without_an_empty_turn() {
     else {
         panic!("the exact first input receipt binds its sender")
     };
-    assert_eq!(binding.input_delivery_id, input.logical_delivery_id.0);
-    assert_eq!(binding.recipient, sender);
+    assert_eq!(
+        binding.input_delivery_id,
+        crate::generated::memory::InputDeliveryId(input.logical_delivery_id.0)
+    );
+    assert_eq!(
+        binding.recipient,
+        crate::generated::memory::Recipient(sender)
+    );
     assert_eq!(
         receipt.native_session_id,
         signal_flow::NativeSessionId(world.session())
@@ -2334,7 +2340,10 @@ fn a_simplified_startup_leaves_its_second_request_ordered() {
     else {
         panic!("the first input alone owns the reply binding")
     };
-    assert_eq!(binding.input_delivery_id, first.logical_delivery_id.0);
+    assert_eq!(
+        binding.input_delivery_id,
+        crate::generated::memory::InputDeliveryId(first.logical_delivery_id.0)
+    );
 }
 
 /// A Simplified flow already owes one reply. Further ordinary Sends are
@@ -2374,15 +2383,15 @@ fn a_simplified_reply_wait_returns_each_durable_acceptance_without_native_input(
         .nexus
         .store
         .bind_simplified_reply(SimplifiedReplyBinding {
-            flow_id: "abc123".into(),
-            input_delivery_id: "already-in-turn".into(),
-            source: at.clone(),
-            recipient: Address {
+            flow_id: flow_ethos::FlowId("abc123".into()),
+            input_delivery_id: crate::generated::memory::InputDeliveryId("already-in-turn".into()),
+            source: crate::generated::memory::Source(at.clone()),
+            recipient: crate::generated::memory::Recipient(Address {
                 aspect: Aspect::Mind,
                 topic: flow_ethos::Topic("core".into()),
                 model: Model::Sol,
-            },
-            completed: false,
+            }),
+            completed: crate::generated::memory::Completed(false),
         })
         .unwrap();
     let caller = super::MarkedProcess::spawn("sleep", &["30"], "pane-1");
@@ -6764,11 +6773,13 @@ fn a_simplified_answer_uses_bound_transcript_b_and_never_hook_a() {
         .nexus
         .store
         .bind_simplified_reply(SimplifiedReplyBinding {
-            flow_id: "abc123".into(),
-            input_delivery_id: input.logical_delivery_id.0.clone(),
-            source: at.clone(),
-            recipient: sender.clone(),
-            completed: false,
+            flow_id: flow_ethos::FlowId("abc123".into()),
+            input_delivery_id: crate::generated::memory::InputDeliveryId(
+                input.logical_delivery_id.0.clone(),
+            ),
+            source: crate::generated::memory::Source(at.clone()),
+            recipient: crate::generated::memory::Recipient(sender.clone()),
+            completed: crate::generated::memory::Completed(false),
         })
         .unwrap();
     let startup = fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue.0;

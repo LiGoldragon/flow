@@ -239,7 +239,7 @@ fn declared_counters_name_the_next_ids_and_a_record_ends_the_empty_store() {
     else {
         panic!("the oldest request is prepared")
     };
-    assert_eq!(attempt.attempt_id, "queue-attempt-0000000000000032");
+    assert_eq!(attempt.queue_attempt_id.0, "queue-attempt-0000000000000032");
     // The logical delivery counter is the delivery cursor every lifecycle
     // event draws from: the admission took 130, the hand-over's Attempting
     // took 131.

@@ -6,7 +6,7 @@
 
 use super::logical_delivery::{MintsRequestIds, RequestClosure, RequestIdBinding};
 use super::{AnnouncesLaunchChanges, FlowStore, StoreError};
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+pub(crate) use crate::generated::memory::ScheduledReminder;
 use sema_engine::{
     EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan, RecordKey, SchemaHash,
     TableDescriptor, TableName,
@@ -17,17 +17,6 @@ pub(super) const SCHEDULED_REMINDER_TABLE_NAME: TableName =
     TableName::new("flow_nexus_scheduled_reminders");
 pub(super) const SCHEDULED_REMINDER_FAMILY: &str = "flow-nexus-scheduled-reminder";
 pub(super) const SCHEDULED_REMINDER_SCHEMA: &str = "flow-nexus-scheduled-reminder-v1";
-
-/// One reminder asked for and not yet sent: its id, whom it reminds, who
-/// asked, when it falls due in Unix seconds, and its words.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct ScheduledReminder {
-    pub request_id: RequestId,
-    pub address: Address,
-    pub sent_by: SentBy,
-    pub due: i64,
-    pub text: String,
-}
 
 impl EngineRecord for ScheduledReminder {
     fn record_key(&self) -> RecordKey {
@@ -130,7 +119,7 @@ impl SchedulesReminders for FlowStore {
                 RequestIdBinding {
                     request_id: request_id.clone(),
                     logical_delivery_id: request_id.scheduled_marker(),
-                    closure: RequestClosure::Open,
+                    request_closure: RequestClosure::Open,
                 },
             )
             .assert(
@@ -139,8 +128,8 @@ impl SchedulesReminders for FlowStore {
                     request_id: request_id.clone(),
                     address,
                     sent_by,
-                    due,
-                    text,
+                    due: crate::generated::memory::Due(due),
+                    text: crate::generated::memory::Text(text),
                 },
             );
         self.engine.commit_atomic(commit)?;
@@ -169,7 +158,7 @@ impl SchedulesReminders for FlowStore {
             .match_records(QueryPlan::all(self.scheduled_reminders))?
             .records()
             .iter()
-            .filter(|reminder| reminder.due <= now)
+            .filter(|reminder| reminder.due.0 <= now)
             .cloned()
             .collect())
     }
@@ -180,7 +169,7 @@ impl SchedulesReminders for FlowStore {
             .match_records(QueryPlan::all(self.scheduled_reminders))?
             .records()
             .iter()
-            .map(|reminder| reminder.due)
+            .map(|reminder| reminder.due.0)
             .filter(|due| *due > now)
             .min())
     }
@@ -201,7 +190,7 @@ impl SchedulesReminders for FlowStore {
         );
         let commit = match self.request_binding(&reminder.request_id)? {
             Some(mut binding) => {
-                binding.closure = RequestClosure::Answered(closed_by);
+                binding.request_closure = RequestClosure::Answered(closed_by);
                 commit.mutate(self.logical_deliveries.request_ids, binding)
             }
             None => commit,
@@ -220,7 +209,7 @@ impl SchedulesReminders for FlowStore {
         let Some(mut reminder) = self.scheduled_reminder(request_id)? else {
             return Err(StoreError::StateInvariant);
         };
-        reminder.due = due;
+        reminder.due = crate::generated::memory::Due(due);
         self.engine.commit_atomic(
             self.engine
                 .begin_atomic_commit()

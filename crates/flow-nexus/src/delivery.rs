@@ -490,8 +490,8 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             .store
             .record_lease_step(PaneLease {
                 delivery_id: self.request.delivery_id.clone(),
-                flow_id: self.target.node.flow_id.clone().0,
-                herdr_pane_id: self.target.route.herdr_pane_id.clone().0,
+                flow_id: self.target.node.flow_id.clone(),
+                herdr_pane_id: self.target.route.herdr_pane_id.clone(),
                 lease_step,
             })
             .map_err(|_| DeliveryRejection::PersistenceRefused)

@@ -539,9 +539,10 @@ impl RunsRequestIdAnnouncements for super::FlowStore {
         let open = |logical_id: &str| {
             bindings.records().iter().any(|binding| {
                 binding.logical_delivery_id.0 == logical_id
-                    && binding.closure == RequestClosure::Open
+                    && binding.request_closure == RequestClosure::Open
             }) && currents.records().iter().any(|current| {
-                current.snapshot.logical_delivery_id.0 == logical_id && current.archived.is_none()
+                current.delivery_snapshot.logical_delivery_id.0 == logical_id
+                    && current.archived_cursor.0.is_none()
             })
         };
         let request_id = |logical_id: &str| {
@@ -1165,10 +1166,10 @@ impl BecomesCurrentWithRequestIds for PriorStoredDeliveryRequest {
         request_ids: &std::collections::BTreeMap<String, RequestId>,
     ) -> Result<super::queue_delivery::StoredDeliveryRequest, StoreError> {
         Ok(super::queue_delivery::StoredDeliveryRequest {
-            request_id: self.request_id.clone(),
+            queue_request_id: meta_signal_flow::QueueRequestId(self.request_id.clone()),
             address: self.address.current()?,
             queue_evidence: self.queue_evidence.current_with_request_ids(request_ids)?,
-            state: match self.state {
+            request_state: match self.state {
                 PriorRequestState::Queued => super::queue_delivery::RequestState::Queued,
                 PriorRequestState::Settled => super::queue_delivery::RequestState::Settled,
                 PriorRequestState::Unsent => super::queue_delivery::RequestState::Unsent,
@@ -1181,10 +1182,14 @@ impl BecomesCurrentWithRequestIds for PriorStoredDeliveryRequest {
 impl From<&PriorNativeDeliveryReceipt> for super::queue_delivery::NativeDeliveryReceipt {
     fn from(value: &PriorNativeDeliveryReceipt) -> Self {
         super::queue_delivery::NativeDeliveryReceipt {
-            native_request_id: value.native_request_id,
-            thread_id: value.thread_id.clone(),
-            turn_id: value.turn_id.clone(),
-            native_receipt: value.native_receipt.clone(),
+            native_request_id: crate::generated::memory::NativeRequestId(
+                value.native_request_id as i64,
+            ),
+            thread_id: crate::generated::memory::ThreadId(value.thread_id.clone()),
+            turn_id: crate::generated::memory::TurnId(value.turn_id.clone()),
+            native_receipt_text: crate::generated::memory::NativeReceiptText(
+                value.native_receipt.clone(),
+            ),
         }
     }
 }
@@ -1202,9 +1207,9 @@ impl BecomesCurrentWithRequestIds for PriorQueueDeliveryAttempt {
         let history_anchor = match &self.history_anchor {
             PriorNativeHistoryAnchor::ClaudeTranscript(cursor) => {
                 NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
-                    device: cursor.device,
-                    inode: cursor.inode,
-                    offset: cursor.offset,
+                    device: crate::generated::memory::Device(cursor.device as i64),
+                    inode: crate::generated::memory::Inode(cursor.inode as i64),
+                    offset: crate::generated::memory::Offset(cursor.offset as i64),
                 })
             }
             PriorNativeHistoryAnchor::CodexTurns(turn) => {
@@ -1226,24 +1231,26 @@ impl BecomesCurrentWithRequestIds for PriorQueueDeliveryAttempt {
                 QueueDeliveryPhase::Settled(receipt.into())
             }
             PriorQueueDeliveryPhase::Absent(absence) => QueueDeliveryPhase::Absent(AbsenceRecord {
-                proof: recode_unchanged!(&absence.proof, meta_signal_flow::AbsenceProof)?,
-                observation: absence.observation.clone(),
+                absence_proof: recode_unchanged!(&absence.proof, meta_signal_flow::AbsenceProof)?,
+                observation: crate::generated::memory::Observation(absence.observation.clone()),
             }),
             PriorQueueDeliveryPhase::Resolved(record) => QueueDeliveryPhase::Resolved(
                 recode_unchanged!(record, meta_signal_flow::QueueResolutionRecord)?,
             ),
         };
         Ok(QueueDeliveryAttempt {
-            request_id: self.request_id.clone(),
-            attempt_id: self.attempt_id.clone(),
-            native_request_id: self.native_request_id,
-            flow_id: self.flow_id.clone(),
-            thread_id: self.thread_id.clone(),
+            queue_request_id: meta_signal_flow::QueueRequestId(self.request_id.clone()),
+            queue_attempt_id: meta_signal_flow::QueueAttemptId(self.attempt_id.clone()),
+            native_request_id: crate::generated::memory::NativeRequestId(
+                self.native_request_id as i64,
+            ),
+            flow_id: flow_ethos::FlowId(self.flow_id.clone()),
+            thread_id: crate::generated::memory::ThreadId(self.thread_id.clone()),
             harness_kind: recode_unchanged!(&self.harness_kind, flow_ethos::HarnessKind)?,
-            history_anchor,
+            native_history_anchor: history_anchor,
             address: self.address.current()?,
             queue_evidence: self.queue_evidence.current_with_request_ids(request_ids)?,
-            phase,
+            queue_delivery_phase: phase,
         })
     }
 }
@@ -1856,12 +1863,12 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
             }
         }
         for binding in simplified_replies {
-            if !currents.contains_key(&binding.input_delivery_id) {
+            if !currents.contains_key(&binding.input_delivery_id.0) {
                 return Err(StoreError::StateInvariant);
             }
         }
         for purpose in purposes {
-            if !currents.contains_key(&purpose.logical_delivery_id) {
+            if !currents.contains_key(&purpose.logical_delivery_id.0) {
                 return Err(StoreError::StateInvariant);
             }
         }
@@ -1900,8 +1907,8 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
         let reminder_tasks: BTreeSet<_> = reminders.iter().map(|row| row.key.clone()).collect();
         let reply_inputs: BTreeSet<_> = simplified_replies
             .iter()
-            .filter(|row| !row.completed)
-            .map(|row| row.input_delivery_id.clone())
+            .filter(|row| !row.completed.0)
+            .map(|row| row.input_delivery_id.0.clone())
             .collect();
         let mut held = BTreeSet::new();
         for (logical_id, current) in &currents {
@@ -1960,13 +1967,13 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
                 );
             }
         }
-        for binding in simplified_replies.iter().filter(|row| row.completed) {
-            if held.contains(&binding.input_delivery_id) {
+        for binding in simplified_replies.iter().filter(|row| row.completed.0) {
+            if held.contains(&binding.input_delivery_id.0) {
                 closures.insert(
-                    binding.input_delivery_id.clone(),
+                    binding.input_delivery_id.0.clone(),
                     RequestClosure::Answered(LogicalDeliveryId(format!(
                         "simplified-result-{}-{}",
-                        binding.flow_id, binding.input_delivery_id
+                        binding.flow_id.0, binding.input_delivery_id.0
                     ))),
                 );
             }
@@ -2097,14 +2104,15 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
             .map(|logical_id| {
                 let old = currents.get(logical_id).ok_or(StoreError::StateInvariant)?;
                 Ok(CurrentLogicalDelivery {
-                    snapshot: old.snapshot.current_with_request_id(
+                    delivery_snapshot: old.snapshot.current_with_request_id(
                         request_ids
                             .get(logical_id)
                             .cloned()
                             .ok_or(StoreError::StateInvariant)?,
                     )?,
-                    archived: None,
-                    admission: super::logical_delivery::DeliveryAdmission::HistoricalUnknown,
+                    archived_cursor: crate::generated::memory::ArchivedCursor(None),
+                    delivery_admission:
+                        super::logical_delivery::DeliveryAdmission::HistoricalUnknown,
                 })
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
@@ -2119,7 +2127,7 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
             })
             .map(|(logical_id, event)| {
                 Ok(LogicalDeliveryEvent {
-                    snapshot: event.snapshot.current_with_request_id(
+                    delivery_snapshot: event.snapshot.current_with_request_id(
                         request_ids
                             .get(logical_id)
                             .cloned()
@@ -2213,7 +2221,7 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
             .map(|logical_id| RequestIdBinding {
                 request_id: request_ids[logical_id].clone(),
                 logical_delivery_id: signal_flow::LogicalDeliveryId(logical_id.clone()),
-                closure: closures
+                request_closure: closures
                     .get(logical_id)
                     .cloned()
                     .unwrap_or(RequestClosure::Open),
@@ -2858,7 +2866,7 @@ mod tests {
         };
         assert_eq!(binding.request_id, RequestId("s001".into()));
         assert_eq!(
-            binding.closure,
+            binding.request_closure,
             RequestClosure::Answered(LogicalDeliveryId("singleton-answer".into()))
         );
         assert_eq!(
@@ -3180,7 +3188,8 @@ mod tests {
             .match_records(QueryPlan::all(current_table))
             .expect("current deliveries read");
         assert!(evolved_current.records().iter().all(|row| {
-            row.admission == crate::store::logical_delivery::DeliveryAdmission::HistoricalUnknown
+            row.delivery_admission
+                == crate::store::logical_delivery::DeliveryAdmission::HistoricalUnknown
         }));
     }
 
@@ -3489,22 +3498,26 @@ mod tests {
             sent: 0,
         };
         let reply = super::super::logical_delivery::SimplifiedReplyBinding {
-            flow_id: "reply-flow".into(),
-            input_delivery_id: "input-held-by-reply".into(),
-            source: sender.current().expect("source recodes"),
-            recipient: recipient.current().expect("recipient recodes"),
-            completed: false,
+            flow_id: flow_ethos::FlowId("reply-flow".into()),
+            input_delivery_id: crate::generated::memory::InputDeliveryId(
+                "input-held-by-reply".into(),
+            ),
+            source: crate::generated::memory::Source(sender.current().expect("source recodes")),
+            recipient: crate::generated::memory::Recipient(
+                recipient.current().expect("recipient recodes"),
+            ),
+            completed: crate::generated::memory::Completed(false),
         };
         let purposes = [
             super::super::logical_delivery::LogicalDeliveryPurpose {
-                logical_delivery_id: "queued-held".into(),
+                logical_delivery_id: flow_ethos::LogicalDeliveryId("queued-held".into()),
                 address: recipient.current().expect("recipient recodes"),
-                purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
+                delivery_purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
             },
             super::super::logical_delivery::LogicalDeliveryPurpose {
-                logical_delivery_id: "delivered-moved".into(),
+                logical_delivery_id: flow_ethos::LogicalDeliveryId("delivered-moved".into()),
                 address: recipient.current().expect("recipient recodes"),
-                purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
+                delivery_purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
             },
         ];
         let mut engine = Engine::open(
@@ -3545,8 +3558,8 @@ mod tests {
             .expect("current reads");
         assert_eq!(current.records().len(), 3);
         assert!(current.records().iter().all(|row| {
-            row.snapshot.logical_delivery_id.0 != "delivered-moved"
-                && row.admission
+            row.delivery_snapshot.logical_delivery_id.0 != "delivered-moved"
+                && row.delivery_admission
                     == super::super::logical_delivery::DeliveryAdmission::HistoricalUnknown
         }));
         let prior_table = engine
@@ -3976,16 +3989,20 @@ mod tests {
                 sent: 0,
             };
             let reply = super::super::logical_delivery::SimplifiedReplyBinding {
-                flow_id: "flow".into(),
-                input_delivery_id: "missing".into(),
-                source: sender.current().expect("address recodes"),
-                recipient: recipient.current().expect("address recodes"),
-                completed: false,
+                flow_id: flow_ethos::FlowId("flow".into()),
+                input_delivery_id: crate::generated::memory::InputDeliveryId("missing".into()),
+                source: crate::generated::memory::Source(
+                    sender.current().expect("address recodes"),
+                ),
+                recipient: crate::generated::memory::Recipient(
+                    recipient.current().expect("address recodes"),
+                ),
+                completed: crate::generated::memory::Completed(false),
             };
             let purpose = super::super::logical_delivery::LogicalDeliveryPurpose {
-                logical_delivery_id: "missing".into(),
+                logical_delivery_id: flow_ethos::LogicalDeliveryId("missing".into()),
                 address: recipient.current().expect("address recodes"),
-                purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
+                delivery_purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
             };
             let heartbeat_row = StoredHeartbeatStanding {
                 address: recipient.current().expect("address recodes"),

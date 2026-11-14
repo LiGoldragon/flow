@@ -20,8 +20,8 @@
 Memory
 [ signal_flow:[ LaunchRequestId StartRejection ReplaceRejection FlowId HerdrRoute Process NativeSessionId TranscriptPath BackgroundWork NativePrompt Address ReapStanding HandoverCloseRefusal HandoverOwner Successor ]
   flow_nexus:[ LaunchedRecord ReplacedRecord ]
-  signal_flow:[ LogicalDeliveryId Metaflow Lock CallerIdentity LaunchAttempt StoreIdentity OrdinarySocketPath MetaSocketPath FlowType Origin HarnessKind EndpointSelection FlowLifecycle SessionId ]
-  meta_signal_flow:[ ConfigureNexus ConfigureModel ConfigureThreshold ConfigureSendServer ConfigureMetaflow ConfigureHarnessFlags HeartbeatConfig DrawBound TryBound HandoverPoliciesConfiguration HandoverArchiveConfiguration HandoverCountConfiguration Duration RestartRecord SendOutcomeRecord Delivery ProcessId ProcessUserId ProcessStartToken ]
+  signal_flow:[ LogicalDeliveryId Metaflow Lock CallerIdentity LaunchAttempt StoreIdentity OrdinarySocketPath MetaSocketPath FlowType Origin HarnessKind EndpointSelection FlowLifecycle SessionId HerdrPaneId DeliverKey SendAcceptance DeliverySnapshot DeliveryCursor RequestId SentBy VisibleNativeInput ]
+  meta_signal_flow:[ ConfigureNexus ConfigureModel ConfigureThreshold ConfigureSendServer ConfigureMetaflow ConfigureHarnessFlags HeartbeatConfig DrawBound TryBound HandoverPoliciesConfiguration HandoverArchiveConfiguration HandoverCountConfiguration Duration RestartRecord SendOutcomeRecord Delivery ProcessId ProcessUserId ProcessStartToken DeliveryId HarnessProfile MetaAspects MessageNexusPath RequestDigest QueueRequestId QueueAttemptId QueueEvidence AbsenceProof Undecided QueueResolutionRecord ]
   :meta_signal_flow:generated:signal:[ Path ]
   flow_ethos:[ Minutes SourceRoot CodexEndpoint ] ]
 [ LaunchOutcome.[ Started.LaunchedRecord
@@ -159,4 +159,88 @@ Memory
                             LatestWorkingComplete.Boolean
                             LatestSent.Integer
                             LatestQueue.Integer
-                            Option<LogicalDeliveryId> } ]
+                            Option<LogicalDeliveryId> }
+  ; Why a logical delivery was admitted: an ordinary send or the heartbeat.
+  DeliveryPurpose.[ Ordinary Heartbeat ]
+  ; How far a leased key sequence went: held with nothing sent yet, the
+  ; interrupt keys sent, the text accepted by Herdr, the submit keys sent.
+  LeaseStep.[ Acquired Interrupted Placed Submitted ]
+  ; The lease one delivery holds on a pane, keyed by the delivery.
+  PaneLease.{ DeliveryId FlowId HerdrPaneId LeaseStep }
+  ; The delivery half of the meta Configuration, one row.
+  DeliveryConfiguration.{ Vector<HarnessProfile> MetaAspects Option<MessageNexusPath> }
+  ; A Deliver call answered, keyed by its DeliverKey: its sender, the digest
+  ; of what it asked, and the answer a repeat gets.
+  DeliverCall.{ DeliverKey Sender.Address RequestDigest SendAcceptance }
+  ; Why one logical delivery was admitted, keyed by its id.
+  LogicalDeliveryPurpose.{ LogicalDeliveryId Address DeliveryPurpose }
+  ; The logical delivery counter: the cursor the next event takes.
+  LogicalDeliveryCounter.{ NextCursor.Integer }
+  ; How a logical delivery was admitted.
+  DeliveryAdmission.[ Message Ordinary HistoricalUnknown ]
+  ; A logical delivery as it stands, keyed by its id, with the cursor it
+  ; was archived at, if it was.
+  CurrentLogicalDelivery.{ DeliverySnapshot ArchivedCursor.Option<DeliveryCursor> DeliveryAdmission }
+  ; One logical delivery event, keyed by its cursor.
+  LogicalDeliveryEvent.{ DeliverySnapshot }
+  ; A simplified flow's reply binding, keyed by its FlowId: the delivery it
+  ; answers, who sent it, whom the reply goes to, and whether it is done.
+  SimplifiedReplyBinding.{ FlowId InputDeliveryId.String Source.Address Recipient.Address Completed.Boolean }
+  ; Whether a request is still open, or answered by a logical delivery.
+  RequestClosure.[ Open Answered.LogicalDeliveryId ]
+  ; A request id bound to its logical delivery, keyed by the request id.
+  RequestIdBinding.{ RequestId LogicalDeliveryId RequestClosure }
+  ; The queue delivery counters: the next request and attempt numbers.
+  DeliveryCounter.{ NextRequest.Integer NextAttempt.Integer }
+  ; Where a queued request stands. Unsent: its attempt was proved never to
+  ; have reached the seat; it is still queued and a later attempt carries
+  ; it. Parked: native history could not resolve it; it stays in the
+  ; journal as Uncertain, no longer an active queue item, never handed over
+  ; again automatically.
+  RequestState.[ Queued Settled Unsent Parked ]
+  ; One queued request, keyed by its id.
+  StoredDeliveryRequest.{ QueueRequestId Address QueueEvidence RequestState }
+  ; A native receipt: the native request, thread and turn, and the native
+  ; response exactly as observed.
+  NativeDeliveryReceipt.{ NativeRequestId.Integer ThreadId.String TurnId.String NativeReceiptText.String }
+  ; Where native history stood before the text was typed: the Claude
+  ; transcript and its length, or the Codex thread's newest turn, None when
+  ; the thread had none.
+  ; A Claude transcript file and its length: the device and inode it lives
+  ; on and the byte offset its end stood at.
+  NativeTranscriptCursor.{ Device.Integer Inode.Integer Offset.Integer }
+  NativeHistoryAnchor.[ ClaudeTranscript.NativeTranscriptCursor CodexTurns.Option<String> ]
+  ; Native history's proof that a request never reached the seat.
+  AbsenceRecord.{ AbsenceProof Observation.String }
+  ; Where one queue delivery attempt stands. Uncertain: native input may
+  ; have reached the seat and no exact receipt is held; it is never sent
+  ; again, the reason naming why the last reconciliation could not decide.
+  ; Read: an authenticated answer proves the request read without an exact
+  ; receipt; a receipt observed later stays separate. Absent: native history
+  ; proved it never reached the seat. Resolved: the owner resolved an
+  ; Uncertain attempt.
+  QueueDeliveryPhase.[ Prepared
+                       Uncertain.Option<Undecided>
+                       ReceiptRecorded.NativeDeliveryReceipt
+                       Settled.NativeDeliveryReceipt
+                       Read.{ Answer.String LateReceipt.Option<NativeDeliveryReceipt> }
+                       Absent.AbsenceRecord
+                       Resolved.QueueResolutionRecord ]
+  ; One attempt to deliver a queued request, keyed by the attempt.
+  QueueDeliveryAttempt.{ QueueRequestId
+                         QueueAttemptId
+                         NativeRequestId
+                         FlowId
+                         ThreadId
+                         HarnessKind
+                         NativeHistoryAnchor
+                         Address
+                         QueueEvidence
+                         QueueDeliveryPhase }
+  ; The send outcome counter: the number the next outcome takes.
+  SendOutcomeCounter.{ NextId.Integer }
+  ; An answer kept for its request, keyed by the request id.
+  KeptAnswer.{ RequestId VisibleNativeInput }
+  ; One reminder asked for and not yet sent, keyed by its request id: whom it
+  ; reminds, who asked, when it falls due in Unix seconds, and its words.
+  ScheduledReminder.{ RequestId Address SentBy Due.Integer Text.String } ]

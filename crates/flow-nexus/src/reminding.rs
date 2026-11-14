@@ -134,7 +134,7 @@ impl RemindsCallers for RunningNexus {
                     flow_ethos::Delivery::Wake,
                     Message::MiddleAbrupt(Request::Reminder(flow_ethos::Reminder_Data {
                         request_id: reminder.request_id.clone(),
-                        string: reminder.text.clone(),
+                        string: reminder.text.0.clone(),
                     })),
                     None,
                 ) {

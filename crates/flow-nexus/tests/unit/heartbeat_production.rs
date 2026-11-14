@@ -107,14 +107,14 @@ fn durable_worker_path_is_quiet_coalesces_and_excludes_its_own_traffic() {
     assert_eq!(
         purposes
             .iter()
-            .filter(|row| row.purpose == DeliveryPurpose::Ordinary)
+            .filter(|row| row.delivery_purpose == DeliveryPurpose::Ordinary)
             .count(),
         1
     );
     assert_eq!(
         purposes
             .iter()
-            .filter(|row| row.purpose == DeliveryPurpose::Heartbeat)
+            .filter(|row| row.delivery_purpose == DeliveryPurpose::Heartbeat)
             .count(),
         1
     );

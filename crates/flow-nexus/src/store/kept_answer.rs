@@ -7,25 +7,16 @@
 use super::logical_delivery::{MintsRequestIds, RequestClosure, RequestIdBinding};
 use super::queue_delivery::AccountsQueueDelivery;
 use super::{AnnouncesLaunchChanges, FlowStore, StoreError};
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+pub(crate) use crate::generated::memory::KeptAnswer;
 use sema_engine::{
     EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan, RecordKey, SchemaHash,
     TableDescriptor, TableName,
 };
-use signal_flow::{Address, Message, Request, RequestId, SentBy, VisibleNativeInput};
+use signal_flow::{Address, Message, Request, RequestId, SentBy};
 
 pub(super) const KEPT_ANSWER_TABLE_NAME: TableName = TableName::new("flow_nexus_kept_answers");
 pub(super) const KEPT_ANSWER_FAMILY: &str = "flow-nexus-kept-answer";
 pub(super) const KEPT_ANSWER_SCHEMA: &str = "flow-nexus-kept-answer-v1";
-
-/// The answer kept with a request whose sender is no Address: the request's
-/// id, and the answer as it would land in a prompt, its sender and priority
-/// with it.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct KeptAnswer {
-    pub request_id: RequestId,
-    pub answer: VisibleNativeInput,
-}
 
 impl EngineRecord for KeptAnswer {
     fn record_key(&self) -> RecordKey {
@@ -139,9 +130,9 @@ impl RoutesAnswers for FlowStore {
         let request_id = binding.request_id.clone();
         let kept = KeptAnswer {
             request_id: request_id.clone(),
-            answer: answer.admitted_input(&request_id, answerer),
+            visible_native_input: answer.admitted_input(&request_id, answerer),
         };
-        binding.closure = RequestClosure::Answered(request_id.kept_marker());
+        binding.request_closure = RequestClosure::Answered(request_id.kept_marker());
         let reminder_key = RecordKey::new(binding.logical_delivery_id.0.clone());
         let task_reminder = !self
             .engine

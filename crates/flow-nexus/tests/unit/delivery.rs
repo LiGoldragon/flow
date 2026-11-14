@@ -521,8 +521,8 @@ fn a_delivery_a_crash_left_under_its_lease_settles_uncertain_and_is_never_retrie
         store
             .record_lease_step(PaneLease {
                 delivery_id: meta_signal_flow::DeliveryId("crashed".into()),
-                flow_id: "908786".into(),
-                herdr_pane_id: "w1:p3".into(),
+                flow_id: flow_ethos::FlowId("908786".into()),
+                herdr_pane_id: signal_flow::HerdrPaneId("w1:p3".into()),
                 lease_step: LeaseStep::Placed,
             })
             .expect("lease row");

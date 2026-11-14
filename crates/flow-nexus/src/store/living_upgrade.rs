@@ -278,10 +278,10 @@ impl UpgradeFrom<DeliveryRequestBeforeLiving> for StoredDeliveryRequest {
     type Refusal = std::convert::Infallible;
     fn upgrade_from(before: DeliveryRequestBeforeLiving) -> Decision<Self, Self::Refusal> {
         Decision::Ready(StoredDeliveryRequest {
-            request_id: before.request_id,
+            queue_request_id: meta_signal_flow::QueueRequestId(before.request_id),
             address: before.address,
             queue_evidence: before.queue_evidence.living(),
-            state: before.state,
+            request_state: before.state,
         })
     }
 }
@@ -310,16 +310,18 @@ impl UpgradeFrom<DeliveryAttemptBeforeLiving> for QueueDeliveryAttempt {
     type Refusal = std::convert::Infallible;
     fn upgrade_from(before: DeliveryAttemptBeforeLiving) -> Decision<Self, Self::Refusal> {
         Decision::Ready(QueueDeliveryAttempt {
-            request_id: before.request_id,
-            attempt_id: before.attempt_id,
-            native_request_id: before.native_request_id,
-            flow_id: before.flow_id,
-            thread_id: before.thread_id,
+            queue_request_id: meta_signal_flow::QueueRequestId(before.request_id),
+            queue_attempt_id: meta_signal_flow::QueueAttemptId(before.attempt_id),
+            native_request_id: crate::generated::memory::NativeRequestId(
+                before.native_request_id as i64,
+            ),
+            flow_id: flow_ethos::FlowId(before.flow_id),
+            thread_id: crate::generated::memory::ThreadId(before.thread_id),
             harness_kind: before.harness_kind,
-            history_anchor: before.history_anchor,
+            native_history_anchor: before.history_anchor,
             address: before.address,
             queue_evidence: before.queue_evidence.living(),
-            phase: before.phase,
+            queue_delivery_phase: before.phase,
         })
     }
 }

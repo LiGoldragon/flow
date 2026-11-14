@@ -1,16 +1,11 @@
 //! Configured sampling heartbeat.  Its evidence deliberately excludes the
 //! deliveries it generates, so an otherwise idle system becomes quiet.
 
+pub(crate) use crate::generated::memory::DeliveryPurpose;
 use crate::live::HoldsLiveValue;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use signal_flow::Address;
 use std::collections::{BTreeMap, BTreeSet};
-
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DeliveryPurpose {
-    Ordinary,
-    Heartbeat,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Observed<T> {
@@ -159,8 +154,8 @@ impl RunsHeartbeat for crate::RunningNexus {
                     .iter()
                     .filter(|entry| {
                         !purposes.iter().any(|row| {
-                            row.logical_delivery_id == entry.logical_delivery_id.0
-                                && row.purpose == DeliveryPurpose::Heartbeat
+                            row.logical_delivery_id == entry.logical_delivery_id
+                                && row.delivery_purpose == DeliveryPurpose::Heartbeat
                         })
                     })
                     .count();
@@ -170,7 +165,8 @@ impl RunsHeartbeat for crate::RunningNexus {
                         ordinary_messages_sent: purposes
                             .iter()
                             .filter(|row| {
-                                row.address == *address && row.purpose == DeliveryPurpose::Ordinary
+                                row.address == *address
+                                    && row.delivery_purpose == DeliveryPurpose::Ordinary
                             })
                             .count() as u64,
                         ordinary_queue_length,

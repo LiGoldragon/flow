@@ -10,12 +10,9 @@
 
 use super::{DefaultConfiguration, FlowStore, SeedsConfiguration, StoreError};
 pub(crate) use crate::generated::memory::StoredDelivery;
+pub(crate) use crate::generated::memory::{DeliveryConfiguration, LeaseStep, PaneLease};
 use crate::store::ManagesMetaflowState;
-use meta_signal_flow::{
-    Delivery, DeliveryGrade, DeliveryId, HarnessProfile, InterruptWitness, MessageNexusPath,
-    MetaAspects,
-};
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use meta_signal_flow::{Delivery, DeliveryGrade, HarnessProfile, InterruptWitness};
 use sema_engine::{
     Assertion, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryVersion, QueryPlan,
     RecordKey, Retraction, SchemaHash, TableDescriptor, TableName, TableReference,
@@ -34,28 +31,6 @@ impl EngineRecord for StoredDelivery {
     }
 }
 
-/// How far a leased key sequence went.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LeaseStep {
-    /// The lease is held; nothing has been sent to the pane yet.
-    Acquired,
-    /// The interrupt keys were sent.
-    Interrupted,
-    /// Herdr accepted the text.
-    Placed,
-    /// The submit keys were sent.
-    Submitted,
-}
-
-/// The Sema row of a delivery under the lease.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct PaneLease {
-    pub delivery_id: DeliveryId,
-    pub flow_id: String,
-    pub herdr_pane_id: String,
-    pub lease_step: LeaseStep,
-}
-
 impl EngineRecord for PaneLease {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.delivery_id.clone().0)
@@ -71,7 +46,7 @@ impl SettlesInterruptedLease for PaneLease {
     fn uncertain(&self) -> Delivery {
         Delivery {
             delivery_id: self.delivery_id.clone(),
-            flow_id: signal_flow::FlowId(self.flow_id.clone()),
+            flow_id: self.flow_id.clone(),
             interrupt_witness: match self.lease_step {
                 LeaseStep::Acquired => InterruptWitness::NotRequested,
                 LeaseStep::Interrupted | LeaseStep::Placed | LeaseStep::Submitted => {
@@ -81,15 +56,6 @@ impl SettlesInterruptedLease for PaneLease {
             delivery_grade: DeliveryGrade::Uncertain,
         }
     }
-}
-
-/// The delivery half of the meta Configuration, kept in its own record and
-/// seeded on open.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct DeliveryConfiguration {
-    pub harness_profile_vector: Vec<HarnessProfile>,
-    pub meta_aspects: MetaAspects,
-    pub message_nexus_path_option: Option<MessageNexusPath>,
 }
 
 impl MemoryDefinition for DeliveryConfiguration {

@@ -3061,9 +3061,9 @@ impl OpensFlowStore for FlowStore {
         // submitted again automatically, and is reconciled from native
         // history once the Nexus runs (`ReconcilesQueueDelivery`).
         for attempt in store.recover_outstanding_deliveries()? {
-            match attempt.phase {
+            match attempt.queue_delivery_phase {
                 QueueDeliveryPhase::ReceiptRecorded(_) => {
-                    if !store.settle_recorded_delivery(&attempt.attempt_id)? {
+                    if !store.settle_recorded_delivery(&attempt.queue_attempt_id.0)? {
                         return Err(StoreError::StateInvariant);
                     }
                 }
@@ -6885,12 +6885,12 @@ mod tests {
             Some(accepted.logical_delivery_id.clone())
         );
         assert!(store.delivery_purposes().unwrap().iter().any(|row| {
-            row.logical_delivery_id == accepted.logical_delivery_id.0
-                && row.purpose == DeliveryPurpose::Heartbeat
+            row.logical_delivery_id == accepted.logical_delivery_id
+                && row.delivery_purpose == DeliveryPurpose::Heartbeat
         }));
         assert!(store.delivery_purposes().unwrap().iter().any(|row| {
-            row.logical_delivery_id == ordinary.logical_delivery_id.0
-                && row.purpose == DeliveryPurpose::Ordinary
+            row.logical_delivery_id == ordinary.logical_delivery_id
+                && row.delivery_purpose == DeliveryPurpose::Ordinary
         }));
         drop(store);
         let reopened = fixture.store();
@@ -7675,11 +7675,13 @@ mod tests {
         );
         store
             .bind_simplified_reply(SimplifiedReplyBinding {
-                flow_id: "simplified".into(),
-                input_delivery_id: input.logical_delivery_id.clone().0,
-                source: source.clone(),
-                recipient: recipient.clone(),
-                completed: false,
+                flow_id: flow_ethos::FlowId("simplified".into()),
+                input_delivery_id: crate::generated::memory::InputDeliveryId(
+                    input.logical_delivery_id.clone().0,
+                ),
+                source: crate::generated::memory::Source(source.clone()),
+                recipient: crate::generated::memory::Recipient(recipient.clone()),
+                completed: crate::generated::memory::Completed(false),
             })
             .unwrap();
         assert_eq!(
@@ -7769,11 +7771,13 @@ mod tests {
         };
         store
             .bind_simplified_reply(SimplifiedReplyBinding {
-                flow_id: "simplified".into(),
-                input_delivery_id: second_input.logical_delivery_id.clone().0,
-                source: second_sender.clone(),
-                recipient: recipient.clone(),
-                completed: false,
+                flow_id: flow_ethos::FlowId("simplified".into()),
+                input_delivery_id: crate::generated::memory::InputDeliveryId(
+                    second_input.logical_delivery_id.clone().0,
+                ),
+                source: crate::generated::memory::Source(second_sender.clone()),
+                recipient: crate::generated::memory::Recipient(recipient.clone()),
+                completed: crate::generated::memory::Completed(false),
             })
             .unwrap();
         store
@@ -7867,11 +7871,13 @@ mod tests {
         };
         store
             .bind_simplified_reply(SimplifiedReplyBinding {
-                flow_id: "simplified-core-primary".into(),
-                input_delivery_id: input.logical_delivery_id.clone().0,
-                source: source.clone(),
-                recipient: sender.clone(),
-                completed: false,
+                flow_id: flow_ethos::FlowId("simplified-core-primary".into()),
+                input_delivery_id: crate::generated::memory::InputDeliveryId(
+                    input.logical_delivery_id.clone().0,
+                ),
+                source: crate::generated::memory::Source(source.clone()),
+                recipient: crate::generated::memory::Recipient(sender.clone()),
+                completed: crate::generated::memory::Completed(false),
             })
             .unwrap();
         store
@@ -9272,8 +9278,8 @@ mod tests {
         store
             .record_lease_step(PaneLease {
                 delivery_id: meta_signal_flow::DeliveryId("interrupted-delivery".into()),
-                flow_id: "flow-1".into(),
-                herdr_pane_id: "pane-1".into(),
+                flow_id: flow_ethos::FlowId("flow-1".into()),
+                herdr_pane_id: signal_flow::HerdrPaneId("pane-1".into()),
                 lease_step: LeaseStep::Placed,
             })
             .expect("interrupted delivery lease is present");
@@ -10291,7 +10297,7 @@ mod tests {
                 RequestIdBinding {
                     request_id: flow_ethos::RequestId("held".into()),
                     logical_delivery_id: flow_ethos::LogicalDeliveryId("delivery-held".into()),
-                    closure: RequestClosure::Open,
+                    request_closure: RequestClosure::Open,
                 },
             ))
             .expect("held id is stored");
@@ -10373,7 +10379,7 @@ mod tests {
                 RequestIdBinding {
                     request_id: flow_ethos::RequestId("held".into()),
                     logical_delivery_id: flow_ethos::LogicalDeliveryId("delivery-held".into()),
-                    closure: RequestClosure::Open,
+                    request_closure: RequestClosure::Open,
                 },
             ))
             .expect("held id is stored");
@@ -10482,7 +10488,7 @@ mod tests {
                 RequestIdBinding {
                     request_id: flow_ethos::RequestId("same".into()),
                     logical_delivery_id: flow_ethos::LogicalDeliveryId("old-delivery".into()),
-                    closure: RequestClosure::Open,
+                    request_closure: RequestClosure::Open,
                 },
             ))
             .expect("old request holds the id");
@@ -10617,7 +10623,7 @@ mod tests {
             MintsRequestIds::request_binding(&store, &order.request_id)
                 .expect("refused answer leaves the binding readable")
                 .expect("refused answer leaves the request held")
-                .closure,
+                .request_closure,
             RequestClosure::Open,
             "every pre-admission answer refusal writes nothing"
         );
@@ -10659,7 +10665,7 @@ mod tests {
             MintsRequestIds::request_binding(&store, &order.request_id)
                 .expect("Order binding reads")
                 .expect("Order binding remains")
-                .closure,
+                .request_closure,
             RequestClosure::Answered(answer.logical_delivery_id.clone())
         );
         let debugged = store
@@ -10697,7 +10703,7 @@ mod tests {
             MintsRequestIds::request_binding(&store, &order.request_id)
                 .expect("reopened Order binding reads")
                 .expect("reopened Order binding remains")
-                .closure,
+                .request_closure,
             RequestClosure::Answered(answer.logical_delivery_id.clone())
         );
         let reopened_answer = store
@@ -11054,7 +11060,7 @@ mod tests {
                 RequestIdBinding {
                     request_id: archived.request_id.clone(),
                     logical_delivery_id: archived.logical_delivery_id,
-                    closure: RequestClosure::Open,
+                    request_closure: RequestClosure::Open,
                 },
             ))
             .expect("corrupt binding is planted");
@@ -11164,7 +11170,7 @@ mod tests {
                     logical_delivery_id: flow_ethos::LogicalDeliveryId(
                         "logical-before-restart".into(),
                     ),
-                    closure: RequestClosure::Open,
+                    request_closure: RequestClosure::Open,
                 },
             ))
             .expect("held id is durable");

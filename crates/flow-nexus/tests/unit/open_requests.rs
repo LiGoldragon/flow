@@ -12,6 +12,7 @@ use super::waking::{
 };
 use crate::Dispatches;
 use crate::composition::RendersQueuedWork;
+use crate::generated::memory::{Device, Inode, Offset};
 use crate::handover::FramesOpenRequests;
 use crate::store::FlowStore;
 use crate::store::RecordsLaunchOutcome as _;
@@ -86,9 +87,9 @@ impl DeliversRequests for FlowStore {
                 &format!("{flow_id}-session"),
                 signal_flow::HarnessKind::Claude,
                 NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
-                    device: 0,
-                    inode: 0,
-                    offset: 0,
+                    device: Device(0),
+                    inode: Inode(0),
+                    offset: Offset(0),
                 }),
             )
             .expect("the oldest request prepares")
@@ -102,18 +103,23 @@ impl DeliversRequests for FlowStore {
         let attempt = self.handed_over(address, flow_id);
         assert!(
             self.record_delivery_receipt(
-                &attempt.attempt_id,
+                &attempt.queue_attempt_id.0,
                 NativeDeliveryReceipt {
                     native_request_id: attempt.native_request_id,
                     thread_id: attempt.thread_id.clone(),
-                    turn_id: format!("{}-turn", attempt.attempt_id),
-                    native_receipt: "{\"result\":{}}".into(),
+                    turn_id: crate::generated::memory::TurnId(format!(
+                        "{}-turn",
+                        attempt.queue_attempt_id.0
+                    )),
+                    native_receipt_text: crate::generated::memory::NativeReceiptText(
+                        "{\"result\":{}}".into(),
+                    ),
                 },
             )
             .expect("the receipt records")
         );
         assert!(
-            self.settle_recorded_delivery(&attempt.attempt_id)
+            self.settle_recorded_delivery(&attempt.queue_attempt_id.0)
                 .expect("the delivery settles")
         );
     }
@@ -363,19 +369,24 @@ fn delivered_to_codex(store: &FlowStore, address: &Address, flow_id: &str, threa
     assert!(
         store
             .record_delivery_receipt(
-                &attempt.attempt_id,
+                &attempt.queue_attempt_id.0,
                 NativeDeliveryReceipt {
                     native_request_id: attempt.native_request_id,
                     thread_id: attempt.thread_id.clone(),
-                    turn_id: format!("{}-turn", attempt.attempt_id),
-                    native_receipt: "{\"result\":{}}".into(),
+                    turn_id: crate::generated::memory::TurnId(format!(
+                        "{}-turn",
+                        attempt.queue_attempt_id.0
+                    )),
+                    native_receipt_text: crate::generated::memory::NativeReceiptText(
+                        "{\"result\":{}}".into(),
+                    ),
                 },
             )
             .expect("the receipt records")
     );
     assert!(
         store
-            .settle_recorded_delivery(&attempt.attempt_id)
+            .settle_recorded_delivery(&attempt.queue_attempt_id.0)
             .expect("the delivery settles")
     );
 }
@@ -571,7 +582,11 @@ fn a_flow_s_result_to_its_own_order_writes_its_metaflow_once() {
     );
 
     let attempt = store.handed_over(&at, "a11ce5");
-    assert!(store.mark_delivery_uncertain(&attempt.attempt_id).unwrap());
+    assert!(
+        store
+            .mark_delivery_uncertain(&attempt.queue_attempt_id.0)
+            .unwrap()
+    );
     let answer = store
         .answered(&at, &at, result(&order.request_id.0))
         .expect("the Result to its own uncertain Order is admitted");

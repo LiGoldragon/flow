@@ -41,7 +41,7 @@ pub trait FindsFlowPlace {
 
 impl FindsFlowPlace for PlaceName {
     fn find_flow_place_under(&self, home: &ConfigurationHome) -> Result<Place, PlaceFileRefusal> {
-        FindsPlace::find_flow_place_under(self, &Self::nexus_name(), home)
+        FindsPlace::find_place_under(self, &Self::nexus_name(), home)
     }
 }
 

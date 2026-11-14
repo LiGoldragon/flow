@@ -190,6 +190,87 @@ impl JudgesThreshold for FlowStore {
     }
 }
 
+/// Whether a woken permaflow resumes its last flow, judged from what Flow
+/// recorded of that flow through its hooks and the resumption its model is
+/// configured with (`Configure.Resumptions`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumptionStanding {
+    /// Its last turn ended under its model's cache warmth and its context
+    /// is below its model's resume ceiling: the wake resumes it.
+    Resumable,
+    /// Its model has no resumption configured, or Flow knows no model for
+    /// it: the wake is fresh.
+    Unconfigured,
+    /// No turn end of this flow is the last recorded for its Address.
+    NoTurnEnd,
+    /// No context size is recorded for it.
+    Unmeasured,
+    /// Its last turn ended `idle_seconds` ago, not under its model's cache
+    /// warmth of `cache_warmth_minutes`.
+    Cold {
+        idle_seconds: i64,
+        cache_warmth_minutes: i64,
+    },
+    /// Its context is at or above its model's resume ceiling.
+    AtCeiling { context: i64, resume_ceiling: i64 },
+}
+
+pub trait JudgesResumption {
+    /// How the last flow `flow_id` of the metaflow at `address` stands for
+    /// a resumption at `now_epoch_seconds`.
+    fn resumption_standing(
+        &self,
+        address: &signal_flow::Address,
+        flow_id: &str,
+        now_epoch_seconds: i64,
+    ) -> Result<ResumptionStanding, StoreError>;
+}
+
+impl JudgesResumption for FlowStore {
+    fn resumption_standing(
+        &self,
+        address: &signal_flow::Address,
+        flow_id: &str,
+        now_epoch_seconds: i64,
+    ) -> Result<ResumptionStanding, StoreError> {
+        use super::turn_end::RecordsTurnEnds;
+        let resumption = match self.flow_model(flow_id)? {
+            Some(model) => self.configured_resumption(&model)?,
+            None => None,
+        };
+        let Some(resumption) = resumption else {
+            return Ok(ResumptionStanding::Unconfigured);
+        };
+        // The last turn end held for the Address is this flow's own, not a
+        // predecessor's.
+        let Some(turn_end) = self
+            .last_turn_end_of(address)?
+            .filter(|turn_end| turn_end.flow_id.0 == flow_id)
+        else {
+            return Ok(ResumptionStanding::NoTurnEnd);
+        };
+        let Some(context) = self.context_size(flow_id)? else {
+            return Ok(ResumptionStanding::Unmeasured);
+        };
+        let idle_seconds = now_epoch_seconds.saturating_sub(turn_end.observed_at.0);
+        let cache_warmth_minutes = resumption.cache_warmth.0;
+        if idle_seconds >= cache_warmth_minutes.saturating_mul(60) {
+            return Ok(ResumptionStanding::Cold {
+                idle_seconds,
+                cache_warmth_minutes,
+            });
+        }
+        let resume_ceiling = resumption.resume_ceiling.0;
+        if context >= resume_ceiling {
+            return Ok(ResumptionStanding::AtCeiling {
+                context,
+                resume_ceiling,
+            });
+        }
+        Ok(ResumptionStanding::Resumable)
+    }
+}
+
 /// Compaction is an emergency measure, refused while the context is below
 /// a threshold: a flow is compacted only when its last measured context is
 /// at or above the refresh threshold configured for its model, the point

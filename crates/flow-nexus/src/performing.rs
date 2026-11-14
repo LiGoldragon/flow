@@ -806,6 +806,12 @@ impl PerformsInParts for RunningNexus {
                 use crate::store::restart::RecordsRestarts;
                 self.store.rebind_restarted(birth).recorded()
             }
+            Record_Data::Resumed(resumed) => {
+                use crate::store::metaflow::SleepsMetaflows;
+                self.store
+                    .resume_metaflow(&resumed.address, resumed.seat_birth)
+                    .recorded()
+            }
             Record_Data::Context(Record_Data_Context_Data { flow_id, tokens }) => {
                 use crate::store::context::RecordsContextSize;
                 self.store

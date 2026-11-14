@@ -460,6 +460,7 @@ mod tests {
             configured_harness_hook: meta_signal_flow::ConfiguredHarnessHook(
                 meta_signal_flow::HarnessHookConfiguration::Unconfigured,
             ),
+            configured_resumptions: meta_signal_flow::ConfiguredResumptions(vec![]),
         };
         let printed = Response::Configuration(snapshot)
             .datomize(vec![])

@@ -3,6 +3,7 @@
 use super::logical_delivery::{RecordsLogicalDeliveries, VerifiedDeliveryLock};
 use super::pending_reap::ReassignsPendingReaps;
 use super::*;
+use crate::generated::memory::SeatBirth;
 use crate::sending::AdmitsSendPayload;
 use crate::sending::RefusesUnidentified;
 use signal_flow::{
@@ -78,6 +79,14 @@ pub(crate) trait SleepsMetaflows {
         flow_id: &str,
         delivered: usize,
     ) -> Result<bool, StoreError>;
+    /// The metaflow becomes Awake again as its last flow, resumed on its own
+    /// native session in the seat `birth` names, in one write: the flow,
+    /// Stopped or Exited, Active again; its route and SeatBirth the resumed
+    /// seat's; its Address taken as a wake takes it, the flow out of Past,
+    /// the successor a Maintained metaflow was owed given and what another
+    /// flow owed at the Address taken over. False, and nothing written,
+    /// when the flow is not one that ended or the Address cannot be taken.
+    fn resume_metaflow(&self, address: &Address, birth: SeatBirth) -> Result<bool, StoreError>;
     #[cfg(test)]
     fn remove_oldest_queued(
         &self,
@@ -361,6 +370,46 @@ impl SleepsMetaflows for FlowStore {
         if reassigned.moved > 0 {
             self.launch_changes.announce();
         }
+        Ok(true)
+    }
+
+    fn resume_metaflow(&self, address: &Address, birth: SeatBirth) -> Result<bool, StoreError> {
+        let flow_id = birth.flow_id.0.clone();
+        let Some(mut flow) = self.flow(&flow_id)? else {
+            return Ok(false);
+        };
+        if !matches!(
+            flow.lifecycle,
+            FlowLifecycle::Stopped | FlowLifecycle::Exited
+        ) {
+            return Ok(false);
+        }
+        let AddressTaking::Takes(taken) = self.address_taking(address, &flow_id, None, 0)? else {
+            return Ok(false);
+        };
+        flow.lifecycle = FlowLifecycle::Active;
+        let commit = taken.written(
+            self,
+            self.engine.begin_atomic_commit().mutate(self.flows, flow),
+        );
+        let route = FlowHerdrRouteRecord {
+            flow_id: flow_id.clone(),
+            route: birth.herdr_route.clone(),
+        };
+        let commit = match self.herdr_route(&flow_id)? {
+            Some(_) => commit.mutate(self.herdr_routes, route),
+            None => commit.assert(self.herdr_routes, route),
+        };
+        let commit = match super::restart::RecordsRestarts::seat_birth(self, &flow_id)? {
+            Some(_) => commit.mutate(self.seat_births, birth),
+            None => commit.assert(self.seat_births, birth),
+        };
+        use super::successor::OwesSuccessors;
+        let commit = self.successor_given(address, commit)?;
+        let flow = FlowId(flow_id);
+        let reassigned = self.reaps_reassigned(address, Some(&flow), commit)?;
+        self.engine.commit_atomic(reassigned.commit)?;
+        self.launch_changes.announce();
         Ok(true)
     }
 

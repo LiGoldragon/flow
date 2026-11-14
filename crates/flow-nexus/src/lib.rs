@@ -51,6 +51,7 @@ pub mod recovery;
 pub mod reminding;
 pub mod repairing;
 pub mod restarting;
+pub mod resuming;
 use metaflow::DispatchesMetaflowPeer;
 #[cfg(test)]
 mod exec_witness;
@@ -2534,6 +2535,7 @@ mod tests {
     mod repairing;
     mod reservation;
     mod restarting;
+    mod resuming;
     mod seat_binding;
     mod send_admission;
     mod send_tool;

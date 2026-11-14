@@ -70,6 +70,13 @@
 ; gave it, and answers Closed once Herdr shows it gone. While a restart
 ; holds a flow, no end of it is recorded: Record.Exited fails Restarting.
 ;
+; A wake that resumes an Asleep metaflow's last flow, its prompt cache
+; still warm and its context below its model's resume ceiling, takes the
+; same Open and Resume in a new pane; Record.Resumed then binds that seat
+; in one write: the flow, Stopped or Exited, Active again, its route and
+; SeatBirth the new pane's and harness's, and its Address Awake as it, out
+; of Past, as Record.Awoken takes it.
+;
 ; LaunchOutcome, Replacement and SeatBirth are the Memory root's record
 ; types (memory.ethos), named through the Nexus crate.
 
@@ -97,6 +104,7 @@ Operation
            Awoken.{ Address FlowId DeliveredCount.Integer }
            Restart.RestartRecord
            Rebound.SeatBirth
+           Resumed.{ Address SeatBirth }
            ; One commit: the predecessor Stopped (when live), the ReapPending
            ; outcome, the PendingReap, and the supersession at its Address.
            ReapOwed.{ PendingReap ReplacedRecord }

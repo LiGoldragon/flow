@@ -437,12 +437,29 @@ pub enum WakePlan {
     /// A new flow, launched from configuration and the context the
     /// metaflow's last launch named.
     Fresh(FreshContext),
+    /// The metaflow's last flow, resumed on its own native session under
+    /// its own FlowId: its prompt cache is still warm and its context below
+    /// the ceiling its model's resumption sets (`crate::resuming`).
+    Resume(Box<ResumeContext>),
     /// No declaration or launch of the metaflow names a context to wake it
     /// with, or no Herdr session is configured.
     Unplaceable,
 }
 
 pub use crate::generated::starter::FreshContext;
+
+/// The last flow a wake resumes: its FlowId, the native session it holds,
+/// the harness and model it ran on, and the context a fresh wake would
+/// compose its launch from, which the resumed launch is composed from too
+/// and a resume that does not bind falls back to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeContext {
+    pub flow_id: FlowId,
+    pub native_session_id: signal_flow::NativeSessionId,
+    pub harness_kind: HarnessKind,
+    pub model_name: String,
+    pub fresh: FreshContext,
+}
 
 /// What a flow's Stop did to its seat.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -685,8 +702,13 @@ pub trait SleepsAndWakesSeats {
     /// until the queue is seen empty under the gate; the hold is released
     /// there.
     fn drain_woken(&self, address: &Address, lease: WakingLease<'_>);
-    /// Which way an Asleep metaflow is woken.
+    /// Which way an Asleep metaflow is woken: its last flow resumed, when
+    /// its model's resumption allows, else the fresh flow `fresh_plan`
+    /// names.
     fn wake_plan(&self, metaflow: &Metaflow) -> WakePlan;
+    /// The fresh flow a metaflow's next flow is launched as, from its
+    /// declaration or its last launch; never a resume.
+    fn fresh_plan(&self, metaflow: &Metaflow) -> WakePlan;
     /// At the Nexus's start: wakes every metaflow due a wake, as a wake the
     /// last Nexus did not start or did not finish left it.
     fn recover_wakes(&self);
@@ -1622,6 +1644,17 @@ impl SleepsAndWakesSeats for RunningNexus {
     }
 
     fn wake_plan(&self, metaflow: &Metaflow) -> WakePlan {
+        use crate::resuming::JudgesWakeResumption;
+        match self.fresh_plan(metaflow) {
+            WakePlan::Fresh(fresh) => match self.resumption(metaflow, &fresh) {
+                Some(resume) => WakePlan::Resume(Box::new(resume)),
+                None => WakePlan::Fresh(fresh),
+            },
+            plan => plan,
+        }
+    }
+
+    fn fresh_plan(&self, metaflow: &Metaflow) -> WakePlan {
         use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
         let last = metaflow
             .past
@@ -3315,16 +3348,43 @@ impl WakesInParts for RunningNexus {
             .filter(|node| !node.session_id.0.is_empty())
         {
             let mut sessions = Vec::new();
-            if let WakePlan::Fresh(fresh) = &plan {
-                sessions.push(fresh.herdr_session_name.0.clone());
+            match &plan {
+                WakePlan::Fresh(fresh) => sessions.push(fresh.herdr_session_name.0.clone()),
+                WakePlan::Resume(resume) => {
+                    sessions.push(resume.fresh.herdr_session_name.0.clone())
+                }
+                WakePlan::Unplaceable => {}
             }
             if let HerdrRouteSelection::Available(route) = &node.herdr_route_selection {
                 sessions.push(route.herdr_session_name.0.clone());
             }
             self.refuse_live_session(&node, &sessions)?;
         }
-        let WakePlan::Fresh(fresh) = plan else {
-            return Err(WakeRefusal::Unplaceable);
+        let fresh = match plan {
+            WakePlan::Fresh(fresh) => fresh,
+            // A resume that binds is the woken flow; its queue is handed to
+            // it by the drain that follows the wake. One that does not wakes
+            // fresh.
+            WakePlan::Resume(resume) => {
+                use crate::resuming::ResumesLastFlow;
+                match self.resume_last_flow(&metaflow, &resume) {
+                    Ok(flow_id) => {
+                        eprintln!(
+                            "flow-nexus: flow {} resumed on its own session; its queue follows",
+                            flow_id.0
+                        );
+                        return Ok(flow_id);
+                    }
+                    Err(failure) => {
+                        eprintln!(
+                            "flow-nexus: flow {} was not resumed ({failure:?}); the wake starts fresh",
+                            resume.flow_id.0
+                        );
+                        resume.fresh
+                    }
+                }
+            }
+            WakePlan::Unplaceable => return Err(WakeRefusal::Unplaceable),
         };
         let started = match self.start_fresh(&metaflow, fresh, &startup_text) {
             Ok(started) => started,
@@ -3606,7 +3666,7 @@ impl WakesInParts for RunningNexus {
         let mut lineage = metaflow.clone();
         lineage.past.0.retain(|past| past.0 != flow_id);
         lineage.past.0.push(flow_ethos::FlowId(flow_id.to_owned()));
-        let WakePlan::Fresh(fresh) = self.wake_plan(&lineage) else {
+        let WakePlan::Fresh(fresh) = self.fresh_plan(&lineage) else {
             return None;
         };
         let model = self.store.configured_model(&address).ok().flatten()?;

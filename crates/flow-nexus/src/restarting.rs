@@ -495,6 +495,132 @@ enum Reopening {
     Refused(Box<Response>),
 }
 
+/// A flow whose harness was resumed in a new pane on the native session it
+/// already holds: by a restart, or by a wake that resumes the metaflow's
+/// last flow.
+pub(crate) struct ResumedFlow<'a> {
+    pub flow_id: &'a signal_flow::FlowId,
+    pub address: &'a signal_flow::Address,
+    pub native_session_id: &'a signal_flow::NativeSessionId,
+}
+
+/// Verifies that the pane a resume started shows the flow's own harness on
+/// its own session, and names the seat it was born as.
+pub(crate) trait VerifiesResumedSeat {
+    /// Awaits the pane's rest, finds the harness the flow ran in it on its
+    /// session, and verifies the seat as an adopted one: its SeatBirth, or
+    /// why it is not the flow's.
+    fn verified_resumed_seat(
+        &self,
+        record: &ResumedFlow<'_>,
+        pane: &HerdrPaneBinding,
+        model: &str,
+    ) -> Result<SeatBirth, RestartFailure>;
+}
+
+impl VerifiesResumedSeat for RunningNexus {
+    fn verified_resumed_seat(
+        &self,
+        record: &ResumedFlow<'_>,
+        pane: &HerdrPaneBinding,
+        model: &str,
+    ) -> Result<SeatBirth, RestartFailure> {
+        use crate::binding::{ReadsProcessIdentity, VerifiesAdoptedSeat};
+        use crate::herdr::launch::NamesHerdrHarness;
+        let refused = |category: &str| RestartFailure::ResumeRefused(category.into());
+        // The harness the flow ran, and runs again: Claude, or a Codex TUI.
+        let harness_kind = self
+            .store
+            .flow_node(&record.flow_id.0)
+            .ok()
+            .flatten()
+            .map(|node| node.harness_kind)
+            .ok_or_else(|| refused("UnknownFlow"))?;
+        self.herdr
+            .await_pane_rest(pane)
+            .map_err(|_| refused("NotReady"))?;
+        let snapshot = self
+            .herdr
+            .session_snapshot(&pane.herdr_session_name.0)
+            .ok_or_else(|| refused("HerdrUnreadable"))?;
+        let field = |agent: &serde_json::Value, key: &str| {
+            agent
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        let agent = snapshot
+            .pointer("/result/snapshot/agents")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|agents| {
+                agents.iter().find(|agent| {
+                    field(agent, "pane_id").as_deref() == Some(pane.herdr_pane_id.0.as_str())
+                        && field(agent, "terminal_id").as_deref()
+                            == Some(pane.herdr_terminal_id.0.as_str())
+                        && field(agent, "agent").as_deref() == Some(harness_kind.expected_harness())
+                })
+            })
+            .cloned()
+            .ok_or_else(|| refused("PaneAbsent"))?;
+        if agent
+            .pointer("/agent_session/value")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|reported| reported != record.native_session_id.0)
+        {
+            return Err(RestartFailure::BindMismatch);
+        }
+        let route = HerdrRoute {
+            herdr_session_name: pane.herdr_session_name.clone(),
+            herdr_agent_name: signal_flow::HerdrAgentName(
+                field(&agent, "name").unwrap_or_else(|| pane.herdr_agent_name.clone().0),
+            ),
+            herdr_pane_id: pane.herdr_pane_id.clone(),
+            herdr_terminal_id: pane.herdr_terminal_id.clone(),
+        };
+        let process = self
+            .herdr
+            .harness_process(&route, &record.native_session_id.0)
+            .ok_or_else(|| refused("ProcessUnidentified"))?;
+        let process_id =
+            u32::try_from(process.pid.0).map_err(|_| refused("ProcessUnidentified"))?;
+        let process_identity =
+            ProcessIdentity::of(process_id).ok_or_else(|| refused("ProcessUnidentified"))?;
+        let working_directory = std::fs::canonicalize(format!("/proc/{process_id}/cwd"))
+            .ok()
+            .and_then(|directory| directory.to_str().map(str::to_owned))
+            .ok_or_else(|| refused("ProcessUnidentified"))?;
+        let binding = FlowBinding {
+            flow_id: record.flow_id.clone(),
+            aspect: record.address.aspect.clone(),
+            model_name: signal_flow::ModelName(model.to_owned()),
+            harness_kind,
+            native_session_id: record.native_session_id.clone(),
+            herdr_workspace_id: pane.herdr_workspace_id.clone(),
+            herdr_pane_id: pane.herdr_pane_id.clone(),
+            herdr_tab_id: meta_signal_flow::HerdrTabId(field(&agent, "tab_id").unwrap_or_default()),
+            herdr_terminal_id: pane.herdr_terminal_id.clone(),
+            herdr_agent_name: route.herdr_agent_name.clone(),
+            process_identity,
+            working_directory: meta_signal_flow::WorkingDirectory(working_directory),
+        };
+        let node = self
+            .verified_seat_node(&pane.herdr_session_name.0, &record.address, &binding)
+            .map_err(|reason| match reason {
+                FlowBindingRefusalReason::SessionMismatch
+                | FlowBindingRefusalReason::NativeIdentityMismatch => RestartFailure::BindMismatch,
+                other => RestartFailure::ResumeRefused(format!("{other:?}")),
+            })?;
+        let HerdrRouteSelection::Available(herdr_route) = node.herdr_route_selection else {
+            return Err(refused("RouteUnavailable"));
+        };
+        Ok(SeatBirth {
+            flow_id: record.flow_id.clone(),
+            herdr_route,
+            process,
+        })
+    }
+}
+
 /// The steps of one restart, each run under the gate unless it says not.
 trait RestartsInSteps {
     /// The checks, the resume composed and validated, then Closing written;
@@ -1353,99 +1479,15 @@ impl RestartsInSteps for RunningNexus {
         pane: &HerdrPaneBinding,
         model: &str,
     ) -> Result<SeatBirth, RestartFailure> {
-        use crate::binding::{ReadsProcessIdentity, VerifiesAdoptedSeat};
-        use crate::herdr::launch::NamesHerdrHarness;
-        let refused = |category: &str| RestartFailure::ResumeRefused(category.into());
-        // The harness the flow ran, and runs again: Claude, or a Codex TUI.
-        let harness_kind = self
-            .store
-            .flow_node(&record.flow_id.0)
-            .ok()
-            .flatten()
-            .map(|node| node.harness_kind)
-            .ok_or_else(|| refused("UnknownFlow"))?;
-        self.herdr
-            .await_pane_rest(pane)
-            .map_err(|_| refused("NotReady"))?;
-        let snapshot = self
-            .herdr
-            .session_snapshot(&pane.herdr_session_name.0)
-            .ok_or_else(|| refused("HerdrUnreadable"))?;
-        let field = |agent: &serde_json::Value, key: &str| {
-            agent
-                .get(key)
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        };
-        let agent = snapshot
-            .pointer("/result/snapshot/agents")
-            .and_then(serde_json::Value::as_array)
-            .and_then(|agents| {
-                agents.iter().find(|agent| {
-                    field(agent, "pane_id").as_deref() == Some(pane.herdr_pane_id.0.as_str())
-                        && field(agent, "terminal_id").as_deref()
-                            == Some(pane.herdr_terminal_id.0.as_str())
-                        && field(agent, "agent").as_deref() == Some(harness_kind.expected_harness())
-                })
-            })
-            .cloned()
-            .ok_or_else(|| refused("PaneAbsent"))?;
-        if agent
-            .pointer("/agent_session/value")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|reported| reported != record.native_session_id.0)
-        {
-            return Err(RestartFailure::BindMismatch);
-        }
-        let route = HerdrRoute {
-            herdr_session_name: pane.herdr_session_name.clone(),
-            herdr_agent_name: signal_flow::HerdrAgentName(
-                field(&agent, "name").unwrap_or_else(|| pane.herdr_agent_name.clone().0),
-            ),
-            herdr_pane_id: pane.herdr_pane_id.clone(),
-            herdr_terminal_id: pane.herdr_terminal_id.clone(),
-        };
-        let process = self
-            .herdr
-            .harness_process(&route, &record.native_session_id.0)
-            .ok_or_else(|| refused("ProcessUnidentified"))?;
-        let process_id =
-            u32::try_from(process.pid.0).map_err(|_| refused("ProcessUnidentified"))?;
-        let process_identity =
-            ProcessIdentity::of(process_id).ok_or_else(|| refused("ProcessUnidentified"))?;
-        let working_directory = std::fs::canonicalize(format!("/proc/{process_id}/cwd"))
-            .ok()
-            .and_then(|directory| directory.to_str().map(str::to_owned))
-            .ok_or_else(|| refused("ProcessUnidentified"))?;
-        let binding = FlowBinding {
-            flow_id: record.flow_id.clone(),
-            aspect: record.address.aspect.clone(),
-            model_name: signal_flow::ModelName(model.to_owned()),
-            harness_kind,
-            native_session_id: record.native_session_id.clone(),
-            herdr_workspace_id: pane.herdr_workspace_id.clone(),
-            herdr_pane_id: pane.herdr_pane_id.clone(),
-            herdr_tab_id: meta_signal_flow::HerdrTabId(field(&agent, "tab_id").unwrap_or_default()),
-            herdr_terminal_id: pane.herdr_terminal_id.clone(),
-            herdr_agent_name: route.herdr_agent_name.clone(),
-            process_identity,
-            working_directory: meta_signal_flow::WorkingDirectory(working_directory),
-        };
-        let node = self
-            .verified_seat_node(&pane.herdr_session_name.0, &record.address, &binding)
-            .map_err(|reason| match reason {
-                FlowBindingRefusalReason::SessionMismatch
-                | FlowBindingRefusalReason::NativeIdentityMismatch => RestartFailure::BindMismatch,
-                other => RestartFailure::ResumeRefused(format!("{other:?}")),
-            })?;
-        let HerdrRouteSelection::Available(herdr_route) = node.herdr_route_selection else {
-            return Err(refused("RouteUnavailable"));
-        };
-        Ok(SeatBirth {
-            flow_id: record.flow_id.clone(),
-            herdr_route,
-            process,
-        })
+        self.verified_resumed_seat(
+            &ResumedFlow {
+                flow_id: &record.flow_id,
+                address: &record.address,
+                native_session_id: &record.native_session_id,
+            },
+            pane,
+            model,
+        )
     }
 
     fn bound(&self, record: &RestartRecord, birth: SeatBirth) -> Response {

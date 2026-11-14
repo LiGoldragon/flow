@@ -566,6 +566,40 @@ fn each_family_is_its_last_declaration() {
     configures(&nexus, ConfigurationChange::Thresholds(thresholds.clone()));
     assert_eq!(snapshot(&nexus).configured_thresholds.0, thresholds);
 
+    // Resumptions are keyed by native model, as thresholds are, and the
+    // family is replaced whole.
+    let resumptions = vec![
+        meta_signal_flow::ConfigureResumption {
+            model_name: flow_ethos::ModelName("claude-opus-5-5".into()),
+            cache_warmth: meta_signal_flow::CacheWarmth(5),
+            resume_ceiling: meta_signal_flow::ResumeCeiling(150_000),
+        },
+        meta_signal_flow::ConfigureResumption {
+            model_name: flow_ethos::ModelName("gpt-6.1-sol".into()),
+            cache_warmth: meta_signal_flow::CacheWarmth(30),
+            resume_ceiling: meta_signal_flow::ResumeCeiling(100_000),
+        },
+    ];
+    configures(
+        &nexus,
+        ConfigurationChange::Resumptions(resumptions.clone()),
+    );
+    assert_eq!(snapshot(&nexus).configured_resumptions.0, resumptions);
+    let resumptions = resumptions[1..].to_vec();
+    configures(
+        &nexus,
+        ConfigurationChange::Resumptions(resumptions.clone()),
+    );
+    assert_eq!(snapshot(&nexus).configured_resumptions.0, resumptions);
+    assert_eq!(
+        nexus
+            .store
+            .configured_resumption("claude-opus-5-5")
+            .expect("the family reads"),
+        None,
+        "an entry the declaration leaves out is gone"
+    );
+
     // A permaflow carries its leave-outs: the Metaflows family declared
     // again replaces each permaflow whole, and one it leaves out is gone
     // with its leave-outs.
@@ -655,6 +689,7 @@ fn each_family_is_its_last_declaration() {
             configured_harness_hook: meta_signal_flow::ConfiguredHarnessHook(
                 meta_signal_flow::HarnessHookConfiguration::Unconfigured
             ),
+            configured_resumptions: meta_signal_flow::ConfiguredResumptions(resumptions),
         }
     );
     // An empty declaration empties the family.

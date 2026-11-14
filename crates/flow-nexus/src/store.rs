@@ -72,8 +72,8 @@ use std::{
 
 use meta_signal_flow::{
     ConfigurationChange, ConfigurationSnapshot, ConfigureCounters, ConfigureHarnessFlags,
-    ConfigureMetaflow, ConfigureModel, ConfigureNexus, ConfigureSendServer, ConfigureThreshold,
-    CountersRefusal, HeartbeatConfig,
+    ConfigureMetaflow, ConfigureModel, ConfigureNexus, ConfigureResumption, ConfigureSendServer,
+    ConfigureThreshold, CountersRefusal, HeartbeatConfig,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -118,6 +118,14 @@ const META_THRESHOLD_CONFIGURATION_TABLE_NAME: TableName =
 const META_THRESHOLD_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-model-threshold-configuration";
 const META_THRESHOLD_CONFIGURATION_SCHEMA: &str =
     "flow-nexus-meta-model-threshold-configuration-v1";
+/// Added in 0.55.0; an earlier store names no resumption, so every wake of
+/// its permaflows is fresh.
+const OPTIONAL_RESUMPTION_TABLE: &str = "flow_nexus_meta_model_resumption_configuration";
+const META_RESUMPTION_CONFIGURATION_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_meta_model_resumption_configuration");
+const META_RESUMPTION_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-model-resumption-configuration";
+const META_RESUMPTION_CONFIGURATION_SCHEMA: &str =
+    "flow-nexus-meta-model-resumption-configuration-v1";
 const META_INVESTIGATION_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_investigation_configuration");
 const META_INVESTIGATION_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-investigation-configuration";
@@ -215,6 +223,7 @@ const CONFIGURATION_ONLY_TABLES: &[&str] = &[
     "flow_nexus_meta_protected_address_configuration",
     "flow_nexus_meta_handover_configuration",
     OPTIONAL_HARNESS_HOOK_TABLE,
+    OPTIONAL_RESUMPTION_TABLE,
 ];
 /// The tables a running store holds, all of them.
 const RUNNING_TABLES: &[&str] = &[
@@ -278,6 +287,7 @@ const RUNNING_TABLES: &[&str] = &[
     OPTIONAL_SCHEDULED_REMINDER_TABLE,
     OPTIONAL_PENDING_REAP_TABLE,
     OPTIONAL_PENDING_HANDOVER_TABLE,
+    OPTIONAL_RESUMPTION_TABLE,
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -833,6 +843,34 @@ impl DescribesThresholdTable for StoredMetaThresholdConfiguration {
             META_THRESHOLD_CONFIGURATION_TABLE_NAME,
             FamilyName::new(META_THRESHOLD_CONFIGURATION_FAMILY),
             SchemaHash::for_label(META_THRESHOLD_CONFIGURATION_SCHEMA),
+        )
+    }
+}
+
+/// One model's resumption: how long its prompt cache stays warm and the
+/// context below which a woken permaflow resumes its last flow, keyed by
+/// the model's name.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredMetaResumptionConfiguration {
+    resumption: ConfigureResumption,
+}
+
+impl EngineRecord for StoredMetaResumptionConfiguration {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.resumption.model_name.clone().0)
+    }
+}
+
+trait DescribesResumptionTable {
+    fn descriptor() -> TableDescriptor<StoredMetaResumptionConfiguration>;
+}
+
+impl DescribesResumptionTable for StoredMetaResumptionConfiguration {
+    fn descriptor() -> TableDescriptor<StoredMetaResumptionConfiguration> {
+        TableDescriptor::new(
+            META_RESUMPTION_CONFIGURATION_TABLE_NAME,
+            FamilyName::new(META_RESUMPTION_CONFIGURATION_FAMILY),
+            SchemaHash::for_label(META_RESUMPTION_CONFIGURATION_SCHEMA),
         )
     }
 }
@@ -1773,6 +1811,7 @@ pub(crate) struct MetaConfigurationTables {
     nexus: TableReference<StoredMetaNexusConfiguration>,
     models: TableReference<StoredMetaModelConfiguration>,
     thresholds: TableReference<StoredMetaThresholdConfiguration>,
+    resumptions: TableReference<StoredMetaResumptionConfiguration>,
     pub(crate) send_servers: TableReference<send_server::StoredMetaSendServerConfiguration>,
     pub(crate) metaflows: TableReference<metaflow_declaration::StoredMetaMetaflowConfiguration>,
     investigation: TableReference<StoredMetaInvestigationConfiguration>,
@@ -1795,6 +1834,7 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
             nexus: engine.register_table(StoredMetaNexusConfiguration::descriptor())?,
             models: engine.register_table(StoredMetaModelConfiguration::descriptor())?,
             thresholds: engine.register_table(StoredMetaThresholdConfiguration::descriptor())?,
+            resumptions: engine.register_table(StoredMetaResumptionConfiguration::descriptor())?,
             send_servers: engine.register_table(
                 <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor(),
             )?,
@@ -2012,6 +2052,7 @@ pub struct ConfiguredFamilies {
     pub nexus: ConfigureNexus,
     pub models: Vec<ConfigureModel>,
     pub thresholds: Vec<ConfigureThreshold>,
+    pub resumptions: Vec<ConfigureResumption>,
     pub send_servers: Vec<ConfigureSendServer>,
     pub metaflows: Vec<ConfigureMetaflow>,
     pub investigation: Option<Address>,
@@ -2072,6 +2113,7 @@ impl CompletesSnapshot for ConfiguredFamilies {
                 self.announcement_tries,
             ),
             configured_harness_hook: meta_signal_flow::ConfiguredHarnessHook(self.harness_hook),
+            configured_resumptions: meta_signal_flow::ConfiguredResumptions(self.resumptions),
         }
     }
 }
@@ -2144,6 +2186,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let meta_protected_addresses_descriptor =
             StoredMetaProtectedAddressConfiguration::descriptor();
         let meta_harness_hook_descriptor = StoredMetaHarnessHookConfiguration::descriptor();
+        let meta_resumptions_descriptor = StoredMetaResumptionConfiguration::descriptor();
         let meta_send_servers_descriptor = <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor();
         let meta_metaflows_descriptor = <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor();
         // Family identities are part of the open request, so Engine validates
@@ -2166,6 +2209,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_heartbeat_descriptor)
                 .with_family(&meta_protected_addresses_descriptor)
                 .with_family(&meta_harness_hook_descriptor)
+                .with_family(&meta_resumptions_descriptor)
                 .with_family(&meta_metaflows_descriptor)
                 .with_family(&meta_handover_descriptor),
         )?;
@@ -2194,6 +2238,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             nexus: engine.register_table(meta_nexus_descriptor)?,
             models: engine.register_table(meta_models_descriptor)?,
             thresholds: engine.register_table(meta_thresholds_descriptor)?,
+            resumptions: engine.register_table(meta_resumptions_descriptor)?,
             send_servers: engine.register_table(meta_send_servers_descriptor)?,
             investigation: engine.register_table(meta_investigation_descriptor)?,
             default_minutes: engine.register_table(meta_default_minutes_descriptor)?,
@@ -3337,6 +3382,11 @@ pub(crate) trait ManagesMetaflowState: Sized {
         &self,
         model_name: &str,
     ) -> Result<Option<ConfigureThreshold>, StoreError>;
+    /// The resumption configured for one model, if any.
+    fn configured_resumption(
+        &self,
+        model_name: &str,
+    ) -> Result<Option<ConfigureResumption>, StoreError>;
     /// The leave-outs a permaflow's Start takes when it names none: its
     /// declaration's, as it stands now; none when no permaflow is declared.
     fn declared_leave_outs(&self, address: &Address) -> Result<Vec<LeaveOut>, StoreError>;
@@ -3435,6 +3485,21 @@ impl ManagesMetaflowState for FlowStore {
         match rows.records() {
             [] => Ok(None),
             [stored] => Ok(Some(stored.threshold.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
+    fn configured_resumption(
+        &self,
+        model_name: &str,
+    ) -> Result<Option<ConfigureResumption>, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.meta_configuration_tables.resumptions,
+            RecordKey::new(model_name),
+        ))?;
+        match rows.records() {
+            [] => Ok(None),
+            [stored] => Ok(Some(stored.resumption.clone())),
             _ => Err(StoreError::StateInvariant),
         }
     }
@@ -5545,6 +5610,10 @@ pub(crate) trait ReadsFlowMemory {
                 META_HARNESS_HOOK_CONFIGURATION_FAMILY,
                 META_HARNESS_HOOK_CONFIGURATION_SCHEMA,
             ),
+            "flow_nexus_meta_model_resumption_configuration" => (
+                META_RESUMPTION_CONFIGURATION_FAMILY,
+                META_RESUMPTION_CONFIGURATION_SCHEMA,
+            ),
             "flow_nexus_meta_protected_address_configuration" => (
                 META_PROTECTED_ADDRESS_CONFIGURATION_FAMILY,
                 META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA,
@@ -5844,6 +5913,7 @@ pub(crate) trait ReadsFlowMemory {
                     || *name == OPTIONAL_PENDING_REAP_TABLE
                     || *name == OPTIONAL_PENDING_HANDOVER_TABLE
                     || *name == OPTIONAL_HARNESS_HOOK_TABLE
+                    || *name == OPTIONAL_RESUMPTION_TABLE
                     || *name == OPTIONAL_REQUEST_ID_TABLE
                     || *name == OPTIONAL_DELIVER_CALL_TABLE
                     || *name == OPTIONAL_STORE_IDENTITY_TABLE
@@ -6070,6 +6140,7 @@ pub(crate) trait ReadsFlowMemory {
         };
         let models_rows = engine.match_records(QueryPlan::all(tables.models))?;
         let thresholds_rows = engine.match_records(QueryPlan::all(tables.thresholds))?;
+        let resumption_rows = engine.match_records(QueryPlan::all(tables.resumptions))?;
         let send_server_rows = engine.match_records(QueryPlan::all(tables.send_servers))?;
         let investigation_rows = engine.match_records(QueryPlan::all(tables.investigation))?;
         let default_minutes_rows = engine.match_records(QueryPlan::all(tables.default_minutes))?;
@@ -6088,6 +6159,7 @@ pub(crate) trait ReadsFlowMemory {
         if models_rows.database_marker() != marker
             || metaflow_rows.database_marker() != marker
             || thresholds_rows.database_marker() != marker
+            || resumption_rows.database_marker() != marker
             || send_server_rows.database_marker() != marker
             || investigation_rows.database_marker() != marker
             || default_minutes_rows.database_marker() != marker
@@ -6115,6 +6187,12 @@ pub(crate) trait ReadsFlowMemory {
             .map(|stored| stored.threshold.clone())
             .collect::<Vec<_>>();
         thresholds.sort_by(|left, right| left.model_name.cmp(&right.model_name));
+        let mut resumptions = resumption_rows
+            .records()
+            .iter()
+            .map(|stored| stored.resumption.clone())
+            .collect::<Vec<_>>();
+        resumptions.sort_by(|left, right| left.model_name.cmp(&right.model_name));
         let investigation = match investigation_rows.records() {
             [] => None,
             [stored] => Some(stored.investigation.clone()),
@@ -6177,6 +6255,7 @@ pub(crate) trait ReadsFlowMemory {
             nexus,
             models,
             thresholds,
+            resumptions,
             send_servers,
             investigation,
             metaflows,
@@ -6709,6 +6788,16 @@ pub(crate) trait ReadsFlowMemory {
                     .map(|threshold| StoredMetaThresholdConfiguration { threshold })
                     .collect(),
             ),
+            ConfigurationChange::Resumptions(resumptions) => {
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.resumptions,
+                    resumptions
+                        .into_iter()
+                        .map(|resumption| StoredMetaResumptionConfiguration { resumption })
+                        .collect(),
+                )
+            }
             ConfigurationChange::Permaflow(metaflow) => {
                 FlowStore::check_leave_outs(
                     engine,

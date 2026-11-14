@@ -73,6 +73,13 @@ pub struct Record_Data_Awoken_Data {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Record_Data_Resumed_Data {
+    pub address: signal_flow::Address,
+    pub seat_birth: flow_nexus::SeatBirth,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Record_Data_ReapOwed_Data {
     pub pending_reap: flow_nexus::PendingReap,
     pub replaced_record: flow_nexus::ReplacedRecord,
@@ -120,6 +127,7 @@ pub enum Record_Data {
     Awoken(Record_Data_Awoken_Data),
     Restart(meta_signal_flow::RestartRecord),
     Rebound(flow_nexus::SeatBirth),
+    Resumed(Record_Data_Resumed_Data),
     ReapOwed(Record_Data_ReapOwed_Data),
     ReapRefused(Record_Data_ReapRefused_Data),
     Reaped(signal_flow::FlowId),

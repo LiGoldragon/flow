@@ -1,4 +1,4 @@
-//! `flow-nexus-hook`: the Claude Code command hook Flow writes into every
+//! `flow-hook`: the Claude Code command hook Flow writes into every
 //! Claude flow it launches. Claude Code runs it on SessionStart, PostToolUse,
 //! UserPromptSubmit, Stop and SessionEnd with the event as JSON on stdin; it turns the
 //! event into one `Report.{ FlowId Option<Process> Event }` and sends it,
@@ -578,8 +578,8 @@ mod tests {
     #[test]
     fn the_hook_names_the_harness_that_runs_its_session() {
         let resumed = Table(vec![
-            (900, 800, 9_000, &["flow-nexus-hook"], None),
-            (800, 700, 8_000, &["sh", "-c", "flow-nexus-hook"], None),
+            (900, 800, 9_000, &["flow-hook"], None),
+            (800, 700, 8_000, &["sh", "-c", "flow-hook"], None),
             (
                 700,
                 600,
@@ -598,7 +598,7 @@ mod tests {
         );
         assert_eq!(resumed.harness_above(900, "s2"), None);
         let recorded = Table(vec![
-            (900, 700, 9_000, &["flow-nexus-hook"], None),
+            (900, 700, 9_000, &["flow-hook"], None),
             (700, 1, 7_100, &["node", "claude"], Some("s1")),
         ]);
         assert_eq!(

@@ -10,9 +10,9 @@ bumped here; the release that carries this change sets it.
   `flow-nexus-meta`. The binaries, the usage line the clients print, the
   `--version` answer (`flow <version>`), the capsule, the tests and the README
   carry the new names, and no old name is left as an alias.
-- **Unchanged:** the daemon `flow-nexus-daemon`, the hook `flow-nexus-hook`
-  and the hook command Flow writes into every Claude flow's settings, the
-  sockets, and the CLI configuration file
+- **Hook:** the hook client `flow-nexus-hook` is `flow-hook`, and the hook
+  command Flow writes into every Claude flow's settings names it; no alias.
+- **Unchanged:** the daemon `flow-nexus-daemon`, the sockets, and the CLI configuration file
   `$XDG_CONFIG_HOME/nexus/flow-nexus.datom`.
 - **To deploy:** everything that runs `flow-nexus` or `flow-nexus-meta` by name
   moves in the same switch: Home's `~/.local/bin` links and its versioned

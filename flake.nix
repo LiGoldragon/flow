@@ -102,7 +102,7 @@
             };
           };
           # The binaries of builds copied into one bin directory: the daemon,
-          # flow-nexus-daemon, finds flow-nexus-hook beside its own resolved
+          # flow-nexus-daemon, finds flow-hook beside its own resolved
           # executable.
           binaries =
             name: builds: attributes:

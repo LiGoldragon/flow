@@ -3,7 +3,7 @@
 Flow Nexus starts, restarts, delivers to, stops, lists, and resolves flows,
 and is the only writer into their panes. `flow-nexus-daemon` is the
 long-running process, started with its place; `flow` is its ordinary
-client, `flow-meta` its privileged client, and `flow-nexus-hook` the
+client, `flow-meta` its privileged client, and `flow-hook` the
 hook Claude Code runs in every Claude flow. The Nexus persists Flow identity
 and policy in one Sema store, and its sockets carry only length-prefixed rkyv
 Signal archives.
@@ -101,7 +101,7 @@ first frame that is not this contract's greeting, an older peer's greeting
 or its raw Input among them, is answered `GreetingRefused.ContractMismatch`
 with this contract's digest before anything is decoded, the connection
 ends, and the refusal is recorded, metadata alone, in `Observe.Undecodable`.
-The `flow` CLI, `flow-nexus-hook` and `flow-meta` greet; a
+The `flow` CLI, `flow-hook` and `flow-meta` greet; a
 refused greeting is the CLI's error (exit 2) and the hook's `2` line.
 
 A place's two directories are shared with every other Nexus at it and are
@@ -120,7 +120,7 @@ the Nexus binds and announces readiness before it is configured. Every
 meta `Configure` is applied to the running Nexus at once, without a
 restart, and `ObserveConfiguration` streams the configuration, then each
 change. `Configure.HarnessHook.<path>` names the hook command written into
-every Claude flow; unconfigured, it is the `flow-nexus-hook` beside the
+every Claude flow; unconfigured, it is the `flow-hook` beside the
 Nexus.
 
 Every write into a pane goes through the privileged socket, and Flow is the

@@ -913,7 +913,7 @@ rec {
             requiredFeatures = [ ];
           }
           {
-            name = "flow-nexus-hook";
+            name = "flow-hook";
             path = "src/hook.rs";
             requiredFeatures = [ ];
           }

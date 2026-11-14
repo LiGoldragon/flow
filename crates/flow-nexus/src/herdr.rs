@@ -132,7 +132,7 @@ pub struct HerdrCli {
     pub(crate) claude_daemon: crate::claude::ClaudeDaemon,
     /// Claude's own records of the sessions its processes run.
     pub(crate) claude_sessions: crate::claude::ClaudeSessions,
-    /// The `flow-nexus-hook` Claude Code runs on SessionStart, PostToolUse and
+    /// The `flow-hook` Claude Code runs on SessionStart, PostToolUse and
     /// Stop in every Claude flow Flow launches ([`HookChoice`]), as the
     /// configuration's HarnessHook names it.
     pub(crate) harness_hook: crate::live::Live<PathBuf>,
@@ -225,9 +225,9 @@ impl Default for HerdrCli {
 
 /// Where the hook command Flow writes into a Claude flow's settings points.
 /// The deployment declares a stable path as the configuration's
-/// HarnessHook and repoints it at the `flow-nexus-hook` of each Flow it
+/// HarnessHook and repoints it at the `flow-hook` of each Flow it
 /// activates, so the hook a running flow was launched with moves with the
-/// deployment. Unconfigured, or a relative path, names the `flow-nexus-hook`
+/// deployment. Unconfigured, or a relative path, names the `flow-hook`
 /// beside the Nexus's own executable.
 pub(crate) struct HookChoice {
     pub(crate) stable: Option<PathBuf>,
@@ -262,9 +262,9 @@ impl ChoosesHarnessHook for HookChoice {
                 .as_ref()
                 .and_then(|path| {
                     path.parent()
-                        .map(|directory| directory.join("flow-nexus-hook"))
+                        .map(|directory| directory.join("flow-hook"))
                 })
-                .unwrap_or_else(|| PathBuf::from("flow-nexus-hook")),
+                .unwrap_or_else(|| PathBuf::from("flow-hook")),
         }
     }
 }
@@ -397,7 +397,7 @@ impl ReadsPromptReply for ProcessReply {
 
 pub trait ConfiguresHerdrCli {
     fn with_codex_endpoints(self, codex_endpoints: CodexEndpoints) -> Self;
-    /// The hook command the configuration names, or the `flow-nexus-hook` beside
+    /// The hook command the configuration names, or the `flow-hook` beside
     /// this executable (`HookChoice`).
     fn with_harness_hook(self, configured: &meta_signal_flow::HarnessHookConfiguration) -> Self;
     /// Takes a changed configuration at once: the Codex endpoints, the
@@ -490,7 +490,7 @@ impl ConfiguresHerdrCli for HerdrCli {
             claude_sessions: crate::claude::ClaudeSessions::under(
                 &fixture_root.join("claude-home"),
             ),
-            harness_hook: Live::holding(PathBuf::from("/fixture/bin/flow-nexus-hook")),
+            harness_hook: Live::holding(PathBuf::from("/fixture/bin/flow-hook")),
             ordinary_socket: PathBuf::from("/fixture/run/flow-next/flow/flow.sock"),
             held_system_prompts: Default::default(),
             title_wait: std::time::Duration::from_secs(2),
@@ -1184,7 +1184,7 @@ mod tests {
 
     /// The hook a Claude flow is launched with is the stable path the
     /// deployment names, so it moves with the next deployment; with none,
-    /// or a relative one, it is the flow-nexus-hook beside the Nexus.
+    /// or a relative one, it is the flow-hook beside the Nexus.
     #[test]
     fn the_hook_command_is_the_stable_path_the_deployment_names() {
         let executable = Some(PathBuf::from(
@@ -1192,20 +1192,20 @@ mod tests {
         ));
         assert_eq!(
             HookChoice {
-                stable: Some(PathBuf::from("/home/li/.local/bin/flow-nexus-hook")),
+                stable: Some(PathBuf::from("/home/li/.local/bin/flow-hook")),
                 executable: executable.clone(),
             }
             .harness_hook(),
-            PathBuf::from("/home/li/.local/bin/flow-nexus-hook")
+            PathBuf::from("/home/li/.local/bin/flow-hook")
         );
-        for stable in [None, Some(PathBuf::from("flow-nexus-hook"))] {
+        for stable in [None, Some(PathBuf::from("flow-hook"))] {
             assert_eq!(
                 HookChoice {
                     stable,
                     executable: executable.clone(),
                 }
                 .harness_hook(),
-                PathBuf::from("/nix/store/abc-flow-configured/bin/flow-nexus-hook")
+                PathBuf::from("/nix/store/abc-flow-configured/bin/flow-hook")
             );
         }
     }

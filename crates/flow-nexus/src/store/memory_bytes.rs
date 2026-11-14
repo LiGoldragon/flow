@@ -483,11 +483,11 @@ mod tests {
             try_bound: meta_signal_flow::TryBound(3),
         });
         frozen::StoredMetaHarnessHookConfiguration {
-            harness_hook: "/run/current-system/sw/bin/flow-nexus-hook".into(),
+            harness_hook: "/run/current-system/sw/bin/flow-hook".into(),
         }
         .archives_alike(&generated::StoredMetaHarnessHookConfiguration {
             path: meta_signal_flow::generated::signal::Path(
-                "/run/current-system/sw/bin/flow-nexus-hook".into(),
+                "/run/current-system/sw/bin/flow-hook".into(),
             ),
         });
         let heartbeat = meta_signal_flow::HeartbeatConfig {

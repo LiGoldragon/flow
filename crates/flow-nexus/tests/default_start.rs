@@ -414,7 +414,7 @@ fn environment_overrides_do_not_replace_the_explicit_configuration() {
         &[
             ("FLOW_SOURCE_ROOT", "/srv/elsewhere"),
             ("FLOW_CODEX_STABLE_CLIENT", "/opt/elsewhere-client"),
-            ("FLOW_HOOK", "/opt/elsewhere/flow-nexus-hook"),
+            ("FLOW_HOOK", "/opt/elsewhere/flow-hook"),
             ("XDG_RUNTIME_DIR", "/run/elsewhere"),
         ],
     );

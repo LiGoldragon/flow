@@ -1,6 +1,6 @@
 //! The client that speaks Signal to a Flow Nexus's ordinary socket: one
 //! query out, its reply frames back. The `flow` CLI and
-//! `flow-nexus-hook` both call through it, each with the socket it was given.
+//! `flow-hook` both call through it, each with the socket it was given.
 
 use crate::Invocation;
 use datom_codec::Datomizable;

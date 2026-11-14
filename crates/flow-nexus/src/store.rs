@@ -38,6 +38,7 @@ pub(crate) mod pending_handover;
 pub(crate) mod pending_reap;
 pub(crate) mod queue_delivery;
 pub(crate) mod reap_upgrade;
+pub(crate) mod recovery_upgrade;
 pub mod reminder;
 pub(crate) mod repair;
 #[cfg(test)]
@@ -1445,11 +1446,11 @@ impl EngineRecord for StoredLaunchOutcome {
 
 impl MemoryDefinition for StoredLaunchOutcome {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(10)
+        MemoryVersion::new(11)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-launch-outcome-v10")
+        SchemaHash::for_label("flow-nexus-launch-outcome-v11")
     }
 }
 
@@ -1576,6 +1577,8 @@ pub enum StoreError {
     HandoverConfigurationRefused(meta_signal_flow::HandoverConfigurationRefusal),
     #[error("handover configuration upgrade failed: {0}")]
     HandoverConfigurationUpgrade(String),
+    #[error("launch-outcome v10 Memory upgrade failed: {0}")]
+    RecoveryUpgrade(String),
     #[error("successor intent upgrade failed: {0}")]
     SuccessorIntentUpgrade(String),
     #[error("0.54.2 Memory upgrade failed: {0}")]
@@ -2551,7 +2554,7 @@ impl OpensFlowStore for FlowStore {
             SchemaHash::for_label("flow-nexus-launch-pane-v1"),
         );
         let launch_outcomes_descriptor =
-            <FlowStore as reap_upgrade::DescribesReapUpgrade>::launch_outcome_descriptor();
+            <FlowStore as recovery_upgrade::DescribesLaunchOutcomeTables>::launch_outcome_descriptor();
         // The two obligation families are not declared to the open: a
         // declared family the catalog lacks is registered by the open
         // itself, and the 0.54.6 upgrade registers them in its own
@@ -2748,6 +2751,12 @@ impl OpensFlowStore for FlowStore {
             )?
             .announce();
         }
+        // This release's step: the launch outcomes 0.54.7 to 0.56.x wrote
+        // (v10) take signal-flow 64's wider rejection, and the successor
+        // intents (v3) the emergency cause, before anything is registered.
+        <FlowStore as recovery_upgrade::UpgradesRecoveryMemory>::upgrade_recovery_memory(
+            &mut engine,
+        )?;
 
         let flows = engine.register_table(flows_descriptor)?;
         let native_owner_proofs = engine.register_table(native_owner_proofs_descriptor)?;
@@ -2782,7 +2791,7 @@ impl OpensFlowStore for FlowStore {
         let launch_cleanups = engine.register_table(launch_cleanups_descriptor)?;
         let compactions = engine.register_table(compactions_descriptor)?;
         let reminders = engine.register_table(reminders_descriptor)?;
-        let successor_intents = <successor::SuccessorIntent as successor_upgrade::UpgradesSuccessorIntent>::upgrade_or_register(&mut engine).map_err(StoreError::SuccessorIntentUpgrade)?;
+        let successor_intents = engine.register_table(successor_intents_descriptor)?;
         let queue_delivery =
             QueueDeliveryTables::register(&mut engine, queue_delivery_descriptors)?;
         let send_outcomes = SendOutcomeTables::register(&mut engine, send_outcome_descriptors)?;
@@ -5756,11 +5765,19 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                 let (family, schema_hash) = FlowStore::metaflow_declaration_v6_identity();
                 identity.family().as_str() == family && identity.schema_hash() == schema_hash
             };
+        // The launch outcomes as 0.54.7 to 0.56.x wrote them, upgraded on
+        // open.
+        let before_recovery_refusals = table_key == "flow_nexus_launch_outcomes"
+            && identity.table_name() == table_key
+            && identity.family().as_str() == "flow-nexus-launch-outcome"
+            && identity.schema_hash()
+                == SchemaHash::for_label(recovery_upgrade::LAUNCH_OUTCOME_SCHEMA_V10);
         let before_recovery_cause = table_key == successor::SUCCESSOR_INTENT_TABLE_NAME.as_str()
             && identity.table_name() == table_key
             && identity.family().as_str() == successor::SUCCESSOR_INTENT_FAMILY
             && identity.schema_hash() == SchemaHash::for_label("flow-nexus-successor-intent-v3");
         before_recovery_cause
+            || before_recovery_refusals
             || before_living
             || before_event_metadata
             || before_pending_reaps

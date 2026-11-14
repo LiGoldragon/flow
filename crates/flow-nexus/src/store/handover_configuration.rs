@@ -73,7 +73,10 @@ impl UpgradeFrom<StoredHandoverConfigurationV2> for StoredHandoverConfiguration 
     }
 }
 
-impl UpgradeFrom<StoredHandoverConfigurationV1> for StoredHandoverConfiguration {
+/// v1 takes the publication deadline v2 added, at its seeded 60 s; v2 then
+/// takes the recovery text, so a v1 store is upgraded through v2, each
+/// format carrying only the step from the one before.
+impl UpgradeFrom<StoredHandoverConfigurationV1> for StoredHandoverConfigurationV2 {
     type Refusal = std::convert::Infallible;
     fn upgrade_from(predecessor: StoredHandoverConfigurationV1) -> Decision<Self, Self::Refusal> {
         Decision::Ready(Self {
@@ -81,7 +84,6 @@ impl UpgradeFrom<StoredHandoverConfigurationV1> for StoredHandoverConfiguration 
             handover_archive_configuration: predecessor.archive,
             handover_count_configuration: predecessor.count,
             duration: meta_signal_flow::Duration(60_000),
-            successor_recovery_text: SuccessorRecoveryText::initial(),
         })
     }
 }
@@ -99,6 +101,22 @@ impl MemoryDefinition for StoredHandoverConfiguration {
         SchemaHash::for_label("flow-nexus-handover-configuration-v3")
     }
 }
+/// The v2 family, the step a v1 store takes on its way to v3.
+pub(crate) trait DescribesHandoverConfigurationV2 {
+    fn descriptor() -> TableDescriptor<StoredHandoverConfigurationV2>;
+}
+impl DescribesHandoverConfigurationV2 for StoredHandoverConfigurationV2 {
+    fn descriptor() -> TableDescriptor<StoredHandoverConfigurationV2> {
+        TableDescriptor::new(
+            HANDOVER_CONFIGURATION_TABLE_NAME,
+            FamilyName::new("flow-nexus-handover-configuration"),
+            Self::schema_hash(),
+        )
+        .with_predecessor::<StoredHandoverConfigurationV1>()
+    }
+}
+/// The current family. It names both earlier formats, so an open admits a
+/// store at either; the upgrade itself runs v1 to v2 to v3.
 pub(crate) trait DescribesHandoverConfiguration {
     fn descriptor() -> TableDescriptor<StoredHandoverConfiguration>;
 }
@@ -212,36 +230,23 @@ impl ReadsHandoverConfiguration for super::FlowStore {
     }
 }
 
-/// The current handover-configuration table, upgraded from its v1 family
-/// or registered fresh.
+/// The current handover-configuration table: a v1 store is first upgraded
+/// to v2, then a v2 store to v3; a current store is opened and an absent
+/// family registered fresh.
 pub(crate) trait UpgradesHandoverConfiguration: Sized {
     fn upgrade_or_register(engine: &mut Engine) -> Result<TableReference<Self>, String>;
 }
 
-impl UpgradesHandoverConfiguration for StoredHandoverConfiguration {
-    fn upgrade_or_register(
-        engine: &mut Engine,
-    ) -> Result<TableReference<StoredHandoverConfiguration>, String> {
-        let descriptor =
-            <StoredHandoverConfiguration as DescribesHandoverConfiguration>::descriptor();
-        let predecessor = engine.list_tables().into_iter().find(|table| {
-            table.identity().table_name() == HANDOVER_CONFIGURATION_TABLE_NAME.as_str()
-        });
-        let outcome = match predecessor {
-            Some(table)
-                if table.identity().schema_hash()
-                    == StoredHandoverConfigurationV1::schema_hash() =>
-            {
-                engine.upgrade_table::<StoredHandoverConfigurationV1, StoredHandoverConfiguration>(
-                    descriptor,
-                )
-            }
-            _ => engine
-                .upgrade_table::<StoredHandoverConfigurationV2, StoredHandoverConfiguration>(
-                    descriptor,
-                ),
-        };
-        match outcome {
+/// One step of the chain, its refusal or failure named.
+trait SettlesHandoverConfigurationStep<Table> {
+    fn settled(self) -> Result<TableReference<Table>, String>;
+}
+
+impl<Table> SettlesHandoverConfigurationStep<Table>
+    for UpgradeOutcome<Table, std::convert::Infallible>
+{
+    fn settled(self) -> Result<TableReference<Table>, String> {
+        match self {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
             UpgradeOutcome::Refused(refusal) => Err(format!(
@@ -251,6 +256,29 @@ impl UpgradesHandoverConfiguration for StoredHandoverConfiguration {
                 "handover configuration upgrade failed: {failure:?}"
             )),
         }
+    }
+}
+
+impl UpgradesHandoverConfiguration for StoredHandoverConfiguration {
+    fn upgrade_or_register(
+        engine: &mut Engine,
+    ) -> Result<TableReference<StoredHandoverConfiguration>, String> {
+        let stored_v1 = engine.list_tables().into_iter().any(|table| {
+            table.identity().table_name() == HANDOVER_CONFIGURATION_TABLE_NAME.as_str()
+                && table.identity().schema_hash() == StoredHandoverConfigurationV1::schema_hash()
+        });
+        if stored_v1 {
+            engine
+                .upgrade_table::<StoredHandoverConfigurationV1, StoredHandoverConfigurationV2>(
+                    <StoredHandoverConfigurationV2 as DescribesHandoverConfigurationV2>::descriptor(),
+                )
+                .settled()?;
+        }
+        engine
+            .upgrade_table::<StoredHandoverConfigurationV2, StoredHandoverConfiguration>(
+                <StoredHandoverConfiguration as DescribesHandoverConfiguration>::descriptor(),
+            )
+            .settled()
     }
 }
 
@@ -270,7 +298,8 @@ mod tests {
             ),
             count: HandoverCountConfiguration::Configured(3),
         };
-        let Decision::Ready(current) = StoredHandoverConfiguration::upgrade_from(old);
+        let Decision::Ready(v2) = StoredHandoverConfigurationV2::upgrade_from(old);
+        let Decision::Ready(current) = StoredHandoverConfiguration::upgrade_from(v2);
         assert_eq!(
             current.handover_archive_configuration,
             HandoverArchiveConfiguration::Configured(meta_signal_flow::generated::signal::Path(
@@ -481,4 +510,5 @@ mod tests {
             assert_eq!(row.successor_recovery_text.0, "After migration.");
         }
     }
+
 }

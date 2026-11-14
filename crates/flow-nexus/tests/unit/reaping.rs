@@ -2058,15 +2058,17 @@ pub(crate) fn v9_store_at(path: &Path, rows: Vec<StoredLaunchOutcomeV9>, version
     }
 }
 
-/// An Engine over the closed store at `path` with the v10 family declared.
+/// An Engine over the closed store at `path` with the current family
+/// declared, which admits the v9 one the reap step upgrades.
 fn evolving_engine(path: &Path) -> sema_engine::Engine {
-    use crate::store::reap_upgrade::DescribesReapUpgrade;
-    let descriptor = <crate::store::FlowStore as DescribesReapUpgrade>::launch_outcome_descriptor();
+    use crate::store::recovery_upgrade::DescribesLaunchOutcomeTables;
+    let descriptor =
+        <crate::store::FlowStore as DescribesLaunchOutcomeTables>::launch_outcome_descriptor();
     sema_engine::Engine::open(
         sema_engine::EngineOpen::new(path, sema_engine::SchemaVersion::new(1))
             .with_family(&descriptor),
     )
-    .expect("the store opens with the v10 family declared")
+    .expect("the store opens with the current family declared")
 }
 
 /// Test 20: a v9 store with a refused reap upgrades in one commit: the
@@ -2283,7 +2285,7 @@ fn reap_upgrade_refusal_preserves_logical_rows_and_catalog() {
 
 /// Test 21: an older daemon refuses a 0.54.7 store: opening with the v9
 /// descriptor answers FamilyIdentityMismatch, and the logical rows and the
-/// catalog are unchanged; the v10 identity still registers.
+/// catalog are unchanged; the current identity still registers.
 #[test]
 fn an_older_daemon_refuses_a_0_54_7_store() {
     let mut world = ReapWorld::staged("older-daemon");
@@ -2322,12 +2324,12 @@ fn an_older_daemon_refuses_a_0_54_7_store() {
             sema_engine::SchemaVersion::new(1),
         ))
         .unwrap();
-        use crate::store::reap_upgrade::DescribesReapUpgrade;
+        use crate::store::recovery_upgrade::DescribesLaunchOutcomeTables;
         engine
             .register_table(
-                <crate::store::FlowStore as DescribesReapUpgrade>::launch_outcome_descriptor(),
+                <crate::store::FlowStore as DescribesLaunchOutcomeTables>::launch_outcome_descriptor(),
             )
-            .expect("the v10 identity still registers");
+            .expect("the current identity still registers");
     }
 }
 

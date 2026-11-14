@@ -1,22 +1,38 @@
-# Recovery-text consumer candidate (unreleased)
+# Integration 98df55 (unreleased): k7jy native rest and caller-bound Refresh, with the warning lane's recovery consumer
 
-This contribution follows the independently gated meta-signal-flow82 producer
-`570b173cbd943001b611439606a439d194a3b824` and canonical build-base
-`3d8eedd897251bd321b4e1cd625668397896c12d`. It is not a live switch.
+Contracts: signal-flow 64.0.0 (83c04fe) and meta-signal-flow 83.0.0 (06fff39),
+on build-base `release-98df55`. **Both the wire and the stored format change.**
+Not a release: no version is chosen and nothing is deployed.
 
-- Handover configuration familyV2 upgrades toV3, retaining frozenV1 support.
-  Its one new SuccessorRecoveryText value is seeded on initialization/upgrade;
-  explicit updates, including empty text, survive reopen and other setters.
-- Successor intent familyV3 upgrades toV4. Every old cause retains its ordinary
-  meaning; old Refresh is never synthesized as emergency. The new emergency
-  cause carries predecessorFlowId and optional validated transcript path.
-- Production composition requires its live recovery capability at construction.
-  Both startup branches, including simplified empty instructions, consume the
-  same configured value/provenance only for the matching emergency cause.
-- Warning runtime capture/rest/on-demand/retry integration belongs to the named
-  Opus k7jy integration lane. Until that delta and the combined immutable full
-  gate are accepted, this candidate does not prove complete recovery behavior.
-  No native Codex/Claude proof or deployment is claimed.
+- **Wire.** signal-flow 64 adds a caller-bound Refresh (`CallerNotCurrent`) and
+  the two recovery refusals beside `HandoverUnreadable`:
+  `RecoveryUnavailable.{ Address FlowId String }` and
+  `RecoveryPredecessorMismatch.{ Address Address FlowId FlowId FlowId }`. Flow
+  answers them from its composition error by one mapping, each named field
+  written into its position (`From<CompositionError> for Failed_Data`).
+  meta-signal-flow 80 to 83 add the context-warning policy, hook-event and
+  successor-recovery-text Configure families, now held and reported by Flow,
+  and `EndedTurnRetention`.
+- **Stored formats, upgraded on open in one ordered chain**, each family's step
+  reading only the format before it:
+  - launch outcomes: v9 (0.54.6) to v10 in the reap step, then v10 (0.54.7 to
+    0.56.x) to v11 in this release's step. v11 holds signal-flow 64's wider
+    rejection; v10 is frozen with the rejection layout of signal-flow 51 to 63.
+  - successor intents: v3 to v4, the cause gaining
+    `EmergencyRefreshWithoutHandover.{ FlowId Option<TranscriptPath> }`; every
+    v3 cause keeps its ordinary meaning.
+  - handover configuration: v1 to v2 (the 60 s publication deadline seeded),
+    then v2 to v3 (the approved recovery text seeded once; a configured text,
+    the empty one included, is kept across reopens and other setters).
+  - new families, registered empty when absent: the context-warning policy,
+    hook-event and progress families, and the ended-turn retention family
+    (absent row: 64).
+  An older daemon is refused at open by the new identities; rollback is the
+  restore of the store copy taken before the deploy.
+- **Not yet in this integration:** nothing in the running Nexus records an
+  `EmergencyRefreshWithoutHandover` cause; the emergency capture at rest is
+  the warning lane's runtime step, still to land. Recovery composition,
+  storage and its fixtures are in place for it.
 
 # Flow 0.56.2: Flow's external calls are typed Emissions generated from Ethos
 

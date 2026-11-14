@@ -1,5 +1,7 @@
 //! The launch-outcome family as 0.54.6 wrote it (v9), upgraded to v10 with
-//! the two obligation families in one atomic evolution.
+//! the two obligation families in one atomic evolution. v10 is the format
+//! of 0.54.7 to 0.56.x, frozen in `recovery_upgrade`, whose step takes it
+//! on to the current v11.
 //!
 //! v9 knew a refused reap only as `ReplaceRejected(ReapRefused(_))`, which
 //! held its confirmed successor out of routing. In v10 that launch reads
@@ -21,9 +23,12 @@
 
 use super::pending_handover::DescribesPendingHandoverTable;
 use super::pending_reap::DescribesPendingReapTable;
+use super::recovery_upgrade::{
+    DescribesLaunchOutcomeTables, LaunchOutcomeV10, ReplaceRejectionV10, StoredLaunchOutcomeV10,
+};
 use super::{
-    FLOW_LAUNCH_OUTCOME_TABLE_NAME, FlowLifecycle, FlowRecord, FlowStore, LaunchOutcome,
-    StoreError, StoredLaunchAttempt, StoredLaunchOutcome,
+    FLOW_LAUNCH_OUTCOME_TABLE_NAME, FlowLifecycle, FlowRecord, FlowStore, StoreError,
+    StoredLaunchAttempt,
 };
 use crate::generated::memory::{
     PendingHandover, PendingReap, Predecessor, ReapResponsibility, Replacement, Responsible,
@@ -40,7 +45,8 @@ pub(crate) const LAUNCH_OUTCOME_SCHEMA_V9: &str = "flow-nexus-launch-outcome-v9"
 
 /// `CompositionRefusal` as signal-flow 51.0.0 to 63.0.0 archived it: the
 /// thirteen variants before the two recovery refusals 64.0.0 appends, whose
-/// payload widens every rejection that holds one.
+/// payload widens every rejection that holds one. The v9 and v10 launch
+/// outcomes both hold it.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CompositionRefusalV9 {
     InvalidLaunchRequestId,
@@ -58,8 +64,9 @@ pub(crate) enum CompositionRefusalV9 {
     HandoverUnreadable(signal_flow::HandoverUnreadable_Data),
 }
 
-/// `StartRejection` as 0.54.6 stored it, holding the CompositionRefusal of
-/// its day: the v9 layout is kept whole, whatever signal-flow appends.
+/// `StartRejection` as 0.54.6 to 0.56.x stored it, holding the
+/// CompositionRefusal of its day: the v9 and v10 layout is kept whole,
+/// whatever signal-flow appends.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StartRejectionV9 {
     CompositionRefused(CompositionRefusalV9),
@@ -200,13 +207,14 @@ pub(crate) trait UpgradesReapMemory {
     fn upgrade_reap_memory(engine: &mut Engine) -> Result<(), StoreError>;
 }
 
-/// The v10 outcome a v9 one becomes, and the PendingReap it owes.
+/// The v10 outcome a v9 one becomes, and the PendingReap it owes. A
+/// rejection keeps its v9 layout, which v10 holds too.
 trait UpgradesLaunchOutcome {
     fn upgraded(
         self,
         replacement: Option<&Replacement>,
         attempt: Option<&StoredLaunchAttempt>,
-    ) -> Result<(LaunchOutcome, Option<PendingReap>), ReapUpgradeRefusal>;
+    ) -> Result<(LaunchOutcomeV10, Option<PendingReap>), ReapUpgradeRefusal>;
 }
 
 impl UpgradesLaunchOutcome for StoredLaunchOutcomeV9 {
@@ -214,34 +222,35 @@ impl UpgradesLaunchOutcome for StoredLaunchOutcomeV9 {
         self,
         replacement: Option<&Replacement>,
         attempt: Option<&StoredLaunchAttempt>,
-    ) -> Result<(LaunchOutcome, Option<PendingReap>), ReapUpgradeRefusal> {
-        use signal_flow::ReplaceRejection;
+    ) -> Result<(LaunchOutcomeV10, Option<PendingReap>), ReapUpgradeRefusal> {
         let id = self.launch_request_id.clone();
         let rejection = match self.launch_outcome {
-            LaunchOutcomeV9::Started(record) => return Ok((LaunchOutcome::Started(record), None)),
+            LaunchOutcomeV9::Started(record) => {
+                return Ok((LaunchOutcomeV10::Started(record), None));
+            }
             LaunchOutcomeV9::Replaced(record) => {
-                return Ok((LaunchOutcome::Replaced(record), None));
+                return Ok((LaunchOutcomeV10::Replaced(record), None));
             }
             LaunchOutcomeV9::StartRejected(rejection) => {
-                return Ok((LaunchOutcome::StartRejected(rejection.into()), None));
+                return Ok((LaunchOutcomeV10::StartRejected(rejection), None));
             }
             LaunchOutcomeV9::ReplaceRejected(rejection) => rejection,
         };
-        let refused = |rejection| Ok((LaunchOutcome::ReplaceRejected(rejection), None));
+        let refused = |rejection| Ok((LaunchOutcomeV10::ReplaceRejected(rejection), None));
         let stop = match rejection {
             ReplaceRejectionV9::PredecessorAbsent => {
-                return refused(ReplaceRejection::PredecessorAbsent);
+                return refused(ReplaceRejectionV10::PredecessorAbsent);
             }
             ReplaceRejectionV9::UnknownPredecessor => {
-                return refused(ReplaceRejection::UnknownPredecessor);
+                return refused(ReplaceRejectionV10::UnknownPredecessor);
             }
             ReplaceRejectionV9::PredecessorStopped => {
-                return refused(ReplaceRejection::PredecessorStopped);
+                return refused(ReplaceRejectionV10::PredecessorStopped);
             }
             ReplaceRejectionV9::LaunchRefused(start) => {
-                return refused(ReplaceRejection::LaunchRefused(start.into()));
+                return refused(ReplaceRejectionV10::LaunchRefused(start));
             }
-            ReplaceRejectionV9::Locked => return refused(ReplaceRejection::Locked),
+            ReplaceRejectionV9::Locked => return refused(ReplaceRejectionV10::Locked),
             ReplaceRejectionV9::ReapRefused(stop) => stop,
         };
         let attempt = attempt.ok_or_else(|| ReapUpgradeRefusal::AttemptMissing(id.clone()))?;
@@ -267,7 +276,7 @@ impl UpgradesLaunchOutcome for StoredLaunchOutcomeV9 {
             _ => ReapStanding::Owed,
         };
         Ok((
-            LaunchOutcome::ReapPending(replaced),
+            LaunchOutcomeV10::ReapPending(replaced),
             Some(PendingReap {
                 predecessor: Predecessor(replacement.predecessor.0.clone()),
                 launch_request_id: signal_flow::LaunchRequestId(id),
@@ -318,7 +327,7 @@ impl OwnsUpgradedReap for PendingReap {
 /// A v9 row upgraded alone, as the identity-only upgrade of an empty family
 /// would read one: every outcome but a refused reap maps to itself, and a
 /// refused reap, which owes a PendingReap no single row can write, refuses.
-impl sema_engine::UpgradeFrom<StoredLaunchOutcomeV9> for StoredLaunchOutcome {
+impl sema_engine::UpgradeFrom<StoredLaunchOutcomeV9> for StoredLaunchOutcomeV10 {
     type Refusal = ReapUpgradeRefusal;
 
     fn upgrade_from(before: StoredLaunchOutcomeV9) -> sema_engine::Decision<Self, Self::Refusal> {
@@ -336,23 +345,6 @@ impl sema_engine::UpgradeFrom<StoredLaunchOutcomeV9> for StoredLaunchOutcome {
     }
 }
 
-/// The descriptors the step reads and writes through.
-pub(crate) trait DescribesReapUpgrade {
-    /// The v10 launch-outcome family, evolving from v9.
-    fn launch_outcome_descriptor() -> sema_engine::TableDescriptor<StoredLaunchOutcome>;
-}
-
-impl DescribesReapUpgrade for FlowStore {
-    fn launch_outcome_descriptor() -> sema_engine::TableDescriptor<StoredLaunchOutcome> {
-        sema_engine::TableDescriptor::<StoredLaunchOutcome>::new(
-            FLOW_LAUNCH_OUTCOME_TABLE_NAME,
-            sema_engine::FamilyName::new("flow-nexus-launch-outcome"),
-            StoredLaunchOutcome::schema_hash(),
-        )
-        .with_predecessor::<StoredLaunchOutcomeV9>()
-    }
-}
-
 impl UpgradesReapMemory for FlowStore {
     fn upgrade_reap_memory(engine: &mut Engine) -> Result<(), StoreError> {
         let refused = |refusal: ReapUpgradeRefusal| StoreError::ReapUpgrade(format!("{refusal:?}"));
@@ -367,16 +359,16 @@ impl UpgradesReapMemory for FlowStore {
         if stored.identity().schema_hash() != StoredLaunchOutcomeV9::schema_hash() {
             return Ok(());
         }
-        let descriptor = Self::launch_outcome_descriptor();
+        let descriptor = Self::launch_outcome_v10_descriptor();
         let inventory = engine
-            .inspect_predecessor::<StoredLaunchOutcomeV9, StoredLaunchOutcome>(&descriptor)?;
+            .inspect_predecessor::<StoredLaunchOutcomeV9, StoredLaunchOutcomeV10>(&descriptor)?;
         // A v9 family with no row owes nothing: an evolution of no row is
         // an empty commit, so its identity alone is upgraded, and the two
         // obligation families are registered empty with the rest.
         if inventory.rows().is_empty() {
             use sema_engine::MemoryUpgrades as _;
             return match engine
-                .upgrade_table::<StoredLaunchOutcomeV9, StoredLaunchOutcome>(descriptor)
+                .upgrade_table::<StoredLaunchOutcomeV9, StoredLaunchOutcomeV10>(descriptor)
             {
                 sema_engine::UpgradeOutcome::Upgraded(_)
                 | sema_engine::UpgradeOutcome::AlreadyCurrent(_) => Ok(()),
@@ -447,7 +439,7 @@ impl UpgradesReapMemory for FlowStore {
             // this same evolution (the invariant of `reaps_reassigned`).
             let reap = reap.map(|reap| {
                 let successor = match &outcome {
-                    LaunchOutcome::ReapPending(replaced) => {
+                    LaunchOutcomeV10::ReapPending(replaced) => {
                         Some(replaced.launched_record.flow_id.clone())
                     }
                     _ => None,
@@ -459,7 +451,7 @@ impl UpgradesReapMemory for FlowStore {
                     .map(|stored| stored.metaflow.state.clone());
                 reap.owned_as_stands(successor.as_ref(), state.as_ref())
             });
-            outcomes.push(StoredLaunchOutcome {
+            outcomes.push(StoredLaunchOutcomeV10 {
                 launch_request_id: signal_flow::LaunchRequestId(id),
                 launch_outcome: outcome,
             });

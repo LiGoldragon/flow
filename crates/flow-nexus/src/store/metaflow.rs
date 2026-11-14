@@ -787,8 +787,12 @@ impl ComputesSuccession for FlowStore {
         };
         let found = holds
             .iter()
-            .find(|hold| hold.flow_id == awake.0)
-            .map(|hold| hold.found.as_ref().map(|found| found.state.clone()));
+            .find(|hold| hold.flow_id.0 == awake.0)
+            .map(|hold| {
+                hold.metaflow_option
+                    .as_ref()
+                    .map(|found| found.state.clone())
+            });
         match found {
             // Between acknowledgement and confirmation the Address receives
             // as the flow the hold found it Awake as, if any.
@@ -839,7 +843,7 @@ impl ComputesSuccession for FlowStore {
         }
         // A hold is read first: its flow's launch is not confirmed.
         for hold in holds {
-            successions.insert(hold.flow_id.clone(), Succession::Unconfirmed);
+            successions.insert(hold.flow_id.clone().0, Succession::Unconfirmed);
         }
         SuccessionIndex { successions }
     }

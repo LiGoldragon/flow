@@ -1724,8 +1724,8 @@ impl SleepsAndWakesSeats for RunningNexus {
             for intent in self.store.successor_intents().unwrap_or_default() {
                 match self.store.metaflow(&intent.address) {
                     Ok(Some(metaflow)) => match metaflow.state {
-                        flow_ethos::State::Awake(current) if current.0 == intent.predecessor => {
-                            match intent.cause {
+                        flow_ethos::State::Awake(current) if current.0 == intent.predecessor.0 => {
+                            match intent.succession_cause {
                                 SuccessionCause::Refresh | SuccessionCause::Exit => {
                                     refreshes.push(current);
                                 }
@@ -1753,7 +1753,7 @@ impl SleepsAndWakesSeats for RunningNexus {
             self.settle_stopped(&flow_id.0);
         }
         for intent in owed {
-            let predecessor = intent.predecessor.clone();
+            let predecessor = intent.predecessor.0.clone();
             match self.take_up_owed(intent) {
                 AtStop::Refreshed(address) => {
                     eprintln!(
@@ -2128,8 +2128,8 @@ impl WaitsForRestToReplace for RunningNexus {
     fn queue_refresh(&self, address: &Address, flow_id: &str) -> Output {
         use signal_flow::{RefreshQueued, RefreshRejection, Refusal};
         match self.store.ordered_replacement(address) {
-            Ok(Some(order)) if order.predecessor == flow_id => {
-                return match order.order {
+            Ok(Some(order)) if order.predecessor.0 == flow_id => {
+                return match order.replacement_order {
                     ReplacementOrder::Refresh => Output::RefreshQueued(RefreshQueued {
                         address: address.clone(),
                         flow_id: signal_flow::FlowId(flow_id.to_owned()),
@@ -2144,8 +2144,8 @@ impl WaitsForRestToReplace for RunningNexus {
         }
         if let Err(error) = self.store.order_replacement(OrderedReplacement {
             address: address.clone(),
-            predecessor: flow_id.to_owned(),
-            order: ReplacementOrder::Refresh,
+            predecessor: crate::generated::memory::Predecessor(flow_id.to_owned()),
+            replacement_order: ReplacementOrder::Refresh,
         }) {
             return Output::Refused(Refusal::Store(error.to_string()));
         }
@@ -2176,7 +2176,7 @@ impl WaitsForRestToReplace for RunningNexus {
             Ok(None) | Err(_) => return persistence(),
         }
         match self.store.ordered_replacement(&address) {
-            Ok(Some(order)) if order.predecessor == predecessor.0 => {
+            Ok(Some(order)) if order.predecessor.0 == predecessor.0 => {
                 return match order.ordered_launch() {
                     Some(launch) if launch.launch_profile == profile && launch.origin == origin => {
                         Output::LaunchPending(launch.waiting_attempt())
@@ -2198,14 +2198,14 @@ impl WaitsForRestToReplace for RunningNexus {
         let launch = OrderedLaunch {
             launch_profile: profile,
             origin,
-            prompt_sha256: prompt_sha256.0,
+            prompt_sha256: crate::generated::memory::PromptSha256(prompt_sha256.0),
         };
         if self
             .store
             .order_replacement(OrderedReplacement {
                 address,
-                predecessor: predecessor.clone().0,
-                order: ReplacementOrder::Launch(Box::new(launch.clone())),
+                predecessor: crate::generated::memory::Predecessor(predecessor.clone().0),
+                replacement_order: ReplacementOrder::Launch(Box::new(launch.clone())),
             })
             .is_err()
         {
@@ -2232,9 +2232,9 @@ impl WaitsForRestToReplace for RunningNexus {
                 .store
                 .owe_successor(SuccessorIntent {
                     address: address.clone(),
-                    predecessor: predecessor.0,
-                    cause: SuccessionCause::Replace,
-                    launch_request_id: profile.launch_request_id.clone().0,
+                    predecessor: crate::generated::memory::Predecessor(predecessor.0),
+                    succession_cause: SuccessionCause::Replace,
+                    launch_request_id: profile.launch_request_id.clone(),
                 })
                 .is_err()
         {
@@ -2267,9 +2267,9 @@ impl WaitsForRestToReplace for RunningNexus {
         };
         eprintln!(
             "flow-nexus: flow {} rests; the replacement ordered for it runs",
-            order.predecessor
+            order.predecessor.0
         );
-        let response = match order.order {
+        let response = match order.replacement_order {
             // A restart takes the gate for its own steps and holds the
             // Address by its record: the waking lease is given back first.
             ReplacementOrder::Restart => {
@@ -2278,7 +2278,7 @@ impl WaitsForRestToReplace for RunningNexus {
                 let _ = self.store.forget_ordered_replacement(&address);
                 let response = crate::restarting::RestartsFlows::restart_at_idle_event(
                     self,
-                    &order.predecessor,
+                    &order.predecessor.0,
                 );
                 return match response {
                     Output::Restarted(_) => AtStop::Restarted(address),
@@ -2288,7 +2288,7 @@ impl WaitsForRestToReplace for RunningNexus {
             ReplacementOrder::Refresh => self.refresh_held(
                 &address,
                 metaflow,
-                signal_flow::FlowId(order.predecessor),
+                signal_flow::FlowId(order.predecessor.0),
                 node,
                 turn,
                 lock,
@@ -2345,7 +2345,7 @@ impl WaitsForRestToReplace for RunningNexus {
             None => {
                 eprintln!(
                     "flow-nexus: flow {} ended before it rested; its refresh is spent",
-                    order.predecessor
+                    order.predecessor.0
                 );
                 let _ = self.store.forget_ordered_replacement(address);
                 false
@@ -2374,7 +2374,7 @@ impl WaitsForRestToReplace for RunningNexus {
         self.wake_deferred();
         eprintln!(
             "flow-nexus: flow {} ended before it rested; the Launch ordered for it starts: {response:?}",
-            order.predecessor
+            order.predecessor.0
         );
         self.wake_due(order.address);
     }
@@ -2390,7 +2390,7 @@ impl WaitsForRestToReplace for RunningNexus {
             for order in self.store.ordered_replacements().unwrap_or_default() {
                 match self.store.metaflow(&order.address) {
                     Ok(Some(metaflow)) => match metaflow.state {
-                        flow_ethos::State::Awake(current) if current.0 == order.predecessor => {
+                        flow_ethos::State::Awake(current) if current.0 == order.predecessor.0 => {
                             resting.push(current);
                         }
                         flow_ethos::State::Asleep => orphans.push(order.address),
@@ -3549,20 +3549,20 @@ impl WakesInParts for RunningNexus {
         // refused is not resumed, and a new one is owed in its place.
         let launch_request_id = match self.store.successor_intent(&address) {
             Ok(Some(intent))
-                if intent.predecessor == flow_id
+                if intent.predecessor.0 == flow_id
                     && matches!(
-                        intent.cause,
+                        intent.succession_cause,
                         SuccessionCause::Refresh | SuccessionCause::Ordered
                     )
-                    && !intent.launch_request_id.is_empty()
-                    && !self.launch_refused(&intent.launch_request_id) =>
+                    && !intent.launch_request_id.0.is_empty()
+                    && !self.launch_refused(&intent.launch_request_id.0) =>
             {
                 // The successor is owed now for this refresh's cause.
-                if intent.cause != cause
+                if intent.succession_cause != cause
                     && self
                         .store
                         .owe_successor(SuccessorIntent {
-                            cause,
+                            succession_cause: cause,
                             ..intent.clone()
                         })
                         .is_err()
@@ -3574,9 +3574,11 @@ impl WakesInParts for RunningNexus {
             Ok(_) => {
                 let intent = SuccessorIntent {
                     address: address.clone(),
-                    predecessor: flow_id.to_owned(),
-                    cause,
-                    launch_request_id: crate::sending::MintsId::minted_id("refresh"),
+                    predecessor: crate::generated::memory::Predecessor(flow_id.to_owned()),
+                    succession_cause: cause,
+                    launch_request_id: signal_flow::LaunchRequestId(
+                        crate::sending::MintsId::minted_id("refresh"),
+                    ),
                 };
                 if self.store.owe_successor(intent.clone()).is_err() {
                     return AtStop::Kept(KeptAtStop::StoreUnreadable);
@@ -3585,7 +3587,7 @@ impl WakesInParts for RunningNexus {
             }
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
-        profile.launch_request_id = signal_flow::LaunchRequestId(launch_request_id);
+        profile.launch_request_id = signal_flow::LaunchRequestId(launch_request_id.0);
         let response = {
             let _turn = self
                 .dispatch_gate
@@ -3745,16 +3747,18 @@ impl WakesInParts for RunningNexus {
         let metaflow = match self.store.metaflow(&address) {
             Ok(Some(metaflow))
                 if metaflow.state
-                    == flow_ethos::State::Awake(flow_ethos::FlowId(intent.predecessor.clone())) =>
+                    == flow_ethos::State::Awake(flow_ethos::FlowId(
+                        intent.predecessor.clone().0,
+                    )) =>
             {
                 metaflow
             }
             Ok(_) => return AtStop::Kept(KeptAtStop::NotAwake),
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
-        let taken = match intent.cause {
+        let taken = match intent.succession_cause {
             SuccessionCause::Replace => {
-                let attempt = match self.store.launch_attempt(&intent.launch_request_id) {
+                let attempt = match self.store.launch_attempt(&intent.launch_request_id.0) {
                     Ok(Some(attempt)) => attempt,
                     // A Replace whose launch was never recorded started
                     // nothing: its predecessor was never touched.
@@ -3765,13 +3769,13 @@ impl WakesInParts for RunningNexus {
                     Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
                 };
                 let mut profile = attempt.launch_profile;
-                if self.launch_refused(&intent.launch_request_id) {
+                if self.launch_refused(&intent.launch_request_id.0) {
                     profile.launch_request_id =
                         signal_flow::LaunchRequestId(crate::sending::MintsId::minted_id("replace"));
                     if self
                         .store
                         .owe_successor(SuccessorIntent {
-                            launch_request_id: profile.launch_request_id.clone().0,
+                            launch_request_id: profile.launch_request_id.clone(),
                             ..intent
                         })
                         .is_err()
@@ -3793,7 +3797,7 @@ impl WakesInParts for RunningNexus {
                     response => AtStop::Kept(KeptAtStop::RefreshLaunchRefused(Box::new(response))),
                 }
             }
-            cause => self.refresh_successor_first(&intent.predecessor, &metaflow, cause),
+            cause => self.refresh_successor_first(&intent.predecessor.0, &metaflow, cause),
         };
         drop(lock);
         self.wake_deferred();
@@ -3908,12 +3912,12 @@ impl WakesInParts for RunningNexus {
         // a Restart ordered is carried out at this idle event, its
         // background work ended, as a refresh past the threshold is.
         let ordered = match self.store.ordered_replacement(&address) {
-            Ok(order) => order.filter(|order| order.predecessor == flow_id),
+            Ok(order) => order.filter(|order| order.predecessor.0 == flow_id),
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
         let ordered_now = ordered.as_ref().is_some_and(|order| {
             matches!(
-                order.order,
+                order.replacement_order,
                 ReplacementOrder::Refresh | ReplacementOrder::Restart
             )
         });

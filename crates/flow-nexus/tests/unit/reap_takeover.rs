@@ -161,9 +161,9 @@ impl TakesReapsOver for ReapWorld {
             .handover_memory(&self.address())
             .unwrap()
             .map(|row| {
-                row.closed
+                row.closed_handover_vector
                     .into_iter()
-                    .map(|closed| (closed.predecessor, closed.successor))
+                    .map(|closed| (closed.predecessor.0, closed.successor.0.0))
                     .collect()
             })
             .unwrap_or_default()
@@ -2210,11 +2210,11 @@ fn an_ordered_launch_after_an_end_takes_the_address_held_reap_over() {
         .store
         .order_replacement(OrderedReplacement {
             address: at.clone(),
-            predecessor: "abc123".into(),
-            order: ReplacementOrder::Launch(Box::new(OrderedLaunch {
+            predecessor: crate::generated::memory::Predecessor("abc123".into()),
+            replacement_order: ReplacementOrder::Launch(Box::new(OrderedLaunch {
                 launch_profile: profile,
                 origin: signal_flow::Origin::Unbound,
-                prompt_sha256: String::new(),
+                prompt_sha256: crate::generated::memory::PromptSha256(String::new()),
             })),
         })
         .unwrap();
@@ -2255,12 +2255,12 @@ fn an_ordered_launch_after_an_end_takes_the_address_held_reap_over() {
     let generations = store
         .handover_memory(&at)
         .unwrap()
-        .map(|row| row.closed)
+        .map(|row| row.closed_handover_vector)
         .unwrap_or_default();
     assert!(
         !generations
             .iter()
-            .any(|closed| closed.predecessor == held && closed.successor == "abc123"),
+            .any(|closed| closed.predecessor.0 == held && closed.successor.0.0 == "abc123"),
         "{generations:?}"
     );
 }

@@ -6,7 +6,7 @@
 
 use super::AnnouncesLaunchChanges;
 use super::{FlowStore, ReadsFlowMemory, StoreError};
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+pub(crate) use crate::generated::memory::HandoverReminder;
 use sema_engine::{
     Assertion, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, RecordKey, SchemaHash,
     TableDescriptor, TableName,
@@ -18,29 +18,12 @@ pub(super) const HANDOVER_REMINDER_TABLE_NAME: TableName =
 pub(super) const HANDOVER_REMINDER_FAMILY: &str = "flow-nexus-handover-reminder";
 pub(super) const HANDOVER_REMINDER_SCHEMA: &str = "flow-nexus-handover-reminder-v1";
 
-/// The durable reminder clock for one handover generation.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct HandoverReminder {
-    pub address: Address,
-    /// The generation of the current handover. Successors use a new row.
-    pub generation: i64,
-    pub model_name: String,
-    /// Unix seconds at which the warning window opened.
-    pub opened_at: i64,
-    /// The first reminder is due at `opened_at` (inclusive).
-    pub next_due: i64,
-    /// Number of successfully admitted reminders.
-    pub sent: i64,
-    pub every_minutes: i64,
-    pub reminder_text: String,
-}
-
 impl EngineRecord for HandoverReminder {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(format!(
             "{}:{}",
             FlowStore::address_record_key(&self.address),
-            self.generation
+            self.handover_generation.0
         ))
     }
 }
@@ -111,7 +94,7 @@ impl SchedulesHandoverReminders for FlowStore {
             .match_records(sema_engine::QueryPlan::all(self.handover_reminders))?
             .records()
             .iter()
-            .filter(|row| row.next_due <= now)
+            .filter(|row| row.next_due.0 <= now)
             .cloned()
             .collect())
     }
@@ -121,7 +104,7 @@ impl SchedulesHandoverReminders for FlowStore {
             .match_records(sema_engine::QueryPlan::all(self.handover_reminders))?
             .records()
             .iter()
-            .map(|row| row.next_due)
+            .map(|row| row.next_due.0)
             .filter(|due| *due > now)
             .min())
     }
@@ -168,12 +151,12 @@ impl SchedulesHandoverReminders for FlowStore {
         let Some(live) = self.handover_memory(address)? else {
             return Ok(false);
         };
-        if live.current_flow_id.as_deref() != Some(flow_id) {
+        if live.flow_id_option.as_ref().map(|value| value.0.as_str()) != Some(flow_id) {
             return Ok(false);
         }
         Ok(self
-            .handover_reminder(address, live.generation)?
-            .is_some_and(|reminder| reminder.sent > 0))
+            .handover_reminder(address, live.handover_generation.0)?
+            .is_some_and(|reminder| reminder.sent.0 > 0))
     }
 }
 
@@ -196,9 +179,11 @@ impl HandoverReminderRules for HandoverReminder {
     fn next_due(&self) -> Result<i64, StoreError> {
         let seconds = self
             .every_minutes
+            .0
             .checked_mul(60)
             .ok_or(StoreError::StateInvariant)?;
         self.next_due
+            .0
             .checked_add(seconds)
             .ok_or(StoreError::StateInvariant)
     }
@@ -230,13 +215,13 @@ impl OpensHandoverReminder for HandoverReminder {
         }
         Ok(Self {
             address,
-            generation,
-            model_name,
-            opened_at,
-            next_due: opened_at,
-            sent: 0,
-            every_minutes,
-            reminder_text,
+            handover_generation: signal_flow::HandoverGeneration(generation),
+            model_name: flow_ethos::ModelName(model_name),
+            opened_at: crate::generated::memory::OpenedAt(opened_at),
+            next_due: crate::generated::memory::NextDue(opened_at),
+            sent: crate::generated::memory::Sent(0),
+            every_minutes: meta_signal_flow::EveryMinutes(every_minutes),
+            reminder_text: meta_signal_flow::ReminderText(reminder_text),
         })
     }
 }

@@ -409,9 +409,9 @@ impl WatchesCompactions for RunningNexus {
         }
         .text();
         let compaction = Compaction {
-            flow_id: flow_id.to_owned(),
-            boundary: boundary.to_owned(),
-            address: address.clone(),
+            flow_id: flow_ethos::FlowId(flow_id.to_owned()),
+            boundary: crate::generated::memory::Boundary(boundary.to_owned()),
+            address_option: address.clone(),
             investigation: Investigation::NotConfigured,
         };
         match self.store.record_compaction(compaction.clone()) {

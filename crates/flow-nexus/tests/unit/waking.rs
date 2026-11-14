@@ -5913,8 +5913,14 @@ fn an_interrupted_launch_pane_running_a_replacement_session_is_never_closed() {
             .is_some(),
         "the launch is settled whatever its cleanup came to"
     );
-    assert_eq!(cleanup(&fixture).thread_step, CleanupStep::Done);
-    assert_eq!(cleanup(&fixture).pane_step, CleanupStep::Pending);
+    assert_eq!(
+        cleanup(&fixture).thread_step,
+        crate::generated::memory::ThreadStep(CleanupStep::Done)
+    );
+    assert_eq!(
+        cleanup(&fixture).pane_step,
+        crate::generated::memory::PaneStep(CleanupStep::Pending)
+    );
     assert!(
         fixture
             .nexus
@@ -5937,7 +5943,10 @@ fn an_interrupted_launch_pane_running_a_replacement_session_is_never_closed() {
     let calls = fs::read_to_string(herdr.join("calls")).unwrap_or_default();
     assert!(calls.contains("pane process-info"), "{calls}");
     assert!(!calls.contains("pane close"), "{calls}");
-    assert_eq!(cleanup(&fixture).pane_step, CleanupStep::Pending);
+    assert_eq!(
+        cleanup(&fixture).pane_step,
+        crate::generated::memory::PaneStep(CleanupStep::Pending)
+    );
     drop(other);
 
     // The pane's foreground process resumes the launch's own thread.
@@ -5998,8 +6007,16 @@ fn an_interrupted_launch_whose_cleanup_fails_is_settled_and_its_cleanup_resumed(
         .launch_cleanup(&launch.0)
         .unwrap()
         .unwrap();
-    assert_eq!(cleanup.thread_step, CleanupStep::Pending, "archive refused");
-    assert_eq!(cleanup.pane_step, CleanupStep::Pending, "Herdr unreadable");
+    assert_eq!(
+        cleanup.thread_step,
+        crate::generated::memory::ThreadStep(CleanupStep::Pending),
+        "archive refused"
+    );
+    assert_eq!(
+        cleanup.pane_step,
+        crate::generated::memory::PaneStep(CleanupStep::Pending),
+        "Herdr unreadable"
+    );
     assert!(!cleanup.is_complete());
     assert!(
         fixture
@@ -6338,8 +6355,8 @@ fn a_maintained_metaflow_ended_by_an_exit_is_owed_a_successor() {
         assert_eq!(asleep.state, State::Asleep);
         if maintained {
             let intent = intent.expect("a successor is owed");
-            assert_eq!(intent.predecessor, CLAUDE_SEAT);
-            assert_eq!(intent.cause, SuccessionCause::Exit);
+            assert_eq!(intent.predecessor.0, CLAUDE_SEAT);
+            assert_eq!(intent.succession_cause, SuccessionCause::Exit);
             assert!(
                 fixture.nexus.wake_is_due(&asleep),
                 "due with nothing queued"
@@ -6448,9 +6465,9 @@ fn a_nexus_start_forgets_a_successor_already_given_and_wakes_one_owed() {
         .store
         .owe_successor(SuccessorIntent {
             address: address(Model::Sol),
-            predecessor: "abc123".into(),
-            cause: SuccessionCause::Exit,
-            launch_request_id: String::new(),
+            predecessor: crate::generated::memory::Predecessor("abc123".into()),
+            succession_cause: SuccessionCause::Exit,
+            launch_request_id: signal_flow::LaunchRequestId(String::new()),
         })
         .unwrap();
     fixture.nexus.store.seed_metaflow(metaflow(
@@ -6464,9 +6481,9 @@ fn a_nexus_start_forgets_a_successor_already_given_and_wakes_one_owed() {
         .store
         .owe_successor(SuccessorIntent {
             address: address(Model::Astra),
-            predecessor: "def456".into(),
-            cause: SuccessionCause::Exit,
-            launch_request_id: String::new(),
+            predecessor: crate::generated::memory::Predecessor("def456".into()),
+            succession_cause: SuccessionCause::Exit,
+            launch_request_id: signal_flow::LaunchRequestId(String::new()),
         })
         .unwrap();
 
@@ -6584,7 +6601,7 @@ fn a_reported_session_end_exits_the_flow_and_owes_a_maintained_successor() {
             assert_eq!(node.flow_lifecycle, FlowLifecycle::Exited);
             assert_eq!(stored(&fixture, Model::Sol).state, State::Asleep);
             assert_eq!(
-                intent.expect("a successor is owed").predecessor,
+                intent.expect("a successor is owed").predecessor.0,
                 CLAUDE_SEAT
             );
         } else {
@@ -6613,9 +6630,9 @@ fn start_sequence_takes_up_an_owed_successor() {
         .store
         .owe_successor(SuccessorIntent {
             address: address(Model::Sol),
-            predecessor: "abc123".into(),
-            cause: SuccessionCause::Exit,
-            launch_request_id: String::new(),
+            predecessor: crate::generated::memory::Predecessor("abc123".into()),
+            succession_cause: SuccessionCause::Exit,
+            launch_request_id: signal_flow::LaunchRequestId(String::new()),
         })
         .unwrap();
     let world = fixture.fresh_claude_world();
@@ -6649,9 +6666,9 @@ fn recover_wakes_takes_up_an_owed_successor() {
         .store
         .owe_successor(SuccessorIntent {
             address: address(Model::Sol),
-            predecessor: "abc123".into(),
-            cause: SuccessionCause::Exit,
-            launch_request_id: String::new(),
+            predecessor: crate::generated::memory::Predecessor("abc123".into()),
+            succession_cause: SuccessionCause::Exit,
+            launch_request_id: signal_flow::LaunchRequestId(String::new()),
         })
         .unwrap();
     let world = fixture.fresh_claude_world();
@@ -7216,7 +7233,7 @@ fn a_warned_codex_seat_is_refreshed_at_the_rest_after_its_warning() {
         .handover_reminder(&address(Model::Sol), 0)
         .unwrap()
         .expect("the warning opened");
-    assert_eq!(reminder.sent, 1);
+    assert_eq!(reminder.sent, crate::generated::memory::Sent(1));
     let typed = fixture.typed().expect("the warning reached the pane");
     assert!(typed.contains(WORDS), "{typed}");
     assert!(typed.contains("flows/908786/handover.md"), "{typed}");

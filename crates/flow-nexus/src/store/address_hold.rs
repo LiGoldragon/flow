@@ -19,7 +19,7 @@ use super::metaflow::{AddressTaking, SleepsMetaflows, TakesLaunchAddress, Writes
 use super::{
     FlowStore, ManagesMetaflowState, MetaflowState, ReadsFlowMemory, StoreError, StoredMetaflow,
 };
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+pub(crate) use crate::generated::memory::AddressHold;
 use sema_engine::{
     AtomicCommit, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan, RecordKey,
     SchemaHash, TableDescriptor, TableName,
@@ -30,17 +30,9 @@ pub(super) const ADDRESS_HOLD_TABLE_NAME: TableName = TableName::new("flow_nexus
 pub(super) const ADDRESS_HOLD_FAMILY: &str = "flow-nexus-address-hold";
 pub(super) const ADDRESS_HOLD_SCHEMA: &str = "flow-nexus-address-hold-v8";
 
-/// The Address a launched flow holds, and the metaflow it found there.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AddressHold {
-    pub flow_id: String,
-    pub address: Address,
-    pub found: Option<Metaflow>,
-}
-
 impl EngineRecord for AddressHold {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.flow_id.clone())
+        RecordKey::new(self.flow_id.0.clone())
     }
 }
 
@@ -143,9 +135,9 @@ impl HoldsLaunchAddress for FlowStore {
             .stored_metaflow(&profile.address)?
             .map(|stored| stored.metaflow);
         let hold = AddressHold {
-            flow_id: flow_id.to_owned(),
+            flow_id: flow_ethos::FlowId(flow_id.to_owned()),
             address: profile.address.clone(),
-            found,
+            metaflow_option: found,
         };
         Ok(Ok(taken
             .written(self, commit)
@@ -177,7 +169,7 @@ impl HoldsLaunchAddress for FlowStore {
             return Ok(commit);
         }
         let queue = current.metaflow.queue;
-        Ok(match hold.found {
+        Ok(match hold.metaflow_option {
             Some(found) => commit.mutate(
                 self.metaflows,
                 StoredMetaflow {
@@ -268,12 +260,12 @@ impl HoldsLaunchAddress for FlowStore {
             .to_vec();
         let mut given = Vec::new();
         for hold in holds {
-            if &hold.address != address || self.flow_is_live(&hold.flow_id)? {
+            if &hold.address != address || self.flow_is_live(&hold.flow_id.0)? {
                 continue;
             }
-            let commit = self.given_back(&hold.flow_id, self.engine.begin_atomic_commit())?;
+            let commit = self.given_back(&hold.flow_id.0, self.engine.begin_atomic_commit())?;
             self.engine.commit_atomic(commit)?;
-            given.push(hold.flow_id);
+            given.push(hold.flow_id.0);
         }
         Ok(given)
     }
@@ -306,9 +298,9 @@ impl LeavesStaleHold for FlowStore {
             .assert(
                 self.address_holds,
                 AddressHold {
-                    flow_id: flow_id.to_owned(),
+                    flow_id: flow_ethos::FlowId(flow_id.to_owned()),
                     address: address.clone(),
-                    found: None,
+                    metaflow_option: None,
                 },
             );
         self.engine

@@ -73,9 +73,12 @@ fn a_tasks_last_reminder_sends_its_failure_to_the_tasks_own_sender() {
         .unwrap()
         .expect("the task holds its reminder");
     assert_eq!(reminder.address, sender, "the sender Flow recorded");
-    assert_eq!(reminder.recipient, recipient);
-    reminder.sent = TASK_REMINDERS - 1;
-    reminder.due = Some(0);
+    assert_eq!(
+        reminder.recipient,
+        crate::generated::memory::Recipient(recipient.clone())
+    );
+    reminder.sent = crate::generated::memory::Sent(TASK_REMINDERS - 1);
+    reminder.due_option = Some(crate::generated::memory::Due(0));
     fixture.nexus.store.hold_reminder(reminder).unwrap();
 
     fixture.nexus.send_due_reminders();
@@ -106,7 +109,7 @@ fn a_tasks_last_reminder_sends_its_failure_to_the_tasks_own_sender() {
         .reminder(&key.0)
         .unwrap()
         .expect("the task stays open");
-    assert_eq!((spent.sent, spent.due), (TASK_REMINDERS, None));
+    assert_eq!((spent.sent.0, spent.due_option), (TASK_REMINDERS, None));
     for entry in &told.0 {
         assert_eq!(
             fixture
@@ -255,8 +258,8 @@ fn a_task_a_seat_sent_itself_fails_to_it_once_with_no_loop() {
     };
     let key = acceptance.logical_delivery_id;
     let mut reminder = fixture.nexus.store.reminder(&key.0).unwrap().unwrap();
-    reminder.sent = TASK_REMINDERS - 1;
-    reminder.due = Some(0);
+    reminder.sent = crate::generated::memory::Sent(TASK_REMINDERS - 1);
+    reminder.due_option = Some(crate::generated::memory::Due(0));
     fixture.nexus.store.hold_reminder(reminder).unwrap();
 
     fixture.nexus.send_due_reminders();
@@ -280,7 +283,7 @@ fn a_task_a_seat_sent_itself_fails_to_it_once_with_no_loop() {
             .store
             .reminder(&key.0)
             .unwrap()
-            .map(|spent| spent.due),
+            .map(|spent| spent.due_option),
         Some(None),
         "the reminder is spent"
     );

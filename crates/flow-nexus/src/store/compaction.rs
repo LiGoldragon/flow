@@ -6,44 +6,19 @@
 //! restart, warns once.
 
 use super::{FlowStore, StoreError};
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+pub(crate) use crate::generated::memory::{Compaction, Investigation};
 use sema_engine::{
     Assertion, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryVersion, QueryPlan,
     RecordKey, SchemaHash, TableDescriptor, TableName,
 };
-use signal_flow::Address;
 
 pub(super) const COMPACTION_TABLE_NAME: TableName = TableName::new("flow_nexus_compactions");
 pub(super) const COMPACTION_FAMILY: &str = "flow-nexus-compaction";
 pub(super) const COMPACTION_SCHEMA: &str = "flow-nexus-compaction-v2";
 
-/// What Flow did with the warning a compaction raised.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub enum Investigation {
-    /// The Investigation seat was started fresh with it as its brief.
-    Started(String),
-    /// The Investigation seat was Awake; the investigation was queued for it.
-    Queued,
-    /// No Investigation seat is configured: the warning was logged only.
-    NotConfigured,
-    /// The investigation could not be started or queued; why.
-    Refused(String),
-}
-
-/// One compaction a flow's harness made while the flow kept working.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Compaction {
-    pub flow_id: String,
-    /// The harness's own id for the compaction: a Claude `compact_boundary`
-    /// row's uuid, a Codex `contextCompaction` item's id.
-    pub boundary: String,
-    pub address: Option<Address>,
-    pub investigation: Investigation,
-}
-
 impl EngineRecord for Compaction {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(Compaction::key(&self.flow_id, &self.boundary))
+        RecordKey::new(Compaction::key(&self.flow_id.0, &self.boundary.0))
     }
 }
 
@@ -106,7 +81,7 @@ impl RecordsCompactions for FlowStore {
     }
 
     fn record_compaction(&self, compaction: Compaction) -> Result<bool, StoreError> {
-        if self.compaction_recorded(&compaction.flow_id, &compaction.boundary)? {
+        if self.compaction_recorded(&compaction.flow_id.0, &compaction.boundary.0)? {
             return Ok(false);
         }
         self.engine
@@ -115,7 +90,10 @@ impl RecordsCompactions for FlowStore {
     }
 
     fn settle_compaction(&self, compaction: Compaction) -> Result<(), StoreError> {
-        let key = RecordKey::new(Compaction::key(&compaction.flow_id, &compaction.boundary));
+        let key = RecordKey::new(Compaction::key(
+            &compaction.flow_id.0,
+            &compaction.boundary.0,
+        ));
         self.engine
             .mutate_keyed(KeyedMutation::new(self.compactions, key, compaction))?;
         Ok(())
@@ -127,7 +105,7 @@ impl RecordsCompactions for FlowStore {
             .match_records(QueryPlan::all(self.compactions))?
             .records()
             .iter()
-            .filter(|compaction| compaction.flow_id == flow_id)
+            .filter(|compaction| compaction.flow_id.0 == flow_id)
             .cloned()
             .collect())
     }
@@ -143,9 +121,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("flow.sema");
         let compaction = Compaction {
-            flow_id: "5a4d0b".into(),
-            boundary: "b1".into(),
-            address: None,
+            flow_id: flow_ethos::FlowId("5a4d0b".into()),
+            boundary: crate::generated::memory::Boundary("b1".into()),
+            address_option: None,
             investigation: Investigation::NotConfigured,
         };
         {

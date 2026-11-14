@@ -9,49 +9,17 @@
 //! sent to it until it rests.
 
 use super::{AnnouncesLaunchChanges, FlowStore, ReadsFlowMemory, StoreError};
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+pub(crate) use crate::generated::memory::{OrderedLaunch, OrderedReplacement, ReplacementOrder};
 use sema_engine::{
     AtomicCommit, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan, RecordKey,
     SchemaHash, TableDescriptor, TableName,
 };
-use signal_flow::{Address, LaunchAttempt, LaunchAttemptPhase, LaunchProfile, Origin};
+use signal_flow::{Address, LaunchAttempt, LaunchAttemptPhase};
 
 pub(super) const ORDERED_REPLACEMENT_TABLE_NAME: TableName =
     TableName::new("flow_nexus_ordered_replacements");
 pub(super) const ORDERED_REPLACEMENT_FAMILY: &str = "flow-nexus-ordered-replacement";
 pub(super) const ORDERED_REPLACEMENT_SCHEMA: &str = "flow-nexus-ordered-replacement-v1";
-
-/// A Launch, or a Replace, that names a working flow: its profile names
-/// that flow as its predecessor.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct OrderedLaunch {
-    pub launch_profile: LaunchProfile,
-    pub origin: Origin,
-    /// The first prompt's digest as the profile composed when ordered.
-    pub prompt_sha256: String,
-}
-
-/// What is to replace the flow once it rests.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub enum ReplacementOrder {
-    /// A Refresh.Address: the flow ends without a turn, and its successor is
-    /// what any refresh starts.
-    Refresh,
-    /// A Launch or a Replace: its own profile is the successor.
-    Launch(Box<OrderedLaunch>),
-    /// A Restart: the flow's harness is closed and its own session resumed,
-    /// its background work ended.
-    Restart,
-}
-
-/// A replacement of `predecessor`, the flow the metaflow at `address` is
-/// Awake as, waiting for that flow to rest.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct OrderedReplacement {
-    pub address: Address,
-    pub predecessor: String,
-    pub order: ReplacementOrder,
-}
 
 impl EngineRecord for OrderedReplacement {
     fn record_key(&self) -> RecordKey {
@@ -90,7 +58,7 @@ pub(crate) trait NamesOrderedLaunch {
 
 impl NamesOrderedLaunch for OrderedReplacement {
     fn ordered_launch(&self) -> Option<&OrderedLaunch> {
-        match &self.order {
+        match &self.replacement_order {
             ReplacementOrder::Launch(launch) => Some(&**launch),
             ReplacementOrder::Refresh | ReplacementOrder::Restart => None,
         }
@@ -109,7 +77,7 @@ impl ShowsWaitingAttempt for OrderedLaunch {
         LaunchAttempt {
             launch_request_id: self.launch_profile.launch_request_id.clone(),
             launch_profile: self.launch_profile.clone(),
-            prompt_sha256: signal_flow::PromptSha256(self.prompt_sha256.clone()),
+            prompt_sha256: signal_flow::PromptSha256(self.prompt_sha256.clone().0),
             origin: self.origin.clone(),
             launch_attempt_phase: LaunchAttemptPhase::Reserved,
             native_launch_intent_option: None,

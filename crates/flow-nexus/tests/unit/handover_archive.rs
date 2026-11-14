@@ -181,7 +181,7 @@ fn timed_retirement_at_phase(
     drop(deadlines);
     let retained = fixture.nexus.store.closed_handovers(&address, 0).unwrap();
     assert_eq!(retained.len(), 1);
-    assert_eq!(retained[0].predecessor, "before");
+    assert_eq!(retained[0].predecessor.0, "before");
     (fixture, archive, address, runner)
 }
 
@@ -257,7 +257,7 @@ fn post_commit_timeout_reverifies_same_generation_before_removal() {
     assert!(hook_entered.exists(), "the real post-commit hook entered");
     let retained = fixture.nexus.store.closed_handovers(&address, 0).unwrap();
     assert_eq!(retained.len(), 1);
-    assert_eq!(retained[0].predecessor, "before");
+    assert_eq!(retained[0].predecessor.0, "before");
     let relative = format!("Mind/{}/Sol/before.md", address.topic.0);
     let commit = runout(archive.path(), &["rev-parse", "HEAD"]);
     let blob = runout(
@@ -360,7 +360,7 @@ fn separate_session_pipe_holder_cannot_extend_the_budget_or_remove_the_generatio
     assert!(started.elapsed() < Duration::from_secs(2));
     let retained = fixture.nexus.store.closed_handovers(&address, 0).unwrap();
     assert_eq!(retained.len(), 1);
-    assert_eq!(retained[0].predecessor, "before");
+    assert_eq!(retained[0].predecessor.0, "before");
     let pid = fs::read_to_string(pid_path)
         .unwrap()
         .trim()

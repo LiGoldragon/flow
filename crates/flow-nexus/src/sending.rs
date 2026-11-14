@@ -382,7 +382,7 @@ impl SendsRequests for RunningNexus {
                     .then(|| self.store.reminder(&acceptance.logical_delivery_id.0))
                     .and_then(Result::ok)
                     .flatten()
-                    .and_then(|reminder| reminder.due);
+                    .and_then(|reminder| reminder.due_option.map(|due| due.0));
                 eprintln!(
                     "{}",
                     Admission {

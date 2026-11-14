@@ -540,7 +540,7 @@ fn restart_of_a_working_seat_is_carried_out_at_its_next_stop() {
     assert!(world.resumes().is_empty());
     assert!(matches!(
         fixture.nexus.store.ordered_replacement(&address(Model::Sol)),
-        Ok(Some(order)) if order.order == ReplacementOrder::Restart && order.predecessor == FLOW
+        Ok(Some(order)) if order.replacement_order == ReplacementOrder::Restart && order.predecessor.0 == FLOW
     ));
     // Asked again, it stays queued.
     assert_eq!(
@@ -2904,7 +2904,7 @@ fn restart_cutover_two_nexus() {
     assert_eq!(old_metaflow.queue.0.len(), 1);
     assert!(matches!(
         fixture.nexus.store.successor_intent(&address(Model::Sol)),
-        Ok(Some(intent)) if intent.predecessor == FLOW
+        Ok(Some(intent)) if intent.predecessor.0 == FLOW
     ));
 
     // The same old reports reach the new Nexus, and an Observe's Gone of

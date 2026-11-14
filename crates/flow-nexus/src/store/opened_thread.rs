@@ -10,7 +10,7 @@
 //! that opened the thread (`store::send_call`).
 
 use super::{FlowStore, StoreError};
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+pub(crate) use crate::generated::memory::OpenedLaunchThread;
 use sema_engine::{
     Assertion, EngineRecord, FamilyName, QueryPlan, RecordKey, SchemaHash, TableDescriptor,
     TableName,
@@ -21,16 +21,9 @@ pub(super) const OPENED_THREAD_TABLE_NAME: TableName =
 pub(super) const OPENED_THREAD_FAMILY: &str = "flow-nexus-launch-opened-thread";
 pub(super) const OPENED_THREAD_SCHEMA: &str = "flow-nexus-launch-opened-thread-v1";
 
-/// The thread a launch request's Spawn opened.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct OpenedLaunchThread {
-    pub launch_request_id: String,
-    pub native_session_id: String,
-}
-
 impl EngineRecord for OpenedLaunchThread {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.launch_request_id.clone())
+        RecordKey::new(self.launch_request_id.0.clone())
     }
 }
 
@@ -77,8 +70,12 @@ impl RecordsOpenedThreads for FlowStore {
                 self.engine.assert(Assertion::new(
                     self.opened_threads,
                     OpenedLaunchThread {
-                        launch_request_id: launch_request_id.to_owned(),
-                        native_session_id: native_session_id.to_owned(),
+                        launch_request_id: signal_flow::LaunchRequestId(
+                            launch_request_id.to_owned(),
+                        ),
+                        native_session_id: signal_flow::NativeSessionId(
+                            native_session_id.to_owned(),
+                        ),
                     },
                 ))?;
                 Ok(true)
@@ -97,7 +94,7 @@ impl RecordsOpenedThreads for FlowStore {
             .to_vec();
         match records.as_slice() {
             [] => Ok(None),
-            [opened] => Ok(Some(opened.native_session_id.clone())),
+            [opened] => Ok(Some(opened.native_session_id.clone().0)),
             _ => Err(StoreError::StateInvariant),
         }
     }
@@ -117,13 +114,13 @@ impl RecordsOpenedThreads for FlowStore {
             .records()
             .iter()
             .filter(|opened| {
-                !native_session_id.is_empty() && opened.native_session_id == native_session_id
+                !native_session_id.is_empty() && opened.native_session_id.0 == native_session_id
             })
             .map(|opened| opened.launch_request_id.clone())
             .collect::<Vec<_>>();
         match launches.as_slice() {
             [] => Ok(None),
-            [launch] => Ok(Some(launch.clone())),
+            [launch] => Ok(Some(launch.clone().0)),
             _ => Err(StoreError::StateInvariant),
         }
     }

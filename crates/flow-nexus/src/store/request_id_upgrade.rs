@@ -1858,7 +1858,7 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
             }
         }
         for reminder in reminders {
-            if !currents.contains_key(&reminder.key) {
+            if !currents.contains_key(&reminder.logical_delivery_id.0) {
                 return Err(StoreError::StateInvariant);
             }
         }
@@ -1904,7 +1904,10 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
             }
         }
 
-        let reminder_tasks: BTreeSet<_> = reminders.iter().map(|row| row.key.clone()).collect();
+        let reminder_tasks: BTreeSet<_> = reminders
+            .iter()
+            .map(|row| row.logical_delivery_id.0.clone())
+            .collect();
         let reply_inputs: BTreeSet<_> = simplified_replies
             .iter()
             .filter(|row| !row.completed.0)
@@ -2174,9 +2177,9 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
             .iter()
             .map(|(_, old)| {
                 Ok(super::address_hold::AddressHold {
-                    flow_id: old.flow_id.clone(),
+                    flow_id: flow_ethos::FlowId(old.flow_id.clone()),
                     address: old.address.current()?,
-                    found: old
+                    metaflow_option: old
                         .found
                         .as_ref()
                         .map(|value| value.current_with_request_ids(&request_ids))
@@ -2230,15 +2233,17 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
 
         let mut announcement_groups: BTreeMap<String, (Address, Vec<String>)> = BTreeMap::new();
         for reminder in reminders {
-            if !held.contains(&reminder.key)
+            if !held.contains(&reminder.logical_delivery_id.0)
                 || !matches!(
-                    closures.get(&reminder.key),
+                    closures.get(&reminder.logical_delivery_id.0),
                     None | Some(RequestClosure::Open)
                 )
             {
                 continue;
             }
-            let current = &currents[&reminder.key].snapshot.delivery_state;
+            let current = &currents[&reminder.logical_delivery_id.0]
+                .snapshot
+                .delivery_state;
             if matches!(
                 current,
                 old_signal::DeliveryState::Attempting
@@ -2246,10 +2251,10 @@ impl EvolvesRequestIdMemory for RequestIdEvolutionDescriptors {
                     | old_signal::DeliveryState::Delivered(_)
             ) {
                 announcement_groups
-                    .entry(reminder.recipient.current_address_key())
-                    .or_insert_with(|| (reminder.recipient.clone(), Vec::new()))
+                    .entry(reminder.recipient.0.current_address_key())
+                    .or_insert_with(|| (reminder.recipient.0.clone(), Vec::new()))
                     .1
-                    .push(reminder.key.clone());
+                    .push(reminder.logical_delivery_id.clone().0);
             }
         }
         let mut task_announcements = Vec::new();
@@ -3490,12 +3495,14 @@ mod tests {
         drop(predecessor);
 
         let reminder = super::super::reminder::Reminder {
-            key: "task-held-by-reminder".into(),
+            logical_delivery_id: flow_ethos::LogicalDeliveryId("task-held-by-reminder".into()),
             address: sender.current().expect("sender recodes"),
-            recipient: recipient.current().expect("recipient recodes"),
-            minutes: 5,
-            due: Some(123),
-            sent: 0,
+            recipient: crate::generated::memory::Recipient(
+                recipient.current().expect("recipient recodes"),
+            ),
+            minutes: flow_ethos::Minutes(5),
+            due_option: Some(crate::generated::memory::Due(123)),
+            sent: crate::generated::memory::Sent(0),
         };
         let reply = super::super::logical_delivery::SimplifiedReplyBinding {
             flow_id: flow_ethos::FlowId("reply-flow".into()),
@@ -3777,7 +3784,7 @@ mod tests {
             .expect("holds read");
         assert_eq!(
             holds.records()[0]
-                .found
+                .metaflow_option
                 .as_ref()
                 .expect("found kept")
                 .queue
@@ -3981,12 +3988,14 @@ mod tests {
             drop(predecessor);
 
             let reminder = super::super::reminder::Reminder {
-                key: "missing".into(),
+                logical_delivery_id: flow_ethos::LogicalDeliveryId("missing".into()),
                 address: sender.current().expect("address recodes"),
-                recipient: recipient.current().expect("address recodes"),
-                minutes: 1,
-                due: Some(1),
-                sent: 0,
+                recipient: crate::generated::memory::Recipient(
+                    recipient.current().expect("address recodes"),
+                ),
+                minutes: flow_ethos::Minutes(1),
+                due_option: Some(crate::generated::memory::Due(1)),
+                sent: crate::generated::memory::Sent(0),
             };
             let reply = super::super::logical_delivery::SimplifiedReplyBinding {
                 flow_id: flow_ethos::FlowId("flow".into()),
@@ -4128,12 +4137,12 @@ mod tests {
         let current_sender = sender.current().expect("sender recodes");
         let current_recipient = recipient.current().expect("recipient recodes");
         let reminders = ["task-one", "task-two"].map(|key| super::super::reminder::Reminder {
-            key: key.into(),
+            logical_delivery_id: flow_ethos::LogicalDeliveryId(key.into()),
             address: current_sender.clone(),
-            recipient: current_recipient.clone(),
-            minutes: 1,
-            due: Some(1),
-            sent: 0,
+            recipient: crate::generated::memory::Recipient(current_recipient.clone()),
+            minutes: flow_ethos::Minutes(1),
+            due_option: Some(crate::generated::memory::Due(1)),
+            sent: crate::generated::memory::Sent(0),
         });
 
         let mut engine = Engine::open(

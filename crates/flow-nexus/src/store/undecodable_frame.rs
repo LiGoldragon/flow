@@ -7,7 +7,7 @@
 //! read or kept.
 
 use super::{AnnouncesLaunchChanges, FlowStore, StoreError};
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+pub(crate) use crate::generated::memory::{UndecodableKey, UndecodableRecord};
 use sema_engine::{
     EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan, RecordKey, SchemaHash,
     TableDescriptor, TableName,
@@ -19,19 +19,9 @@ pub(super) const UNDECODABLE_FRAME_TABLE_NAME: TableName =
 pub(super) const UNDECODABLE_FRAME_FAMILY: &str = "flow-nexus-undecodable-frame";
 pub(super) const UNDECODABLE_FRAME_SCHEMA: &str = "flow-nexus-undecodable-frame-v1";
 
-/// One refused frame, keyed by when it was refused and by whom, so records
-/// read back oldest first.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct UndecodableRecord {
-    /// Nanoseconds since the Unix epoch, zero-padded, then the caller's
-    /// process id.
-    pub key: String,
-    pub frame: UndecodableFrame,
-}
-
 impl EngineRecord for UndecodableRecord {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.key.clone())
+        RecordKey::new(self.undecodable_key.0.clone())
     }
 }
 
@@ -74,8 +64,11 @@ impl RecordsUndecodableFrames for FlowStore {
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or_default();
         let record = UndecodableRecord {
-            key: format!("{refused_at:024}-{:010}", frame.seat_evidence.process.pid.0),
-            frame,
+            undecodable_key: UndecodableKey(format!(
+                "{refused_at:024}-{:010}",
+                frame.seat_evidence.process.pid.0
+            )),
+            undecodable_frame: frame,
         };
         let commit = self
             .engine
@@ -92,7 +85,10 @@ impl RecordsUndecodableFrames for FlowStore {
             .match_records(QueryPlan::all(self.undecodable_frames))?
             .records()
             .to_vec();
-        records.sort_by(|left, right| left.key.cmp(&right.key));
-        Ok(records.into_iter().map(|record| record.frame).collect())
+        records.sort_by(|left, right| left.undecodable_key.cmp(&right.undecodable_key));
+        Ok(records
+            .into_iter()
+            .map(|record| record.undecodable_frame)
+            .collect())
     }
 }

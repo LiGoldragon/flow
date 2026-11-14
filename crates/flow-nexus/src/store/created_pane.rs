@@ -1,20 +1,11 @@
 //! Durable one-shot launch pane recording, reconciled from e41621a.
 use super::*;
+pub(crate) use crate::generated::memory::StoredLaunchPane;
 use signal_flow::HerdrPaneBinding;
-
-/// The created native pane is distinct from an observed native identity.  It
-/// lets a retry inspect the one pane that was already created without
-/// creating a second external seat.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(super) struct StoredLaunchPane {
-    pane: HerdrPaneBinding,
-    harness_start_requested: bool,
-    orphaned: bool,
-}
 
 impl EngineRecord for StoredLaunchPane {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.pane.launch_request_id.clone().0)
+        RecordKey::new(self.herdr_pane_binding.launch_request_id.clone().0)
     }
 }
 
@@ -54,9 +45,9 @@ impl RecordsCreatedLaunchPane for FlowStore {
         self.engine.assert(Assertion::new(
             self.launch_panes,
             StoredLaunchPane {
-                pane,
-                harness_start_requested: false,
-                orphaned: false,
+                herdr_pane_binding: pane,
+                harness_start_requested: crate::generated::memory::HarnessStartRequested(false),
+                orphaned: crate::generated::memory::Orphaned(false),
             },
         ))?;
         Ok(true)
@@ -69,11 +60,11 @@ impl RecordsCreatedLaunchPane for FlowStore {
         let Some(mut stored) = self.stored_launch_pane(launch_request_id)? else {
             return Ok(None);
         };
-        if stored.orphaned || stored.harness_start_requested {
+        if stored.orphaned.0 || stored.harness_start_requested.0 {
             return Ok(None);
         }
-        stored.harness_start_requested = true;
-        let pane = stored.pane.clone();
+        stored.harness_start_requested = crate::generated::memory::HarnessStartRequested(true);
+        let pane = stored.herdr_pane_binding.clone();
         self.mutate_launch_pane(stored)?;
         Ok(Some(pane))
     }
@@ -82,10 +73,10 @@ impl RecordsCreatedLaunchPane for FlowStore {
         let Some(mut stored) = self.stored_launch_pane(launch_request_id)? else {
             return Ok(false);
         };
-        if stored.orphaned {
+        if stored.orphaned.0 {
             return Ok(true);
         }
-        stored.orphaned = true;
+        stored.orphaned = crate::generated::memory::Orphaned(true);
         self.mutate_launch_pane(stored)?;
         Ok(true)
     }
@@ -98,8 +89,8 @@ impl ReadsCreatedLaunchPane for FlowStore {
     ) -> Result<Option<HerdrPaneBinding>, StoreError> {
         Ok(self
             .stored_launch_pane(launch_request_id)?
-            .filter(|stored| stored.harness_start_requested && !stored.orphaned)
-            .map(|stored| stored.pane))
+            .filter(|stored| stored.harness_start_requested.0 && !stored.orphaned.0)
+            .map(|stored| stored.herdr_pane_binding))
     }
 }
 
@@ -130,7 +121,7 @@ impl StoresCreatedLaunchPane for FlowStore {
     fn mutate_launch_pane(&self, pane: StoredLaunchPane) -> Result<(), StoreError> {
         self.engine.mutate_keyed(KeyedMutation::new(
             self.launch_panes,
-            RecordKey::new(pane.pane.launch_request_id.clone().0),
+            RecordKey::new(pane.herdr_pane_binding.launch_request_id.clone().0),
             pane,
         ))?;
         Ok(())

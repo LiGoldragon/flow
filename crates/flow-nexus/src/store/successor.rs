@@ -10,8 +10,8 @@
 //! its next start and starts the successor then.
 
 use super::{FlowStore, ReadsFlowMemory, StoreError};
+pub(crate) use crate::generated::memory::{SuccessionCause, SuccessorIntent};
 use meta_signal_flow::Continuity;
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     AtomicCommit, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan, RecordKey,
     SchemaHash, TableDescriptor, TableName,
@@ -22,33 +22,6 @@ pub(super) const SUCCESSOR_INTENT_TABLE_NAME: TableName =
     TableName::new("flow_nexus_successor_intents");
 pub(super) const SUCCESSOR_INTENT_FAMILY: &str = "flow-nexus-successor-intent";
 pub(super) const SUCCESSOR_INTENT_SCHEMA: &str = "flow-nexus-successor-intent-v3";
-
-/// Why a Maintained metaflow is owed its successor.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub enum SuccessionCause {
-    /// Its flow passed its model's refresh threshold and rested.
-    Refresh,
-    /// Its flow ended without Flow or an owner ending it: its pane gone.
-    Exit,
-    /// A Refresh ordered from outside ends its flow, whatever its context.
-    Ordered,
-    /// A Replace, as a Launch addressed to an Awake metaflow names one, ends
-    /// its flow; the successor is the Replace's own launch.
-    Replace,
-}
-
-/// A successor owed to the metaflow at `address`, after `predecessor`. A
-/// refresh's successor replaces its predecessor under `launch_request_id`,
-/// so a Nexus that takes the intent up again resumes that replacement
-/// rather than starting a second; an exit's successor is a wake, which
-/// names none.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct SuccessorIntent {
-    pub address: Address,
-    pub predecessor: String,
-    pub cause: SuccessionCause,
-    pub launch_request_id: String,
-}
 
 impl EngineRecord for SuccessorIntent {
     fn record_key(&self) -> RecordKey {

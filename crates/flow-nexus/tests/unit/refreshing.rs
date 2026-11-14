@@ -1143,7 +1143,7 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
         .handover_reminder(&seat_address(), 0)
         .unwrap()
         .expect("the scheduler created the timer");
-    assert_eq!((first.sent, first.next_due), (1, 310));
+    assert_eq!((first.sent.0, first.next_due.0), (1, 310));
     let first_warning_id = stored(&fixture)
         .queue
         .0
@@ -1218,7 +1218,7 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
             .handover_reminder(&seat_address(), 0)
             .unwrap()
             .unwrap();
-        assert_eq!((timer.sent, timer.next_due), (2, 610));
+        assert_eq!((timer.sent.0, timer.next_due.0), (2, 610));
         let queued = fixture
             .nexus
             .store
@@ -1467,9 +1467,9 @@ fn a_nexus_start_starts_a_successor_owed_after_a_refresh_or_a_replace() {
             .store
             .owe_successor(SuccessorIntent {
                 address: seat_address(),
-                predecessor: CLAUDE_SEAT.into(),
-                cause: cause.clone(),
-                launch_request_id: SUCCESSOR_REQUEST.into(),
+                predecessor: crate::generated::memory::Predecessor(CLAUDE_SEAT.into()),
+                succession_cause: cause.clone(),
+                launch_request_id: signal_flow::LaunchRequestId(SUCCESSOR_REQUEST.into()),
             })
             .expect("successor owed");
         assert!(
@@ -1770,8 +1770,8 @@ fn the_ordered_replacement_survives_a_nexus_restart() {
         .ordered_replacement(&seat_address())
         .unwrap()
         .expect("the refresh survives");
-    assert_eq!(order.predecessor, CLAUDE_SEAT);
-    assert_eq!(order.order, ReplacementOrder::Refresh);
+    assert_eq!(order.predecessor.0, CLAUDE_SEAT);
+    assert_eq!(order.replacement_order, ReplacementOrder::Refresh);
 
     fixture.nexus.recover_wakes();
     assert!(!closed(&fixture), "the working flow is not closed at start");

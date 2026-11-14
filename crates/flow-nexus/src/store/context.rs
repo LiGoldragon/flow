@@ -8,8 +8,8 @@
 
 use super::AnnouncesLaunchChanges;
 use super::{FlowStore, ManagesMetaflowState, ReadsFlowRoles, ReadsLaunchAttempt, StoreError};
+pub(crate) use crate::generated::memory::FlowContextSize;
 use meta_signal_flow::{CompactionRefusal, ContextBelowThreshold};
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Assertion, EngineRecord, FamilyName, KeyedMutation, QueryPlan, RecordKey, SchemaHash,
     TableDescriptor, TableName, TableReference,
@@ -20,16 +20,9 @@ pub(super) const FLOW_CONTEXT_SIZE_TABLE_NAME: TableName =
 pub(super) const FLOW_CONTEXT_SIZE_FAMILY: &str = "flow-nexus-flow-context-size";
 pub(super) const FLOW_CONTEXT_SIZE_SCHEMA: &str = "flow-nexus-flow-context-size-v1";
 
-/// One flow's context size at its last Stop, in tokens.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct FlowContextSize {
-    pub flow_id: String,
-    pub tokens: i64,
-}
-
 impl EngineRecord for FlowContextSize {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.flow_id.clone())
+        RecordKey::new(self.flow_id.0.clone())
     }
 }
 
@@ -84,8 +77,8 @@ impl ReadsContextSizeRow for FlowStore {
 impl RecordsContextSize for FlowStore {
     fn record_context_size(&self, flow_id: &str, tokens: i64) -> Result<(), StoreError> {
         let row = FlowContextSize {
-            flow_id: flow_id.into(),
-            tokens,
+            flow_id: flow_ethos::FlowId(flow_id.into()),
+            tokens: signal_flow::Tokens(tokens),
         };
         if self.context_size_row(flow_id)?.is_some() {
             self.engine.mutate_keyed(KeyedMutation::new(
@@ -102,7 +95,7 @@ impl RecordsContextSize for FlowStore {
     }
 
     fn context_size(&self, flow_id: &str) -> Result<Option<i64>, StoreError> {
-        Ok(self.context_size_row(flow_id)?.map(|row| row.tokens))
+        Ok(self.context_size_row(flow_id)?.map(|row| row.tokens.0))
     }
 }
 

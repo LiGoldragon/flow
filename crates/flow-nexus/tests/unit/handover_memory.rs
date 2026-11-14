@@ -67,7 +67,11 @@ fn keep_appends_and_replaces_in_the_original_position() {
         ]
     );
     assert_eq!(
-        store.handover_memory(&address).unwrap().unwrap().touch,
+        store
+            .handover_memory(&address)
+            .unwrap()
+            .unwrap()
+            .touch_option,
         Some(Touch::Unknown)
     );
 }
@@ -122,9 +126,12 @@ fn successor_closes_an_immutable_snapshot_and_starts_with_unknown_touch() {
         .close_handover_for_successor(&address, "pred01", "succ01")
         .unwrap();
     let closed = store.handover_memory(&address).unwrap().unwrap();
-    assert_eq!(closed.current, vec![section("one", "d", "before")]);
-    assert_eq!(closed.touch, None);
-    assert_eq!(closed.closed[0].sections, closed.current);
+    assert_eq!(closed.section_vector, vec![section("one", "d", "before")]);
+    assert_eq!(closed.touch_option, None);
+    assert_eq!(
+        closed.closed_handover_vector[0].section_vector,
+        closed.section_vector
+    );
     store
         .keep_handover(
             &address,
@@ -135,7 +142,7 @@ fn successor_closes_an_immutable_snapshot_and_starts_with_unknown_touch() {
         .unwrap();
     let changed = store.handover_memory(&address).unwrap().unwrap();
     assert_eq!(
-        changed.closed[0].sections,
+        changed.closed_handover_vector[0].section_vector,
         vec![section("one", "d", "before")]
     );
 }
@@ -152,10 +159,13 @@ fn successor_restart_is_idempotent_and_empty_generation_is_archived() {
         .close_handover_for_successor(&address, "pred01", "succ01")
         .unwrap();
     let row = store.handover_memory(&address).unwrap().unwrap();
-    assert_eq!(row.closed.len(), 1);
-    assert!(row.closed[0].sections.is_empty());
-    assert_eq!(row.current_flow_id.as_deref(), Some("succ01"));
-    assert_eq!(row.generation, 1);
+    assert_eq!(row.closed_handover_vector.len(), 1);
+    assert!(row.closed_handover_vector[0].section_vector.is_empty());
+    assert_eq!(
+        row.flow_id_option.as_ref().map(|value| value.0.as_str()),
+        Some("succ01")
+    );
+    assert_eq!(row.handover_generation, signal_flow::HandoverGeneration(1));
     assert_eq!(
         store.handover_for_flow(&address, "pred01").unwrap(),
         Some(Vec::new())
@@ -191,10 +201,13 @@ fn closed_generation_reopens_and_retry_keeps_one_snapshot() {
         .close_handover_for_successor(&address, "pred", "succ")
         .unwrap();
     let row = reopened.handover_memory(&address).unwrap().unwrap();
-    assert_eq!(row.closed.len(), 1);
-    assert_eq!(row.current_flow_id.as_deref(), Some("succ"));
-    assert_eq!(row.touch, None);
-    assert_eq!(row.current, vec![section("old", "d", "body")]);
+    assert_eq!(row.closed_handover_vector.len(), 1);
+    assert_eq!(
+        row.flow_id_option.as_ref().map(|value| value.0.as_str()),
+        Some("succ")
+    );
+    assert_eq!(row.touch_option, None);
+    assert_eq!(row.section_vector, vec![section("old", "d", "body")]);
 }
 
 #[test]
@@ -284,9 +297,12 @@ fn closed_snapshot_survives_successor_edit_and_reopen_notification() {
         .close_handover_for_successor(&address, "pred", "succ")
         .unwrap();
     let row = store.handover_memory(&address).unwrap().unwrap();
-    assert_eq!(row.closed.len(), 1);
-    assert_eq!(row.closed[0].sections, vec![section("one", "d", "before")]);
-    assert_eq!(row.current, vec![section("one", "d", "after")]);
+    assert_eq!(row.closed_handover_vector.len(), 1);
+    assert_eq!(
+        row.closed_handover_vector[0].section_vector,
+        vec![section("one", "d", "before")]
+    );
+    assert_eq!(row.section_vector, vec![section("one", "d", "after")]);
 }
 
 #[test]
@@ -335,9 +351,9 @@ fn exact_retirement_identity_preserves_new_live_and_closed_rows() {
         Output::RetirementChanged(RetirementChange::GenerationRemoved(_))
     ));
     let row = store.handover_memory(&address).unwrap().unwrap();
-    assert_eq!(row.current, vec![section("live", "d", "new")]);
-    assert_eq!(row.closed.len(), 1);
-    assert_eq!(row.closed[0].predecessor, "succ");
+    assert_eq!(row.section_vector, vec![section("live", "d", "new")]);
+    assert_eq!(row.closed_handover_vector.len(), 1);
+    assert_eq!(row.closed_handover_vector[0].predecessor.0, "succ");
 }
 
 #[test]
@@ -350,7 +366,7 @@ fn changed_published_snapshot_is_retained() {
         .unwrap();
     let mut published = store.closed_handovers(&address, 0).unwrap().pop().unwrap();
     let subscription = store.observe_handover_retirement(&address).unwrap();
-    published.successor = "changed".into();
+    published.successor = signal_flow::Successor(flow_ethos::FlowId("changed".into()));
     assert_eq!(
         store
             .complete_closed_handover_retirement(&address, &published, archive_identity())
@@ -577,6 +593,6 @@ fn concurrent_authenticated_writes_preserve_both_sections() {
         join.join().unwrap();
     }
     let row = store.handover_memory(&address).unwrap().unwrap();
-    assert_eq!(row.current.len(), 2);
-    assert_eq!(row.touch, Some(Touch::Unknown));
+    assert_eq!(row.section_vector.len(), 2);
+    assert_eq!(row.touch_option, Some(Touch::Unknown));
 }

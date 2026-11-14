@@ -11,7 +11,7 @@ use crate::context::{
     CONTEXT_OPENING, ComposesFlowContext, ContextRequest, CurriculumComposer,
     OpensCurriculumComposer, SelectsStartup, VerifiedContext, VerifiesContext,
 };
-use crate::generated::curriculum::{Outcome, Query};
+use signal_curriculum_nexus::{Input, Output};
 use signal_flow::{Address, Aspect, ContextRefusal, HarnessKind, Model};
 use std::io::{Read, Write};
 
@@ -101,16 +101,16 @@ fn replayed(answer: &'static [u8]) -> (CurriculumComposer, std::thread::JoinHand
 fn a_real_478c_rejected_frame_is_a_composer_rejection_carrying_its_text() {
     let request = missing_module_request();
     assert_eq!(
-        rkyv::to_bytes::<rkyv::rancor::Error>(&Query::ComposeStartup(request.startup_selection()))
+        rkyv::to_bytes::<rkyv::rancor::Error>(&Input::ComposeStartup(request.startup_selection()))
             .expect("query archives")
             .as_slice(),
         MISSING_MODULE_QUERY,
         "Flow asks as Curriculum's own CLI asks"
     );
     assert_eq!(
-        rkyv::from_bytes::<Outcome, rkyv::rancor::Error>(MISSING_MODULE_ANSWER)
+        rkyv::from_bytes::<Output, rkyv::rancor::Error>(MISSING_MODULE_ANSWER)
             .expect("the 478c answer reads"),
-        Outcome::Rejected("missing module knowledge:no-such-module".into())
+        Output::Rejected("missing module knowledge:no-such-module".into())
     );
     let (composer, server) = replayed(MISSING_MODULE_ANSWER);
     assert_eq!(
@@ -129,14 +129,14 @@ fn a_real_478c_rejected_frame_is_a_composer_rejection_carrying_its_text() {
 fn a_real_478c_startup_composed_frame_reads_and_verifies() {
     let request = startup_request();
     assert_eq!(
-        rkyv::to_bytes::<rkyv::rancor::Error>(&Query::ComposeStartup(request.startup_selection()))
+        rkyv::to_bytes::<rkyv::rancor::Error>(&Input::ComposeStartup(request.startup_selection()))
             .expect("query archives")
             .as_slice(),
         STARTUP_COMPOSED_QUERY,
         "Flow asks as Curriculum's own CLI asks"
     );
-    let Outcome::StartupComposed(composition) =
-        rkyv::from_bytes::<Outcome, rkyv::rancor::Error>(STARTUP_COMPOSED_ANSWER)
+    let Output::StartupComposed(composition) =
+        rkyv::from_bytes::<Output, rkyv::rancor::Error>(STARTUP_COMPOSED_ANSWER)
             .expect("the 478c answer reads")
     else {
         panic!("a StartupComposed frame")

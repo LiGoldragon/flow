@@ -11,15 +11,16 @@ use crate::store::send_outcome::RecordsSendOutcomes;
 extern crate self as flow_nexus;
 use crate::claude::ProjectsClaudeReadiness;
 use crate::codex::SelectsCodexEndpoint;
-pub use crate::generated::curriculum::{
-    ContextProvenance, Outcome as CurriculumOutcome, Query as CurriculumQuery, StartupComposition,
-    StartupSelection,
-};
+// Curriculum's wire, named as the starter's Ethos names it.
 pub use crate::generated::memory::{
     LaunchOutcome, PendingHandover, PendingReap, Replacement, SeatBirth, SupersededHandover,
 };
 pub use crate::generated::operation::Outcome as OperationOutcome;
 pub use crate::generated::starter::{LaunchedRecord, ReplacedRecord};
+pub use signal_curriculum_nexus::{
+    ContextProvenance, Input as CurriculumQuery, Output as CurriculumOutcome, StartupComposition,
+    StartupSelection,
+};
 // The Memory root names the hand-kept transcript cursor by the crate's name.
 use crate::herdr::ConfiguresHerdrCli;
 use crate::herdr::ReadsHerdrPanes;

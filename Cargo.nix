@@ -1136,6 +1136,11 @@ rec {
             usesDefaultFeatures = false;
           }
           {
+            name = "signal-curriculum-nexus";
+            packageId = "signal-curriculum-nexus";
+            features = [ "datom" ];
+          }
+          {
             name = "signal-flow";
             packageId = "signal-flow 63.0.0";
           }
@@ -3016,6 +3021,46 @@ rec {
           "datom" = [ "dep:datom-codec" "dep:protos" ];
         };
         resolvedDefaultFeatures = [ "datom" ];
+      };
+      "signal-curriculum-nexus" = rec {
+        crateName = "signal-curriculum-nexus";
+        version = "0.1.0";
+        edition = "2024";
+        workspace_member = null;
+        src = pkgs.fetchgit {
+          url = "https://github.com/LiGoldragon/signal-curriculum-nexus";
+          rev = "3e8b5b9a8cb7523ab205a74c9bbe828dc9f31cdc";
+          sha256 = "139qjyp4i8w0928z8i5400pybchr6s320gwgvjxgjrq7v4xmsvyy";
+        };
+        libName = "signal_curriculum_nexus";
+        dependencies = [
+          {
+            name = "datom-codec";
+            packageId = "datom-codec";
+            optional = true;
+          }
+          {
+            name = "protos";
+            packageId = "protos";
+            optional = true;
+          }
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+        ];
+        buildDependencies = [
+          {
+            name = "ethos-zero";
+            packageId = "ethos-zero 27.0.0";
+          }
+        ];
+        features = {
+          "datom" = [ "dep:datom-codec" "dep:protos" ];
+        };
+        resolvedDefaultFeatures = [ "datom" "default" ];
       };
       "signal-flow 60.0.0" = rec {
         crateName = "signal-flow";

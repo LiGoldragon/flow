@@ -4,9 +4,6 @@
 //! does.
 
 use crate::caller::CallerProcess;
-use crate::generated::curriculum::{
-    ContextProvenance, Query as CurriculumQuery, StartupComposition,
-};
 use crate::generated::operation::Outcome;
 use crate::generated::starter::{
     CallerProcessing, ContextRequest, ContextRequesting, CurriculumQuerying, DeliveryIntended,
@@ -14,6 +11,7 @@ use crate::generated::starter::{
     PaneBound, PartNumbering, Profiled, Progressing, ProvenanceListing, RememberedFlows,
     SegmentListing, StartupComposing, StartupProgress, SystemPrompted, Textual,
 };
+use signal_curriculum_nexus::{ContextProvenance, Input as CurriculumQuery, StartupComposition};
 use signal_flow::{
     HarnessKind, HerdrPaneBinding, LaunchProfile, LeaveOut, PromptDeliveryIntent, SystemPrompt,
 };

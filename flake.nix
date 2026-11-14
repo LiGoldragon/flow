@@ -6,10 +6,9 @@
     # machinery, shared with every repository on it, so a crate at one
     # version and feature set has one store path across them.
     base.url = "github:LiGoldragon/build-base";
-    # The Curriculum whose schema Flow pins (crates/flow-nexus/ethos/
-    # curriculum.ethos, 478cbc5's but for RolesDocument's bare Roles variant,
-    # which ethos-zero 22 requires and which keeps every form): the capsule runs its own
-    # Curriculum Nexus from it.
+    # The Curriculum the capsule runs its own Curriculum Nexus from. Flow
+    # speaks to it through signal-curriculum-nexus, the wire contract both
+    # compile.
     curriculum = {
       url = "github:LiGoldragon/Curriculum";
       flake = false;

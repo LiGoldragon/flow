@@ -13,11 +13,9 @@
 //!
 //! The production composer is the Curriculum Nexus, asked over the socket
 //! the Nexus's configuration names (`CurriculumNexusPath`),
-//! with `ComposeStartup` from its schema, copied into
-//! `ethos/curriculum.ethos` from Curriculum 478cbc5 (schema SHA-256
-//! 26011a94…48e28) but for `RolesDocument.[ Roles ]`, the bare variant
-//! ethos-zero 22 requires, which keeps every form; its selection names the flows a launch remembers
-//! and whose composition carries their raw records. Its Outcome has five
+//! with `ComposeStartup` from its contract, signal-curriculum-nexus, which
+//! Curriculum compiles too; its selection names the flows a launch remembers
+//! and whose composition carries their raw records. Its Output has five
 //! variants, the fifth `Rejected` with Curriculum's own text, which Flow
 //! keeps whole in `ContextRefusal::ComposerRejected`, but for a remembered
 //! flow's records missing, `RecordMissing`. Its answer names no
@@ -25,10 +23,6 @@
 //! launch's Address, and the composed launch keeps it with the identities
 //! asked for it.
 
-use crate::generated::curriculum::{
-    CallerMetaflow, ContextProvenance, Outcome as CurriculumOutcome, Query as CurriculumQuery,
-    StartupComposition, StartupPlacement, StartupSelection, Target,
-};
 pub use crate::generated::starter::{
     ComposesFlowContext, ContextRequest, ContextRequesting, CurriculumQuerying, CutsRenderedText,
     ExchangesCurriculumFrames, OpensCurriculumComposer, ProvenanceListing, ReadsVerifiedContext,
@@ -36,6 +30,10 @@ pub use crate::generated::starter::{
 };
 use crate::model::RunsModel;
 use sha2::{Digest, Sha256};
+use signal_curriculum_nexus::{
+    CallerMetaflow, ContextProvenance, Input as CurriculumQuery, Output as CurriculumOutcome,
+    StartupComposition, StartupPlacement, StartupSelection, Target,
+};
 use signal_flow::{Address, Aspect, ContextRefusal, HarnessKind};
 use std::{
     io::{Read, Write},
@@ -122,7 +120,7 @@ impl ResolvesModule for ContextComposer {
 impl ResolvesModule for CurriculumComposer {
     fn resolve_module(&self, identity: &signal_flow::ModuleIdentity) -> ModuleStanding {
         match self.exchange(CurriculumQuery::ResolveSources(vec![
-            crate::generated::curriculum::ModuleIdentity(identity.0.clone()),
+            signal_curriculum_nexus::ModuleIdentity(identity.0.clone()),
         ])) {
             Ok(CurriculumOutcome::ResolvedSources(modules))
                 if modules
@@ -185,29 +183,25 @@ impl SelectsStartup for ContextRequest {
                 HarnessKind::Claude => Target::Claude,
                 HarnessKind::Codex => Target::Codex,
             },
-            system_modules: crate::generated::curriculum::SystemModules(
+            system_modules: signal_curriculum_nexus::SystemModules(
                 self.system_modules
                     .0
                     .iter()
-                    .map(|identity| {
-                        crate::generated::curriculum::ModuleIdentity(identity.0.clone())
-                    })
+                    .map(|identity| signal_curriculum_nexus::ModuleIdentity(identity.0.clone()))
                     .collect(),
             ),
-            user_modules: crate::generated::curriculum::UserModules(
+            user_modules: signal_curriculum_nexus::UserModules(
                 self.prompt_modules
                     .0
                     .iter()
-                    .map(|identity| {
-                        crate::generated::curriculum::ModuleIdentity(identity.0.clone())
-                    })
+                    .map(|identity| signal_curriculum_nexus::ModuleIdentity(identity.0.clone()))
                     .collect(),
             ),
             flow_id_vector: self
                 .remembered_flows
                 .0
                 .iter()
-                .map(|flow| crate::generated::curriculum::FlowId(flow.0.clone()))
+                .map(|flow| signal_curriculum_nexus::FlowId(flow.0.clone()))
                 .collect(),
         }
     }
@@ -496,19 +490,18 @@ impl ComposesFlowContext for FixtureComposer {
                     .get(&identity.0)
                     .ok_or_else(|| ContextRefusal::ModuleMissing(Some(identity.clone())))?;
                 rows.push(ContextProvenance {
-                    module_identity: crate::generated::curriculum::ModuleIdentity(
-                        identity.0.clone(),
-                    ),
-                    repository_name: crate::generated::curriculum::RepositoryName(
+                    module_identity: signal_curriculum_nexus::ModuleIdentity(identity.0.clone()),
+                    repository_name: signal_curriculum_nexus::RepositoryName(
                         "fixture-context".into(),
                     ),
-                    source_revision: crate::generated::curriculum::SourceRevision("0".repeat(40)),
-                    source_relative_path: crate::generated::curriculum::SourceRelativePath(
-                        format!("{}.md", identity.0.replace(':', "/")),
-                    ),
-                    source_sha256: crate::generated::curriculum::SourceSha256(digest(body)),
-                    body_sha256: crate::generated::curriculum::BodySha256(digest(body)),
-                    rendered_sha256: crate::generated::curriculum::RenderedSha256(digest(body)),
+                    source_revision: signal_curriculum_nexus::SourceRevision("0".repeat(40)),
+                    source_relative_path: signal_curriculum_nexus::SourceRelativePath(format!(
+                        "{}.md",
+                        identity.0.replace(':', "/")
+                    )),
+                    source_sha256: signal_curriculum_nexus::SourceSha256(digest(body)),
+                    body_sha256: signal_curriculum_nexus::BodySha256(digest(body)),
+                    rendered_sha256: signal_curriculum_nexus::RenderedSha256(digest(body)),
                     startup_placement: placement.clone(),
                     integer: ordinal as i64,
                 });
@@ -549,18 +542,16 @@ impl ComposesFlowContext for FixtureComposer {
             .cloned()
             .collect::<String>();
         Ok(StartupComposition {
-            system_payload_sha256: crate::generated::curriculum::SystemPayloadSha256(digest(
+            system_payload_sha256: signal_curriculum_nexus::SystemPayloadSha256(digest(
                 &system_text,
             )),
-            user_payload_sha256: crate::generated::curriculum::UserPayloadSha256(digest(
-                &user_text,
-            )),
-            records_payload_sha256: crate::generated::curriculum::RecordsPayloadSha256(digest(
+            user_payload_sha256: signal_curriculum_nexus::UserPayloadSha256(digest(&user_text)),
+            records_payload_sha256: signal_curriculum_nexus::RecordsPayloadSha256(digest(
                 &records_text,
             )),
-            system_text: crate::generated::curriculum::SystemText(system_text),
-            user_text: crate::generated::curriculum::UserText(user_text),
-            records_text: crate::generated::curriculum::RecordsText(records_text),
+            system_text: signal_curriculum_nexus::SystemText(system_text),
+            user_text: signal_curriculum_nexus::UserText(user_text),
+            records_text: signal_curriculum_nexus::RecordsText(records_text),
             context_provenance_vector: rows,
         })
     }
@@ -594,9 +585,9 @@ mod tests {
         let composer = fixture();
         let mut composition = composer.compose_flow_context(request()).unwrap();
         composition.records_text =
-            crate::generated::curriculum::RecordsText("## an unasked record\n".into());
+            signal_curriculum_nexus::RecordsText("## an unasked record\n".into());
         composition.records_payload_sha256 =
-            crate::generated::curriculum::RecordsPayloadSha256(format!(
+            signal_curriculum_nexus::RecordsPayloadSha256(format!(
                 "{:x}",
                 Sha256::digest(composition.records_text.0.as_bytes())
             ));
@@ -609,7 +600,7 @@ mod tests {
             crate::generated::starter::RememberedFlows(vec![flow_ethos::FlowId("36b71b".into())]);
         assert!(VerifiedContext::verified(&remembering, composition.clone()).is_ok());
         composition.records_payload_sha256 =
-            crate::generated::curriculum::RecordsPayloadSha256("0".repeat(64));
+            signal_curriculum_nexus::RecordsPayloadSha256("0".repeat(64));
         assert_eq!(
             VerifiedContext::verified(&remembering, composition),
             Err(ContextRefusal::PayloadMismatch)
@@ -626,18 +617,18 @@ mod tests {
             harness_kind: HarnessKind::Claude,
             system_modules: signal_flow::SystemModules(vec![
                 signal_flow::ModuleIdentity(
-                    crate::generated::curriculum::ModuleIdentity("spirit:core:0".into()).0,
+                    signal_curriculum_nexus::ModuleIdentity("spirit:core:0".into()).0,
                 ),
                 signal_flow::ModuleIdentity(
-                    crate::generated::curriculum::ModuleIdentity("intent:flow:0".into()).0,
+                    signal_curriculum_nexus::ModuleIdentity("intent:flow:0".into()).0,
                 ),
             ]),
             prompt_modules: signal_flow::PromptModules(vec![
                 signal_flow::ModuleIdentity(
-                    crate::generated::curriculum::ModuleIdentity("operation:main-flow:0".into()).0,
+                    signal_curriculum_nexus::ModuleIdentity("operation:main-flow:0".into()).0,
                 ),
                 signal_flow::ModuleIdentity(
-                    crate::generated::curriculum::ModuleIdentity("knowledge:flow:0".into()).0,
+                    signal_curriculum_nexus::ModuleIdentity("knowledge:flow:0".into()).0,
                 ),
             ]),
             remembered_flows: crate::generated::starter::RememberedFlows(vec![]),
@@ -688,7 +679,7 @@ mod tests {
         let request = request();
         let mut composition = fixture().compose_flow_context(&request).unwrap();
         composition.context_provenance_vector[2].rendered_sha256 =
-            crate::generated::curriculum::RenderedSha256("0".repeat(64));
+            signal_curriculum_nexus::RenderedSha256("0".repeat(64));
         assert_eq!(
             VerifiedContext::verified(&request, composition),
             Err(ContextRefusal::PayloadMismatch)

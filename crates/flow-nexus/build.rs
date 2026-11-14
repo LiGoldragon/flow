@@ -9,7 +9,6 @@ fn main() {
         "operation",
         "startup",
         "library",
-        "curriculum",
         "starter",
         "send_tool",
         "landing",

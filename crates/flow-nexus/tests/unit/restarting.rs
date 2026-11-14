@@ -3137,7 +3137,7 @@ const NEW_STORE: &str = "flow-0530.sema";
 struct SocketCurriculum {
     socket: std::path::PathBuf,
     accepts_models: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    asked: std::sync::Arc<std::sync::Mutex<Vec<crate::generated::curriculum::StartupSelection>>>,
+    asked: std::sync::Arc<std::sync::Mutex<Vec<signal_curriculum_nexus::StartupSelection>>>,
     stopping: std::sync::Arc<std::sync::atomic::AtomicBool>,
     server: Option<std::thread::JoinHandle<()>>,
 }
@@ -3190,14 +3190,14 @@ impl SocketCurriculum {
     fn answer(
         frame: &[u8],
         accepts_models: bool,
-        asked: &std::sync::Mutex<Vec<crate::generated::curriculum::StartupSelection>>,
-    ) -> crate::generated::curriculum::Outcome {
+        asked: &std::sync::Mutex<Vec<signal_curriculum_nexus::StartupSelection>>,
+    ) -> signal_curriculum_nexus::Output {
         use crate::context::{ComposesFlowContext, ContextRequest, FixtureComposer};
-        use crate::generated::curriculum::{Outcome, Query, Target};
-        let Ok(Query::ComposeStartup(selection)) =
-            rkyv::from_bytes::<Query, rkyv::rancor::Error>(frame)
+        use signal_curriculum_nexus::{Input, Output, Target};
+        let Ok(Input::ComposeStartup(selection)) =
+            rkyv::from_bytes::<Input, rkyv::rancor::Error>(frame)
         else {
-            return Outcome::Rejected("unexpected query".into());
+            return Output::Rejected("unexpected query".into());
         };
         asked.lock().unwrap().push(selection.clone());
         let words: &[&str] = if accepts_models {
@@ -3206,7 +3206,7 @@ impl SocketCurriculum {
             &LAYER_WORDS
         };
         if !words.contains(&selection.caller_metaflow.third_string.as_str()) {
-            return Outcome::Rejected(INVALID_ADDRESS.into());
+            return Output::Rejected(INVALID_ADDRESS.into());
         }
         let request = ContextRequest {
             address: address(Model::Sol),
@@ -3247,11 +3247,11 @@ impl SocketCurriculum {
             ][..],
         );
         match bodies.compose_flow_context(&request) {
-            Ok(composition) => Outcome::StartupComposed(composition),
+            Ok(composition) => Output::StartupComposed(composition),
             Err(signal_flow::ContextRefusal::ModuleMissing(Some(identity))) => {
-                Outcome::Rejected(format!("missing module {identity}", identity = identity.0))
+                Output::Rejected(format!("missing module {identity}", identity = identity.0))
             }
-            Err(refusal) => Outcome::Rejected(format!("{refusal:?}")),
+            Err(refusal) => Output::Rejected(format!("{refusal:?}")),
         }
     }
 
@@ -3627,8 +3627,8 @@ fn restart_not_composed_owner_stop() {
 fn restart_composition_against_curriculum_socket() {
     use crate::composition::{OpensLaunchComposer, PlacesModuleByKind};
     use crate::context::{ContextRequest, OpensCurriculumComposer, SelectsStartup};
-    use crate::generated::curriculum::{Outcome as CurriculumOutcome, Query as CurriculumQuery};
     use crate::generated::operation::Failed_Data;
+    use signal_curriculum_nexus::{Input as CurriculumQuery, Output as CurriculumOutcome};
     use std::io::{Read, Write};
     let socket = std::env::var("RESTART_PROOF_CURRICULUM_SOCKET").expect("socket");
     let expect = std::env::var("RESTART_PROOF_EXPECT").expect("refused or composed");

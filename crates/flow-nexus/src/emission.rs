@@ -4,8 +4,9 @@
 
 use crate::generated::emission::{
     AgentStatus, AgentTarget, AgentWait, ClaudeSessionStart, CodexTitle, CurriculumExchange,
-    Emittable, FlowIdentityClaim, Focus, HarnessCommandLine, HerdrCommand, HerdrSessionCommand,
-    MetadataSource, OutputSource, Printout, ProcessReply, ScreenFormat, Stderr, Stdout,
+    Emittable, FlowIdentityClaim, Focus, GitCommand, GitRevision, HarnessCommandLine, HerdrCommand,
+    HerdrSessionCommand, MetadataSource, OutputSource, Printout, ProcessReply, ScreenFormat,
+    Stderr, Stdout,
 };
 use crate::herdr::HerdrCli;
 use crate::herdr::launch::NamesHerdrHarness;
@@ -351,17 +352,34 @@ impl ObservesFinishedProcess for std::io::Result<std::process::Output> {
     fn process_reply(self) -> ProcessReply {
         match self {
             Err(error) => ProcessReply::Unstarted(error.to_string()),
-            Ok(output) => {
-                let printout = Printout {
-                    stdout: Stdout(String::from_utf8_lossy(&output.stdout).into_owned()),
-                    stderr: Stderr(String::from_utf8_lossy(&output.stderr).into_owned()),
-                };
-                if output.status.success() {
-                    ProcessReply::Succeeded(printout)
-                } else {
-                    ProcessReply::Failed(printout)
-                }
+            Ok(output) => output.status.process_reply(output.stdout, output.stderr),
+        }
+    }
+}
+
+/// What a process that ran printed, read as text: a successful one's
+/// stdout must be UTF-8, since what it printed is its answer; a failed one's
+/// is kept as nearly as it reads.
+trait ReadsPrintedText {
+    fn process_reply(self, stdout: Vec<u8>, stderr: Vec<u8>) -> ProcessReply;
+}
+
+impl ReadsPrintedText for std::process::ExitStatus {
+    fn process_reply(self, stdout: Vec<u8>, stderr: Vec<u8>) -> ProcessReply {
+        let stderr = Stderr(String::from_utf8_lossy(&stderr).into_owned());
+        if self.success() {
+            match String::from_utf8(stdout) {
+                Ok(stdout) => ProcessReply::Succeeded(Printout {
+                    stdout: Stdout(stdout),
+                    stderr,
+                }),
+                Err(error) => ProcessReply::Unreadable(error.to_string()),
             }
+        } else {
+            ProcessReply::Failed(Printout {
+                stdout: Stdout(String::from_utf8_lossy(&stdout).into_owned()),
+                stderr,
+            })
         }
     }
 }
@@ -437,13 +455,8 @@ impl Emittable<CancellableHerdr<'_>> for HerdrCommand {
         {
             return cancelled(&mut child);
         }
-        let printout = Printout {
-            stdout: Stdout(String::from_utf8_lossy(&output).into_owned()),
-            stderr: Stderr(String::new()),
-        };
         match child.wait() {
-            Ok(status) if status.success() => ProcessReply::Succeeded(printout),
-            Ok(_) => ProcessReply::Failed(printout),
+            Ok(status) => status.process_reply(output, Vec::new()),
             Err(error) => ProcessReply::Unstarted(error.to_string()),
         }
     }
@@ -489,14 +502,22 @@ impl ReadsProcessReply for ProcessReply {
                 "Herdr command refused the launch stage: {}",
                 printout.stderr.0.trim()
             )),
+            ProcessReply::Unreadable(error) => {
+                Err(format!("Herdr returned unreadable output: {error}"))
+            }
             ProcessReply::Cancelled => Err("Herdr command was cancelled".into()),
+            ProcessReply::TimedOut => Err("Herdr command timed out".into()),
         }
     }
 
     fn printed(&self) -> Option<&str> {
         match self {
             ProcessReply::Succeeded(printout) => Some(printout.stdout.0.as_str()),
-            ProcessReply::Unstarted(_) | ProcessReply::Failed(_) | ProcessReply::Cancelled => None,
+            ProcessReply::Unstarted(_)
+            | ProcessReply::Failed(_)
+            | ProcessReply::Unreadable(_)
+            | ProcessReply::Cancelled
+            | ProcessReply::TimedOut => None,
         }
     }
 
@@ -615,5 +636,71 @@ impl Emittable<HerdrCli> for FlowIdentityClaim {
             }
         }
         command.output().process_reply()
+    }
+}
+
+/// Git spoken in the handover archive's work tree, by whatever runner the
+/// archive holds, bounded by one publication's deadline.
+pub(crate) struct ArchiveGit<'archive> {
+    pub(crate) runner: &'archive dyn crate::handover_archive::RunsGitCommand,
+    pub(crate) repository: &'archive std::path::Path,
+    pub(crate) deadline: std::time::Instant,
+}
+
+/// The words a Git command is spoken in, after `git -C <work tree>`.
+trait SpeaksGit {
+    fn git_words(&self) -> Vec<String>;
+}
+
+impl SpeaksGit for GitCommand {
+    fn git_words(&self) -> Vec<String> {
+        match self {
+            GitCommand::ShowsWorkTree => vec!["rev-parse".into(), "--is-inside-work-tree".into()],
+            GitCommand::ResolveRevision(GitRevision::Head) => {
+                vec!["rev-parse".into(), "HEAD".into()]
+            }
+            GitCommand::ResolveRevision(GitRevision::ArchivedAt(archived)) => vec![
+                "rev-parse".into(),
+                format!("{}:{}", archived.git_commit.0, archived.archive_path.0),
+            ],
+            GitCommand::ShowBlob(blob) => vec!["cat-file".into(), "blob".into(), blob.0.clone()],
+            GitCommand::ListTracked(path) => vec![
+                "ls-files".into(),
+                "--error-unmatch".into(),
+                "--".into(),
+                path.0.clone(),
+            ],
+            GitCommand::ShortStatus(path) => vec![
+                "status".into(),
+                "--porcelain".into(),
+                "--".into(),
+                path.0.clone(),
+            ],
+            GitCommand::Add(path) => vec!["add".into(), "--".into(), path.0.clone()],
+            GitCommand::CommitOnly(path) => vec![
+                "commit".into(),
+                "--only".into(),
+                "-m".into(),
+                "Archive handover".into(),
+                "--".into(),
+                path.0.clone(),
+            ],
+        }
+    }
+}
+
+/// One Git process through the archive's runner: what it printed, or that
+/// the publication's deadline passed first.
+impl Emittable<ArchiveGit<'_>> for GitCommand {
+    fn emit(&self, git: &ArchiveGit<'_>) -> ProcessReply {
+        use crate::handover_archive::HandoverArchiveRefusal;
+        let words = self.git_words();
+        let arguments = words.iter().map(String::as_str).collect::<Vec<_>>();
+        match git.runner.run(git.repository, &arguments, git.deadline) {
+            Ok(output) => Ok(output).process_reply(),
+            Err(HandoverArchiveRefusal::PublicationTimedOut) => ProcessReply::TimedOut,
+            Err(HandoverArchiveRefusal::Git(error)) => ProcessReply::Unstarted(error),
+            Err(refusal) => ProcessReply::Unstarted(refusal.to_string()),
+        }
     }
 }

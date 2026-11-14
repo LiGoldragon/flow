@@ -5692,6 +5692,11 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                 Some(("flow-nexus-send-outcome", "flow-nexus-send-outcome-v7"))
             }
             "flow_nexus_send_calls" => Some(("flow-nexus-send-call", "flow-nexus-send-call-v7")),
+            // Unchanged from 0.53.2 until the successor intent recorded the emergency cause (v4).
+            "flow_nexus_successor_intents" => Some((
+                "flow-nexus-successor-intent",
+                "flow-nexus-successor-intent-v3",
+            )),
             // Unchanged from 0.53.2 until 0.54.3 named a Herdr session.
             "flow_nexus_meta_nexus_configuration" => Some((
                 "flow-nexus-meta-nexus-configuration",
@@ -5727,9 +5732,17 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
         let identity = registration.identity();
         FlowStore::request_id_predecessor_family_identity(table_key).is_some_and(
             |(family, schema_hash)| {
+                // The handover configuration is `-v2` in 0.53.2 and was `-v1`
+                // before it; the current family is `-v3`, and the chain on
+                // open takes either to it.
+                let predecessor_handover = table_key == OPTIONAL_HANDOVER_TABLE
+                    && (identity.schema_hash()
+                        == SchemaHash::for_label("flow-nexus-handover-configuration-v1")
+                        || identity.schema_hash()
+                            == SchemaHash::for_label("flow-nexus-handover-configuration-v2"));
                 identity.table_name() == table_key
                     && identity.family().as_str() == family
-                    && identity.schema_hash() == schema_hash
+                    && (identity.schema_hash() == schema_hash || predecessor_handover)
             },
         )
     }

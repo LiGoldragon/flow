@@ -41,7 +41,7 @@ pub(crate) trait ConfiguresCounters {
     fn configure_counters(
         &self,
         declared: ConfigureCounters,
-    ) -> Result<ConfigureOutcome, StoreError>;
+    ) -> Result<ConfigurationCommit, StoreError>;
 }
 
 impl ConfiguresCounters for FlowStore {
@@ -58,7 +58,7 @@ impl ConfiguresCounters for FlowStore {
     fn configure_counters(
         &self,
         declared: ConfigureCounters,
-    ) -> Result<ConfigureOutcome, StoreError> {
+    ) -> Result<ConfigurationCommit, StoreError> {
         let logical = LogicalDeliveryIds(self);
         let queue = QueueAttemptIds(self);
         let sent = SendOutcomeIds(self);
@@ -85,7 +85,7 @@ impl ConfiguresCounters for FlowStore {
             )));
         }
         if declared == standing {
-            return Ok(ConfigureOutcome::Unchanged);
+            return Ok(ConfigurationCommit::Unchanged);
         }
         let commit = self.engine.begin_atomic_commit();
         let commit =
@@ -93,6 +93,6 @@ impl ConfiguresCounters for FlowStore {
         let commit = queue.declare_next_id(commit, &queue_counter, declared.queue_attempt.0)?;
         let commit = sent.declare_next_id(commit, &sent_counter, declared.send_outcome.0)?;
         self.engine.commit_atomic(commit)?;
-        Ok(ConfigureOutcome::Replaced)
+        Ok(ConfigurationCommit::Written)
     }
 }

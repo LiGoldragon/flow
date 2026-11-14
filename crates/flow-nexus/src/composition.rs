@@ -12,7 +12,7 @@
 //! holds its predecessor's handover and, after it, the requests its
 //! permaflow still owes an answer. When it does not fit one message it is
 //! sent in as many numbered parts as it takes, one right after another. A
-//! simplified flow keeps its USER modules in its own system prompt.
+//! simplified flow keeps its prompt modules in its own system prompt.
 
 use crate::context::{ComposesFlowContext, ContextComposer, VerifiedContext, VerifiesContext};
 pub use crate::generated::starter::{
@@ -427,15 +427,15 @@ impl ValidatesLaunchProfile for LaunchProfile {
                 CompositionRefusal::InvalidSystemModules,
             ));
         }
-        if !identities_valid(&profile.user_modules.0)
+        if !identities_valid(&profile.prompt_modules.0)
             || profile
-                .user_modules
+                .prompt_modules
                 .0
                 .iter()
                 .any(|identity| profile.system_modules.0.contains(identity))
         {
             return Err(CompositionError::InvalidProfileField(
-                CompositionRefusal::InvalidUserModules,
+                CompositionRefusal::InvalidPromptModules,
             ));
         }
         let remembering_valid = match &profile.remembering {
@@ -506,18 +506,18 @@ impl ComposesVerifiedContext for LaunchComposer {
         // A module is placed by its kind: spirit and intent in the system
         // prompt, every other kind in the first message, whichever list of
         // the launch names it; each keeps its order.
-        let (system_modules, user_modules): (Vec<_>, Vec<_>) = profile
+        let (system_modules, prompt_modules): (Vec<_>, Vec<_>) = profile
             .system_modules
             .0
             .iter()
-            .chain(profile.user_modules.0.iter())
+            .chain(profile.prompt_modules.0.iter())
             .cloned()
             .partition(|identity| identity.0.as_str().placed_in_system_prompt());
         let request = ContextRequest {
             address: profile.address.clone(),
             harness_kind: input.harness_kind(),
             system_modules: signal_flow::SystemModules(system_modules),
-            user_modules: signal_flow::UserModules(user_modules),
+            prompt_modules: signal_flow::PromptModules(prompt_modules),
             remembered_flows: input.remembered_flows(),
         };
         let composition = self.context.compose_flow_context(&request)?;
@@ -705,7 +705,7 @@ impl ComposesInRoot for LaunchComposer {
         };
         let mut segments = verified.user_segments();
         // The raw records of the flows the launch remembers follow its
-        // USER modules, as one segment, ahead of the brief.
+        // prompt modules, as one segment, ahead of the brief.
         let records = verified.records_text();
         if !records.is_empty() {
             segments.push(records);
@@ -713,7 +713,7 @@ impl ComposesInRoot for LaunchComposer {
         if harnessed.launch_profile.flow_kind == signal_flow::FlowKind::Simplified {
             // A simplified flow must not receive a context-only startup turn:
             // its first user message belongs to the first queued request.
-            // Keep every declared user module, but compose it into the system
+            // Keep every declared prompt module, but compose it into the system
             // prompt before the literal presentation role. A real initial
             // instruction remains the first user message; an empty one does
             // not create a context-only startup turn.
@@ -829,7 +829,7 @@ pub struct FreshSeat {
     pub effort: String,
     pub herdr_session_name: String,
     pub system_modules: signal_flow::SystemModules,
-    pub user_modules: signal_flow::UserModules,
+    pub prompt_modules: signal_flow::PromptModules,
     pub leave_outs_option: Option<Vec<LeaveOut>>,
     pub flow_kind: signal_flow::FlowKind,
     pub tool_set: signal_flow::ToolSet,
@@ -898,7 +898,7 @@ impl ProfilesFreshSeat for FreshSeat {
         LaunchProfile {
             launch_request_id: signal_flow::LaunchRequestId(self.launch_request_id.clone()),
             system_modules: self.system_modules.clone(),
-            user_modules: self.user_modules.clone(),
+            prompt_modules: self.prompt_modules.clone(),
             address: self.address.clone(),
             model_name: signal_flow::ModelName(self.model_name.clone()),
             effort: signal_flow::Effort(self.effort.clone()),
@@ -934,7 +934,7 @@ pub(crate) mod tests {
                 signal_flow::ModuleIdentity("spirit:core:0".into()),
                 signal_flow::ModuleIdentity("intent:flow:0".into()),
             ]),
-            user_modules: signal_flow::UserModules(vec![
+            prompt_modules: signal_flow::PromptModules(vec![
                 signal_flow::ModuleIdentity("operation:main-flow:0".into()),
                 signal_flow::ModuleIdentity("knowledge:flow:0".into()),
             ]),
@@ -983,11 +983,11 @@ pub(crate) mod tests {
     }
 
     /// The raw records of the flows a launch remembers are composed into its
-    /// first message after its USER modules and before its brief, and the
+    /// first message after its prompt modules and before its brief, and the
     /// composer is asked for exactly those flows; a launch remembering none
     /// carries none.
     #[test]
-    fn remembered_flows_raw_records_follow_the_user_modules_in_the_first_message() {
+    fn remembered_flows_raw_records_follow_the_prompt_modules_in_the_first_message() {
         let mut context = FixtureComposer::from(
             &[
                 ("spirit:core:0", "Spirit body."),
@@ -1407,14 +1407,14 @@ pub(crate) mod tests {
     }
 
     /// A first message too large for one message is sent in as many parts
-    /// as it takes, one right after another; no USER module joins the
+    /// as it takes, one right after another; no prompt module joins the
     /// system prompt, which holds spirit and intent alone.
     #[test]
     fn a_message_too_large_for_one_message_is_sent_in_parts_and_never_moves_to_the_system_prompt() {
         let size = 400_000;
         let (composer, names) = large(&[size, size, size]);
         let mut profile = fixture_profile();
-        profile.user_modules = signal_flow::UserModules(
+        profile.prompt_modules = signal_flow::PromptModules(
             names
                 .iter()
                 .cloned()
@@ -1470,7 +1470,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn simplified_launch_keeps_user_modules_in_system_and_has_no_startup_turn() {
+    fn simplified_launch_keeps_prompt_modules_in_system_and_has_no_startup_turn() {
         // A simplified flow takes whatever tool set it is configured with,
         // the default included.
         let mut profile = fixture_profile();
@@ -1535,14 +1535,15 @@ pub(crate) mod tests {
         assert!(composed.first_prompt_payload.prompt_part_vector.is_empty());
     }
 
-    /// One USER module larger than one message is not cut and never moved
+    /// One prompt module larger than one message is not cut and never moved
     /// into the system prompt: the launch is refused.
     #[test]
     fn a_module_too_large_for_one_message_refuses_the_launch() {
         let (composer, names) = large(&[1_100_000]);
         let mut profile = fixture_profile();
-        profile.user_modules =
-            signal_flow::UserModules(names.into_iter().map(signal_flow::ModuleIdentity).collect());
+        profile.prompt_modules = signal_flow::PromptModules(
+            names.into_iter().map(signal_flow::ModuleIdentity).collect(),
+        );
         assert_eq!(
             composer.compose(
                 crate::composition::HarnessedProfile {
@@ -1600,7 +1601,7 @@ pub(crate) mod tests {
             signal_flow::ModuleIdentity("vision:flow:0".into()),
             signal_flow::ModuleIdentity("spirit:legacy:0".into()),
         ]);
-        profile.user_modules = signal_flow::UserModules(vec![
+        profile.prompt_modules = signal_flow::PromptModules(vec![
             signal_flow::ModuleIdentity("intent:flow:0".into()),
             signal_flow::ModuleIdentity("knowledge:flow:0".into()),
             signal_flow::ModuleIdentity("compensation:truth:0".into()),
@@ -1652,7 +1653,7 @@ pub(crate) mod tests {
             signal_flow::ModuleIdentity("spirit:core:0".into()),
             signal_flow::ModuleIdentity("intent:large:0".into()),
         ]);
-        profile.user_modules = signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+        profile.prompt_modules = signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
             "knowledge:small:0".into(),
         )]);
         let composed = composer
@@ -1713,7 +1714,7 @@ pub(crate) mod tests {
                 let modules = if system {
                     &mut profile.system_modules.0
                 } else {
-                    &mut profile.user_modules.0
+                    &mut profile.prompt_modules.0
                 };
                 modules[0] = signal_flow::ModuleIdentity(identity.into());
                 assert_eq!(
@@ -1728,7 +1729,7 @@ pub(crate) mod tests {
                     Err(CompositionError::InvalidProfileField(if system {
                         CompositionRefusal::InvalidSystemModules
                     } else {
-                        CompositionRefusal::InvalidUserModules
+                        CompositionRefusal::InvalidPromptModules
                     })),
                     "{identity} in system={system}",
                 );
@@ -1756,8 +1757,8 @@ pub(crate) mod tests {
             profile.system_modules = signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
                 "spirit:core:0".into(),
             )]);
-            profile.user_modules =
-                signal_flow::UserModules(vec![signal_flow::ModuleIdentity(identity.into())]);
+            profile.prompt_modules =
+                signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(identity.into())]);
             let composed = composer
                 .compose(
                     HarnessedProfile {
@@ -1789,15 +1790,15 @@ pub(crate) mod tests {
                     .0
                     .push(signal_flow::ModuleIdentity("/abs/path.md".into()))
             }),
-            (CompositionRefusal::InvalidUserModules, |profile| {
+            (CompositionRefusal::InvalidPromptModules, |profile| {
                 profile
-                    .user_modules
+                    .prompt_modules
                     .0
                     .push(signal_flow::ModuleIdentity("knowledge:flow:0".into()))
             }),
-            (CompositionRefusal::InvalidUserModules, |profile| {
+            (CompositionRefusal::InvalidPromptModules, |profile| {
                 profile
-                    .user_modules
+                    .prompt_modules
                     .0
                     .push(signal_flow::ModuleIdentity("spirit:core:0".into()))
             }),
@@ -1832,7 +1833,7 @@ pub(crate) mod tests {
     #[test]
     fn a_missing_identity_refuses_the_launch_with_its_identity() {
         let mut profile = fixture_profile();
-        profile.user_modules.0.push(signal_flow::ModuleIdentity(
+        profile.prompt_modules.0.push(signal_flow::ModuleIdentity(
             "knowledge:unknown-module:0".into(),
         ));
         assert_eq!(

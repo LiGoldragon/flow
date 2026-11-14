@@ -124,7 +124,7 @@ fn declare_secondary(fixture: &NexusFixture, continuity: meta_signal_flow::Conti
                     signal_flow::ModuleIdentity("spirit:core:0".into()),
                     signal_flow::ModuleIdentity("intent:flow:0".into()),
                 ]),
-                user_modules: signal_flow::UserModules(vec![]),
+                prompt_modules: signal_flow::PromptModules(vec![]),
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
                 continuity,

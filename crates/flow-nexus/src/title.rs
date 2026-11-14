@@ -91,7 +91,7 @@ mod tests {
                 signal_flow::ModuleIdentity("spirit:core:0".into()),
                 signal_flow::ModuleIdentity("intent:flow:0".into()),
             ]),
-            user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+            prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
                 "operation:main-flow:0".into(),
             )]),
             address: signal_flow::Address {

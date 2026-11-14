@@ -188,7 +188,7 @@ fn declare(fixture: &NexusFixture, root_option: Option<String>) {
                 signal_flow::ModuleIdentity("spirit:core:0".into()),
                 signal_flow::ModuleIdentity("intent:flow:0".into()),
             ]),
-            user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+            prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
                 "operation:main-flow:0".into(),
             )]),
             flow_kind: signal_flow::FlowKind::Regular,
@@ -408,7 +408,7 @@ fn a_launch_whose_root_cannot_be_resolved_is_refused_naming_its_predecessor() {
             root_option: Some(meta_signal_flow::Root(root.clone())),
             address: profile.address.clone(),
             system_modules: profile.system_modules.clone(),
-            user_modules: profile.user_modules.clone(),
+            prompt_modules: profile.prompt_modules.clone(),
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
             continuity: Continuity::Maintained,
@@ -853,7 +853,7 @@ fn an_on_demand_seat_whose_successor_is_refused_its_handover_is_not_closed() {
                         signal_flow::ModuleIdentity("spirit:core:0".into()),
                         signal_flow::ModuleIdentity("intent:flow:0".into()),
                     ]),
-                    user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+                    prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
                         "operation:main-flow:0".into(),
                     )]),
                     flow_kind: signal_flow::FlowKind::Regular,

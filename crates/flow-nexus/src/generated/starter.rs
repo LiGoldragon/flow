@@ -15,7 +15,7 @@ pub struct ContextRequest {
     pub address: signal_flow::Address,
     pub harness_kind: signal_flow::HarnessKind,
     pub system_modules: signal_flow::SystemModules,
-    pub user_modules: signal_flow::UserModules,
+    pub prompt_modules: signal_flow::PromptModules,
     pub remembered_flows: RememberedFlows,
 }
 #[rustfmt::skip]
@@ -36,7 +36,7 @@ pub struct Purpose(pub String);
 pub struct FreshContext {
     pub herdr_session_name: signal_flow::HerdrSessionName,
     pub system_modules: signal_flow::SystemModules,
-    pub user_modules: signal_flow::UserModules,
+    pub prompt_modules: signal_flow::PromptModules,
     pub leave_outs_option: std::option::Option<signal_flow::LeaveOuts>,
     pub flow_kind: signal_flow::FlowKind,
     pub tool_set: signal_flow::ToolSet,

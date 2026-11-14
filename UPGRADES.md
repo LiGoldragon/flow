@@ -1,7 +1,24 @@
 # Flow 0.55.0: a permaflow carries its leave-outs; one value of one permaflow changed alone
 
-Contracts: signal-flow 61.0.0 (4871bb8) and meta-signal-flow 78.0.0
-(3d4cf0a). **The stored format changes.**
+Contracts: signal-flow 62.0.0 (37e99d3) and meta-signal-flow 78.0.0
+(ac7db8a), on build base 306abea. **The stored format changes.**
+
+- **A Configure answers its change.** Every Configure answers
+  `Configured.<the change it was given>`, echoed whole, whether or not
+  anything was written: a change that changes nothing still writes nothing
+  and answers the same echo,
+  `Configured.Amend.{ { Psyche core Fable } Add.PromptModule.vision:energy-nexus:1 }`.
+  `Configured.Replaced` and `Configured.Unchanged` are gone. A Remove
+  answers `Removed.<the Removal it was given>`, echoed the same way. Every
+  refusal is `ConfigureRefused.<refusal>`, with the variants
+  `ConfigureRejected` had. A caller that matched `Configured.Replaced` or
+  `Configured.Unchanged` matches `Configured.` (the CriomOS-home configure
+  script does).
+- **PromptModules.** The permaflow's first-prompt modules are
+  `PromptModules` (signal-flow 62.0.0, renamed from `UserModules`), in
+  the launch profile and the permaflow declaration alike, and
+  `CompositionRefusal.InvalidUserModules` is `InvalidPromptModules`. The
+  stored layout is unchanged; only the names move.
 
 - **A permaflow is one definition.** `ConfigureMetaflow` carries its
   leave-outs after its workspace, and the leave-out family is gone:
@@ -13,7 +30,7 @@ Contracts: signal-flow 61.0.0 (4871bb8) and meta-signal-flow 78.0.0
 - **A leave-out of another harness is an unknown feature.** A `Permaflow`,
   a `Metaflows` entry or an `Amend` naming a leave-out of another harness
   than its Address's Model runs on is refused
-  `ConfigureRejected.UnknownFeature.<leave-out>`, nothing written. The
+  `ConfigureRefused.UnknownFeature.<leave-out>`, nothing written. The
   harness is derived as a launch derives it: the native model `Models`
   names for the Model, on Codex when a declared Codex endpoint lists it, on
   Claude otherwise. While no native model is configured for the Model, or
@@ -26,8 +43,8 @@ Contracts: signal-flow 61.0.0 (4871bb8) and meta-signal-flow 78.0.0
   written back by the single-entry commit `Configure.Permaflow` takes, so
   nothing else in the store changes; the read and the write are one turn
   of the meta socket, which serves one dispatch at a time under the
-  dispatch gate. A change that changes nothing answers `Configured.Unchanged`
-  and writes nothing. Refusals: `UnknownPermaflow.<Address>`,
+  dispatch gate. A change that changes nothing writes nothing and answers
+  the same echo. Refusals: `UnknownPermaflow.<Address>`,
   `TopicRefused`, `UnknownFeature`, and for a module added,
   `UnknownModule.<identity>` (not `type:subject:version`, or Curriculum
   does not hold it, asked by `ResolveSources` through the configured

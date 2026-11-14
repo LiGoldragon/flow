@@ -78,7 +78,7 @@ fn declare(fixture: &NexusFixture, at: Address) {
                 signal_flow::ModuleIdentity("spirit:core:0".into()),
                 signal_flow::ModuleIdentity("intent:flow:0".into()),
             ]),
-            user_modules: signal_flow::UserModules(vec![signal_flow::ModuleIdentity(
+            prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
                 "operation:main-flow:0".into(),
             )]),
             flow_kind: signal_flow::FlowKind::Regular,

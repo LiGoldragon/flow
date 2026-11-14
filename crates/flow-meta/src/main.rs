@@ -387,7 +387,7 @@ mod tests {
                 system_modules: signal_flow::SystemModules(vec![signal_flow::ModuleIdentity(
                     "spirit:core:0".into(),
                 )]),
-                user_modules: signal_flow::UserModules(vec![]),
+                prompt_modules: signal_flow::PromptModules(vec![]),
                 flow_kind: FlowKind::Regular,
                 tool_set: match index % 3 {
                     0 => ToolSet::Default,

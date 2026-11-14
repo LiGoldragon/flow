@@ -20,7 +20,7 @@
 Library
 [ signal_flow:[ Address HarnessKind LaunchProfile
                  PromptDeliveryIntent NativeTargetReceipt FlowId
-                 SessionId Origin SystemModules UserModules
+                 SessionId Origin SystemModules PromptModules
                  HerdrSessionName LeaveOuts FlowKind ToolSet
                  LeaveOutRefusal ComposedLaunch
                  ContextRefusal SystemPrompt HerdrPaneBinding
@@ -32,13 +32,13 @@ Library
   ; raw vision and notion records are composed into its first message.
   RememberedFlows.Vector<FlowId>
   ; What a launch asks of the context composer.
-  ContextRequest.{ Address HarnessKind SystemModules UserModules RememberedFlows }
+  ContextRequest.{ Address HarnessKind SystemModules PromptModules RememberedFlows }
   ; A launch profile with the harness the Nexus derived for its model and
   ; the flows its Remembering resolved to.
   HarnessedProfile.{ LaunchProfile HarnessKind RememberedFlows }
   ; What a fresh wake takes from the metaflow's declaration, else its last
   ; launch: the purpose is the declaration's, composed ahead of the brief.
-  FreshContext.{ HerdrSessionName SystemModules UserModules Option<LeaveOuts> FlowKind ToolSet Purpose.String }
+  FreshContext.{ HerdrSessionName SystemModules PromptModules Option<LeaveOuts> FlowKind ToolSet Purpose.String }
   ; A Started launch as its outcome row keeps it; the flow's route is read
   ; from the flow's own row when the reply is made.
   LaunchedRecord.{ FlowId SessionId Origin }

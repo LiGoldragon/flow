@@ -301,10 +301,12 @@ A new store persists these; a populated store resumes what it holds; meta
 family whole, `Nexus`, `Models`, `Thresholds` or `Metaflows`, and replaces
 the committed family in one commit, so the effective configuration is always
 the last declaration of each family: an entry the declaration leaves out is
-removed. It answers `Configured.Replaced`, or `Configured.Unchanged` when
-nothing differs; `ConfigureRejected.DuplicateEntry` (one Model, or one Address, named twice),
-`ConfigureRejected.CodexModelsOverlap` and
-`ConfigureRejected.UnknownFeature` change nothing. `Models` holds one
+removed. It answers `Configured` with the change it was given, echoed
+whole, also when nothing differs and nothing is written:
+`Configured.Models.[ { Sol gpt-6-sol } ]`. `ConfigureRefused.DuplicateEntry`
+(one Model, or one Address, named twice),
+`ConfigureRefused.CodexModelsOverlap` and
+`ConfigureRefused.UnknownFeature` change nothing. `Models` holds one
 native model per Model, `{ Sol gpt-6-sol }`; a Start or
 Replace naming any other model than the one configured for its Address's
 Model, compared name for name, is
@@ -317,7 +319,9 @@ records it (`claude-haiku-5-5`); a launch naming an alias (`haiku`) or a
 suffixed name (`claude-opus-5-5[1m]`) is `StartRejected.CompositionRefused`.
 A permaflow is one definition: its declaration (`Configure.Permaflow`, or
 an entry of `Metaflows`) carries, after its workspace, the leave-outs its
-flows start without, of the harness its Model runs on,
+flows start without, of the harness its Model runs on, then its
+`SystemModules`, composed into the system prompt, and its `PromptModules`,
+composed into the first prompt,
 `{ { Psyche flow Opus } None [ SkillTool WorkflowTool ] [ spirit:core:0 ] [] Regular Default OnDemand «» [] }`;
 one naming a leave-out of the other harness is refused
 `UnknownFeature.<leave-out>` while that harness is known (the Model's
@@ -329,7 +333,9 @@ permaflow alone: `Workspace`, `Purpose`, `Kind` or `Continuity` replaced, or
 one `SystemModule`, `PromptModule` or `LeaveOut` added with `Add` or taken
 out with `Remove`, `Configure.Amend.{ { Psyche core Fable } Add.PromptModule.vision:energy-nexus:1 }`.
 It is read and written back in one single-entry commit, the rest of the
-store kept; a change that changes nothing answers `Configured.Unchanged`.
+store kept, and answers `Configured` with the Amend echoed,
+`Configured.Amend.{ { Psyche core Fable } Add.PromptModule.vision:energy-nexus:1 }`;
+a change that changes nothing writes nothing and answers the same echo.
 An Address with no permaflow is refused `UnknownPermaflow`; a module added
 is resolved by Curriculum first (`UnknownModule`, `CurriculumUnavailable`).
 Every declaration takes effect at the permaflow's next flow. A

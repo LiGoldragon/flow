@@ -195,7 +195,7 @@ impl SelectsStartup for ContextRequest {
                     .collect(),
             ),
             user_modules: crate::generated::curriculum::UserModules(
-                self.user_modules
+                self.prompt_modules
                     .0
                     .iter()
                     .map(|identity| {
@@ -373,7 +373,7 @@ impl VerifiesContext for VerifiedContext {
             .zip(std::iter::repeat(&system_rows))
             .chain(
                 request
-                    .user_modules
+                    .prompt_modules
                     .0
                     .iter()
                     .zip(std::iter::repeat(&user_rows)),
@@ -488,7 +488,7 @@ impl ComposesFlowContext for FixtureComposer {
         let mut rows = Vec::new();
         for (identities, placement) in [
             (&request.system_modules.0, StartupPlacement::System),
-            (&request.user_modules.0, StartupPlacement::User),
+            (&request.prompt_modules.0, StartupPlacement::User),
         ] {
             for (ordinal, identity) in identities.iter().enumerate() {
                 let body = self
@@ -539,7 +539,7 @@ impl ComposesFlowContext for FixtureComposer {
                 .collect::<Vec<_>>()
         };
         let system_text = rendered(&texts(&request.system_modules.0));
-        let user_text = rendered(&texts(&request.user_modules.0));
+        let user_text = rendered(&texts(&request.prompt_modules.0));
         // A remembered flow that logged no record composes nothing.
         let records_text = request
             .remembered_flows
@@ -632,7 +632,7 @@ mod tests {
                     crate::generated::curriculum::ModuleIdentity("intent:flow:0".into()).0,
                 ),
             ]),
-            user_modules: signal_flow::UserModules(vec![
+            prompt_modules: signal_flow::PromptModules(vec![
                 signal_flow::ModuleIdentity(
                     crate::generated::curriculum::ModuleIdentity("operation:main-flow:0".into()).0,
                 ),
@@ -714,7 +714,7 @@ mod tests {
     fn an_identity_the_composer_does_not_hold_is_rejected() {
         let mut request = request();
         request
-            .user_modules
+            .prompt_modules
             .0
             .push(signal_flow::ModuleIdentity("unknown-module".into()));
         assert_eq!(

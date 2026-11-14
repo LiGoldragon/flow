@@ -65,7 +65,7 @@ impl IdentifiesThread for RunningNexus {
             .root_thread(&native_session_id.0);
         match self.store.thread_metaflow(&root_thread)? {
             Some(metaflow) if !self.rest_ended_awake(&metaflow.address) => {
-                Ok(Output::Identified(metaflow.address))
+                Ok(Output::ThreadIdentified(metaflow.address))
             }
             _ => Ok(Output::Refused(Refusal::unidentified(process))),
         }

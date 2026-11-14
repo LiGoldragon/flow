@@ -325,7 +325,7 @@ fn clear_and_clear_all_empty_queues_that_queues_reads() {
     assert!(queued(&fixture, &first).is_empty());
     assert_eq!(
         fixture.nexus.dispatch(Input::ClearAll),
-        Output::Cleared(vec![c.request_id])
+        Output::AllCleared(vec![c.request_id])
     );
     assert!(queued(&fixture, &second).is_empty());
     assert_eq!(

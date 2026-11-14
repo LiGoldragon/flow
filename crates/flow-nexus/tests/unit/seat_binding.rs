@@ -424,7 +424,7 @@ fn a_codex_seat_herdr_reports_no_session_for_binds_from_its_named_pane() {
             address: address.clone(),
             seat_pane: pane("w12:p1"),
         }),
-        Output::Bound(flow_ethos::FlowId("877549".into()))
+        Output::SeatBound(flow_ethos::FlowId("877549".into()))
     );
     assert!(
         fixture.nexus.store.launch_changes.current() > before_adoption,
@@ -511,7 +511,7 @@ fn a_real_cli_caller_is_answered_alike_whoever_it_is() {
             .collect()
     );
     let bind = configured.call(bind_seat(terra.clone()), Some(ROOT));
-    assert_eq!(bind.answer, "Bound.877549");
+    assert_eq!(bind.answer, "SeatBound.877549");
     assert_eq!(bind.codex_thread.as_deref(), Some(ROOT));
     let node = configured
         .fixture
@@ -596,7 +596,7 @@ fn a_real_cli_caller_is_answered_alike_whoever_it_is() {
     // Unbound.
     let unconfigured = CodexCliWorld::new(false, Model::Terra);
     let unconfigured_bind = unconfigured.call(bind_seat(terra.clone()), Some(ROOT));
-    assert_eq!(unconfigured_bind.answer, "Bound.877549");
+    assert_eq!(unconfigured_bind.answer, "SeatBound.877549");
     assert_eq!(unconfigured_bind.codex_thread, None);
     assert_eq!(unconfigured_bind.sending_address, None);
     unconfigured
@@ -638,7 +638,7 @@ fn a_real_cli_caller_is_answered_alike_whoever_it_is() {
     // to the Luna seat and to a caller in no flow alike.
     let wrong_seat = CodexCliWorld::new(true, Model::Luna);
     let luna_bind = wrong_seat.call(bind_seat(luna.clone()), Some(ROOT));
-    assert_eq!(luna_bind.answer, "Bound.877549");
+    assert_eq!(luna_bind.answer, "SeatBound.877549");
     let luna_keep = wrong_seat.call(keep(terra.clone(), "diagnostic"), Some(ROOT));
     assert_eq!(luna_keep.sending_address, Some(luna.clone()));
     assert_eq!(luna_keep.answer, "KeepRefused.UnknownFlow");
@@ -864,7 +864,7 @@ fn a_known_claude_seat_binds_from_its_named_pane_whoever_asks() {
                 address: address.clone(),
                 seat_pane: pane("w1:p3"),
             }),
-            Output::Bound(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+            Output::SeatBound(flow_ethos::FlowId(CLAUDE_SEAT.into()))
         );
     }
     // A pane Herdr shows no agent in names no seat.
@@ -1014,7 +1014,7 @@ fn a_claude_seat_binds_on_an_empty_store_under_its_sessions_flow_id() {
                 address: address.clone(),
                 seat_pane: claude_pane("w1:p3"),
             }),
-            Output::Bound(flow_ethos::FlowId(HARNESS_FLOW_ID.into())),
+            Output::SeatBound(flow_ethos::FlowId(HARNESS_FLOW_ID.into())),
             "{reported:?}: the Claude seat binds under its session's Flow ID"
         );
         let peer = FlowStore::process_identity_for_pid(claude.0.id()).unwrap();

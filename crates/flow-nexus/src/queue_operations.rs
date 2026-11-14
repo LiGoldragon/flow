@@ -287,7 +287,7 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
                 Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
             }
         }
-        Output::Cleared(withdrawn)
+        Output::AllCleared(withdrawn)
     }
 
     fn push(&self, address: &Address, priority: &Priority) -> Output {

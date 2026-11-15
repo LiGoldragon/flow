@@ -429,6 +429,16 @@ impl VerifiesContext for VerifiedContext {
             return Err(ContextRefusal::PayloadMismatch);
         }
         let rows = &composition.context_provenance_vector;
+        // The producer expands bindings/dependencies once per actual identity.
+        // A distinct singleton and containing span remain distinct; repeating
+        // one actual identity is refused even across placements.
+        let mut actual_identities = std::collections::HashSet::new();
+        if !rows
+            .iter()
+            .all(|row| actual_identities.insert(&row.module_identity))
+        {
+            return Err(ContextRefusal::PayloadMismatch);
+        }
         let placed = |placement: StartupPlacement| -> Vec<ContextProvenance> {
             rows.iter()
                 .filter(|row| row.startup_placement == placement)
@@ -955,5 +965,66 @@ mod tests {
                 last: signal_curriculum_nexus::Last(signal_curriculum_nexus::Version(1)),
             });
         assert!(!invalid.matches_binding("knowledge:topic:2"));
+    }
+    #[test]
+    fn repeated_actual_identity_is_refused_with_consistent_rendering_hashes_and_ordinals() {
+        use super::CutsRenderedText;
+        use sha2::{Digest, Sha256};
+        use signal_curriculum_nexus::StartupPlacement;
+        for duplicate_at in [StartupPlacement::System, StartupPlacement::User] {
+            let mut request = request();
+            request.system_modules.0 =
+                vec![signal_flow::ModuleIdentity("knowledge:duplicate:1".into())];
+            request.prompt_modules.0.clear();
+            let mut reply_selection = request.clone();
+            match duplicate_at {
+                StartupPlacement::System => reply_selection
+                    .system_modules
+                    .0
+                    .push(request.system_modules.0[0].clone()),
+                StartupPlacement::User => reply_selection
+                    .prompt_modules
+                    .0
+                    .push(request.system_modules.0[0].clone()),
+            }
+            // Compose the adversarial reply afresh, not by corrupting an old
+            // hash: both rendered bodies, placement-local ordinals and all
+            // three payload digests are internally valid.
+            let composer =
+                FixtureComposer::from(&[("knowledge:duplicate:1", "Repeated body.")][..]);
+            let reply = composer.compose_flow_context(&reply_selection).unwrap();
+            assert_eq!(reply.context_provenance_vector.len(), 2);
+            for (text, hash) in [
+                (&reply.system_text.0, &reply.system_payload_sha256.0),
+                (&reply.user_text.0, &reply.user_payload_sha256.0),
+                (&reply.records_text.0, &reply.records_payload_sha256.0),
+            ] {
+                assert_eq!(&format!("{:x}", Sha256::digest(text.as_bytes())), hash);
+            }
+            for placement in [StartupPlacement::System, StartupPlacement::User] {
+                let placed = reply
+                    .context_provenance_vector
+                    .iter()
+                    .filter(|r| r.startup_placement == placement)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                assert!(
+                    placed
+                        .iter()
+                        .enumerate()
+                        .all(|(i, r)| r.integer == i as i64)
+                );
+                let text = match placement {
+                    StartupPlacement::System => &reply.system_text.0,
+                    StartupPlacement::User => &reply.user_text.0,
+                };
+                assert!(text.as_str().rendered_segments(&placed).is_some());
+            }
+            assert_eq!(
+                VerifiedContext::verified(&request, &reply),
+                Err(ContextRefusal::PayloadMismatch),
+                "duplicate at {duplicate_at:?}"
+            );
+        }
     }
 }

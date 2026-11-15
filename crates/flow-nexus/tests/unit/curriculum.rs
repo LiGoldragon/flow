@@ -184,7 +184,7 @@ fn old_ordinary_archives_are_not_typed_startup_operations() {
 }
 
 /// Actual producer60609 selection Single1 expands to the singleton, containing
-/// span and its dependency. Flow keeps all actual identities, source paths and
+/// span and co-selected energy module. Flow keeps actual identities, source paths and
 /// rendered slices rather than flattening them to the requested binding.
 #[test]
 fn real_numeric_binding_and_exact_span_frames_keep_actual_provenance() {
@@ -208,7 +208,7 @@ fn real_numeric_binding_and_exact_span_frames_keep_actual_provenance() {
                 topic: flow_ethos::Topic("core".into()),
                 model: Model::Sol,
             },
-            &[identity],
+            &[identity, "intent:energy:0"],
             &[],
         );
         assert_eq!(

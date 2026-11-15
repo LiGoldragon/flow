@@ -1,0 +1,39 @@
+StartupComposed.{ «These are your skills, given here; do not reload them.
+
+Module IDs: spirit:binding:0-1, intent:energy:0
+
+<!-- module: spirit:binding:0-1 -->
+BINDING_SPAN_BODY
+<!-- end-module: spirit:binding:0-1 -->
+
+<!-- module: intent:energy:0 -->
+INTENT_BODY
+<!-- end-module: intent:energy:0 -->
+»
+                  «»
+                  «»
+                  f08ba0486c8d1cc06e8ab8dc8d2cd6f86f25062cb4b082776bf64b74f8e7b363
+                  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+                  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+                  [ { { Spirit
+                        binding
+                        Span.{ 0 1 } }
+                      psyche-belief
+                      74279bd7868e77ca2ba0f1cf886ffeef31d62ea5
+                      spirit/binding/0-1.md
+                      0720d47407f8841444b7e50885e431c9c19b47a09dd4abf7a74ec608afb44a60
+                      0720d47407f8841444b7e50885e431c9c19b47a09dd4abf7a74ec608afb44a60
+                      0720d47407f8841444b7e50885e431c9c19b47a09dd4abf7a74ec608afb44a60
+                      System
+                      0 }
+                    { { Intent
+                        energy
+                        Single.0 }
+                      psyche-belief
+                      74279bd7868e77ca2ba0f1cf886ffeef31d62ea5
+                      intent/energy/0.md
+                      1d62ee8fdb041ae6d82fcb652edb2e7e980137fda0bc5d2c9265fd3afbb0d070
+                      1d62ee8fdb041ae6d82fcb652edb2e7e980137fda0bc5d2c9265fd3afbb0d070
+                      1d62ee8fdb041ae6d82fcb652edb2e7e980137fda0bc5d2c9265fd3afbb0d070
+                      System
+                      1 } ] }

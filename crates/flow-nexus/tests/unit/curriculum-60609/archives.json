@@ -1,0 +1,34 @@
+{
+  "binding0-1-span.answer.rkyv": {
+    "bytes": 1247,
+    "sha256": "0e744dd1b4ede574e613f5ad70ad170ea2bebc6df6b2c37dadfcae692fba1e73"
+  },
+  "binding0-1-span.query.rkyv": {
+    "bytes": 102,
+    "sha256": "6f14b425efdfa2f10658fac86c4d07b0850d4f0a1cce4ca8281fda1825c3039d"
+  },
+  "binding1-singleton.answer.rkyv": {
+    "bytes": 1705,
+    "sha256": "77b0357ad3517416f29799c9ad4647327980d36ab32a0202237fff70636255aa"
+  },
+  "binding1-singleton.query.rkyv": {
+    "bytes": 102,
+    "sha256": "211a8b8f2d3bef597cf46a4e7b9a3c0f6a70680165221d2f8989dba15be46f2d"
+  },
+  "missing-module.answer.rkyv": {
+    "bytes": 108,
+    "sha256": "c779878c43b4d1aa01e87e50f6088882888262c3f46fe7d00504aeb53e2dd7dd"
+  },
+  "missing-module.query.rkyv": {
+    "bytes": 102,
+    "sha256": "fab27bf10a38548619810762e9c1bc6886c9dd7619fffc4ad43af603cb076b70"
+  },
+  "startup-composed.answer.rkyv": {
+    "bytes": 1221,
+    "sha256": "c14a4c8a5be79e8e842f1dc500e127cc8afd144bc108f6f7dec53bbbedd7f30f"
+  },
+  "startup-composed.query.rkyv": {
+    "bytes": 102,
+    "sha256": "0684ac46f3629abb03c448e92a6aad684dbc2846e1d7bbfc853e8224ffb7061e"
+  }
+}

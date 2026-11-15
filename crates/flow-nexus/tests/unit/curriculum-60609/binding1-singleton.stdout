@@ -1,0 +1,54 @@
+StartupComposed.{ «These are your skills, given here; do not reload them.
+
+Module IDs: spirit:binding:1, spirit:binding:0-1, intent:energy:0
+
+<!-- module: spirit:binding:1 -->
+BINDING_SINGLE_BODY
+<!-- end-module: spirit:binding:1 -->
+
+<!-- module: spirit:binding:0-1 -->
+BINDING_SPAN_BODY
+<!-- end-module: spirit:binding:0-1 -->
+
+<!-- module: intent:energy:0 -->
+INTENT_BODY
+<!-- end-module: intent:energy:0 -->
+»
+                  «»
+                  «»
+                  76c0ca3e62fadda38dde0f56bfcf44fb6f27758c5f632369a1c38af3dcc88712
+                  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+                  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+                  [ { { Spirit
+                        binding
+                        Single.1 }
+                      psyche-belief
+                      74279bd7868e77ca2ba0f1cf886ffeef31d62ea5
+                      spirit/binding/1.md
+                      46a2491605ccdef28dc36c1a78aca1c78f22e2ec3fc6f46dcb8de17454f8fb32
+                      46a2491605ccdef28dc36c1a78aca1c78f22e2ec3fc6f46dcb8de17454f8fb32
+                      46a2491605ccdef28dc36c1a78aca1c78f22e2ec3fc6f46dcb8de17454f8fb32
+                      System
+                      0 }
+                    { { Spirit
+                        binding
+                        Span.{ 0 1 } }
+                      psyche-belief
+                      74279bd7868e77ca2ba0f1cf886ffeef31d62ea5
+                      spirit/binding/0-1.md
+                      0720d47407f8841444b7e50885e431c9c19b47a09dd4abf7a74ec608afb44a60
+                      0720d47407f8841444b7e50885e431c9c19b47a09dd4abf7a74ec608afb44a60
+                      0720d47407f8841444b7e50885e431c9c19b47a09dd4abf7a74ec608afb44a60
+                      System
+                      1 }
+                    { { Intent
+                        energy
+                        Single.0 }
+                      psyche-belief
+                      74279bd7868e77ca2ba0f1cf886ffeef31d62ea5
+                      intent/energy/0.md
+                      1d62ee8fdb041ae6d82fcb652edb2e7e980137fda0bc5d2c9265fd3afbb0d070
+                      1d62ee8fdb041ae6d82fcb652edb2e7e980137fda0bc5d2c9265fd3afbb0d070
+                      1d62ee8fdb041ae6d82fcb652edb2e7e980137fda0bc5d2c9265fd3afbb0d070
+                      System
+                      2 } ] }

@@ -850,3 +850,100 @@ fn reminder_state_reopens_with_anchored_due_without_duplicate_initial() {
         crate::generated::memory::NextDue(400)
     );
 }
+
+/// A persisted completed call above both warning boundaries, while the
+/// recorded legacy observation still stands below its threshold.
+fn tool_observation_fixture() -> super::NexusFixture {
+    use super::refresh_and_compaction::{seat_metaflow, seat_warned_at};
+    use super::waking::{CLAUDE_SEAT, claude_seat};
+    use crate::store::context::RecordsContextSize;
+    let fixture = super::NexusFixture::new();
+    claude_seat(&fixture, 180_000);
+    seat_warned_at(&fixture, 101, "legacy reminder");
+    seat_metaflow(&fixture, vec![]);
+    fixture
+        .nexus
+        .store
+        .record_context_size(CLAUDE_SEAT, 10)
+        .unwrap();
+    fixture
+}
+
+#[test]
+fn a_tool_event_without_warning_policy_preserves_legacy_observations() {
+    use super::waking::CLAUDE_SEAT;
+    use crate::store::context::{JudgesThreshold, RecordsContextSize};
+    use crate::store::context_warnings::ReadsContextWarningProgress;
+    use crate::store::metaflow::SleepsMetaflows;
+    let fixture = tool_observation_fixture();
+    let store = &fixture.nexus.store;
+    let address = signal_flow::Address {
+        aspect: Aspect::Mind,
+        topic: flow_ethos::Topic("flow".into()),
+        model: Model::Sol,
+    };
+    store.ensure_live_handover(&address, CLAUDE_SEAT).unwrap();
+    let context = store.context_size(CLAUDE_SEAT).unwrap();
+    let threshold = store.threshold_standing(CLAUDE_SEAT).unwrap();
+    let progress = store.warning_progress(CLAUDE_SEAT).unwrap();
+    let reminder = store.handover_reminder(&address, 0).unwrap();
+    let metaflow = store.metaflow(&address).unwrap();
+    assert_eq!(context, Some(10));
+    assert!(progress.is_none());
+    assert!(reminder.is_none());
+    for _ in 0..2 {
+        fixture.nexus.after_report(
+            &flow_ethos::FlowId(CLAUDE_SEAT.into()),
+            &signal_flow::Event::ToolUsed("Bash".into()),
+        );
+        fixture.nexus.send_due_handover_reminders(1);
+        assert_eq!(store.context_size(CLAUDE_SEAT).unwrap(), context);
+        assert_eq!(store.threshold_standing(CLAUDE_SEAT).unwrap(), threshold);
+        assert_eq!(store.warning_progress(CLAUDE_SEAT).unwrap(), progress);
+        assert_eq!(store.handover_reminder(&address, 0).unwrap(), reminder);
+        assert_eq!(store.metaflow(&address).unwrap(), metaflow);
+    }
+}
+
+#[test]
+fn a_tool_event_with_warning_policy_observes_and_admits_once() {
+    use super::waking::CLAUDE_SEAT;
+    use crate::context_warnings::tests::fixture_policy;
+    use crate::store::ManagesMetaflowState;
+    use crate::store::context::{NamesFlowModel, RecordsContextSize};
+    use crate::store::context_warnings::ReadsContextWarningProgress;
+    use crate::store::metaflow::SleepsMetaflows;
+    let fixture = tool_observation_fixture();
+    let store = &fixture.nexus.store;
+    let mut policy = fixture_policy();
+    policy.model_name = flow_ethos::ModelName(store.flow_model(CLAUDE_SEAT).unwrap().unwrap());
+    policy.context_usage_projection =
+        meta_signal_flow::ContextUsageProjection::ClaudeCompletedInputWithCache;
+    policy
+        .context_warning_limit
+        .context_boundary_evidence
+        .harness_kind = signal_flow::HarnessKind::Claude;
+    store
+        .configure_change(meta_signal_flow::ConfigurationChange::ContextWarningPolicy(
+            policy,
+        ))
+        .unwrap();
+    for _ in 0..2 {
+        fixture.nexus.after_report(
+            &flow_ethos::FlowId(CLAUDE_SEAT.into()),
+            &signal_flow::Event::ToolUsed("Bash".into()),
+        );
+        assert_eq!(store.context_size(CLAUDE_SEAT).unwrap(), Some(180_000));
+        assert!(store.warning_progress(CLAUDE_SEAT).unwrap().is_some());
+        assert_eq!(
+            store
+                .metaflow_awake_as(CLAUDE_SEAT)
+                .unwrap()
+                .unwrap()
+                .queue
+                .0
+                .len(),
+            1
+        );
+    }
+}

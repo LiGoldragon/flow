@@ -226,9 +226,19 @@ impl RecordsReports for RunningNexus {
             // A cleared session is not an exit: the harness goes on in the
             // session the next Started names.
             Event::ToolUsed(_) => {
-                crate::context_warnings::ObservesClaudeContext::observe_claude_context(
-                    self, &flow_id.0,
-                );
+                use crate::store::context::NamesFlowModel;
+                use crate::store::context_warnings::ReadsContextWarningConfiguration;
+                let observes = match self.store.flow_model(&flow_id.0) {
+                    Ok(Some(model)) => {
+                        matches!(self.store.context_warning_policy(&model), Ok(Some(_)))
+                    }
+                    Ok(None) | Err(_) => false,
+                };
+                if observes {
+                    crate::context_warnings::ObservesClaudeContext::observe_claude_context(
+                        self, &flow_id.0,
+                    );
+                }
             }
             Event::Started(_) | Event::Cleared(_) => {}
         }

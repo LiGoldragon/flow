@@ -376,6 +376,13 @@ pub trait AccountsQueueDelivery {
         address: &Address,
     ) -> Result<Option<QueueDeliveryAttempt>, StoreError>;
 
+    /// Retained attempts used to reconstruct an original native payload.
+    /// Completed members remain comparison evidence, never pending work.
+    fn retained_delivery_attempts(
+        &self,
+        address: &Address,
+    ) -> Result<Vec<QueueDeliveryAttempt>, StoreError>;
+
     /// Every attempt of the address that did not settle, Absent ones
     /// included, oldest first.
     fn unsettled_deliveries(
@@ -1374,6 +1381,19 @@ impl AccountsQueueDelivery for FlowStore {
         address: &Address,
     ) -> Result<Option<QueueDeliveryAttempt>, StoreError> {
         self.outstanding_for(address)
+    }
+
+    fn retained_delivery_attempts(
+        &self,
+        address: &Address,
+    ) -> Result<Vec<QueueDeliveryAttempt>, StoreError> {
+        let mut retained = self
+            .delivery_attempts()?
+            .into_iter()
+            .filter(|attempt| &attempt.address == address)
+            .collect::<Vec<_>>();
+        retained.sort_by(|left, right| left.queue_attempt_id.cmp(&right.queue_attempt_id));
+        Ok(retained)
     }
 
     fn unsettled_deliveries(

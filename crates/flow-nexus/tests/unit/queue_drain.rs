@@ -881,3 +881,214 @@ fn a_resting_claude_seat_does_not_advance_after_unwitnessed_delivered_resolution
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);
     assert_eq!(queue(&fixture), vec![]);
 }
+
+/// A sibling's earlier receipt is retained evidence of the complete payload,
+/// not a reason to shorten the payload still awaiting reconciliation.
+#[test]
+fn partial_cohort_settlement_preserves_original_payload_and_terminal_history() {
+    use crate::generated::memory::{NativeDeliveryReceipt, NativeReceiptText, TurnId};
+    use crate::waking::ParksCohort;
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::PromptedUnrecorded("w1:p3"),
+    );
+    let requests = vec![from_core("partial-first"), from_core("partial-second")];
+    seat(&fixture, requests.clone());
+    append_main_rows(&fixture, &[end_turn("before-partial")]);
+    report(&fixture, claude_stop(&fixture));
+    let attempts = fixture
+        .nexus
+        .store
+        .unsettled_deliveries(&address(Model::Sol))
+        .unwrap();
+    let first = &attempts[0];
+    assert!(
+        fixture
+            .nexus
+            .store
+            .record_delivery_receipt(
+                &first.queue_attempt_id.0,
+                NativeDeliveryReceipt {
+                    native_request_id: first.native_request_id,
+                    thread_id: first.thread_id.clone(),
+                    turn_id: TurnId("partial-native".into()),
+                    native_receipt_text: NativeReceiptText("original-first-receipt".into()),
+                },
+            )
+            .unwrap()
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .settle_recorded_delivery(&first.queue_attempt_id.0)
+            .unwrap()
+    );
+    let terminal = fixture
+        .nexus
+        .store
+        .queue_delivery_attempt(&first.queue_attempt_id.0)
+        .unwrap();
+    let payload = queue_payload(&requests);
+    append_main_rows(
+        &fixture,
+        &[
+            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"partial-native",
+            "message":{"content":payload}}),
+            end_turn("partial-completed"),
+        ],
+    );
+    fixture
+        .nexus
+        .store
+        .recover_outstanding_deliveries()
+        .unwrap();
+    fixture.nexus.reconcile_typed(&address(Model::Sol));
+    assert!(
+        standings(&fixture).is_empty(),
+        "remaining sibling takes the complete payload receipt"
+    );
+    assert_eq!(
+        terminal,
+        fixture
+            .nexus
+            .store
+            .queue_delivery_attempt(&first.queue_attempt_id.0)
+            .unwrap()
+    );
+    fixture.nexus.reconcile_typed(&address(Model::Sol));
+    fixture.nexus.recover_deliveries();
+    assert!(standings(&fixture).is_empty());
+    assert_eq!(typed_count(&fixture, "partial-first"), 1);
+    assert_eq!(typed_count(&fixture, "partial-second"), 1);
+    assert_eq!(
+        terminal,
+        fixture
+            .nexus
+            .store
+            .queue_delivery_attempt(&first.queue_attempt_id.0)
+            .unwrap()
+    );
+}
+
+/// An event reconciles older cohorts too; the newest receipt is not the
+/// only one whose pending letters can hold a refreshed seat back.
+#[test]
+fn reconciliation_visits_two_disjoint_original_cohorts() {
+    use crate::generated::memory::NativeHistoryAnchor;
+    use crate::store::queue_delivery::PrepareQueueDelivery;
+    use crate::waking::ParksCohort;
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::PromptedUnrecorded("w1:p3"),
+    );
+    let first = vec![from_core("older-first"), from_core("older-second")];
+    seat(&fixture, first.clone());
+    append_main_rows(&fixture, &[end_turn("before-older")]);
+    report(&fixture, claude_stop(&fixture));
+    let attempts = fixture
+        .nexus
+        .store
+        .unsettled_deliveries(&address(Model::Sol))
+        .unwrap();
+    append_main_rows(
+        &fixture,
+        &[
+            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"older-native",
+            "message":{"content":queue_payload(&first)}}),
+            end_turn("older-completed"),
+        ],
+    );
+    let NativeHistoryAnchor::ClaudeTranscript(mut cursor) =
+        attempts[0].native_history_anchor.clone()
+    else {
+        panic!("Claude anchor");
+    };
+    cursor.offset.0 = i64::try_from(
+        std::fs::metadata(super::waking::claude_transcript(&fixture))
+            .unwrap()
+            .len(),
+    )
+    .unwrap();
+    let second = vec![from_core("newer-first"), from_core("newer-second")];
+    let cohort = second.iter().map(queue_entry).collect::<Vec<_>>();
+    let mut metaflow = stored(&fixture, Model::Sol);
+    metaflow.queue.0 = cohort.clone();
+    fixture.nexus.store.seed_metaflow(metaflow);
+    let PrepareQueueDelivery::Prepared(head) = fixture
+        .nexus
+        .store
+        .prepare_oldest_delivery(
+            &address(Model::Sol),
+            CLAUDE_SEAT,
+            CLAUDE_SESSION,
+            signal_flow::HarnessKind::Claude,
+            NativeHistoryAnchor::ClaudeTranscript(cursor),
+        )
+        .unwrap()
+    else {
+        panic!("second head prepared")
+    };
+    assert!(
+        fixture
+            .nexus
+            .store
+            .mark_delivery_uncertain(&head.queue_attempt_id.0)
+            .unwrap()
+    );
+    assert_eq!(fixture.nexus.park_cohort(&head, &cohort).len(), 2);
+    append_main_rows(
+        &fixture,
+        &[
+            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"newer-native",
+            "message":{"content":queue_payload(&second)}}),
+            end_turn("newer-completed"),
+        ],
+    );
+    fixture.nexus.reconcile_typed(&address(Model::Sol));
+    assert!(
+        standings(&fixture).is_empty(),
+        "both disjoint exact payloads reconcile on one event"
+    );
+    assert_eq!(typed_count(&fixture, "older-first"), 1);
+}
+
+/// Submission precedes complete sibling parking in the existing format.
+/// Missing durable membership stays uncertain; a completed turn or a
+/// consecutive counter is not permission to invent the missing suffix.
+#[test]
+fn a_submitted_payload_with_an_unrepresented_suffix_stays_uncertain() {
+    use crate::waking::ParksCohort;
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::PromptedUnrecorded("w1:p3"),
+    );
+    let first = from_core("represented-head");
+    let missing = from_core("unrepresented-suffix");
+    seat(&fixture, vec![first.clone()]);
+    append_main_rows(&fixture, &[end_turn("before-gap")]);
+    report(&fixture, claude_stop(&fixture));
+    append_main_rows(
+        &fixture,
+        &[
+            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"gap-native",
+            "message":{"content":queue_payload(&[first, missing])}}),
+            end_turn("gap-completed"),
+        ],
+    );
+    fixture
+        .nexus
+        .store
+        .recover_outstanding_deliveries()
+        .unwrap();
+    fixture.nexus.reconcile_typed(&address(Model::Sol));
+    fixture.nexus.recover_deliveries();
+    assert!(matches!(
+        standings(&fixture).as_slice(),
+        [VisibleQueueDeliveryStanding::Uncertain(_)]
+    ));
+    assert_eq!(typed_count(&fixture, "represented-head"), 1);
+}

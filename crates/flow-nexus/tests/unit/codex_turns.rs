@@ -688,3 +688,48 @@ pub(crate) fn typed_payload(nexus: &crate::RunningNexus, address: &signal_flow::
         .map(|(_, payload)| payload)
         .expect("the attempt's payload")
 }
+
+/// Completed native turns do not erase uncertain letters. The exact
+/// original cohort receipt releases every represented pending member,
+/// including an older cohort, independently of terminal siblings in store.
+#[test]
+fn exact_receipts_release_pending_members_of_two_completed_cohorts() {
+    let ledger = CodexTurns::default();
+    ledger.apply(THREAD, idle());
+    for (attempt, payload) in [
+        ("older-a", "older-original"),
+        ("older-b", "older-original"),
+        ("newer-a", "newer-original"),
+    ] {
+        ledger.apply(THREAD, typed(attempt, payload, Interrupt::NotPressed));
+    }
+    ledger.apply(THREAD, started(T1));
+    ledger.apply(THREAD, completed(T1));
+    ledger.apply(THREAD, started(T2));
+    ledger.apply(THREAD, completed(T2));
+    assert!(matches!(
+        ledger.standing(THREAD),
+        ThreadStanding::LetterAwaited(_)
+    ));
+    ledger.apply(
+        THREAD,
+        LedgerEvent::LetterReceived(LetterReceived_Data {
+            queue_attempt_id: QueueAttemptId("newer-a".into()),
+            codex_turn_id: turn(T2),
+        }),
+    );
+    assert!(
+        matches!(ledger.standing(THREAD), ThreadStanding::LetterAwaited(_)),
+        "older letters remain real obligations"
+    );
+    for attempt in ["older-a", "older-b"] {
+        ledger.apply(
+            THREAD,
+            LedgerEvent::LetterReceived(LetterReceived_Data {
+                queue_attempt_id: QueueAttemptId(attempt.into()),
+                codex_turn_id: turn(T1),
+            }),
+        );
+    }
+    assert_eq!(ledger.standing(THREAD), ThreadStanding::AtRest);
+}

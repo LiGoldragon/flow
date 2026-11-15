@@ -1334,7 +1334,14 @@ impl ReconcilesQueueDelivery for RunningNexus {
                 );
             }
         }
-        for member in run {
+        for member in run.iter().filter(|member| {
+            matches!(
+                member.queue_delivery_phase,
+                QueueDeliveryPhase::Prepared
+                    | QueueDeliveryPhase::Uncertain(_)
+                    | QueueDeliveryPhase::ReceiptRecorded(_)
+            )
+        }) {
             let receipt = NativeDeliveryReceipt {
                 native_request_id: member.native_request_id,
                 thread_id: member.thread_id.clone(),
@@ -2852,20 +2859,19 @@ pub(crate) trait ParksCohort {
     /// anchor and parks it, so none is typed again. Returns those parked,
     /// oldest first.
     fn park_cohort(&self, head: &QueueDeliveryAttempt, cohort: &[QueueEntry]) -> Vec<QueueEntry>;
-    /// Every run of the unsettled attempts sharing `attempt`'s native
-    /// anchor that holds `attempt`, longest first, each with the payload
-    /// text it would have been typed as.
+    /// Candidate runs of retained attempts sharing `attempt`'s native
+    /// anchor, including completed comparison members. Only an exact
+    /// native receipt establishes a candidate's original payload boundary.
     fn cohort_runs(
         &self,
         attempt: &QueueDeliveryAttempt,
     ) -> Vec<(Vec<QueueDeliveryAttempt>, String)>;
-    /// The attempts one payload carried with `attempt`: the unsettled
-    /// typed attempts at its native anchor whose attempt numbers run
-    /// consecutively through its own, oldest first.
+    /// Retained comparison members at `attempt`'s native anchor whose
+    /// attempt numbers run consecutively through its own, oldest first.
+    /// Consecutive identities nominate a candidate, not proof of a cohort.
     fn typed_group(&self, attempt: &QueueDeliveryAttempt) -> Vec<QueueDeliveryAttempt>;
-    /// Under the gate the caller holds: settles the latest payload typed
-    /// into the seat `address` is Awake as, when native history shows its
-    /// receipt. One payload, so one or two native reads.
+    /// Under the gate the caller holds: reconciles every disjoint pending
+    /// payload of the seat `address` is Awake as, using exact native receipts.
     fn reconcile_typed(&self, address: &Address);
     /// At start, with no gate held: reads native history for every
     /// payload still to settle, then takes the gate only to settle each
@@ -3041,10 +3047,10 @@ impl ParksCohort for RunningNexus {
     }
 
     fn typed_group(&self, attempt: &QueueDeliveryAttempt) -> Vec<QueueDeliveryAttempt> {
-        let Ok(unsettled) = self.store.unsettled_deliveries(&attempt.address) else {
+        let Ok(retained) = self.store.retained_delivery_attempts(&attempt.address) else {
             return vec![attempt.clone()];
         };
-        let mut siblings = unsettled
+        let mut siblings = retained
             .into_iter()
             .filter(|other| {
                 other.flow_id == attempt.flow_id
@@ -3059,6 +3065,8 @@ impl ParksCohort for RunningNexus {
                         QueueDeliveryPhase::Prepared
                             | QueueDeliveryPhase::Uncertain(_)
                             | QueueDeliveryPhase::ReceiptRecorded(_)
+                            | QueueDeliveryPhase::Settled(_)
+                            | QueueDeliveryPhase::Read { .. }
                     )
             })
             .collect::<Vec<_>>();
@@ -3117,11 +3125,15 @@ impl ParksCohort for RunningNexus {
         else {
             return;
         };
-        let latest = self.typed(address, &flow_id.0).into_iter().last();
-        if let Some(attempt) = latest
-            && let Ok((run, turn_id, native_receipt, seat_after)) = self.find_receipt(&attempt)
-        {
-            let _ = self.settle_received(&attempt, &run, turn_id, native_receipt, seat_after);
+        let mut covered = HashSet::new();
+        for attempt in self.typed(address, &flow_id.0) {
+            if !covered.insert(attempt.native_request_id) {
+                continue;
+            }
+            if let Ok((run, turn_id, native_receipt, seat_after)) = self.find_receipt(&attempt) {
+                covered.extend(run.iter().map(|member| member.native_request_id));
+                let _ = self.settle_received(&attempt, &run, turn_id, native_receipt, seat_after);
+            }
         }
     }
 

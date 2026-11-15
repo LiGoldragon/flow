@@ -79,7 +79,7 @@ fn declare(fixture: &NexusFixture, at: Address) {
                 signal_flow::ModuleIdentity("intent:flow:0".into()),
             ]),
             prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
-                "operation:main-flow:0".into(),
+                "knowledge:main-flow:0".into(),
             )]),
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,

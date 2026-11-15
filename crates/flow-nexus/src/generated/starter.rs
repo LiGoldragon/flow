@@ -178,8 +178,21 @@ pub trait OpensCurriculumComposer {
         Self: Sized;
 }
 #[rustfmt::skip]
+pub trait ParsesCurriculumIdentity {
+    fn curriculum_identity(
+        &self,
+    ) -> std::option::Option<signal_curriculum_nexus::ModuleIdentity>;
+}
+#[rustfmt::skip]
+pub trait RendersCurriculumIdentity {
+    fn identity_text(&self) -> String;
+    fn matches_binding<N: Textual>(&self, input: N) -> bool;
+}
+#[rustfmt::skip]
 pub trait SelectsStartup {
-    fn startup_selection(&self) -> flow_nexus::StartupSelection;
+    fn startup_selection(
+        &self,
+    ) -> std::result::Result<flow_nexus::StartupSelection, signal_flow::ContextRefusal>;
 }
 #[rustfmt::skip]
 pub trait VerifiesContext {

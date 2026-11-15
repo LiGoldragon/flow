@@ -1445,7 +1445,7 @@ fn declared(fixture: &NexusFixture, system_modules: &[&str], root_option: Option
                         .collect(),
                 ),
                 prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
-                    "operation:main-flow:0".into(),
+                    "knowledge:main-flow:0".into(),
                 )]),
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
@@ -2664,7 +2664,7 @@ impl OpensSecondNexus for NexusFixture {
                         signal_flow::ModuleIdentity("intent:flow:0".into()),
                     ]),
                     prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
-                        "operation:main-flow:0".into(),
+                        "knowledge:main-flow:0".into(),
                     )]),
                     flow_kind: signal_flow::FlowKind::Regular,
                     tool_set: signal_flow::ToolSet::Default,
@@ -2688,7 +2688,7 @@ impl OpensSecondNexus for NexusFixture {
                         &[
                             ("spirit:core:0", "Spirit body."),
                             ("intent:flow:0", "Intent body."),
-                            ("operation:main-flow:0", "Main flow body."),
+                            ("knowledge:main-flow:0", "Main flow body."),
                             ("knowledge:flow:0", "Knowledge body."),
                         ][..],
                     ),
@@ -3220,7 +3220,11 @@ impl SocketCurriculum {
                     .system_modules
                     .0
                     .into_iter()
-                    .map(|identity| signal_flow::ModuleIdentity(identity.0))
+                    .map(|identity| {
+                        signal_flow::ModuleIdentity(
+                            crate::context::RendersCurriculumIdentity::identity_text(&identity),
+                        )
+                    })
                     .collect(),
             ),
             prompt_modules: signal_flow::PromptModules(
@@ -3228,7 +3232,11 @@ impl SocketCurriculum {
                     .user_modules
                     .0
                     .into_iter()
-                    .map(|identity| signal_flow::ModuleIdentity(identity.0))
+                    .map(|identity| {
+                        signal_flow::ModuleIdentity(
+                            crate::context::RendersCurriculumIdentity::identity_text(&identity),
+                        )
+                    })
                     .collect(),
             ),
             remembered_flows: crate::generated::starter::RememberedFlows(
@@ -3243,7 +3251,7 @@ impl SocketCurriculum {
             &[
                 ("spirit:core:0", "Spirit body."),
                 ("intent:flow:0", "Intent body."),
-                ("operation:main-flow:0", "Main flow body."),
+                ("knowledge:main-flow:0", "Main flow body."),
                 ("knowledge:flow:0", "Knowledge body."),
             ][..],
         );
@@ -3705,7 +3713,8 @@ fn restart_composition_against_curriculum_socket() {
             prompt_modules: signal_flow::PromptModules(prompt_modules),
             remembered_flows: crate::generated::starter::RememberedFlows(vec![]),
         }
-        .startup_selection();
+        .startup_selection()
+        .expect("canonical fixture selection");
         let query = rkyv::to_bytes::<rkyv::rancor::Error>(&CurriculumQuery::ComposeStartup(
             selection.clone(),
         ))

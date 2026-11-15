@@ -1035,7 +1035,7 @@ mod tests {
                 "spirit:core:0".into(),
             )]),
             prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
-                "operation:main-flow:0".into(),
+                "knowledge:main-flow:0".into(),
             )]),
             address: address("orderedLaunch"),
             model_name: flow_ethos::ModelName("gpt-6-astra".into()),

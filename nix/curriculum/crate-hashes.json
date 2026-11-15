@@ -1,7 +1,8 @@
 {
-  "git+https://github.com/LiGoldragon/datom-codec?rev=4dff16b4f7412febc3b71aac8b49680cd20988cb#0.32.2": "0fmfphn8ksqrrgayknb1yxk8ha6i6aza3mm8y5pgfjz6kpm2hap7",
-  "git+https://github.com/LiGoldragon/datom-codec?rev=4dff16b4f7412febc3b71aac8b49680cd20988cb#datom-codec-derive@0.32.0": "0fmfphn8ksqrrgayknb1yxk8ha6i6aza3mm8y5pgfjz6kpm2hap7",
-  "git+https://github.com/LiGoldragon/ethos-zero?rev=c2653dd82adbdb1f1f2f654405c6620e0d06fd58#16.0.0": "1rn59mcxqca6jjp7yba8f5ljylrxh8clywyz1kmjnraxgavx528c",
-  "git+https://github.com/LiGoldragon/nexus?rev=ec097e315a3b0b99bc215a72f6c3f6d8b2b060cf#0.5.0": "0c0qm66wilv27gpi4c18l812sk70hs28pvsbdvhbb89gffq1pl6f",
-  "git+https://github.com/LiGoldragon/protos?rev=15b41da8f2579e73ead59bc0c2b97529b8ac32d3#0.32.2": "0l6manmxwr9rywvfwcsy3lmvi4kc8apgvwq87ijg77cllxx05za9"
+  "git+https://github.com/LiGoldragon/datom-codec?rev=09a0526#0.33.1": "18cplyk9f5nrqs35fgqpimfi507l38qvkmkx3z2qm2vwi1rlii2d",
+  "git+https://github.com/LiGoldragon/datom-codec?rev=09a0526#datom-codec-derive@0.32.3": "18cplyk9f5nrqs35fgqpimfi507l38qvkmkx3z2qm2vwi1rlii2d",
+  "git+https://github.com/LiGoldragon/ethos-zero?rev=970459d#28.0.0": "1iymm3vjsxslkfp1gih72shiav8gk0bkrra1ix3ka9iyg578ldcf",
+  "git+https://github.com/LiGoldragon/nexus?rev=69946db066bb70bdbc1fd7dbf5e6c88dcf05c363#0.5.0": "08qk0m47dxvnpn7nz7x00x6vzmw22n9xl3ykl8v0f2xn5fhs8iv6",
+  "git+https://github.com/LiGoldragon/protos?rev=c93b598#0.33.0": "00rwpzkxqmwhmxr2dkv9ay9wfvjxbprvvv23lfxmqamm2264r2gb",
+  "git+https://github.com/LiGoldragon/signal-curriculum-nexus?rev=8e63176cb1c0f1429a9797412391b4035a25cc68#0.2.0": "03i9lf2jk6hgh1qh7pz66frbya9ja4caic7pd7nxsc5rbg8q77nh"
 }

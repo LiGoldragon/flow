@@ -1144,7 +1144,7 @@ pub(crate) mod tests {
                 signal_flow::ModuleIdentity("intent:flow:0".into()),
             ]),
             prompt_modules: signal_flow::PromptModules(vec![
-                signal_flow::ModuleIdentity("operation:main-flow:0".into()),
+                signal_flow::ModuleIdentity("knowledge:main-flow:0".into()),
                 signal_flow::ModuleIdentity("knowledge:flow:0".into()),
             ]),
             address: Address {
@@ -1170,7 +1170,7 @@ pub(crate) mod tests {
                 &[
                     ("spirit:core:0", "Spirit body."),
                     ("intent:flow:0", "Intent body."),
-                    ("operation:main-flow:0", "Main flow body."),
+                    ("knowledge:main-flow:0", "Main flow body."),
                     ("knowledge:flow:0", "Knowledge body."),
                 ][..],
             ))),
@@ -1184,7 +1184,7 @@ pub(crate) mod tests {
                 &[
                     ("spirit:core:0", "Spirit body."),
                     ("intent:flow:0", "Intent body."),
-                    ("operation:main-flow:0", "Main flow body."),
+                    ("knowledge:main-flow:0", "Main flow body."),
                     ("knowledge:flow:0", "Knowledge body."),
                 ][..],
             ))),
@@ -1203,7 +1203,7 @@ pub(crate) mod tests {
             &[
                 ("spirit:core:0", "Spirit body."),
                 ("intent:flow:0", "Intent body."),
-                ("operation:main-flow:0", "Main flow body."),
+                ("knowledge:main-flow:0", "Main flow body."),
                 ("knowledge:flow:0", "Knowledge body."),
             ][..],
         );
@@ -1400,7 +1400,7 @@ pub(crate) mod tests {
             )
             .unwrap();
         let body = &composed.first_prompt_payload.first_prompt_body;
-        assert!(body.0.starts_with("These are your skills, given here; do not reload them.\n\nModule IDs: operation:main-flow:0, knowledge:flow:0\n"));
+        assert!(body.0.starts_with("These are your skills, given here; do not reload them.\n\nModule IDs: knowledge:main-flow:0, knowledge:flow:0\n"));
         assert!(body.0.contains("\n<!-- module: knowledge:flow:0 -->\nKnowledge body.\n<!-- end-module: knowledge:flow:0 -->\n"));
         assert!(
             body.0
@@ -1415,7 +1415,7 @@ pub(crate) mod tests {
                 .0,
             body.0
         );
-        assert!(!body.0.contains("Skill tool") && !body.0.contains("/operation:main-flow:0"));
+        assert!(!body.0.contains("Skill tool") && !body.0.contains("/knowledge:main-flow:0"));
     }
 
     #[test]
@@ -1703,7 +1703,7 @@ pub(crate) mod tests {
             )
             .unwrap();
         let system = &composed.system_prompt.system_prompt_text;
-        assert!(system.0.contains("<!-- module: operation:main-flow:0 -->"));
+        assert!(system.0.contains("<!-- module: knowledge:main-flow:0 -->"));
         assert!(system.0.contains("<!-- module: knowledge:flow:0 -->"));
         assert!(composed.first_prompt_payload.first_prompt_body.0.is_empty());
         assert!(composed.first_prompt_payload.prompt_part_vector.is_empty());
@@ -1804,7 +1804,7 @@ pub(crate) mod tests {
                 ("compensation:truth:0", "Compensation body."),
                 ("inquiry:flow:0", "Inquiry body."),
                 ("spirit:legacy:0", "Legacy spirit body."),
-                ("operation:main-flow:0", "Main flow body."),
+                ("knowledge:main-flow:0", "Main flow body."),
             ][..],
         );
         let composer = LaunchComposer::with_context(
@@ -1822,7 +1822,7 @@ pub(crate) mod tests {
             signal_flow::ModuleIdentity("knowledge:flow:0".into()),
             signal_flow::ModuleIdentity("compensation:truth:0".into()),
             signal_flow::ModuleIdentity("inquiry:flow:0".into()),
-            signal_flow::ModuleIdentity("operation:main-flow:0".into()),
+            signal_flow::ModuleIdentity("knowledge:main-flow:0".into()),
         ]);
         let composed = composer
             .compose(

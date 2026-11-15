@@ -189,7 +189,7 @@ fn declare(fixture: &NexusFixture, root_option: Option<String>) {
                 signal_flow::ModuleIdentity("intent:flow:0".into()),
             ]),
             prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
-                "operation:main-flow:0".into(),
+                "knowledge:main-flow:0".into(),
             )]),
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
@@ -854,7 +854,7 @@ fn an_on_demand_seat_whose_successor_is_refused_its_handover_is_not_closed() {
                         signal_flow::ModuleIdentity("intent:flow:0".into()),
                     ]),
                     prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
-                        "operation:main-flow:0".into(),
+                        "knowledge:main-flow:0".into(),
                     )]),
                     flow_kind: signal_flow::FlowKind::Regular,
                     tool_set: signal_flow::ToolSet::Default,

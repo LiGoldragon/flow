@@ -47,7 +47,7 @@ fn memory_composer(store: &Arc<FlowStore>) -> LaunchComposer {
             &[
                 ("spirit:core:0", "Spirit body."),
                 ("intent:flow:0", "Intent body."),
-                ("operation:main-flow:0", "Main flow body."),
+                ("knowledge:main-flow:0", "Main flow body."),
                 ("knowledge:flow:0", "Knowledge body."),
             ][..],
         ))),

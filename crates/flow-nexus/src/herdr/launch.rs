@@ -3044,7 +3044,7 @@ pub(crate) mod tests {
                     signal_flow::ModuleIdentity("intent:flow:0".into()),
                 ]),
                 prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
-                    "operation:main-flow:0".into(),
+                    "knowledge:main-flow:0".into(),
                 )]),
                 address: signal_flow::Address {
                     aspect: Aspect::Field,

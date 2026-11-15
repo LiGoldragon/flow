@@ -15,8 +15,8 @@
 //! the Nexus's configuration names (`CurriculumNexusPath`),
 //! with `ComposeStartup` from its contract, signal-curriculum-nexus, which
 //! Curriculum compiles too; its selection names the flows a launch remembers
-//! and whose composition carries their raw records. Its Output has five
-//! variants, the fifth `Rejected` with Curriculum's own text, which Flow
+//! and whose composition carries their raw records. Its Output includes
+//! `Rejected` with Curriculum's own text, which Flow
 //! keeps whole in `ContextRefusal::ComposerRejected`, but for a remembered
 //! flow's records missing, `RecordMissing`. Its answer names no
 //! metaflow, so the metaflow check is Flow's own: the request carries the
@@ -26,8 +26,8 @@
 use crate::generated::emission::{CurriculumExchange, Emittable};
 pub use crate::generated::starter::{
     ComposesFlowContext, ContextRequest, ContextRequesting, CutsRenderedText,
-    OpensCurriculumComposer, ProvenanceListing, ReadsVerifiedContext, SelectsStartup,
-    StartupComposing, Textual, VerifiesContext,
+    OpensCurriculumComposer, ParsesCurriculumIdentity, ProvenanceListing, ReadsVerifiedContext,
+    RendersCurriculumIdentity, SelectsStartup, StartupComposing, Textual, VerifiesContext,
 };
 use crate::model::RunsModel;
 use sha2::{Digest, Sha256};
@@ -104,21 +104,120 @@ impl ResolvesModule for ContextComposer {
     }
 }
 
+impl ParsesCurriculumIdentity for str {
+    fn curriculum_identity(&self) -> Option<signal_curriculum_nexus::ModuleIdentity> {
+        use signal_curriculum_nexus::{
+            First, Last, ModuleIdentity, ModuleKind, ModuleSubject, Span_Data, Version, Versions,
+        };
+        let fields = self.split(':').collect::<Vec<_>>();
+        let [kind, subject, version] = fields.as_slice() else {
+            return None;
+        };
+        let module_kind = match *kind {
+            "spirit" => ModuleKind::Spirit,
+            "intent" => ModuleKind::Intent,
+            "vision" => ModuleKind::Vision,
+            "knowledge" => ModuleKind::Knowledge,
+            "inquiry" => ModuleKind::Inquiry,
+            "compensation" => ModuleKind::Compensation,
+            "role" => ModuleKind::Role,
+            "raw" => ModuleKind::Raw,
+            _ => return None,
+        };
+        if subject.is_empty()
+            || !subject
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return None;
+        }
+        let number = |value: &str| -> Option<Version> {
+            if value.is_empty()
+                || (value != "0" && value.starts_with('0'))
+                || !value.bytes().all(|b| b.is_ascii_digit())
+            {
+                return None;
+            }
+            Some(Version(value.parse().ok()?))
+        };
+        let versions = match version.split_once('-') {
+            Some((first, last)) => {
+                let first = number(first)?;
+                let last = number(last)?;
+                if first.0 >= last.0 {
+                    return None;
+                }
+                Versions::Span(Span_Data {
+                    first: First(first),
+                    last: Last(last),
+                })
+            }
+            None => Versions::Single(number(version)?),
+        };
+        Some(ModuleIdentity {
+            module_kind,
+            module_subject: ModuleSubject((*subject).into()),
+            versions,
+        })
+    }
+}
+
+impl RendersCurriculumIdentity for signal_curriculum_nexus::ModuleIdentity {
+    fn identity_text(&self) -> String {
+        use signal_curriculum_nexus::{ModuleKind, Versions};
+        let kind = match self.module_kind {
+            ModuleKind::Spirit => "spirit",
+            ModuleKind::Intent => "intent",
+            ModuleKind::Vision => "vision",
+            ModuleKind::Knowledge => "knowledge",
+            ModuleKind::Inquiry => "inquiry",
+            ModuleKind::Compensation => "compensation",
+            ModuleKind::Role => "role",
+            ModuleKind::Raw => "raw",
+        };
+        let version = match &self.versions {
+            Versions::Single(version) => version.0.to_string(),
+            Versions::Span(span) => format!("{}-{}", span.first.0.0, span.last.0.0),
+        };
+        format!("{kind}:{}:{version}", self.module_subject.0)
+    }
+
+    fn matches_binding<N: Textual>(&self, input: N) -> bool {
+        use signal_curriculum_nexus::Versions;
+        // Validate actual identities too: wire scalars may carry invalid subjects or bounds.
+        if self.identity_text().as_str().curriculum_identity().as_ref() != Some(self) {
+            return false;
+        }
+        let Some(binding) = input.text().as_str().curriculum_identity() else {
+            return false;
+        };
+        if self.module_kind != binding.module_kind || self.module_subject != binding.module_subject
+        {
+            return false;
+        }
+        match (&binding.versions, &self.versions) {
+            (Versions::Single(version), Versions::Span(span)) => {
+                span.first.0.0 <= version.0 && version.0 <= span.last.0.0
+            }
+            _ => self.versions == binding.versions,
+        }
+    }
+}
+
 /// The Curriculum Nexus resolves the one module by `ResolveSources`, as
 /// composition does: an answer naming it is Held; Curriculum's own
 /// "missing module" refusal is Unknown; a socket that cannot be reached, an
 /// answer that cannot be read, or any other refusal is Unreachable.
 impl ResolvesModule for CurriculumComposer {
     fn resolve_module(&self, identity: &signal_flow::ModuleIdentity) -> ModuleStanding {
-        match CurriculumQuery::ResolveSources(vec![signal_curriculum_nexus::ModuleIdentity(
-            identity.0.clone(),
-        )])
-        .emit(self)
-        {
+        let Some(typed) = identity.0.as_str().curriculum_identity() else {
+            return ModuleStanding::Unknown;
+        };
+        match CurriculumQuery::ResolveSources(vec![typed]).emit(self) {
             CurriculumExchange::Answered(CurriculumOutcome::SourcesResolved(modules))
                 if modules
                     .iter()
-                    .any(|module| module.module_identity.0 == identity.0) =>
+                    .any(|module| module.module_identity.matches_binding(identity.0.as_str())) =>
             {
                 ModuleStanding::Held
             }
@@ -164,8 +263,15 @@ impl ComposesFlowContext for ContextComposer {
 }
 
 impl SelectsStartup for ContextRequest {
-    fn startup_selection(&self) -> StartupSelection {
-        StartupSelection {
+    fn startup_selection(&self) -> Result<StartupSelection, ContextRefusal> {
+        let convert = |identity: &signal_flow::ModuleIdentity| {
+            identity
+                .0
+                .as_str()
+                .curriculum_identity()
+                .ok_or_else(|| ContextRefusal::ModuleMissing(Some(identity.clone())))
+        };
+        Ok(StartupSelection {
             caller_metaflow: CallerMetaflow {
                 first_string: match self.address.aspect {
                     Aspect::Psyche => "Psyche",
@@ -184,15 +290,15 @@ impl SelectsStartup for ContextRequest {
                 self.system_modules
                     .0
                     .iter()
-                    .map(|identity| signal_curriculum_nexus::ModuleIdentity(identity.0.clone()))
-                    .collect(),
+                    .map(convert)
+                    .collect::<Result<Vec<_>, _>>()?,
             ),
             user_modules: signal_curriculum_nexus::UserModules(
                 self.prompt_modules
                     .0
                     .iter()
-                    .map(|identity| signal_curriculum_nexus::ModuleIdentity(identity.0.clone()))
-                    .collect(),
+                    .map(convert)
+                    .collect::<Result<Vec<_>, _>>()?,
             ),
             flow_id_vector: self
                 .remembered_flows
@@ -200,7 +306,7 @@ impl SelectsStartup for ContextRequest {
                 .iter()
                 .map(|flow| signal_curriculum_nexus::FlowId(flow.0.clone()))
                 .collect(),
-        }
+        })
     }
 }
 
@@ -209,7 +315,7 @@ impl ComposesFlowContext for CurriculumComposer {
         &self,
         input: N,
     ) -> Result<StartupComposition, ContextRefusal> {
-        match CurriculumQuery::ComposeStartup(input.context_request().startup_selection())
+        match CurriculumQuery::ComposeStartup(input.context_request().startup_selection()?)
             .emit(self)
         {
             CurriculumExchange::Answered(CurriculumOutcome::StartupComposed(composition)) => {
@@ -264,21 +370,26 @@ impl CutsRenderedText for str {
             "{}\n\nModule IDs: {}\n",
             CONTEXT_OPENING,
             rows.iter()
-                .map(|row| row.module_identity.0.as_str())
+                .map(|row| row.module_identity.identity_text())
                 .collect::<Vec<_>>()
                 .join(", ")
         );
         let mut rest = self.strip_prefix(&opening)?;
         let mut segments = Vec::new();
         for (index, row) in rows.iter().enumerate() {
-            let identity = &row.module_identity;
-            let open = format!("\n<!-- module: {identity} -->\n", identity = identity.0);
-            let close = format!("\n<!-- end-module: {identity} -->\n", identity = identity.0);
+            let identity = row.module_identity.identity_text();
+            if identity.as_str().curriculum_identity().as_ref() != Some(&row.module_identity) {
+                return None;
+            }
+            let open = format!("\n<!-- module: {identity} -->\n", identity = identity);
+            let close = format!("\n<!-- end-module: {identity} -->\n", identity = identity);
             let after_open = rest.strip_prefix(&open)?;
             let body_end = match rows.get(index + 1) {
                 Some(next) => {
-                    let next_open =
-                        format!("{close}\n<!-- module: {} -->\n", next.module_identity.0);
+                    let next_open = format!(
+                        "{close}\n<!-- module: {} -->\n",
+                        next.module_identity.identity_text()
+                    );
                     after_open.find(&next_open)?
                 }
                 None => after_open.strip_suffix(&close)?.len(),
@@ -339,8 +450,10 @@ impl VerifiesContext for VerifiedContext {
                     .zip(std::iter::repeat(&user_rows)),
             )
             .find_map(|(identity, placed)| {
-                (!placed.iter().any(|row| row.module_identity.0 == identity.0))
-                    .then(|| identity.clone())
+                (!placed
+                    .iter()
+                    .any(|row| row.module_identity.matches_binding(identity.0.as_str())))
+                .then(|| identity.clone())
             });
         if let Some(identity) = missing {
             return Err(ContextRefusal::ModuleMissing(Some(identity)));
@@ -456,7 +569,11 @@ impl ComposesFlowContext for FixtureComposer {
                     .get(&identity.0)
                     .ok_or_else(|| ContextRefusal::ModuleMissing(Some(identity.clone())))?;
                 rows.push(ContextProvenance {
-                    module_identity: signal_curriculum_nexus::ModuleIdentity(identity.0.clone()),
+                    module_identity: identity
+                        .0
+                        .as_str()
+                        .curriculum_identity()
+                        .ok_or_else(|| ContextRefusal::ModuleMissing(Some(identity.clone())))?,
                     repository_name: signal_curriculum_nexus::RepositoryName(
                         "fixture-context".into(),
                     ),
@@ -527,7 +644,8 @@ impl ComposesFlowContext for FixtureComposer {
 mod tests {
     use super::{
         CONTEXT_OPENING, ComposesFlowContext, ContextRequest, FixtureComposer,
-        ReadsVerifiedContext, VerifiedContext, VerifiesContext,
+        ParsesCurriculumIdentity, ReadsVerifiedContext, RendersCurriculumIdentity, SelectsStartup,
+        VerifiedContext, VerifiesContext,
     };
     use signal_flow::{Address, Aspect, ContextRefusal, HarnessKind, Model};
 
@@ -540,7 +658,10 @@ mod tests {
         for row in composition.context_provenance_vector {
             assert_eq!(
                 row.source_relative_path.0,
-                format!("{}.md", row.module_identity.0.replace(':', "/")),
+                format!(
+                    "{}.md",
+                    row.module_identity.identity_text().replace(':', "/")
+                ),
             );
         }
     }
@@ -582,20 +703,12 @@ mod tests {
             },
             harness_kind: HarnessKind::Claude,
             system_modules: signal_flow::SystemModules(vec![
-                signal_flow::ModuleIdentity(
-                    signal_curriculum_nexus::ModuleIdentity("spirit:core:0".into()).0,
-                ),
-                signal_flow::ModuleIdentity(
-                    signal_curriculum_nexus::ModuleIdentity("intent:flow:0".into()).0,
-                ),
+                signal_flow::ModuleIdentity("spirit:core:0".into()),
+                signal_flow::ModuleIdentity("intent:flow:0".into()),
             ]),
             prompt_modules: signal_flow::PromptModules(vec![
-                signal_flow::ModuleIdentity(
-                    signal_curriculum_nexus::ModuleIdentity("operation:main-flow:0".into()).0,
-                ),
-                signal_flow::ModuleIdentity(
-                    signal_curriculum_nexus::ModuleIdentity("knowledge:flow:0".into()).0,
-                ),
+                signal_flow::ModuleIdentity("knowledge:main-flow:0".into()),
+                signal_flow::ModuleIdentity("knowledge:flow:0".into()),
             ]),
             remembered_flows: crate::generated::starter::RememberedFlows(vec![]),
         }
@@ -607,7 +720,7 @@ mod tests {
                 ("spirit:core:0", "Spirit body."),
                 ("intent:flow:0", "Intent body."),
                 (
-                    "operation:main-flow:0",
+                    "knowledge:main-flow:0",
                     "Main flow body.\n\nSecond paragraph.",
                 ),
                 ("knowledge:flow:0", "Knowledge body."),
@@ -658,7 +771,7 @@ mod tests {
         let mut composition = fixture().compose_flow_context(&request).unwrap();
         composition
             .context_provenance_vector
-            .retain(|row| row.module_identity.0 != "knowledge:flow:0");
+            .retain(|row| row.module_identity.identity_text() != "knowledge:flow:0");
         assert_eq!(
             VerifiedContext::verified(&request, composition),
             Err(ContextRefusal::ModuleMissing(Some(
@@ -680,5 +793,167 @@ mod tests {
                 signal_flow::ModuleIdentity("unknown-module".into())
             )))
         );
+    }
+    #[test]
+    fn typed_identity_canonical_roundtrip_covers_every_kind_and_persona_name() {
+        for kind in [
+            "spirit",
+            "intent",
+            "vision",
+            "knowledge",
+            "inquiry",
+            "compensation",
+            "role",
+            "raw",
+        ] {
+            for subject in ["core", "psyche-core-tertiary", "book-page2-description"] {
+                for version in ["0", "1", "0-1", "1-9", "9223372036854775807"] {
+                    let text = format!("{kind}:{subject}:{version}");
+                    let parsed = text
+                        .as_str()
+                        .curriculum_identity()
+                        .expect("canonical identity");
+                    assert_eq!(parsed.identity_text(), text);
+                    assert!(parsed.matches_binding(text.as_str()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_text_is_refused_before_the_curriculum_exchange() {
+        for identity in [
+            "spirit:core",
+            "operation:core:0",
+            "Spirit:core:0",
+            "role::0",
+            "role:Core:0",
+            "role:some_name:0",
+            "role:some.name:0",
+            "role:é:0",
+            "role:core:-1",
+            "role:core:01",
+            "role:core:+1",
+            "role:core:1-1",
+            "role:core:2-1",
+            "role:core:0-01",
+            "role:core:0-1-2",
+            "role:core:9223372036854775808",
+            "role:core:1:2",
+            "role:core: 1",
+        ] {
+            assert!(identity.curriculum_identity().is_none(), "{identity}");
+            let mut request = request();
+            request.system_modules.0 = vec![signal_flow::ModuleIdentity(identity.into())];
+            assert_eq!(
+                request.startup_selection(),
+                Err(ContextRefusal::ModuleMissing(Some(
+                    signal_flow::ModuleIdentity(identity.into())
+                )))
+            );
+            let composer = super::CurriculumComposer {
+                socket: "/does/not/exist".into(),
+            };
+            assert_eq!(
+                composer.compose_flow_context(&request),
+                Err(ContextRefusal::ModuleMissing(Some(
+                    signal_flow::ModuleIdentity(identity.into())
+                )))
+            );
+            assert_eq!(
+                super::ResolvesModule::resolve_module(
+                    &composer,
+                    &signal_flow::ModuleIdentity(identity.into())
+                ),
+                super::ModuleStanding::Unknown
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_binding_preserves_singleton_and_containing_span_actual_provenance() {
+        let mut actual = request();
+        actual.system_modules.0.clear();
+        actual.prompt_modules.0 = ["role:persona:1", "role:persona:0-1"]
+            .into_iter()
+            .map(|s| signal_flow::ModuleIdentity(s.into()))
+            .collect();
+        let composer = FixtureComposer::from(
+            &[
+                ("role:persona:1", "Singleton persona."),
+                ("role:persona:0-1", "Spanning persona."),
+            ][..],
+        );
+        let composition = composer.compose_flow_context(&actual).unwrap();
+        let mut binding = actual.clone();
+        binding.prompt_modules.0.truncate(1);
+        let verified = VerifiedContext::verified(&binding, &composition).unwrap();
+        assert_eq!(verified.user_segments().len(), 2);
+        assert_eq!(verified.user_segments().concat(), composition.user_text.0);
+        assert_eq!(
+            composition
+                .context_provenance_vector
+                .iter()
+                .map(|r| r.module_identity.identity_text())
+                .collect::<Vec<_>>(),
+            ["role:persona:1", "role:persona:0-1"]
+        );
+        assert_eq!(
+            composition.context_provenance_vector[1]
+                .source_relative_path
+                .0,
+            "role/persona/0-1.md"
+        );
+        let singleton_zero = "role:persona:0".curriculum_identity().unwrap();
+        assert!(!singleton_zero.matches_binding("role:persona:1"));
+        let mut wrong = actual.clone();
+        wrong.prompt_modules.0 = vec![signal_flow::ModuleIdentity("role:persona:0".into())];
+        let zero = FixtureComposer::from(&[("role:persona:0", "Old persona.")][..])
+            .compose_flow_context(&wrong)
+            .unwrap();
+        assert!(matches!(
+            VerifiedContext::verified(&binding, zero),
+            Err(ContextRefusal::ModuleMissing(_))
+        ));
+        let mut misplaced = composition.clone();
+        for row in &mut misplaced.context_provenance_vector {
+            row.startup_placement = signal_curriculum_nexus::StartupPlacement::System;
+        }
+        assert!(VerifiedContext::verified(&binding, misplaced).is_err());
+        let mut reordered = composition.clone();
+        reordered.context_provenance_vector[1].integer = 0;
+        assert_eq!(
+            VerifiedContext::verified(&binding, reordered),
+            Err(ContextRefusal::PayloadMismatch)
+        );
+    }
+
+    #[test]
+    fn binding_checks_exact_spans_and_inclusive_numeric_bounds() {
+        let actual = "knowledge:topic:1-3".curriculum_identity().unwrap();
+        for binding in [
+            "knowledge:topic:1",
+            "knowledge:topic:2",
+            "knowledge:topic:3",
+            "knowledge:topic:1-3",
+        ] {
+            assert!(actual.matches_binding(binding));
+        }
+        for binding in [
+            "knowledge:topic:0",
+            "knowledge:topic:4",
+            "knowledge:topic:1-2",
+            "role:topic:2",
+            "knowledge:other:2",
+        ] {
+            assert!(!actual.matches_binding(binding));
+        }
+        let mut invalid = actual;
+        invalid.versions =
+            signal_curriculum_nexus::Versions::Span(signal_curriculum_nexus::Span_Data {
+                first: signal_curriculum_nexus::First(signal_curriculum_nexus::Version(3)),
+                last: signal_curriculum_nexus::Last(signal_curriculum_nexus::Version(1)),
+            });
+        assert!(!invalid.matches_binding("knowledge:topic:2"));
     }
 }

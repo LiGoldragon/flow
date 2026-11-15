@@ -169,7 +169,7 @@ pub(super) fn declare_seat(
                     .collect(),
             ),
             prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
-                "operation:main-flow:0".into(),
+                "knowledge:main-flow:0".into(),
             )]),
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
@@ -1238,7 +1238,7 @@ fn fable_seat_past_its_threshold(fixture: &NexusFixture, protected: Vec<Address>
                 "spirit:core:0".into(),
             )]),
             prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
-                "operation:main-flow:0".into(),
+                "knowledge:main-flow:0".into(),
             )]),
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,

@@ -143,7 +143,7 @@ pub(super) fn maintain(fixture: &NexusFixture, address: Address) {
                     signal_flow::ModuleIdentity("intent:flow:0".into()),
                 ]),
                 prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
-                    "operation:main-flow:0".into(),
+                    "knowledge:main-flow:0".into(),
                 )]),
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
@@ -1353,7 +1353,7 @@ fn last_launch_context() -> WakePlan {
             signal_flow::ModuleIdentity("intent:flow:0".into()),
         ]),
         prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
-            "operation:main-flow:0".into(),
+            "knowledge:main-flow:0".into(),
         )]),
         flow_kind: signal_flow::FlowKind::Regular,
         tool_set: signal_flow::ToolSet::Default,
@@ -1403,7 +1403,7 @@ fn a_fresh_wake_composes_modules_and_queued_work_in_the_first_prompt() {
             signal_flow::ModuleIdentity("intent:flow:0".into()),
         ]),
         prompt_modules: signal_flow::PromptModules(vec![
-            signal_flow::ModuleIdentity("operation:main-flow:0".into()),
+            signal_flow::ModuleIdentity("knowledge:main-flow:0".into()),
             signal_flow::ModuleIdentity("knowledge:flow:0".into()),
         ]),
         leave_outs_option: None,
@@ -1630,7 +1630,7 @@ fn launched_claude_ended_by_with(
             signal_flow::ModuleIdentity("intent:flow:0".into()),
         ]),
         prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
-            "operation:main-flow:0".into(),
+            "knowledge:main-flow:0".into(),
         )]),
         flow_kind: flow_kind.clone(),
         tool_set: if flow_kind == signal_flow::FlowKind::Simplified {
@@ -4793,7 +4793,7 @@ impl SleepsCodex for NexusFixture {
                 signal_flow::ModuleIdentity("intent:flow:0".into()),
             ]),
             prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
-                "operation:main-flow:0".into(),
+                "knowledge:main-flow:0".into(),
             )]),
             address: address(Model::Sol),
             model_name: flow_ethos::ModelName("fixture-model".into()),
@@ -5553,7 +5553,7 @@ impl SetsUpFirstTurnSend for NexusFixture {
                 signal_flow::ModuleIdentity("intent:flow:0".into()),
             ]),
             prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
-                "operation:main-flow:0".into(),
+                "knowledge:main-flow:0".into(),
             )]),
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
@@ -6984,7 +6984,7 @@ fn a_start_starts_no_other_models_seat_first() {
                     signal_flow::ModuleIdentity("intent:flow:0".into()),
                 ]),
                 prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
-                    "operation:main-flow:0".into(),
+                    "knowledge:main-flow:0".into(),
                 )]),
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,

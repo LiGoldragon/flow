@@ -95,9 +95,9 @@ rec {
     crates = {
       "bitflags" = rec {
         crateName = "bitflags";
-        version = "2.13.1";
+        version = "2.13.2";
         edition = "2021";
-        sha256 = "1nl76mpykmwmb8rq1l5vw1azdh1wvxdrnsk4sy3rdrzx01nvg25m";
+        sha256 = "01hbgjwvid66850fzi76mvn5f2bqycx6sf165ng1kfjqq9bl1v9x";
         authors = [
           "The Rust Project Developers"
         ];
@@ -302,7 +302,7 @@ rec {
       };
       "curriculum" = rec {
         crateName = "curriculum";
-        version = "0.1.0";
+        version = "0.2.0";
         edition = "2024";
         crateBin = [
           {
@@ -325,6 +325,10 @@ rec {
             features = [ "rkyv" ];
           }
           {
+            name = "mio";
+            packageId = "mio";
+          }
+          {
             name = "nexus";
             packageId = "nexus";
           }
@@ -344,6 +348,10 @@ rec {
             packageId = "sha2";
           }
           {
+            name = "signal-curriculum-nexus";
+            packageId = "signal-curriculum-nexus";
+          }
+          {
             name = "thiserror";
             packageId = "thiserror";
           }
@@ -353,30 +361,32 @@ rec {
             features = [ "rt-multi-thread" "net" "io-util" "signal" ];
           }
         ];
-        devDependencies = [
+        buildDependencies = [
           {
             name = "ethos-zero";
             packageId = "ethos-zero";
           }
+        ];
+        devDependencies = [
           {
             name = "tempfile";
             packageId = "tempfile";
           }
         ];
         features = {
-          "datom" = [ "dep:datom-codec" "dep:protos" ];
+          "datom" = [ "dep:datom-codec" "dep:protos" "signal-curriculum-nexus/datom" ];
         };
         resolvedDefaultFeatures = [ "datom" "default" ];
       };
       "datom-codec" = rec {
         crateName = "datom-codec";
-        version = "0.32.2";
+        version = "0.33.1";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/datom-codec";
-          rev = "4dff16b4f7412febc3b71aac8b49680cd20988cb";
-          sha256 = "0fmfphn8ksqrrgayknb1yxk8ha6i6aza3mm8y5pgfjz6kpm2hap7";
+          rev = "09a0526949b043f921b6d3ce115b7f455291f2e2";
+          sha256 = "18cplyk9f5nrqs35fgqpimfi507l38qvkmkx3z2qm2vwi1rlii2d";
         };
         libName = "datom_codec";
         dependencies = [
@@ -404,13 +414,13 @@ rec {
       };
       "datom-codec-derive" = rec {
         crateName = "datom-codec-derive";
-        version = "0.32.0";
+        version = "0.32.3";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/datom-codec";
-          rev = "4dff16b4f7412febc3b71aac8b49680cd20988cb";
-          sha256 = "0fmfphn8ksqrrgayknb1yxk8ha6i6aza3mm8y5pgfjz6kpm2hap7";
+          rev = "09a0526949b043f921b6d3ce115b7f455291f2e2";
+          sha256 = "18cplyk9f5nrqs35fgqpimfi507l38qvkmkx3z2qm2vwi1rlii2d";
         };
         procMacro = true;
         libName = "datom_codec_derive";
@@ -537,14 +547,14 @@ rec {
       };
       "ethos-zero" = rec {
         crateName = "ethos-zero";
-        version = "16.0.0";
+        version = "28.0.0";
         edition = "2024";
         crateBin = [];
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/ethos-zero";
-          rev = "c2653dd82adbdb1f1f2f654405c6620e0d06fd58";
-          sha256 = "1rn59mcxqca6jjp7yba8f5ljylrxh8clywyz1kmjnraxgavx528c";
+          rev = "970459d100ddee5f62a76c05642ecfabefba6329";
+          sha256 = "1iymm3vjsxslkfp1gih72shiav8gk0bkrra1ix3ka9iyg578ldcf";
         };
         libName = "ethos_zero";
         dependencies = [
@@ -1184,6 +1194,30 @@ rec {
         };
         resolvedDefaultFeatures = [ "auxvec" "elf" "errno" "general" "ioctl" "no_std" ];
       };
+      "log" = rec {
+        crateName = "log";
+        version = "0.4.34";
+        edition = "2021";
+        sha256 = "1ihkzn0m33ab79fcl4mkb04n5iwqzbxzyw7l7hazqkffaqzbvy7r";
+        authors = [
+          "The Rust Project Developers"
+        ];
+        features = {
+          "kv_serde" = [ "kv_std" "value-bag/serde" "serde" ];
+          "kv_std" = [ "std" "kv" "value-bag/error" ];
+          "kv_sval" = [ "kv" "value-bag/sval" "sval" "sval_ref" ];
+          "kv_unstable" = [ "kv" "value-bag" ];
+          "kv_unstable_serde" = [ "kv_serde" "kv_unstable_std" ];
+          "kv_unstable_std" = [ "kv_std" "kv_unstable" ];
+          "kv_unstable_sval" = [ "kv_sval" "kv_unstable" ];
+          "serde" = [ "serde_core" ];
+          "serde_core" = [ "dep:serde_core" ];
+          "std" = [ "alloc" ];
+          "sval" = [ "dep:sval" ];
+          "sval_ref" = [ "dep:sval_ref" ];
+          "value-bag" = [ "dep:value-bag" ];
+        };
+      };
       "memchr" = rec {
         crateName = "memchr";
         version = "2.8.3";
@@ -1205,9 +1239,9 @@ rec {
       };
       "mio" = rec {
         crateName = "mio";
-        version = "1.2.4";
+        version = "1.2.3";
         edition = "2021";
-        sha256 = "1vl6px9zy0pwhlwnw3cknsqyzkg8bcpiwiq4cgicf2fwgywfv20p";
+        sha256 = "1n5ryp7j5fga38z7php5yy9k7ia24rp6cl9gm27zwar6khz4862b";
         authors = [
           "Carl Lerche <me@carllerche.com>"
           "Thomas de Zeeuw <thomasdezeeuw@gmail.com>"
@@ -1218,6 +1252,11 @@ rec {
             name = "libc";
             packageId = "libc";
             target = { target, features }: ((target."unix" or false) || ("hermit" == target."os" or null) || ("wasi" == target."os" or null));
+          }
+          {
+            name = "log";
+            packageId = "log";
+            optional = true;
           }
           {
             name = "wasi";
@@ -1236,7 +1275,7 @@ rec {
           "log" = [ "dep:log" ];
           "os-ext" = [ "os-poll" "windows-sys/Win32_System_Pipes" "windows-sys/Win32_Security" ];
         };
-        resolvedDefaultFeatures = [ "net" "os-ext" "os-poll" ];
+        resolvedDefaultFeatures = [ "default" "log" "net" "os-ext" "os-poll" ];
       };
       "munge" = rec {
         crateName = "munge";
@@ -1291,8 +1330,8 @@ rec {
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/nexus";
-          rev = "ec097e315a3b0b99bc215a72f6c3f6d8b2b060cf";
-          sha256 = "0c0qm66wilv27gpi4c18l812sk70hs28pvsbdvhbb89gffq1pl6f";
+          rev = "69946db066bb70bdbc1fd7dbf5e6c88dcf05c363";
+          sha256 = "08qk0m47dxvnpn7nz7x00x6vzmw22n9xl3ykl8v0f2xn5fhs8iv6";
         };
         dependencies = [
           {
@@ -1406,13 +1445,13 @@ rec {
       };
       "protos" = rec {
         crateName = "protos";
-        version = "0.32.2";
+        version = "0.33.0";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/protos";
-          rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3";
-          sha256 = "0l6manmxwr9rywvfwcsy3lmvi4kc8apgvwq87ijg77cllxx05za9";
+          rev = "c93b598025984f8a73e70aa18b8e8a6fdfdfdfd8";
+          sha256 = "00rwpzkxqmwhmxr2dkv9ay9wfvjxbprvvv23lfxmqamm2264r2gb";
         };
         dependencies = [
           {
@@ -1942,6 +1981,46 @@ rec {
         };
         resolvedDefaultFeatures = [ "default" "std" ];
       };
+      "signal-curriculum-nexus" = rec {
+        crateName = "signal-curriculum-nexus";
+        version = "0.2.0";
+        edition = "2024";
+        workspace_member = null;
+        src = pkgs.fetchgit {
+          url = "https://github.com/LiGoldragon/signal-curriculum-nexus";
+          rev = "8e63176cb1c0f1429a9797412391b4035a25cc68";
+          sha256 = "03i9lf2jk6hgh1qh7pz66frbya9ja4caic7pd7nxsc5rbg8q77nh";
+        };
+        libName = "signal_curriculum_nexus";
+        dependencies = [
+          {
+            name = "datom-codec";
+            packageId = "datom-codec";
+            optional = true;
+          }
+          {
+            name = "protos";
+            packageId = "protos";
+            optional = true;
+          }
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+        ];
+        buildDependencies = [
+          {
+            name = "ethos-zero";
+            packageId = "ethos-zero";
+          }
+        ];
+        features = {
+          "datom" = [ "dep:datom-codec" "dep:protos" ];
+        };
+        resolvedDefaultFeatures = [ "datom" "default" ];
+      };
       "signal-hook-registry" = rec {
         crateName = "signal-hook-registry";
         version = "1.4.8";
@@ -2132,9 +2211,9 @@ rec {
       };
       "thiserror" = rec {
         crateName = "thiserror";
-        version = "2.0.20";
+        version = "2.0.21";
         edition = "2021";
-        sha256 = "0kxs6p295jffxhzaxpxv1dwaaf5iqlm6sx8h0djp6ancbxgj71pc";
+        sha256 = "17hq1lh5dyr3bkc7zzjrbrp4qgkvhc48kgq1n5fdxkindaw2rr89";
         authors = [
           "David Tolnay <dtolnay@gmail.com>"
         ];
@@ -2151,9 +2230,9 @@ rec {
       };
       "thiserror-impl" = rec {
         crateName = "thiserror-impl";
-        version = "2.0.20";
+        version = "2.0.21";
         edition = "2021";
-        sha256 = "1bwjc94gi0xn5jz26h1a8bjj1wdkvvr6jifamyc4mp9n28zcs15w";
+        sha256 = "0945n8agp7kg6n6b35yyjb4g5xv2q22vrw15h6jj1nw76a99flgy";
         procMacro = true;
         libName = "thiserror_impl";
         authors = [
@@ -2219,9 +2298,9 @@ rec {
       };
       "tokio" = rec {
         crateName = "tokio";
-        version = "1.53.2";
+        version = "1.53.1";
         edition = "2021";
-        sha256 = "0i202ksji8q2asvii0adzgi8m0z93z3j7apn62qfh8d6qzy92pz9";
+        sha256 = "1v8b3b45pkpbibls75yniqbvx5dlks2708141ljni5mnf6lawb10";
         authors = [
           "Tokio Contributors <team@tokio.rs>"
         ];

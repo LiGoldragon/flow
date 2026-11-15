@@ -3291,13 +3291,13 @@ rec {
       };
       "signal-curriculum-nexus" = rec {
         crateName = "signal-curriculum-nexus";
-        version = "0.1.0";
+        version = "0.2.0";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal-curriculum-nexus";
-          rev = "4202d8bade73179be646b588498ae55e5687d1e8";
-          sha256 = "0911rq0kmmm4p6gw5xzak74lgi7zh41ai7phz1frmp913spwcp74";
+          rev = "8e63176cb1c0f1429a9797412391b4035a25cc68";
+          sha256 = "03i9lf2jk6hgh1qh7pz66frbya9ja4caic7pd7nxsc5rbg8q77nh";
         };
         libName = "signal_curriculum_nexus";
         dependencies = [

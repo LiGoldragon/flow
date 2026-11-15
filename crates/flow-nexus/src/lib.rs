@@ -3740,7 +3740,7 @@ mod tests {
                         &[
                             ("spirit:core:0", "Spirit body."),
                             ("intent:flow:0", "Intent body."),
-                            ("operation:main-flow:0", "Main flow body."),
+                            ("knowledge:main-flow:0", "Main flow body."),
                             ("knowledge:flow:0", "Knowledge body."),
                         ][..],
                     ))),
@@ -6271,7 +6271,7 @@ mod tests {
                     signal_flow::ModuleIdentity("intent:flow:0".into()),
                 ]),
                 prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
-                    "operation:main-flow:0".into(),
+                    "knowledge:main-flow:0".into(),
                 )]),
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,

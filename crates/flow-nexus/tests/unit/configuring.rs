@@ -1378,12 +1378,12 @@ fn each_amend_changes_exactly_its_one_value_and_nothing_else() {
         ),
         (
             Change::Add(Element::PromptModule(signal_flow::ModuleIdentity(
-                "operation:main-flow:0".into(),
+                "knowledge:main-flow:0".into(),
             ))),
             Box::new(|row: &mut ConfigureMetaflow| {
                 row.prompt_modules
                     .0
-                    .push(signal_flow::ModuleIdentity("operation:main-flow:0".into()))
+                    .push(signal_flow::ModuleIdentity("knowledge:main-flow:0".into()))
             }),
         ),
         (
@@ -2523,7 +2523,7 @@ fn one_live_store_value_reaches_both_composers_without_reconstructing_the_source
     let modules = [
         ("spirit:core:0", "Spirit body."),
         ("intent:flow:0", "Intent body."),
-        ("operation:main-flow:0", "Main flow body."),
+        ("knowledge:main-flow:0", "Main flow body."),
         ("knowledge:flow:0", "Knowledge body."),
     ];
     let composer = LaunchComposer::with_context(

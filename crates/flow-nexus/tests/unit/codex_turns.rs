@@ -927,6 +927,17 @@ fn codex_partial_cohorts_release_the_queued_refresh_preserving_terminal_bytes() 
     for run in 1..=16 {
         fake.serve_turn_history(run, &thread, true, history.clone());
     }
+    // A recovered subscription's cut establishes the historical turns.
+    // Receipt correlation cannot release letters into a turn the ledger
+    // has never observed, even when native history proves the payload.
+    fixture.nexus.codex_turns.apply(
+        &thread,
+        cut(&[
+            ("older-native", CodexTurnStatus::Completed),
+            ("newer-native", CodexTurnStatus::Completed),
+            ("running", CodexTurnStatus::InProgress),
+        ]),
+    );
     assert!(matches!(
         fixture.nexus.dispatch(Input::Refresh(target.clone())),
         Output::RefreshQueued(_)

@@ -222,6 +222,79 @@ impl AnswersCompletedDirectSend for signal_flow::DeliveryState {
     }
 }
 
+/// Admits a whole ordered call before scheduling its recipient once.
+pub trait SendsSeveralRequests {
+    fn send_several_requests(
+        &self,
+        send: signal_flow::SendSeveralRequest,
+        peer: Option<&Process>,
+    ) -> Output;
+}
+
+impl SendsSeveralRequests for RunningNexus {
+    fn send_several_requests(
+        &self,
+        send: signal_flow::SendSeveralRequest,
+        peer: Option<&Process>,
+    ) -> Output {
+        use crate::generated::operation::AdmissionMessage;
+        use crate::launching::NamesTopic;
+        use crate::store::delivery_group::AdmitsDeliveryGroups;
+        use crate::store::kept_answer::{AnswerRoute, RoutesAnswers};
+        if send.sendable_message_vector.is_empty() {
+            return Output::SentSeveral(Vec::new());
+        }
+        let observed_sender = match peer {
+            Some(peer) => self.sender_of(peer),
+            None => Ok(SentBy::Unbound),
+        };
+        let sender = match observed_sender {
+            Ok(sender) => sender,
+            Err(output) => return *output,
+        };
+        let _turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !send.address.topic.0.as_str().is_camel_case_topic() {
+            return Output::Refused(Refusal::TopicRefused(send.address.topic));
+        }
+        let mut messages = Vec::with_capacity(send.sendable_message_vector.len());
+        for sendable in send.sendable_message_vector {
+            let message = match self.store.resolve_sendable_message(sendable) {
+                Ok(Ok(message)) => message,
+                Ok(Err(refusal)) => return Output::Refused(refusal),
+                Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
+            };
+            if let Some(refusal) = message.oversized_refusal(&sender) {
+                return Output::Refused(refusal);
+            }
+            match self.store.answer_route(&message) {
+                Ok(AnswerRoute::Unanswering) => {}
+                Ok(AnswerRoute::To(address)) if address == send.address => {}
+                Ok(_) => return Output::Refused(Refusal::Unresolved),
+                Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
+            }
+            let delivery = if matches!(message, Message::Soft(_)) {
+                flow_ethos::Delivery::Queue
+            } else {
+                flow_ethos::Delivery::Wake
+            };
+            messages.push(AdmissionMessage { delivery, message });
+        }
+        match self
+            .store
+            .admit_delivery_group(&send.address, sender, messages)
+        {
+            Ok(Ok(accepted)) => {
+                Output::SentSeveral(accepted.into_iter().map(|value| value.request_id).collect())
+            }
+            Ok(Err(refusal)) => Output::Refused(refusal),
+            Err(error) => Output::Refused(Refusal::Store(error.to_string())),
+        }
+    }
+}
+
 pub trait SendsRequests {
     /// Answers a Send from `peer`, under the dispatch gate.
     fn send_request(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer;

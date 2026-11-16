@@ -892,3 +892,187 @@ fn a_send_with_nested_and_escaped_guillemets_round_trips_through_the_cli_and_the
         );
     }
 }
+
+#[test]
+fn send_several_empty_has_no_admission_or_native_effect() {
+    use super::NexusFixture;
+    use crate::sending::SendsSeveralRequests;
+    use crate::store::memory_digest::DigestsMemory;
+    let fixture = NexusFixture::new();
+    let before = fixture.nexus.store.memory_digest().unwrap();
+    assert_eq!(
+        fixture.nexus.send_several_requests(
+            signal_flow::SendSeveralRequest {
+                address: sender(),
+                sendable_message_vector: Vec::new(),
+            },
+            None
+        ),
+        signal_flow::Output::SentSeveral(Vec::new())
+    );
+    assert_eq!(fixture.nexus.store.memory_digest().unwrap(), before);
+    assert!(fixture.typed().unwrap_or_default().is_empty());
+}
+
+#[test]
+fn send_several_admission_returns_ordered_ids_and_preserves_each_priority() {
+    use super::NexusFixture;
+    use crate::sending::SendsSeveralRequests;
+    use crate::store::delivery_group::SelectsDeliveryGroups;
+    use crate::store::metaflow::SeedsMetaflow;
+    use signal_flow::{Message, Output, SendableMessage, SendableRequest};
+    let fixture = NexusFixture::new();
+    let recipient = Address {
+        topic: flow_ethos::Topic("severalTarget".into()),
+        ..sender()
+    };
+    fixture.nexus.store.seed_metaflow(flow_ethos::Metaflow {
+        address: recipient.clone(),
+        state: flow_ethos::State::Asleep,
+        past: flow_ethos::Past(Vec::new()),
+        queue: flow_ethos::Queue(Vec::new()),
+    });
+    let Output::SentSeveral(ids) = fixture.nexus.send_several_requests(
+        signal_flow::SendSeveralRequest {
+            address: recipient.clone(),
+            sendable_message_vector: vec![
+                SendableMessage::Soft(SendableRequest::Order("first".into())),
+                SendableMessage::HardAbrupt(SendableRequest::Notice("second".into())),
+                SendableMessage::MiddleAbrupt(SendableRequest::Question("third".into())),
+            ],
+        },
+        None,
+    ) else {
+        panic!("whole admission")
+    };
+    let queue = fixture
+        .nexus
+        .store
+        .metaflow(&recipient)
+        .unwrap()
+        .unwrap()
+        .queue
+        .0;
+    assert_eq!(
+        queue
+            .iter()
+            .map(|entry| entry.request_id.clone())
+            .collect::<Vec<_>>(),
+        ids
+    );
+    assert!(matches!(queue[0].message, Message::Soft(_)));
+    assert!(matches!(queue[1].message, Message::HardAbrupt(_)));
+    assert!(matches!(queue[2].message, Message::MiddleAbrupt(_)));
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .oldest_delivery_group(&recipient, &queue)
+            .unwrap(),
+        queue
+    );
+    assert!(
+        fixture.typed().unwrap_or_default().is_empty(),
+        "reply proves admission only"
+    );
+}
+
+#[test]
+fn send_several_invalid_late_member_refuses_without_admitting_earlier_members() {
+    use super::NexusFixture;
+    use crate::sending::SendsSeveralRequests;
+    use crate::store::memory_digest::DigestsMemory;
+    use signal_flow::{Output, SendableMessage, SendableRequest};
+    let fixture = NexusFixture::new();
+    let before = fixture.nexus.store.memory_digest().unwrap();
+    let answer = fixture.nexus.send_several_requests(
+        signal_flow::SendSeveralRequest {
+            address: Address {
+                topic: flow_ethos::Topic("severalTarget".into()),
+                ..sender()
+            },
+            sendable_message_vector: vec![
+                SendableMessage::Soft(SendableRequest::Order("must remain unadmitted".into())),
+                SendableMessage::Soft(SendableRequest::Result(
+                    signal_flow::SendableRequest_Result_Data {
+                        request_id: flow_ethos::RequestId("zzzz".into()),
+                        string: "unknown answer".into(),
+                    },
+                )),
+            ],
+        },
+        None,
+    );
+    assert!(matches!(answer, Output::Refused(_)));
+    assert_eq!(fixture.nexus.store.memory_digest().unwrap(), before);
+    assert!(fixture.typed().unwrap_or_default().is_empty());
+}
+
+#[test]
+fn send_several_refuses_kept_and_different_answer_routes_without_closing_any_request() {
+    use super::NexusFixture;
+    use crate::sending::SendsSeveralRequests;
+    use crate::store::logical_delivery::RecordsLogicalDeliveries;
+    use crate::store::memory_digest::DigestsMemory;
+    use crate::store::metaflow::SeedsMetaflow;
+    use signal_flow::{
+        DeliveryState, Message, Output, PrivateSendResponse, SendableMessage, SendableRequest,
+        SentBy,
+    };
+    for sent_by in [
+        SentBy::Unbound,
+        SentBy::Sender(Address {
+            topic: flow_ethos::Topic("differentAnswerReceiver".into()),
+            ..sender()
+        }),
+    ] {
+        let fixture = NexusFixture::new();
+        let recipient = Address {
+            topic: flow_ethos::Topic("answerTarget".into()),
+            ..sender()
+        };
+        fixture.nexus.store.seed_metaflow(flow_ethos::Metaflow {
+            address: recipient.clone(),
+            state: flow_ethos::State::Asleep,
+            past: flow_ethos::Past(Vec::new()),
+            queue: flow_ethos::Queue(Vec::new()),
+        });
+        let PrivateSendResponse::SendAccepted(original) = fixture
+            .nexus
+            .store
+            .accept_logical_delivery(
+                &recipient,
+                sent_by,
+                flow_ethos::Delivery::Queue,
+                Message::Soft(Request::Order("original request".into())),
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("original admitted")
+        };
+        fixture
+            .nexus
+            .store
+            .transition_logical_delivery(&original.logical_delivery_id, DeliveryState::Uncertain)
+            .unwrap();
+        let before = fixture.nexus.store.memory_digest().unwrap();
+        let response = fixture.nexus.send_several_requests(
+            signal_flow::SendSeveralRequest {
+                address: recipient,
+                sendable_message_vector: vec![
+                    SendableMessage::Soft(SendableRequest::Notice("preceding member".into())),
+                    SendableMessage::Soft(SendableRequest::Result(
+                        signal_flow::SendableRequest_Result_Data {
+                            request_id: original.request_id,
+                            string: "answer".into(),
+                        },
+                    )),
+                ],
+            },
+            None,
+        );
+        assert_eq!(response, Output::Refused(signal_flow::Refusal::Unresolved));
+        assert_eq!(fixture.nexus.store.memory_digest().unwrap(), before);
+    }
+}

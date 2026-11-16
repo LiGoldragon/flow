@@ -135,6 +135,35 @@ mod tests {
     };
 
     #[test]
+    fn send_several_parses_ordered_messages_and_textualizes_ordered_ids() {
+        let client = FlowClient;
+        let Input::SendSeveral(send) = client.parse_query([
+            "SendSeveral.{ { Mind core Sol } [ Soft.Order.«first» HardAbrupt.Notice.«second» ] }".into()
+        ].into_iter()).expect("typed several parses") else { panic!("several input") };
+        assert_eq!(
+            send.sendable_message_vector,
+            vec![
+                SendableMessage::Soft(SendableRequest::Order("first".into())),
+                SendableMessage::HardAbrupt(SendableRequest::Notice("second".into())),
+            ]
+        );
+        assert_eq!(
+            client.textualize_reply(&Output::SentSeveral(vec![
+                flow_ethos::RequestId("a001".into()),
+                flow_ethos::RequestId("b002".into()),
+            ])),
+            "SentSeveral.[ a001 b002 ]"
+        );
+        let Input::SendSeveral(empty) = client
+            .parse_query(["SendSeveral.{ { Mind core Sol } [] }".into()].into_iter())
+            .expect("empty vector parses")
+        else {
+            panic!("empty several")
+        };
+        assert!(empty.sendable_message_vector.is_empty());
+    }
+
+    #[test]
     fn send_priority_and_deliver_all_are_typed() {
         let client = FlowClient;
         let Input::Send(send) = client

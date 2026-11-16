@@ -25,7 +25,8 @@ Memory
   :meta_signal_flow:generated:signal:[ Path ]
   :std:boxed:[ Box ]
   flow_ethos:[ Minutes SourceRoot CodexEndpoint ] ]
-[ LaunchOutcome.[ Started.LaunchedRecord
+[ LogicalDeliveryGroup.{ Address Vector<LogicalDeliveryId> } ; ordered members of one admission
+  LaunchOutcome.[ Started.LaunchedRecord
                   Replaced.ReplacedRecord
                   StartRejected.StartRejection
                   ReplaceRejected.ReplaceRejection

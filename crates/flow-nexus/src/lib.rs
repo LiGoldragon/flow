@@ -866,6 +866,20 @@ impl signal_flow::Answering for OrdinaryCall<'_> {
         }
     }
 
+    fn send_several(
+        &self,
+        send_several_request: &signal_flow::SendSeveralRequest,
+    ) -> Result<Vec<signal_flow::RequestId>, Output> {
+        use crate::sending::SendsSeveralRequests;
+        match self
+            .nexus
+            .send_several_requests(send_several_request.clone(), None)
+        {
+            Output::SentSeveral(request_ids) => Ok(request_ids),
+            other => Err(other),
+        }
+    }
+
     // An observation streams over a connection; a direct dispatch answers
     // its opening frame once, as a read.
     fn observe_sends(

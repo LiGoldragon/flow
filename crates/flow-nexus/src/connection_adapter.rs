@@ -195,6 +195,18 @@ impl AdaptsFlowConnection for FlowConnectionAdapter<'_> {
                 };
                 return answer.response.reply(completion);
             }
+            Input::SendSeveral(send) => {
+                use crate::sending::SendsSeveralRequests;
+                let address = send.address.clone();
+                let nonempty = !send.sendable_message_vector.is_empty();
+                let response = nexus.send_several_requests(send, caller.process.as_ref());
+                let completion = if nonempty && matches!(response, Output::SentSeveral(_)) {
+                    Completion::AfterAnyWrite(PostReplyOperation::WakeDue(address))
+                } else {
+                    Completion::NoPostReplyWork
+                };
+                return response.reply(completion);
+            }
             Input::DeliverAll(address) => {
                 return nexus
                     .deliver_all(address)

@@ -80,7 +80,7 @@ impl CommitsAttemptState for FlowStore {
 const DELIVERY_COUNTER_TABLE_NAME: TableName = TableName::new("flow_nexus_queue_delivery_counter");
 const DELIVERY_REQUEST_TABLE_NAME: TableName = TableName::new("flow_nexus_queue_delivery_requests");
 const DELIVERY_ATTEMPT_TABLE_NAME: TableName = TableName::new("flow_nexus_queue_delivery_attempts");
-const COUNTER_KEY: &str = "counter";
+pub(super) const COUNTER_KEY: &str = "counter";
 /// The first attempt of a store that has made none: an attempt's number is
 /// also its Codex app-server request id, and a connection reserves the
 /// first two while opening and resuming.

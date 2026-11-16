@@ -8173,3 +8173,48 @@ fn retention_exceeded_is_logged_and_reconciles() {
         "the next cut reconciles the ledger"
     );
 }
+
+#[test]
+fn a_simplified_wake_carries_one_whole_send_several_group_in_its_first_prompt() {
+    use crate::sending::SendsSeveralRequests;
+    use signal_flow::{Output, SendSeveralRequest, SendableMessage, SendableRequest};
+    let mut fixture = NexusFixture::new();
+    ended_simplified_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let Output::SentSeveral(ids) = fixture.nexus.send_several_requests(
+        SendSeveralRequest {
+            address: at.clone(),
+            sendable_message_vector: vec![
+                SendableMessage::Soft(SendableRequest::Notice("startup-several-first".into())),
+                SendableMessage::MiddleAbrupt(SendableRequest::Notice(
+                    "startup-several-second".into(),
+                )),
+            ],
+        },
+        None,
+    ) else {
+        panic!("startup group admitted")
+    };
+    let world = fixture.fresh_claude_world();
+    fixture.nexus.wake_due(at.clone());
+    assert_eq!(world.claude_starts(), 1);
+    let prompts = world.user_turns(&fixture);
+    let carried = prompts
+        .iter()
+        .filter(|prompt| prompt.contains("startup-several-first"))
+        .collect::<Vec<_>>();
+    assert_eq!(carried.len(), 1, "one first prompt carries whole group");
+    assert!(carried[0].find("startup-several-first") < carried[0].find("startup-several-second"));
+    assert!(carried[0].find(&ids[0].0) < carried[0].find(&ids[1].0));
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
+    fixture.nexus.wake_due(at);
+    assert_eq!(
+        world.claude_starts(),
+        1,
+        "group never starts a second prompt"
+    );
+}

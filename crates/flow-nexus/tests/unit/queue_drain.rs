@@ -1092,3 +1092,61 @@ fn a_submitted_payload_with_an_unrepresented_suffix_stays_uncertain() {
     ));
     assert_eq!(typed_count(&fixture, "represented-head"), 1);
 }
+
+#[test]
+fn send_several_is_one_ordered_uncertain_prompt_and_never_retyped() {
+    use crate::sending::SendsSeveralRequests;
+    use signal_flow::{SendSeveralRequest, SendableMessage, SendableRequest};
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![working_claude_agent(&fixture)],
+        PromptFixture::PromptedUnrecorded("w1:p3"),
+    );
+    let earlier = from_core("earlier-request-body");
+    seat(&fixture, vec![earlier]);
+    let Output::SentSeveral(ids) = fixture.nexus.send_several_requests(
+        SendSeveralRequest {
+            address: address(Model::Sol),
+            sendable_message_vector: vec![
+                SendableMessage::Soft(SendableRequest::Order("several-first-body".into())),
+                SendableMessage::Soft(SendableRequest::Order("several-second-body".into())),
+            ],
+        },
+        None,
+    ) else {
+        panic!("group admitted")
+    };
+    let cohort = stored(&fixture, Model::Sol).queue.0;
+    let payload = cohort.prompt_text(&address(Model::Sol));
+    assert_eq!(
+        cohort[1..]
+            .iter()
+            .map(|entry| entry.request_id.clone())
+            .collect::<Vec<_>>(),
+        ids
+    );
+    append_main_rows(&fixture, &[end_turn("before")]);
+    report(&fixture, claude_stop(&fixture));
+    let typed = fixture.typed().unwrap_or_default();
+    assert_eq!(
+        typed.matches(&payload).count(),
+        1,
+        "one complete ordered prompt"
+    );
+    assert!(queue(&fixture).is_empty());
+    assert_eq!(standings(&fixture).len(), 3);
+    report(&fixture, claude_stop(&fixture));
+    assert_eq!(
+        fixture
+            .typed()
+            .unwrap_or_default()
+            .matches(&payload)
+            .count(),
+        1
+    );
+    report(
+        &fixture,
+        submitted(CLAUDE_SESSION, "several-receipt", &payload),
+    );
+    assert!(standings(&fixture).is_empty());
+}

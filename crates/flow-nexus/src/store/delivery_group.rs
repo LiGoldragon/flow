@@ -1,6 +1,8 @@
 //! One atomic admission's ordered members, retained independently of queue state.
 
-use super::logical_delivery::{LogicalDeliveryTransition, RecordsLogicalDeliveries};
+use super::logical_delivery::{
+    LogicalDeliveryTransition, RecordsLogicalDeliveries, RequestedDeliveryAdmission,
+};
 use super::queue_delivery::AccountsQueueDelivery;
 use super::*;
 use crate::generated::memory::LogicalDeliveryGroup;
@@ -55,10 +57,10 @@ impl AdmitsDeliveryGroups for FlowStore {
         if messages.is_empty() {
             return Ok(Ok(Vec::new()));
         }
-        self.accept_logical_delivery_group(
+        self.accept_requested_delivery_admission(
             address,
             sender,
-            messages,
+            RequestedDeliveryAdmission::SendSeveral(messages),
             None,
             LogicalDeliveryTransition {
                 purpose: crate::heartbeat::DeliveryPurpose::Ordinary,

@@ -417,6 +417,13 @@ pub(crate) struct LogicalDeliveryTransition {
     pub(crate) upgrade_notice: Option<crate::store::request_id_upgrade::UpgradeNoticeAdmission>,
 }
 
+/// The requested capability is retained independently of member count.
+/// This abstraction does not yet change persisted grouping behavior.
+pub(crate) enum RequestedDeliveryAdmission {
+    Send(crate::generated::operation::AdmissionMessage),
+    SendSeveral(Vec<crate::generated::operation::AdmissionMessage>),
+}
+
 #[derive(Clone)]
 pub(crate) struct DeliverCallSpec {
     pub key: signal_flow::DeliverKey,
@@ -716,11 +723,11 @@ pub(crate) trait RecordsLogicalDeliveries {
         message: Message,
         reminder: crate::store::handover_reminders::HandoverReminder,
     ) -> Result<signal_flow::PrivateSendResponse, StoreError>;
-    fn accept_logical_delivery_group(
+    fn accept_requested_delivery_admission(
         &self,
         address: &Address,
         sent_by: SentBy,
-        messages: Vec<crate::generated::operation::AdmissionMessage>,
+        requested: RequestedDeliveryAdmission,
         held_lock: Option<VerifiedDeliveryLock>,
         transition: LogicalDeliveryTransition,
     ) -> Result<Result<Vec<SendAcceptance>, Refusal>, StoreError>;
@@ -2014,10 +2021,13 @@ impl RecordsLogicalDeliveries for FlowStore {
         transition: LogicalDeliveryTransition,
     ) -> Result<signal_flow::PrivateSendResponse, StoreError> {
         Ok(
-            match self.accept_logical_delivery_group(
+            match self.accept_requested_delivery_admission(
                 address,
                 sent_by,
-                vec![crate::generated::operation::AdmissionMessage { delivery, message }],
+                RequestedDeliveryAdmission::Send(crate::generated::operation::AdmissionMessage {
+                    delivery,
+                    message,
+                }),
                 held_lock,
                 transition,
             )? {
@@ -2028,14 +2038,18 @@ impl RecordsLogicalDeliveries for FlowStore {
             },
         )
     }
-    fn accept_logical_delivery_group(
+    fn accept_requested_delivery_admission(
         &self,
         address: &Address,
         sent_by: SentBy,
-        messages: Vec<crate::generated::operation::AdmissionMessage>,
+        requested: RequestedDeliveryAdmission,
         held_lock: Option<VerifiedDeliveryLock>,
         transition: LogicalDeliveryTransition,
     ) -> Result<Result<Vec<SendAcceptance>, Refusal>, StoreError> {
+        let messages = match requested {
+            RequestedDeliveryAdmission::Send(message) => vec![message],
+            RequestedDeliveryAdmission::SendSeveral(messages) => messages,
+        };
         let _guard = self
             .logical_deliveries
             .write_gate

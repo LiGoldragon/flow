@@ -443,6 +443,94 @@ pub enum WakePlan {
     Unplaceable,
 }
 
+/// Read-only evidence for the recipient's execution kind. Consumers must
+/// establish cutoff consistency before using this snapshot for a mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RecipientExecutionEvidence {
+    ActiveLaunch {
+        metaflow: Metaflow,
+        profile: LaunchProfile,
+    },
+    NextDeclaration {
+        metaflow: Metaflow,
+        declaration: meta_signal_flow::ConfigureMetaflow,
+    },
+    NextPreviousLaunch {
+        metaflow: Metaflow,
+        profile: LaunchProfile,
+    },
+}
+
+impl RecipientExecutionEvidence {
+    pub(crate) fn flow_kind(&self) -> &signal_flow::FlowKind {
+        match self {
+            Self::ActiveLaunch { profile, .. } | Self::NextPreviousLaunch { profile, .. } => {
+                &profile.flow_kind
+            }
+            Self::NextDeclaration { declaration, .. } => &declaration.flow_kind,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RecipientExecutionUnresolved {
+    MetaflowUnavailable,
+    MetaflowUnreadable,
+    ActiveLaunchUnavailable,
+    DeclarationUnreadable,
+    NextLaunchUnavailable,
+}
+
+pub(crate) trait ResolvesRecipientExecution {
+    fn recipient_execution_evidence(
+        &self,
+        address: &Address,
+    ) -> Result<RecipientExecutionEvidence, RecipientExecutionUnresolved>;
+}
+
+impl ResolvesRecipientExecution for RunningNexus {
+    fn recipient_execution_evidence(
+        &self,
+        address: &Address,
+    ) -> Result<RecipientExecutionEvidence, RecipientExecutionUnresolved> {
+        use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
+        let metaflow = self
+            .store
+            .metaflow(address)
+            .map_err(|_| RecipientExecutionUnresolved::MetaflowUnreadable)?
+            .ok_or(RecipientExecutionUnresolved::MetaflowUnavailable)?;
+        match &metaflow.state {
+            flow_ethos::State::Awake(flow_id) => {
+                let profile = self
+                    .last_launch_profile(&flow_id.0)
+                    .ok_or(RecipientExecutionUnresolved::ActiveLaunchUnavailable)?;
+                Ok(RecipientExecutionEvidence::ActiveLaunch { metaflow, profile })
+            }
+            flow_ethos::State::Asleep => {
+                let declaration = self
+                    .store
+                    .metaflow_declaration(address)
+                    .map_err(|_| RecipientExecutionUnresolved::DeclarationUnreadable)?;
+                match declaration {
+                    Some(declaration) => Ok(RecipientExecutionEvidence::NextDeclaration {
+                        metaflow,
+                        declaration,
+                    }),
+                    None => {
+                        let profile = metaflow
+                            .past
+                            .0
+                            .last()
+                            .and_then(|flow_id| self.last_launch_profile(&flow_id.0))
+                            .ok_or(RecipientExecutionUnresolved::NextLaunchUnavailable)?;
+                        Ok(RecipientExecutionEvidence::NextPreviousLaunch { metaflow, profile })
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub use crate::generated::starter::FreshContext;
 
 /// What a flow's Stop did to its seat.

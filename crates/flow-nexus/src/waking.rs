@@ -461,8 +461,12 @@ pub(crate) enum RecipientExecutionEvidence {
     },
 }
 
-impl RecipientExecutionEvidence {
-    pub(crate) fn flow_kind(&self) -> &signal_flow::FlowKind {
+pub(crate) trait ClassifiedByFlowKind {
+    fn flow_kind(&self) -> &signal_flow::FlowKind;
+}
+
+impl ClassifiedByFlowKind for RecipientExecutionEvidence {
+    fn flow_kind(&self) -> &signal_flow::FlowKind {
         match self {
             Self::ActiveLaunch { profile, .. } | Self::NextPreviousLaunch { profile, .. } => {
                 &profile.flow_kind

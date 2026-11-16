@@ -733,3 +733,244 @@ fn exact_receipts_release_pending_members_of_two_completed_cohorts() {
     }
     assert_eq!(ledger.standing(THREAD), ThreadStanding::AtRest);
 }
+
+/// The production Codex receipt path, not direct LetterReceived injection:
+/// two partially settled cohorts retain Read/Settled siblings, recover
+/// exact native history, release their actual pending letters, and allow
+/// the queued refresh at native rest without retransmitting anything.
+#[test]
+fn codex_partial_cohorts_release_the_queued_refresh_preserving_terminal_bytes() {
+    use super::send_tool::{RunsFakeAppServer, accepting_codex_endpoint};
+    use super::waking::{address, stored};
+    use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
+    use crate::Dispatches;
+    use crate::codex_turns::SettlesRestingCodexSeats;
+    use crate::composition::RendersQueuedWork;
+    use crate::generated::memory::{
+        NativeDeliveryReceipt, NativeHistoryAnchor, NativeReceiptText, TurnId,
+    };
+    use crate::store::SeedsRole;
+    use crate::store::logical_delivery::RecordsLogicalDeliveries;
+    use crate::store::metaflow::SeedsMetaflow;
+    use crate::store::queue_delivery::{
+        AccountsQueueDelivery, PrepareQueueDelivery, QueueDeliveryPhase,
+    };
+    use crate::waking::{AtStop, ParksCohort};
+    use signal_flow::{FlowLifecycle, Input, Message, Model, Output, Request, SentBy};
+
+    let mut fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![fixture.settled_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.register_with(FlowLifecycle::Active);
+    let target = address(Model::Sol);
+    let sender = address(Model::Opus);
+    for (at, state) in [
+        (
+            &target,
+            flow_ethos::State::Awake(flow_ethos::FlowId("908786".into())),
+        ),
+        (&sender, flow_ethos::State::Asleep),
+    ] {
+        fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+            address: at.clone(),
+            state,
+            past: flow_ethos::Past(vec![]),
+            queue: flow_ethos::Queue(vec![]),
+        });
+    }
+    super::refresh_and_compaction::declare_seat(
+        &fixture,
+        meta_signal_flow::Continuity::OnDemand,
+        vec![],
+    );
+    fixture.nexus.store.seed_role(signal_flow::CallerIdentity {
+        flow_id: flow_ethos::FlowId("908786".into()),
+        aspect: signal_flow::Aspect::Mind,
+        model_name: flow_ethos::ModelName("gpt-sol".into()),
+    });
+    let thread = fixture.node().session_id.0;
+    let fake = accepting_codex_endpoint(&mut fixture, "gpt-sol", &thread);
+    fixture.nexus.codex_turns.apply(&thread, idle());
+    fixture.nexus.codex_turns.apply(&thread, started("running"));
+    let mut terminal = Vec::new();
+    let mut history = Vec::new();
+    for (cohort, anchor) in [("older", "before-older"), ("newer", "before-newer")] {
+        for member in ["settled", "read", "pending"] {
+            let admitted = fixture
+                .nexus
+                .store
+                .accept_logical_delivery(
+                    &target,
+                    SentBy::Sender(sender.clone()),
+                    flow_ethos::Delivery::Queue,
+                    Message::Soft(Request::Order(format!("{cohort}-{member}"))),
+                    None,
+                )
+                .unwrap();
+            assert!(matches!(
+                admitted,
+                signal_flow::PrivateSendResponse::SendAccepted(_)
+            ));
+        }
+        let entries = stored(&fixture, Model::Sol).queue.0;
+        let payload = entries.prompt_text(&target);
+        let PrepareQueueDelivery::Prepared(head) = fixture
+            .nexus
+            .store
+            .prepare_oldest_delivery(
+                &target,
+                "908786",
+                &thread,
+                signal_flow::HarnessKind::Codex,
+                NativeHistoryAnchor::CodexTurns(Some(anchor.into())),
+            )
+            .unwrap()
+        else {
+            panic!("cohort head prepared")
+        };
+        fixture
+            .nexus
+            .store
+            .mark_delivery_uncertain(&head.queue_attempt_id.0)
+            .unwrap();
+        assert_eq!(fixture.nexus.park_cohort(&head, &entries).len(), 3);
+        let attempts = fixture.nexus.typed_group(&head);
+        assert_eq!(attempts.len(), 3);
+        fixture
+            .nexus
+            .store
+            .record_delivery_receipt(
+                &attempts[0].queue_attempt_id.0,
+                NativeDeliveryReceipt {
+                    native_request_id: attempts[0].native_request_id,
+                    thread_id: attempts[0].thread_id.clone(),
+                    turn_id: TurnId(format!("{cohort}-native")),
+                    native_receipt_text: NativeReceiptText(format!("{cohort}-kept-receipt")),
+                },
+            )
+            .unwrap();
+        fixture
+            .nexus
+            .store
+            .settle_recorded_delivery(&attempts[0].queue_attempt_id.0)
+            .unwrap();
+        let answer = fixture
+            .nexus
+            .store
+            .resolve_sendable_message(signal_flow::SendableMessage::Soft(
+                signal_flow::SendableRequest::Result(signal_flow::SendableRequest_Result_Data {
+                    request_id: entries[1].request_id.clone(),
+                    string: "Read and answered.".into(),
+                }),
+            ))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            fixture
+                .nexus
+                .store
+                .accept_logical_delivery(
+                    &sender,
+                    SentBy::Sender(target.clone()),
+                    flow_ethos::Delivery::Queue,
+                    answer,
+                    None,
+                )
+                .unwrap(),
+            signal_flow::PrivateSendResponse::SendAccepted(_)
+        ));
+        for (index, attempt) in attempts.iter().take(2).enumerate() {
+            let retained = fixture
+                .nexus
+                .store
+                .queue_delivery_attempt(&attempt.queue_attempt_id.0)
+                .unwrap()
+                .unwrap();
+            assert!(if index == 0 {
+                matches!(
+                    retained.queue_delivery_phase,
+                    QueueDeliveryPhase::Settled(_)
+                )
+            } else {
+                matches!(
+                    retained.queue_delivery_phase,
+                    QueueDeliveryPhase::Read { .. }
+                )
+            });
+            terminal.push((
+                attempt.queue_attempt_id.0.clone(),
+                rkyv::to_bytes::<rkyv::rancor::Error>(&retained)
+                    .unwrap()
+                    .to_vec(),
+            ));
+        }
+        // Restart reconstruction installs a pending letter for the remaining
+        // member, with its full original payload, not the shortened subset.
+        fixture.nexus.codex_turns.apply(
+            &thread,
+            typed(
+                &attempts[2].queue_attempt_id.0,
+                &payload,
+                Interrupt::NotPressed,
+            ),
+        );
+        history.insert(
+            0,
+            serde_json::json!({"id":anchor,"status":"completed","items":[]}),
+        );
+        history.insert(0, serde_json::json!({"id":format!("{cohort}-native"),"status":"completed","items":[{
+            "type":"userMessage","id":format!("{cohort}-input"),"content":[{"type":"text","text":payload}]
+        }]}));
+    }
+    for run in 1..=16 {
+        fake.serve_turn_history(run, &thread, true, history.clone());
+    }
+    assert!(matches!(
+        fixture.nexus.dispatch(Input::Refresh(target.clone())),
+        Output::RefreshQueued(_)
+    ));
+    // Native completion invokes production reconcile_typed for LetterAwaited,
+    // then the now-resting ledger releases the actual queued refresh.
+    let outcome = fixture
+        .nexus
+        .codex_events(&thread, vec![completed("running")]);
+    assert!(
+        matches!(outcome, Some(AtStop::Refreshed(ref at)) if at == &target),
+        "{outcome:?}"
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .unsettled_deliveries(&target)
+            .unwrap()
+            .is_empty()
+    );
+    for (id, before) in terminal {
+        let retained = fixture
+            .nexus
+            .store
+            .queue_delivery_attempt(&id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            before,
+            rkyv::to_bytes::<rkyv::rancor::Error>(&retained)
+                .unwrap()
+                .to_vec(),
+            "terminal bytes unchanged: {id}"
+        );
+    }
+    assert!(
+        fake.queued_turn_texts().is_empty(),
+        "no turn/start retransmission"
+    );
+    assert!(fixture.typed().is_none(), "no pane retyping");
+    assert!(
+        std::fs::read_to_string(fixture.directory.path().join("herdr-operations.log"))
+            .unwrap_or_default()
+            .contains("pane close w1:p3")
+    );
+}

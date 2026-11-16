@@ -3127,11 +3127,11 @@ impl ParksCohort for RunningNexus {
         };
         let mut covered = HashSet::new();
         for attempt in self.typed(address, &flow_id.0) {
-            if !covered.insert(attempt.native_request_id) {
+            if !covered.insert(attempt.queue_attempt_id.0.clone()) {
                 continue;
             }
             if let Ok((run, turn_id, native_receipt, seat_after)) = self.find_receipt(&attempt) {
-                covered.extend(run.iter().map(|member| member.native_request_id));
+                covered.extend(run.iter().map(|member| member.queue_attempt_id.0.clone()));
                 let _ = self.settle_received(&attempt, &run, turn_id, native_receipt, seat_after);
             }
         }
@@ -3148,13 +3148,13 @@ impl ParksCohort for RunningNexus {
             };
             let mut covered = HashSet::new();
             for attempt in self.typed(address, &flow_id.0) {
-                if !covered.insert(attempt.native_request_id) {
+                if !covered.insert(attempt.queue_attempt_id.0.clone()) {
                     continue;
                 }
                 covered.extend(
                     self.typed_group(&attempt)
                         .iter()
-                        .map(|member| member.native_request_id),
+                        .map(|member| member.queue_attempt_id.0.clone()),
                 );
                 // Read off the gate; settle under it.
                 let Ok((run, turn_id, native_receipt, seat_after)) = self.find_receipt(&attempt)

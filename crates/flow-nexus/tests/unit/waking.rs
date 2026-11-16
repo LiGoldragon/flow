@@ -8218,3 +8218,117 @@ fn a_simplified_wake_carries_one_whole_send_several_group_in_its_first_prompt() 
         "group never starts a second prompt"
     );
 }
+
+#[test]
+fn cancelled_send_several_members_leave_ordered_survivors_and_later_work_in_first_prompt() {
+    use crate::queue_operations::OperatesOnRequestsAndQueues;
+    use crate::sending::SendsSeveralRequests;
+    use signal_flow::{Output, SendSeveralRequest, SendableMessage, SendableRequest};
+    for cancelled in [vec![0], vec![1], vec![2], vec![0, 2], vec![0, 1, 2]] {
+        let mut fixture = NexusFixture::new();
+        ended_claude(&fixture);
+        let at = address(Model::Sol);
+        fixture.nexus.store.seed_metaflow(metaflow(
+            Model::Sol,
+            State::Asleep,
+            vec!["abc123"],
+            vec![],
+        ));
+        let bodies = [
+            "cancel-group-first",
+            "cancel-group-middle",
+            "cancel-group-last",
+        ];
+        let Output::SentSeveral(ids) = fixture.nexus.send_several_requests(
+            SendSeveralRequest {
+                address: at.clone(),
+                sendable_message_vector: bodies
+                    .iter()
+                    .map(|body| SendableMessage::Soft(SendableRequest::Order((*body).into())))
+                    .collect(),
+            },
+            None,
+        ) else {
+            panic!("group admitted")
+        };
+        for index in &cancelled {
+            assert_eq!(
+                fixture.nexus.cancel(&ids[*index]),
+                Output::Cancelled(ids[*index].clone())
+            );
+        }
+        assert!(matches!(
+            fixture.nexus.send_several_requests(
+                SendSeveralRequest {
+                    address: at.clone(),
+                    sendable_message_vector: vec![SendableMessage::Soft(SendableRequest::Notice(
+                        "cancel-group-later".into()
+                    ))]
+                },
+                None
+            ),
+            Output::SentSeveral(_)
+        ));
+        let world = fixture.fresh_claude_world();
+        fixture.nexus.wake_due(at.clone());
+        let prompts = world.user_turns(&fixture);
+        let carried = prompts
+            .iter()
+            .filter(|prompt| prompt.contains("cancel-group-later"))
+            .collect::<Vec<_>>();
+        assert_eq!(carried.len(), 1);
+        let mut last_position = None;
+        for (index, body) in bodies.iter().enumerate() {
+            if cancelled.contains(&index) {
+                assert!(!carried[0].contains(body));
+            } else {
+                let position = carried[0].find(body).expect("survivor is in prompt");
+                if let Some(previous) = last_position {
+                    assert!(previous < position);
+                }
+                last_position = Some(position);
+                assert!(carried[0].contains(&ids[index].0));
+            }
+        }
+        if let Some(previous) = last_position {
+            assert!(previous < carried[0].find("cancel-group-later").unwrap());
+        }
+        assert_eq!(world.claude_starts(), 1);
+        assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
+        fixture.nexus.wake_due(at);
+        assert_eq!(world.claude_starts(), 1);
+    }
+}
+
+#[test]
+fn all_cancelled_send_several_members_start_no_prompt() {
+    use crate::queue_operations::OperatesOnRequestsAndQueues;
+    use crate::sending::SendsSeveralRequests;
+    use signal_flow::{Output, SendSeveralRequest, SendableMessage, SendableRequest};
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let Output::SentSeveral(ids) = fixture.nexus.send_several_requests(
+        SendSeveralRequest {
+            address: at.clone(),
+            sendable_message_vector: vec![
+                SendableMessage::Soft(SendableRequest::Order("cancel-all-first".into())),
+                SendableMessage::Soft(SendableRequest::Order("cancel-all-last".into())),
+            ],
+        },
+        None,
+    ) else {
+        panic!("group admitted")
+    };
+    for id in ids {
+        assert_eq!(fixture.nexus.cancel(&id), Output::Cancelled(id));
+    }
+    let world = fixture.fresh_claude_world();
+    fixture.nexus.wake_due(at);
+    assert_eq!(world.claude_starts(), 0);
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
+}

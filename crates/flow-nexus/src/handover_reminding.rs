@@ -36,7 +36,7 @@ impl RendersHandoverWarning for HandoverReminderNotice {
 
 impl DecidesHandoverReminder for HandoverReminder {
     fn notice_if_due(&self, now: i64) -> Option<HandoverReminderNotice> {
-        (now >= self.next_due.0).then(|| HandoverReminderNotice {
+        (self.sent.0 == 0 && now >= self.next_due.0).then(|| HandoverReminderNotice {
             address: self.address.clone(),
             text: self.reminder_text.clone().0,
             generation: self.handover_generation.0,
@@ -159,6 +159,14 @@ impl RemindsHandoverCallers for crate::RunningNexus {
                 .handover_reminder(&metaflow.address, generation.0)
                 .ok()
                 .flatten();
+            // Keep the durable once-only witness for this flow, including
+            // when its warning window closes and later opens again.
+            if existing
+                .as_ref()
+                .is_some_and(|reminder| reminder.sent.0 > 0)
+            {
+                continue;
+            }
             if green {
                 if existing.is_some() {
                     let _ = self
@@ -263,10 +271,8 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             // Admission is deliberately ordinary. In particular this does
             // not use DeliveryPurpose::Heartbeat or any refresh hold bypass.
             // MiddleAbrupt reaches the flow at its next tool boundary.
-            let base = HandoverReminderNotice {
-                address: reminder.address.clone(),
-                text: reminder.reminder_text.clone().0,
-                generation: reminder.handover_generation.0,
+            let Some(base) = reminder.notice_if_due(now) else {
+                continue;
             };
             let mut admitted = reminder.clone();
             admitted.sent = match admitted.sent.0.checked_add(1) {

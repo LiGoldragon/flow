@@ -6,11 +6,11 @@
         "nixpkgs": "nixpkgs"
       },
       "locked": {
-        "lastModified": 1794702544,
-        "narHash": "sha256-1g8R0nPaUa5KXNhB5QvOkgcR3SnMEoQWOz3PO+3LYb8=",
+        "lastModified": 1794876691,
+        "narHash": "sha256-X73stxHF5fZaeExumf+s5Pua/sla8kOf4f7akHQKcxY=",
         "owner": "LiGoldragon",
         "repo": "build-base",
-        "rev": "4ea69d1fc87c95e7c1f54d02b21166ffb3285edd",
+        "rev": "8c795797f243b3d0fb66687241993c36e549f5ca",
         "type": "github"
       },
       "original": {
@@ -52,12 +52,12 @@
     "curriculum": {
       "flake": false,
       "locked": {
-        "lastModified": 1794704753,
+        "lastModified": 1794876854,
+        "narHash": "sha256-7aTzNKxA0lKRFRqWgHioQfTp5+5ryTMKYBZKd3UP4bM=",
         "owner": "LiGoldragon",
         "repo": "Curriculum",
-        "rev": "60609c55f90432782625275294636a4e396d9497",
-        "type": "github",
-        "narHash": "sha256-Dq+CNCm41KNRjCg1HdryDSYxyB+n91HG4IYpZHLSmtM="
+        "rev": "781d2d6f906c1ea5d3d9a48445adf7f05765bd0c",
+        "type": "github"
       },
       "original": {
         "owner": "LiGoldragon",

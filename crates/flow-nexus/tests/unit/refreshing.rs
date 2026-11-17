@@ -1073,13 +1073,11 @@ fn a_launch_ordered_replace_holds_the_metaflow_and_types_nothing_into_its_predec
     );
 }
 
-/// A timer created by the production scheduler remains durable while an
-/// actual replacement holds the metaflow. Its next warning is admitted and
-/// advanced before that hold is released, then the same logical delivery is
-/// drained exactly once to the successor rather than typed into the ending
-/// predecessor.
+/// The production scheduler's first warning remains durable while an actual
+/// replacement holds the metaflow. A later tick admits no second warning;
+/// the first logical delivery drains once to the successor.
 #[test]
-fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
+fn scheduled_warning_stays_once_during_replace_and_drains_once_to_successor() {
     use crate::message_projection::ProjectsQueueEntry;
     use datom_codec::{Actualizing, Potential};
 
@@ -1176,9 +1174,9 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
     ));
 
     // The Replace answers once the reap is owed; the predecessor's close is
-    // its worker's, and the warning is admitted while that close runs.
+    // its worker's. Exercise the later tick while that close is held.
     let replaced = fixture.nexus.dispatch(Input::Replace(profile.clone()));
-    let warning_id = std::thread::scope(|scope| {
+    std::thread::scope(|scope| {
         // Scope joins its children after this closure returns or unwinds.
         // Keep the release guard inside the closure so an assertion releases
         // the fixture's native close before that join can wait on it.
@@ -1189,40 +1187,32 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
             closing.appeared_by(deadline),
             "the reap never reached close"
         );
-        let reminding = scope.spawn(|| fixture.nexus.send_due_handover_reminders(310));
-        let admitted = || {
+        fixture.nexus.send_due_handover_reminders(310);
+        assert_eq!(
             stored(&fixture)
                 .queue
                 .0
                 .iter()
-                .find(|entry| {
-                    entry.logical_delivery_id != first_warning_id
-                        && matches!(&entry.message, Message::MiddleAbrupt(Request::Notice(text))
-                        if text.contains("flow Keep."))
+                .filter(|entry| {
+                    matches!(&entry.message, Message::MiddleAbrupt(Request::Notice(text))
+                    if text.contains("flow Keep."))
                 })
                 .map(|entry| entry.logical_delivery_id.clone())
-        };
-        // Asked again at each change the store announces.
-        assert!(
-            fixture
-                .nexus
-                .store
-                .launch_changes
-                .until_holds(deadline, &mut || admitted().is_some()),
-            "warning was not durably admitted"
+                .collect::<Vec<_>>(),
+            vec![first_warning_id.clone()],
+            "replacement admits no second reminder"
         );
-        let warning_id = admitted().expect("the warning admitted");
         let timer = fixture
             .nexus
             .store
             .handover_reminder(&seat_address(), 0)
             .unwrap()
             .unwrap();
-        assert_eq!((timer.sent.0, timer.next_due.0), (2, 610));
+        assert_eq!((timer.sent.0, timer.next_due.0), (1, 310));
         let queued = fixture
             .nexus
             .store
-            .logical_delivery_snapshot(&warning_id)
+            .logical_delivery_snapshot(&first_warning_id)
             .unwrap()
             .unwrap();
         assert!(matches!(
@@ -1231,9 +1221,7 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
         ));
         assert_eq!(typing_calls(&fixture).len(), predecessor_calls);
         release.release();
-        reminding.join().expect("reminder tick completed");
         reaping.join().expect("the reap settled");
-        warning_id
     });
 
     let Output::ReapPending(replaced) = replaced else {
@@ -1292,8 +1280,8 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
             .iter()
             .map(|entry| entry.logical_delivery_id.clone())
             .collect::<Vec<_>>(),
-        vec![first_warning_id.clone(), warning_id.clone()],
-        "the scheduler's two distinct warnings remain oldest first"
+        vec![first_warning_id.clone()],
+        "the scheduler's first warning alone remains queued"
     );
     let expected_inputs = queued_cohort
         .0
@@ -1308,7 +1296,7 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
     };
     assert_eq!(
         drained_cohort, queued_cohort.0,
-        "the one drain parks both distinct logical IDs in queue order"
+        "the one drain parks the first warning alone"
     );
     let cohort_input = fixture.typed().expect("warning cohort typed to successor");
     let mut budget = datom_codec::Budget {
@@ -1323,10 +1311,10 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
             .unwrap_or_else(|error| panic!("{cohort_input}: {error:?}"));
     assert_eq!(
         observed_inputs, expected_inputs,
-        "one native cohort carries both warning IDs' exact visible inputs, oldest first"
+        "one native cohort carries the first warning's exact visible input"
     );
     assert_eq!(successor_input_count(), 1);
-    for warning in [&first_warning_id, &warning_id] {
+    for warning in [&first_warning_id] {
         let placed = fixture
             .nexus
             .store
@@ -1348,7 +1336,7 @@ fn scheduled_warning_admitted_during_replace_drains_once_to_the_successor() {
     drop(codex);
     assert!(
         stored(&fixture).queue.0.is_empty(),
-        "both correlated warning IDs leave the queue together"
+        "the first warning leaves the queue"
     );
 }
 

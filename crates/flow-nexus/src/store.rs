@@ -10104,7 +10104,7 @@ mod tests {
     #[test]
     fn panel_families_are_preserved_unread_while_latest_memory_advances() {
         use crate::store::context::RecordsContextSize;
-        use redb::{ReadableDatabase as _, ReadableTable as _, ReadableTableMetadata as _};
+        use redb::{ReadableDatabase as _, ReadableTableMetadata as _};
         for running in [false, true] {
             let fixture = StoreFixture::new();
             fixture.configured();
@@ -10190,11 +10190,11 @@ mod tests {
                         .register_table(TableDescriptor::<super::FlowRecord>::new(
                             TableName::new(table),
                             FamilyName::new(if wrong_schema { family } else { "foreign" }),
-                            SchemaHash::for_label(if wrong_schema {
-                                "future-v2"
+                            if wrong_schema {
+                                SchemaHash::for_label("future-v2")
                             } else {
-                                &format!("{family}-v1")
-                            }),
+                                SchemaHash::for_label(&format!("{family}-v1"))
+                            },
                         ))
                         .unwrap();
                 }

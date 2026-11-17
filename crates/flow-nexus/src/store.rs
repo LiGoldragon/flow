@@ -10126,7 +10126,7 @@ mod tests {
                         .register_table(TableDescriptor::<super::FlowRecord>::new(
                             TableName::new(table),
                             FamilyName::new(family),
-                            SchemaHash::for_label(&format!("{family}-v1")),
+                            SchemaHash::for_label(format!("{family}-v1")),
                         ))
                         .unwrap();
                 }
@@ -10193,7 +10193,7 @@ mod tests {
                             if wrong_schema {
                                 SchemaHash::for_label("future-v2")
                             } else {
-                                SchemaHash::for_label(&format!("{family}-v1"))
+                                SchemaHash::for_label(format!("{family}-v1"))
                             },
                         ))
                         .unwrap();

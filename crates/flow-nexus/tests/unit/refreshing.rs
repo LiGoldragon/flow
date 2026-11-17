@@ -24,7 +24,6 @@ use crate::generated::operation::{Operation, Outcome};
 use crate::handover_reminding::RemindsHandoverCallers;
 use crate::performing::Performs;
 use crate::sending::{IdentifiesSender, SendsRequests};
-use crate::store::AnnouncesLaunchChanges as _;
 use crate::store::SeedsRole;
 use crate::store::context::{JudgesThreshold, RecordsContextSize};
 use crate::store::handover::HoldsHandovers as _;

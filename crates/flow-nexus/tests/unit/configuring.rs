@@ -2618,3 +2618,39 @@ fn prompt_module_amends_accept_exact_spans_singletons_and_distinct_notion_identi
         );
     }
 }
+
+#[test]
+fn malformed_span_amends_are_unknown_modules_and_leave_the_store_unchanged() {
+    use meta_signal_flow::{Change, Element};
+    let (_fixture, mut nexus, alpha, _beta) = amend_world();
+    let identities = [
+        "vision:flow-nexus:1-1",
+        "vision:flow-nexus:2-1",
+        "vision:flow-nexus:0-01",
+        "vision:flow-nexus:0-1-2",
+    ];
+    let modules = identities
+        .iter()
+        .map(|identity| (*identity, "Malformed span."))
+        .collect::<Vec<_>>();
+    *nexus.composer.edit() = crate::context::ContextComposer(std::sync::Arc::new(
+        crate::context::FixtureComposer::from(&modules[..]),
+    ));
+    let before = snapshot(&nexus);
+    let rows = other_rows(&nexus);
+    for identity in identities {
+        let identity = signal_flow::ModuleIdentity(identity.into());
+        assert_eq!(
+            configure(
+                &nexus,
+                amend(
+                    &alpha.address,
+                    Change::Add(Element::PromptModule(identity.clone()))
+                )
+            ),
+            MetaResponse::ConfigureRefused(ConfigureRefusal::UnknownModule(identity)),
+        );
+        assert_eq!(snapshot(&nexus), before);
+        assert_eq!(other_rows(&nexus), rows);
+    }
+}

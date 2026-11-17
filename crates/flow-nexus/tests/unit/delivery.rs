@@ -966,7 +966,7 @@ fn direct_delivery_custody_blocks_refresh_until_pane_input_finishes() {
         release.release();
         (delivery.join().expect("direct delivery"), refresh)
     });
-    assert!(matches!(delivery, meta_signal_flow::Output::Delivered(_)));
+    assert!(matches!(delivery, meta_signal_flow::Output::MessageTyped(_)));
     assert_eq!(
         refresh,
         signal_flow::Output::RefreshRejected(RefreshRejection::Locked)

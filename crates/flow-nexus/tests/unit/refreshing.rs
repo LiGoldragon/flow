@@ -1314,11 +1314,11 @@ fn scheduled_warning_stays_once_during_replace_and_drains_once_to_successor() {
         "one native cohort carries the first warning's exact visible input"
     );
     assert_eq!(successor_input_count(), 1);
-    for warning in [&first_warning_id] {
+    {
         let placed = fixture
             .nexus
             .store
-            .logical_delivery_snapshot(warning)
+            .logical_delivery_snapshot(&first_warning_id)
             .unwrap()
             .unwrap();
         assert!(

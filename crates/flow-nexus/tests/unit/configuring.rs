@@ -2585,6 +2585,7 @@ fn one_live_store_value_reaches_both_composers_without_reconstructing_the_source
 
 #[test]
 fn prompt_module_amends_accept_exact_spans_singletons_and_distinct_notion_identities() {
+    use crate::composition::OpensLaunchComposer;
     use meta_signal_flow::{Change, Element};
     let (_fixture, mut nexus, alpha, _beta) = amend_world();
     let modules = [
@@ -2593,9 +2594,12 @@ fn prompt_module_amends_accept_exact_spans_singletons_and_distinct_notion_identi
         ("notion:harness-nexus:0", "Harness notion."),
         ("notion:source-nexus:0", "Source notion."),
     ];
-    *nexus.composer.edit() = crate::context::ContextComposer(std::sync::Arc::new(
-        crate::context::FixtureComposer::from(&modules[..]),
-    ));
+    *nexus.composer.edit() = crate::composition::LaunchComposer::with_context(
+        crate::context::ContextComposer(std::sync::Arc::new(
+            crate::context::FixtureComposer::from(&modules[..]),
+        )),
+        std::sync::Arc::new(crate::composition::FixtureSuccessorRecovery::default()),
+    );
     let mut expected = alpha;
     for (identity, _) in modules {
         let before = snapshot(&nexus);
@@ -2621,6 +2625,7 @@ fn prompt_module_amends_accept_exact_spans_singletons_and_distinct_notion_identi
 
 #[test]
 fn malformed_span_amends_are_unknown_modules_and_leave_the_store_unchanged() {
+    use crate::composition::OpensLaunchComposer;
     use meta_signal_flow::{Change, Element};
     let (_fixture, mut nexus, alpha, _beta) = amend_world();
     let identities = [
@@ -2633,9 +2638,12 @@ fn malformed_span_amends_are_unknown_modules_and_leave_the_store_unchanged() {
         .iter()
         .map(|identity| (*identity, "Malformed span."))
         .collect::<Vec<_>>();
-    *nexus.composer.edit() = crate::context::ContextComposer(std::sync::Arc::new(
-        crate::context::FixtureComposer::from(&modules[..]),
-    ));
+    *nexus.composer.edit() = crate::composition::LaunchComposer::with_context(
+        crate::context::ContextComposer(std::sync::Arc::new(
+            crate::context::FixtureComposer::from(&modules[..]),
+        )),
+        std::sync::Arc::new(crate::composition::FixtureSuccessorRecovery::default()),
+    );
     let before = snapshot(&nexus);
     let rows = other_rows(&nexus);
     for identity in identities {

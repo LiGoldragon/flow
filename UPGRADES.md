@@ -1,3 +1,25 @@
+# Flow 0.56.3: a forward-compatible recovery reader
+
+Built on the live 61242e2 once-only reminder line. Ordinary64 and meta83
+remain unchanged. No existing row, schema or default configuration changes.
+
+The two panel families, `flow_nexus_flow_transitions` and `flow_nexus_hold`,
+are accepted only with their exact v1 catalog identities. They are optional;
+this reader never registers either family and never decodes or writes its
+rows. A stored Hold does not hold this older behavioral reader. Every other
+family and schema retains the existing strict recognition.
+
+Deploy this release before the 0.57/0.58/0.59 panel/transition cohort. Recovery
+from that cohort switches the daemon and compatible meta client back to this
+release against the **latest same Memory**, never a pre-switch restore. New
+panel history remains intact and ignored until a roll-forward reader resumes
+it; all newer ordinary Memory writes remain available. A configuration-only
+and a running open are both supported. Unknown future panel schemas refuse
+before writes; corruption outside the two unread families retains normal
+refusal behavior.
+
+The flow-nexus crate alone changes version; unchanged members keep theirs.
+
 # Integration 98df55 (unreleased): k7jy native rest and caller-bound Refresh, with the warning lane's recovery consumer
 
 Contracts: signal-flow 64.0.0 (83c04fe) and meta-signal-flow 83.0.0 (06fff39),

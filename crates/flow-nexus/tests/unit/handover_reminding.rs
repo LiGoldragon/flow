@@ -23,7 +23,7 @@ fn warning_boundary_is_inclusive_without_rounding() {
 }
 
 #[test]
-fn first_notice_is_immediate_and_repeats_are_anchored() {
+fn first_notice_is_immediate_and_successful_admission_finishes_it() {
     let r = HandoverReminder::open_handover_reminder(
         address(),
         3,
@@ -36,6 +36,10 @@ fn first_notice_is_immediate_and_repeats_are_anchored() {
     assert!(r.notice_if_due(100).is_some());
     assert!(r.notice_if_due(99).is_none());
     assert_eq!(r.advanced_due(), Some(400));
+    let admitted = r.advanced().unwrap();
+    for now in [100, 400, 1600, i64::MAX] {
+        assert!(admitted.notice_if_due(now).is_none());
+    }
 }
 
 #[test]
@@ -526,7 +530,7 @@ fn stop_measurement_opens_first_warning_before_the_next_timer_tick() {
 }
 
 #[test]
-fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
+fn runtime_discovery_warns_once_across_later_ticks_and_window_reopening() {
     const CLAUDE_MODEL: &str = "fixture-model";
     const CLAUDE_SEAT: &str = "fixture-seat";
     use super::NexusFixture;
@@ -622,6 +626,14 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
         crate::generated::memory::Sent(1)
     );
     fixture.nexus.send_due_handover_reminders(320);
+    for (now, tokens) in [(1220, 85), (1820, 86), (2420, 102)] {
+        fixture
+            .nexus
+            .store
+            .record_context_size(CLAUDE_SEAT, tokens)
+            .unwrap();
+        fixture.nexus.send_due_handover_reminders(now);
+    }
     assert_eq!(
         fixture
             .nexus
@@ -630,12 +642,12 @@ fn runtime_discovery_crosses_boundary_once_and_cancels_green() {
             .unwrap()
             .unwrap()
             .sent,
-        crate::generated::memory::Sent(2)
+        crate::generated::memory::Sent(1)
     );
 }
 
 #[test]
-fn green_keep_cancels_open_warning_timer() {
+fn green_keep_preserves_the_once_only_warning_witness() {
     const CLAUDE_MODEL: &str = "fixture-model";
     const CLAUDE_SEAT: &str = "fixture-seat";
     use super::NexusFixture;
@@ -728,7 +740,7 @@ fn green_keep_cancels_open_warning_timer() {
             .store
             .handover_reminder(&address, 0)
             .unwrap()
-            .is_none()
+            .is_some_and(|row| row.sent == crate::generated::memory::Sent(1))
     );
 }
 
@@ -827,6 +839,14 @@ fn reminder_state_reopens_with_anchored_due_without_duplicate_initial() {
     assert_eq!(
         reopened.handover_reminder(&address, 0).unwrap(),
         Some(advanced.clone())
+    );
+    assert!(
+        reopened
+            .handover_reminder(&address, 0)
+            .unwrap()
+            .unwrap()
+            .notice_if_due(i64::MAX)
+            .is_none()
     );
     let retry = reopened
         .accept_handover_reminder(

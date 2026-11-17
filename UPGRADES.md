@@ -1,3 +1,22 @@
+# Flow 0.59.1: recorded transitions on the live recovery lineage
+
+Merges the gated0.59.0 behavior with live0.56.3 ancestry. The accepted0v72
+once-only reminder implementation and fixtures are kept exactly. No cut of
+existing harness-derived readings is made; no new harness reader is added.
+The underlying0.57 override panel and0.58 root interface are included.
+
+Memory and wires are those of0.59.0: ordinary64 and meta87. New panel
+families are registered when absent and read normally.0.56.3's recovery-only
+opaque-row fixtures and duplicate identity literals do not belong in this
+active reader; its ancestor remains the compatible daemon for returning to
+ordinary64/meta83 while retaining the same latest Memory. Never restore a
+pre-switch copy.0.59.0/0.58.0 remain schema-compatible by source, but only
+the deployed0.56.3 recovery contract is the approved fallback.
+
+Only the changed flow-nexus crate moves to0.59.1; other members retain the
+versions of the gated0.59.0 cohort. Whole configuration and protected Fable
+preservation remain deployment preconditions owned by Field.
+
 # Flow 0.59.0: a flow's state is a record of events
 
 Contracts: signal-flow 64.0.0 (83c04fe) and meta-signal-flow 87.0.0

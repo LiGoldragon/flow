@@ -1041,32 +1041,21 @@ pub struct FreshSeat {
     pub prompt: String,
 }
 
-/// A module identity names its kind, topic and explicit canonical decimal
-/// version, `kind:topic:number`: lowercase letters, digits and hyphens on
-/// either side of the first two colons, and a number with no leading zero.
+/// A module identity uses Curriculum's canonical typed singleton or span
+/// grammar, shared by configuration admission and context resolution.
 pub(crate) trait NamesVersionedModule {
     fn is_versioned_module_identity(&self) -> bool;
 }
 
 impl NamesVersionedModule for str {
     fn is_versioned_module_identity(&self) -> bool {
-        let part = |part: &str| {
-            !part.is_empty()
-                && part
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        };
-        let fields = self.split(':').collect::<Vec<_>>();
-        matches!(fields.as_slice(), [kind, topic, version]
-            if part(kind) && part(topic)
-                && !version.is_empty()
-                && (*version == "0" || !version.starts_with('0'))
-                && version.bytes().all(|byte| byte.is_ascii_digit()))
+        use crate::context::ParsesCurriculumIdentity;
+        self.curriculum_identity().is_some()
     }
 }
 
 /// Where a context module goes, by the kind of its explicit
-/// `kind:topic:number` identity. Spirit and intent sit in the system prompt;
+/// versioned identity. Spirit and intent sit in the system prompt;
 /// every other kind goes to the first message with the remembered raw records.
 pub(crate) trait PlacesModuleByKind {
     fn placed_in_system_prompt(&self) -> bool;
@@ -1120,6 +1109,30 @@ impl ProfilesFreshSeat for FreshSeat {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn canonical_singleton_and_span_module_admission_share_the_typed_identity_rules() {
+        use super::NamesVersionedModule;
+        for identity in [
+            "vision:flow-nexus:0",
+            "vision:flow-nexus:0-1",
+            "notion:harness-nexus:0",
+            "notion:source-nexus:0",
+        ] {
+            assert!(identity.is_versioned_module_identity(), "{identity}");
+        }
+        for identity in [
+            "vision:flow-nexus:01",
+            "vision:flow-nexus:0-01",
+            "vision:flow-nexus:1-1",
+            "vision:flow-nexus:2-1",
+            "vision:flow-nexus:0-1-2",
+            "notion:harness-nexus:-1",
+            "notion:harness-nexus:9223372036854775808",
+        ] {
+            assert!(!identity.is_versioned_module_identity(), "{identity}");
+        }
+    }
+
     use super::{
         ComposesInRoot, ComposesLaunch, ComposesPresentationRole, ComposesVerifiedContext,
         CompositionError, FitsOneMessage, FixtureSuccessorRecovery, HandoverRoot, HarnessedProfile,

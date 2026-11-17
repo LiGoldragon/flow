@@ -2582,3 +2582,39 @@ fn one_live_store_value_reaches_both_composers_without_reconstructing_the_source
         }
     }
 }
+
+#[test]
+fn prompt_module_amends_accept_exact_spans_singletons_and_distinct_notion_identities() {
+    use meta_signal_flow::{Change, Element};
+    let (_fixture, mut nexus, alpha, _beta) = amend_world();
+    let modules = [
+        ("vision:flow-nexus:0-1", "Spanning vision."),
+        ("vision:flow-nexus:0", "Singleton vision."),
+        ("notion:harness-nexus:0", "Harness notion."),
+        ("notion:source-nexus:0", "Source notion."),
+    ];
+    *nexus.composer.edit() = crate::context::ContextComposer(std::sync::Arc::new(
+        crate::context::FixtureComposer::from(&modules[..]),
+    ));
+    let mut expected = alpha;
+    for (identity, _) in modules {
+        let before = snapshot(&nexus);
+        let rows = other_rows(&nexus);
+        let identity = signal_flow::ModuleIdentity(identity.into());
+        let change = amend(
+            &expected.address,
+            Change::Add(Element::PromptModule(identity.clone())),
+        );
+        configures(&nexus, change.clone());
+        expected.prompt_modules.0.push(identity);
+        assert_eq!(snapshot(&nexus), with_permaflow(&before, &expected));
+        assert_eq!(other_rows(&nexus), rows);
+        let unchanged = snapshot(&nexus);
+        configures(&nexus, change);
+        assert_eq!(
+            snapshot(&nexus),
+            unchanged,
+            "the repeated Amend is idempotent"
+        );
+    }
+}

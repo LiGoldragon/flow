@@ -118,6 +118,7 @@ impl ParsesCurriculumIdentity for str {
             "intent" => ModuleKind::Intent,
             "vision" => ModuleKind::Vision,
             "knowledge" => ModuleKind::Knowledge,
+            "notion" => ModuleKind::Notion,
             "inquiry" => ModuleKind::Inquiry,
             "compensation" => ModuleKind::Compensation,
             "role" => ModuleKind::Role,
@@ -170,6 +171,7 @@ impl RendersCurriculumIdentity for signal_curriculum_nexus::ModuleIdentity {
             ModuleKind::Intent => "intent",
             ModuleKind::Vision => "vision",
             ModuleKind::Knowledge => "knowledge",
+            ModuleKind::Notion => "notion",
             ModuleKind::Inquiry => "inquiry",
             ModuleKind::Compensation => "compensation",
             ModuleKind::Role => "role",
@@ -811,6 +813,7 @@ mod tests {
             "intent",
             "vision",
             "knowledge",
+            "notion",
             "inquiry",
             "compensation",
             "role",
@@ -827,6 +830,41 @@ mod tests {
                     assert!(parsed.matches_binding(text.as_str()));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn notion_context_preserves_its_identity_source_path_and_user_placement() {
+        let mut request = request();
+        request.system_modules.0.clear();
+        request.prompt_modules.0 = ["notion:harness-nexus:0", "notion:source-nexus:0"]
+            .into_iter()
+            .map(|identity| signal_flow::ModuleIdentity(identity.into()))
+            .collect();
+        let composer = FixtureComposer::from(
+            &[
+                ("notion:harness-nexus:0", "Harness notion."),
+                ("notion:source-nexus:0", "Source notion."),
+            ][..],
+        );
+        let composed = composer.compose_flow_context(&request).unwrap();
+        let verified = VerifiedContext::verified(&request, &composed).unwrap();
+        assert!(verified.system_text().is_empty());
+        assert_eq!(verified.user_segments().len(), 2);
+        for (row, identity) in composed
+            .context_provenance_vector
+            .iter()
+            .zip(&request.prompt_modules.0)
+        {
+            assert_eq!(row.module_identity.identity_text(), identity.0);
+            assert_eq!(
+                row.source_relative_path.0,
+                format!("{}.md", identity.0.replace(':', "/"))
+            );
+            assert_eq!(
+                row.startup_placement,
+                signal_curriculum_nexus::StartupPlacement::User
+            );
         }
     }
 

@@ -22,6 +22,10 @@
 //! The warning is a journal line at warning priority.
 
 use crate::RunningNexus;
+use crate::codex_turns::TracksCodexTurns;
+use crate::generated::transitions::{
+    CodexFlowReport, CodexReport, Measured_Data, ReportedEvent, ReportsEvents,
+};
 use crate::model::RunsModel;
 use crate::store::compaction::{Compaction, Investigation, RecordsCompactions};
 use crate::store::context::RecordsContextSize;
@@ -318,10 +322,21 @@ impl WatchesCompactions for RunningNexus {
             read_to.insert(flow_id.to_owned(), (transcript, next));
             found
                 .into_iter()
-                .filter(|compaction| compaction.trigger == "auto")
                 .filter(|compaction| !first || compaction.timestamp >= self.compactions.floor)
                 .collect::<Vec<_>>()
         };
+        // Every compaction read is the flow's event; only one its harness
+        // made on its own is raised.
+        for _ in &raised {
+            self.report_event(ReportedEvent {
+                flow_id: node.flow_id.clone(),
+                event: crate::generated::memory::Event::Compacting,
+            });
+        }
+        let raised = raised
+            .into_iter()
+            .filter(|compaction| compaction.trigger == "auto")
+            .collect::<Vec<_>>();
         for compaction in raised {
             self.raise_compaction(&node, &compaction.uuid, compaction.pre_tokens);
         }
@@ -344,8 +359,21 @@ impl WatchesCompactions for RunningNexus {
                 let _dispatch = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
                 use crate::context_warnings::ObservesContextWithDispatch;
                 self.observe_context_with_dispatch(&node, tokens);
+                self.report_codex(CodexFlowReport {
+                    flow_id: node.flow_id.clone(),
+                    codex_report: CodexReport::Measured(Measured_Data {
+                        thread_standing: self.codex_turns.standing(thread),
+                        tokens: signal_flow::Tokens(tokens),
+                    }),
+                });
             }
             CodexContextSignal::Compacted(item) => {
+                // Every compaction is the flow's event, whether asked for or
+                // not; only one it did on its own is raised.
+                self.report_event(ReportedEvent {
+                    flow_id: node.flow_id.clone(),
+                    event: crate::generated::memory::Event::Compacting,
+                });
                 let asked = self
                     .compactions
                     .requested
@@ -366,6 +394,13 @@ impl WatchesCompactions for RunningNexus {
         {
             use crate::context_warnings::ObservesContextWithDispatch;
             self.observe_context_with_dispatch(&node, tokens);
+            self.report_codex(CodexFlowReport {
+                flow_id: node.flow_id.clone(),
+                codex_report: CodexReport::Measured(Measured_Data {
+                    thread_standing: self.codex_turns.standing(thread),
+                    tokens: signal_flow::Tokens(tokens),
+                }),
+            });
         }
     }
 

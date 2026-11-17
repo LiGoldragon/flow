@@ -1,0 +1,90 @@
+; A flow's state is a record of events. The Flow Nexus holds a flow's state
+; as the last of its transitions (memory.ethos Flow), each recorded with the
+; event that caused it, for every harness alike. A harness's report is typed
+; into one Event: Started, Working with the context's size, Idle with the
+; context's size, Compacting, Ended. Recorded with the cause Reported, an
+; event leads to its state: Started and Working to Acting, Idle to Resting,
+; Ended to Asleep; Compacting keeps the state the flow was in. A request the
+; Nexus delivers is recorded with the cause Arrived, its RequestId, and leads
+; to Acting. The state the Nexus decides by is the last transition's.
+;
+; The intake is one typed Event, so its source can change without touching
+; the state logic. Today a Claude flow's hooks report it: a Started of a
+; session the flow had not started is Started, and a Started of a session it
+; already started (a resume, or its session going on past a compaction) is
+; its rest when its transcript shows its main turn ended, else Working; its
+; own prompt is Working, a tool boundary Working, its own Stop Idle with the
+; size its transcript shows, its own session's end Ended. A Codex flow's
+; app-server reports it through its thread's turn ledger: its first report
+; is preceded by Started, its thread leaving its rest into a turn or a
+; running item is Working, its thread reaching its rest is Idle, a token
+; usage is Working with that size while the thread is in a turn and Idle
+; with it at rest, its thread closed is Ended. A compaction either harness
+; makes is Compacting. Working carries the context size Flow last measured
+; where the report itself carries none.
+;
+; Caused is one cause at one seat, at its moment. CodexReport is what a
+; batch of a Codex thread's ledger events, or one token usage, says:
+; Stepped, the thread's standing before and after the batch; Measured, the
+; standing it stands in and the tokens its last model call carried; Closed,
+; its thread closed. ClaudeReport, ReportedEvent and CodexFlowReport name
+; the flow a report is of; AskedFlow the flow whose state is read; a
+; TransitionWrite is one flow's record as a commit writes it, Appended when
+; it was held and Opened when it is new.
+;
+; LeadsToState is a cause's: the state it leads to from the state before,
+; None for a cause this release decides no state by (CoolingDue,
+; Crystallized, and Overridden, whose override names its own state).
+; TypesCodexReport is a Codex report's: the Event it is, given the size Flow
+; last measured, or None when it changes nothing. SeedsReportedTransition is
+; a flow's recorded harness events': the Event its last report maps to, with
+; the size given, a repeated Started of one session taking the event before
+; it, and a Cleared none.
+;
+; RecordsTransitions is the store's: a cause appended to its seat's flow as
+; the transition it leads to, None when it leads to none; the records the
+; arrivals of delivered requests write, which the caller commits with the
+; delivery under the transitions' gate; the state a flow is in, its last transition's; and
+; the Memory upgrade, run at every open: each live flow whose transitions
+; hold no Reported one is given the one its last recorded report maps to,
+; placed before the overrides it holds, the count answered.
+;
+; ReportsEvents is the Nexus's: a Claude report typed into its Event; an
+; event recorded through Operation for the seat of the flow, the moment
+; now; a Codex report recorded, Started first when the flow holds no
+; transition yet.
+
+Library
+[ :flow_nexus:store:[ FlowStore StoreError ]                                     ; imports
+  :flow_nexus:[ RunningNexus ]
+  :flow_nexus:generated:memory:[ Event Cause Transition Moment Flow FlowEvents ]
+  :flow_nexus:generated:overriding:[ Seat ]
+  :flow_nexus:generated:turn_ledger:[ ThreadStanding ]
+  :meta_signal_flow:generated:signal:[ State ]
+  :signal_flow:[ FlowId Tokens HookEvent.Event ] ]
+[ Caused.{ Seat Cause Moment }                                                   ; types: one cause at one seat
+  CodexReport.[ Stepped.{ Before.ThreadStanding                                  ;   a Codex thread's report: a batch's step
+                          After.ThreadStanding }
+                Measured.{ ThreadStanding Tokens }                               ;     a token usage in its standing
+                Closed ]                                                         ;     its thread closed
+  ClaudeReport.{ FlowId HookEvent }                                              ;   a Claude hook's report of one flow
+  ReportedEvent.{ FlowId Event }                                                 ;   one event of one flow
+  CodexFlowReport.{ FlowId CodexReport }                                         ;   one Codex report of one flow
+  AskedFlow.FlowId                                                               ;   the flow whose state is asked
+  TransitionWrite.[ Appended.Flow                                                ;   a flow's record to write: held, one transition longer
+                    Opened.Flow ] ]                                              ;     new, with its first
+[ LeadsToState.[ leads_to.{ [ Option<State> ] [ Option<State> ] } ]              ; traits
+  TypesCodexReport.[ codex_event.{ [ Option<Tokens> ] [ Option<Event> ] } ]
+  SeedsReportedTransition.[ last_reported.{ [ Option<Tokens> ] [ Option<Event> ] } ]
+  RecordsTransitions.[ record_caused.{ [ Caused ] [ Result<Option<Transition> StoreError> ] }
+                       arrivals.{ [ Vector<Caused> ] [ Result<Vector<TransitionWrite> StoreError> ] }
+                       state_of.{ [ AskedFlow ] [ Result<Option<State> StoreError> ] }
+                       seed_reported_transitions.[ Result<Integer StoreError> ] ]
+  ReportsEvents.[ claude_event.{ [ ClaudeReport ] [ Option<Event> ] }
+                  report_event.{ [ ReportedEvent ] [ Boolean ] }
+                  report_codex.{ [ CodexFlowReport ] [ Boolean ] } ] ]
+[ Cause.[ LeadsToState ]                                                         ; associations
+  CodexReport.[ TypesCodexReport ]
+  FlowEvents.[ SeedsReportedTransition ]
+  FlowStore.[ RecordsTransitions ]
+  RunningNexus.[ ReportsEvents ] ]

@@ -37,6 +37,9 @@
 //! the queue (`recover_typed`).
 
 use crate::RunningNexus;
+use crate::generated::transitions::{
+    After, Before, CodexFlowReport, CodexReport, ReportsEvents, Stepped_Data,
+};
 use crate::generated::turn_ledger::{
     BackgroundTerminal, CodexItemId, CodexTurnId, CodexTurnStatus, CutItem, LedgerEvent,
     LedgerEvidence, LedgerReading, LetterReceived_Data, PayloadText, PendingLetter,
@@ -805,7 +808,10 @@ impl SettlesRestingCodexSeats for RunningNexus {
         if events.is_empty() {
             return None;
         }
-        let (seat, ended) = {
+        let closed = events
+            .iter()
+            .any(|event| matches!(event, LedgerEvent::ThreadClosed));
+        let (seat, ended, reported) = {
             let _turn = self
                 .dispatch_gate
                 .lock()
@@ -823,6 +829,19 @@ impl SettlesRestingCodexSeats for RunningNexus {
                 .map(|reading| reading.turns_ended.0.len())
                 .sum::<usize>();
             let flow = self.codex_flow_on(thread);
+            // What the batch says of the thread, recorded as its flow's
+            // event (`transitions`).
+            let reported = flow.as_ref().map(|node| CodexFlowReport {
+                flow_id: node.flow_id.clone(),
+                codex_report: if closed {
+                    CodexReport::Closed
+                } else {
+                    CodexReport::Stepped(Stepped_Data {
+                        before: Before(before.clone()),
+                        after: After(self.codex_turns.standing(thread)),
+                    })
+                },
+            });
             // A turn ended with only letters left: native history is read
             // for the latest one's receipt, which a reconnect may have kept
             // from this ledger.
@@ -847,8 +866,11 @@ impl SettlesRestingCodexSeats for RunningNexus {
                     .then(|| self.resting_codex_seat(&metaflow.address))
                     .flatten()
             });
-            (seat, flow.map(|node| (node.flow_id, ended)))
+            (seat, flow.map(|node| (node.flow_id, ended)), reported)
         };
+        if let Some(reported) = reported {
+            self.report_codex(reported);
+        }
         // Each turn the events ended is a turn end, sent before the
         // settlement it allows.
         if let Some((flow_id, ended)) = ended {
@@ -862,12 +884,29 @@ impl SettlesRestingCodexSeats for RunningNexus {
     }
 
     fn observe_codex_events(&self, thread: &str, events: Vec<LedgerEvent>) {
+        let before = self.codex_turns.standing(thread);
+        let closed = events
+            .iter()
+            .any(|event| matches!(event, LedgerEvent::ThreadClosed));
         let readings = events
             .into_iter()
             .map(|event| self.codex_turns.apply(thread, event))
             .collect::<Vec<_>>();
         for reading in &readings {
             self.note_retention(thread, reading);
+        }
+        if let Some(node) = self.codex_flow_on(thread) {
+            self.report_codex(CodexFlowReport {
+                flow_id: node.flow_id,
+                codex_report: if closed {
+                    CodexReport::Closed
+                } else {
+                    CodexReport::Stepped(Stepped_Data {
+                        before: Before(before),
+                        after: After(self.codex_turns.standing(thread)),
+                    })
+                },
+            });
         }
         let ended = readings
             .iter()

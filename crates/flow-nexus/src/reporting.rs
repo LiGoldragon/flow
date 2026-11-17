@@ -22,6 +22,7 @@ use crate::RunningNexus;
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Harness_Data,
 };
+use crate::generated::transitions::{ClaudeReport, ReportedEvent, ReportsEvents};
 use crate::performing::Performs;
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::events::RecordsHarnessEvents;
@@ -131,6 +132,28 @@ impl RecordsReports for RunningNexus {
         // compaction its harness made on its own; SessionStart follows one
         // at once.
         crate::compacting::WatchesCompactions::watch_claude_compactions(self, &flow_id.0);
+        // The report is typed into its Event and recorded as the flow's
+        // transition before anything it sets going; a tool boundary is
+        // recorded once its context is observed, below.
+        if !matches!(event, Event::ToolUsed(_))
+            && let Some(typed) = self.claude_event(ClaudeReport {
+                flow_id: flow_id.clone(),
+                hook_event: event.clone(),
+            })
+        {
+            // A session started again at its rest (a restart's resume) has
+            // had its idle event: what waits for its rest is handed over.
+            let resumed_at_rest = matches!(event, Event::Started(_))
+                && matches!(typed, crate::generated::memory::Event::Idle(_));
+            self.report_event(ReportedEvent {
+                flow_id: flow_id.clone(),
+                event: typed,
+            });
+            if resumed_at_rest && let Ok(Some(metaflow)) = self.store.metaflow_awake_as(&flow_id.0)
+            {
+                self.drain_awake(&metaflow.address);
+            }
+        }
         match event {
             // The flow's own Claude session ended: it has exited, its locks
             // go with it, and a Maintained metaflow is owed its successor.
@@ -238,6 +261,15 @@ impl RecordsReports for RunningNexus {
                     crate::context_warnings::ObservesClaudeContext::observe_claude_context(
                         self, &flow_id.0,
                     );
+                }
+                if let Some(typed) = self.claude_event(ClaudeReport {
+                    flow_id: flow_id.clone(),
+                    hook_event: event.clone(),
+                }) {
+                    self.report_event(ReportedEvent {
+                        flow_id: flow_id.clone(),
+                        event: typed,
+                    });
                 }
             }
             Event::Started(_) | Event::Cleared(_) => {}

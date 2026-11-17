@@ -79,6 +79,12 @@ impl SeatsRestartWorld for NexusFixture {
             vec![],
             vec![],
         ));
+        // The seat's last report is its rest.
+        use crate::generated::transitions::{ReportedEvent, ReportsEvents};
+        self.nexus.report_event(ReportedEvent {
+            flow_id: flow_ethos::FlowId(FLOW.into()),
+            event: crate::generated::memory::Event::Idle(signal_flow::Tokens(0)),
+        });
         let fresh = self.fresh_claude_world();
         fs::write(fresh.state.join("restart-world"), "").unwrap();
         if alive {
@@ -3418,6 +3424,13 @@ fn adopted_on_new(
         }),
         Output::Adopted(flow_ethos::FlowId(FLOW.into()))
     );
+    // An adopted seat holds no report in the new Nexus's Memory until its
+    // harness reports; its next report is its rest.
+    use crate::generated::transitions::{ReportedEvent, ReportsEvents};
+    new.report_event(ReportedEvent {
+        flow_id: flow_ethos::FlowId(FLOW.into()),
+        event: crate::generated::memory::Event::Idle(signal_flow::Tokens(0)),
+    });
     (world, new, curriculum)
 }
 

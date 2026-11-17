@@ -80,6 +80,10 @@ impl RemembersOverrides for FlowStore {
     /// Appends the transition to its flow's record, the record naming the
     /// seat's Address, in one write.
     fn record_transition(&self, transitioned: Transitioned) -> Result<bool, StoreError> {
+        let _gate = self
+            .transitions_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let key = RecordKey::new(transitioned.seat.flow_id.0.clone());
         let held = self
             .engine
@@ -169,6 +173,10 @@ impl RemembersOverrides for FlowStore {
     /// metaflow's Past, and its transition appended. False, and nothing
     /// written, when Flow holds no row for the flow.
     fn forget_flow(&self, transitioned: Transitioned) -> Result<bool, StoreError> {
+        let _gate = self
+            .transitions_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let flow_id = transitioned.seat.flow_id.0.clone();
         if self.flow(&flow_id)?.is_none() {
             return Ok(false);

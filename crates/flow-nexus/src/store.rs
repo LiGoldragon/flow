@@ -55,6 +55,7 @@ pub(crate) mod sent;
 mod staged_open;
 pub(crate) mod successor;
 pub(crate) mod successor_upgrade;
+pub(crate) mod transitions;
 pub(crate) mod turn_end;
 pub(crate) mod undecodable_frame;
 pub(crate) use crate::generated::memory::{
@@ -1747,6 +1748,8 @@ pub struct FlowStore {
     kept_answers: TableReference<kept_answer::KeptAnswer>,
     scheduled_reminders: TableReference<scheduled_reminder::ScheduledReminder>,
     flow_transitions: TableReference<crate::generated::memory::Flow>,
+    /// Taken by every write of a flow's transitions (`transitions`).
+    transitions_gate: Mutex<()>,
     hold: TableReference<crate::generated::memory::StoredHold>,
     queue_delivery: QueueDeliveryTables,
     send_outcomes: SendOutcomeTables,
@@ -2886,6 +2889,7 @@ impl OpensFlowStore for FlowStore {
             kept_answers,
             scheduled_reminders,
             flow_transitions,
+            transitions_gate: Mutex::new(()),
             hold,
             queue_delivery,
             send_outcomes,
@@ -2923,6 +2927,7 @@ impl OpensFlowStore for FlowStore {
         store.seed_store_identity()?;
         store.seed_missing_queued_deliveries()?;
         request_id_upgrade::RunsRequestIdAnnouncements::run_request_id_announcements(&store)?;
+        <FlowStore as crate::generated::transitions::RecordsTransitions>::seed_reported_transitions(&store)?;
         Ok(store)
     }
 
@@ -3117,6 +3122,7 @@ impl OpensFlowStore for FlowStore {
             kept_answers,
             scheduled_reminders,
             flow_transitions,
+            transitions_gate: Mutex::new(()),
             hold,
             queue_delivery,
             send_outcomes,
@@ -3146,6 +3152,7 @@ impl OpensFlowStore for FlowStore {
         store.archive_legacy_queue()?;
         store.align_followed_requests()?;
         store.seed_missing_queued_deliveries()?;
+        <FlowStore as crate::generated::transitions::RecordsTransitions>::seed_reported_transitions(&store)?;
         if store
             .engine
             .match_records(QueryPlan::key(store.state, RecordKey::new(STATE_KEY)))?

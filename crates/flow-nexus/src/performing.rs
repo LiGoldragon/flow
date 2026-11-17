@@ -890,6 +890,15 @@ impl PerformsInParts for RunningNexus {
                 use crate::generated::overriding::RemembersOverrides;
                 self.store.record_transition(transitioned).recorded()
             }
+            // A cause that leads to no state writes nothing, and is answered
+            // as recorded: nothing it owes is left unwritten.
+            Record_Data::Caused(caused) => {
+                use crate::generated::transitions::RecordsTransitions;
+                match self.store.record_caused(caused) {
+                    Ok(_) => Outcome::Recorded,
+                    Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
+                }
+            }
             Record_Data::Switched(holding) => {
                 use crate::generated::overriding::RemembersOverrides;
                 match self.store.switch(holding) {

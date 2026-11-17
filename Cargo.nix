@@ -934,7 +934,7 @@ rec {
       };
       "flow" = rec {
         crateName = "flow";
-        version = "0.58.0";
+        version = "0.59.0";
         edition = "2024";
         crateBin = [
           {
@@ -1012,7 +1012,7 @@ rec {
       };
       "flow-defaults" = rec {
         crateName = "flow-defaults";
-        version = "0.58.0";
+        version = "0.59.0";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/flow-defaults; };
         libName = "flow_defaults";
@@ -1079,7 +1079,7 @@ rec {
       };
       "flow-meta" = rec {
         crateName = "flow-meta";
-        version = "0.58.0";
+        version = "0.59.0";
         edition = "2024";
         crateBin = [
           {
@@ -1154,7 +1154,7 @@ rec {
       };
       "flow-native" = rec {
         crateName = "flow-native";
-        version = "0.58.0";
+        version = "0.59.0";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/flow-native; };
         libName = "flow_native";
@@ -1168,7 +1168,7 @@ rec {
       };
       "flow-nexus" = rec {
         crateName = "flow-nexus";
-        version = "0.58.0";
+        version = "0.59.0";
         edition = "2024";
         crateBin = [
           {
@@ -1350,7 +1350,7 @@ rec {
       };
       "flow-place" = rec {
         crateName = "flow-place";
-        version = "0.58.0";
+        version = "0.59.0";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/flow-place; };
         libName = "flow_place";

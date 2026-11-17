@@ -32,7 +32,8 @@ fn seat_id() -> flow_ethos::FlowId {
     flow_ethos::FlowId(CLAUDE_SEAT.into())
 }
 
-/// The transitions Flow's Memory holds for `flow_id`, oldest first.
+/// The override transitions Flow's Memory holds for `flow_id`, oldest
+/// first: those with the cause Overridden.
 fn transitions(fixture: &NexusFixture, flow_id: &str) -> Vec<Transition> {
     fixture
         .nexus
@@ -43,6 +44,9 @@ fn transitions(fixture: &NexusFixture, flow_id: &str) -> Vec<Transition> {
         .find(|flow| flow.flow_id.0 == flow_id)
         .map(|flow| flow.transition_vector)
         .unwrap_or_default()
+        .into_iter()
+        .filter(|transition| transition.cause == Cause::Overridden)
+        .collect()
 }
 
 /// The last transition held for `flow_id` is the override's, into `state`,
@@ -65,7 +69,7 @@ fn overridden_into(fixture: &NexusFixture, flow_id: &str, state: meta::State) {
 }
 
 /// The Claude seat Awake at the Sol Address, resting in its live pane, its
-/// metaflow Maintained.
+/// last report its rest, its metaflow Maintained.
 fn resting_seat(fixture: &NexusFixture) {
     fixture.accept_pane_operations(
         vec![claude_agent(fixture)],
@@ -80,6 +84,11 @@ fn resting_seat(fixture: &NexusFixture) {
         vec![],
     ));
     maintain(fixture, address(Model::Sol));
+    use crate::generated::transitions::{ReportedEvent, ReportsEvents};
+    fixture.nexus.report_event(ReportedEvent {
+        flow_id: seat_id(),
+        event: crate::generated::memory::Event::Idle(signal_flow::Tokens(40_000)),
+    });
 }
 
 /// An Order queued for the seat, from Flow.

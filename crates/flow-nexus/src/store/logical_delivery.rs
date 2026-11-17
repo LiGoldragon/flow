@@ -1177,6 +1177,8 @@ impl RecordsLogicalDeliveries for FlowStore {
         let mut changed = false;
         let mut commit = self.engine.begin_atomic_commit();
         let mut seen = std::collections::HashSet::new();
+        // Each request the woken flow received arrives there.
+        let mut arrived = Vec::new();
         for entry in startup {
             let records = self.engine.match_records(QueryPlan::key(
                 self.logical_deliveries.current,
@@ -1218,6 +1220,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             let mut snapshot = current.delivery_snapshot.clone();
             snapshot.delivery_cursor = signal_flow::DeliveryCursor(next_cursor);
             snapshot.delivery_state = delivered;
+            arrived.push(snapshot.request_id.clone());
             next_cursor = next_cursor
                 .checked_add(1)
                 .ok_or(StoreError::StateInvariant)?;
@@ -1250,6 +1253,38 @@ impl RecordsLogicalDeliveries for FlowStore {
         }
         stored.metaflow.queue.0.drain(..startup.len());
         commit = commit.mutate(self.metaflows, stored);
+        let _transitions = self
+            .transitions_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        commit = {
+            use crate::generated::transitions::{Caused, RecordsTransitions, TransitionWrite};
+            let moment = crate::generated::memory::Moment(
+                crate::reminding::CountsUnixSeconds::seconds_since_epoch(
+                    &std::time::SystemTime::now(),
+                ),
+            );
+            let seat = crate::generated::overriding::Seat {
+                flow_id: signal_flow::FlowId(flow_id.to_owned()),
+                address: address.clone(),
+            };
+            let causes = arrived
+                .into_iter()
+                .map(|request_id| Caused {
+                    seat: seat.clone(),
+                    cause: crate::generated::memory::Cause::Arrived(request_id),
+                    moment,
+                })
+                .collect();
+            let mut commit = commit;
+            for write in self.arrivals(causes)? {
+                commit = match write {
+                    TransitionWrite::Appended(flow) => commit.mutate(self.flow_transitions, flow),
+                    TransitionWrite::Opened(flow) => commit.assert(self.flow_transitions, flow),
+                };
+            }
+            commit
+        };
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
         Ok(true)
@@ -2452,6 +2487,57 @@ impl RecordsLogicalDeliveries for FlowStore {
                     delivery_snapshot: snapshot.clone(),
                 },
             );
+        // A request delivered, or read without its receipt, has arrived at
+        // the flow its metaflow is Awake as, in the same commit.
+        let arriving = matches!(
+            snapshot.delivery_state,
+            DeliveryState::Delivered(_) | DeliveryState::Read
+        );
+        let _transitions = arriving.then(|| {
+            self.transitions_gate
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+        });
+        let commit = match self.metaflow(&snapshot.address)? {
+            Some(metaflow) if arriving => match metaflow.state {
+                flow_ethos::State::Awake(flow_id) => {
+                    use crate::generated::transitions::{
+                        Caused, RecordsTransitions, TransitionWrite,
+                    };
+                    let moment = crate::generated::memory::Moment(
+                        crate::reminding::CountsUnixSeconds::seconds_since_epoch(
+                            &std::time::SystemTime::now(),
+                        ),
+                    );
+                    let seat = crate::generated::overriding::Seat {
+                        flow_id,
+                        address: snapshot.address.clone(),
+                    };
+                    let causes = vec![snapshot.request_id.clone()]
+                        .into_iter()
+                        .map(|request_id| Caused {
+                            seat: seat.clone(),
+                            cause: crate::generated::memory::Cause::Arrived(request_id),
+                            moment,
+                        })
+                        .collect();
+                    let mut commit = commit;
+                    for write in self.arrivals(causes)? {
+                        commit = match write {
+                            TransitionWrite::Appended(flow) => {
+                                commit.mutate(self.flow_transitions, flow)
+                            }
+                            TransitionWrite::Opened(flow) => {
+                                commit.assert(self.flow_transitions, flow)
+                            }
+                        };
+                    }
+                    commit
+                }
+                flow_ethos::State::Asleep => commit,
+            },
+            _ => commit,
+        };
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
         Ok(snapshot)

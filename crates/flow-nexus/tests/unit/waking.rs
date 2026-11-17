@@ -616,9 +616,10 @@ pub(super) fn soft_recipient(
     (caller, peer)
 }
 
-/// Shows the seat in its turn, Herdr showing it Working and its transcript
-/// recording no end of its main turn, or resting, its transcript recording
-/// that end and Herdr showing it Idle.
+/// Shows the seat in its turn, Herdr showing it Working, its transcript
+/// recording no end of its main turn and its last report Working, or
+/// resting, its transcript recording that end, Herdr showing it Idle and its
+/// last report Idle.
 pub(super) fn soft_recipient_shows(fixture: &NexusFixture, resting: bool) {
     if resting {
         append_main_rows(fixture, &[end_turn("turn-ended")]);
@@ -632,6 +633,17 @@ pub(super) fn soft_recipient_shows(fixture: &NexusFixture, resting: bool) {
         vec![super::codex_agent_in("pane-1", "terminal-pane-1"), seat],
         PromptFixture::Prompted("w1:p3"),
     );
+    // What the seat's harness reported last: its rest, or its turn.
+    use crate::generated::transitions::{ReportedEvent, ReportsEvents};
+    let tokens = signal_flow::Tokens(40_000);
+    fixture.nexus.report_event(ReportedEvent {
+        flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+        event: if resting {
+            crate::generated::memory::Event::Idle(tokens)
+        } else {
+            crate::generated::memory::Event::Working(tokens)
+        },
+    });
 }
 
 /// Sends `body` Soft from `peer` to the seat as a flow's own Send is

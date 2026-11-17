@@ -38,7 +38,6 @@ use crate::reminding::CountsUnixSeconds;
 use crate::store::delivery::{RecordsDeliveries, SelectsHarnessProfile};
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::{NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows};
-use crate::waking::HoldsSoftForIdle;
 use meta_signal_flow::{Output, Refused_Data, State, StoreFailure};
 use signal_flow::{AgentState, HarnessKind, HerdrRouteSelection};
 
@@ -60,16 +59,12 @@ impl HeedsOverrides for RunningNexus {
         if !(live && awake) {
             return State::Asleep;
         }
-        let recorded = self.store.transitions().ok().and_then(|flows| {
-            flows
-                .into_iter()
-                .find(|flow| flow.flow_id == seat.flow_id)
-                .and_then(|flow| flow.transition_vector.last().map(|last| last.state.clone()))
-        });
-        match recorded {
-            Some(state) => state,
-            None if self.rests_now(&seat.flow_id.0) => State::Resting,
-            None => State::Acting,
+        // The state is the last transition; a live seat that has reported
+        // nothing yet is Acting.
+        use crate::generated::transitions::{AskedFlow, RecordsTransitions};
+        match self.store.state_of(AskedFlow(seat.flow_id)) {
+            Ok(Some(state)) => state,
+            Ok(None) | Err(_) => State::Acting,
         }
     }
 

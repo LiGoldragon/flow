@@ -2789,8 +2789,22 @@ fn codex_resolved_absent(
         .nexus
         .store
         .test_outstanding_queue_attempt_id(&seat_at());
+    let before = fixture.nexus.codex_turns.standing(SEAT_THREAD);
     for event in first_events {
         fixture.nexus.codex_turns.apply(SEAT_THREAD, event);
+    }
+    // The app-server's report of the thread's step, as its intake records it.
+    {
+        use crate::generated::transitions::{
+            After, Before, CodexFlowReport, CodexReport, ReportsEvents, Stepped_Data,
+        };
+        fixture.nexus.report_codex(CodexFlowReport {
+            flow_id: flow_ethos::FlowId("908786".into()),
+            codex_report: CodexReport::Stepped(Stepped_Data {
+                before: Before(before),
+                after: After(fixture.nexus.codex_turns.standing(SEAT_THREAD)),
+            }),
+        });
     }
     fake.accept_queued_turns(SEAT_THREAD, 1..=2);
     let response = fixture.nexus.dispatch_meta_serially(
@@ -2840,6 +2854,20 @@ fn a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane() {
         .nexus
         .codex_turns
         .apply(SEAT_THREAD, super::codex_turns::idle());
+    // The app-server's report of the thread's rest, as its intake records it.
+    {
+        use crate::generated::transitions::{
+            After, Before, CodexFlowReport, CodexReport, ReportsEvents, Stepped_Data,
+        };
+        use crate::generated::turn_ledger::ThreadStanding;
+        fixture.nexus.report_codex(CodexFlowReport {
+            flow_id: flow_ethos::FlowId("908786".into()),
+            codex_report: CodexReport::Stepped(Stepped_Data {
+                before: Before(ThreadStanding::Unreconciled),
+                after: After(ThreadStanding::AtRest),
+            }),
+        });
+    }
     fixture.nexus.wake_due(seat_at());
     assert!(
         fake.queued_turn_texts().is_empty(),

@@ -163,9 +163,9 @@ impl WakePolicy for RunningNexus {}
 /// first. A seat whose last turn event already is its rest has had that
 /// event, and is handed its Soft work when it arrives.
 pub trait HoldsSoftForIdle {
-    /// Whether the seat's last turn event is its rest: a Codex thread its
-    /// app-server's events show resting, a Claude seat whose transcript
-    /// records its main turn's end.
+    /// Whether the seat's last turn event is its rest: its last transition
+    /// leads to Resting, an Idle its harness reported or an owner's
+    /// SetState among them.
     fn rests_now(&self, flow_id: &str) -> bool;
     /// Whether `queue`, at the seat Awake as `flow_id`, waits for that
     /// seat's idle event: it holds only Soft work and the seat is in its
@@ -174,14 +174,18 @@ pub trait HoldsSoftForIdle {
 }
 
 impl HoldsSoftForIdle for RunningNexus {
+    // The flow's state is its last transition (`transitions`). A Simplified
+    // Claude seat that opened with no prompt has had no turn yet and is
+    // ready for its first input.
     fn rests_now(&self, flow_id: &str) -> bool {
-        match self.store.flow_node(flow_id) {
-            Ok(Some(node)) => match node.harness_kind {
-                HarnessKind::Codex => self.codex_resting(flow_id),
-                HarnessKind::Claude => self.claude_main_turn_ended(&node),
-            },
-            _ => false,
-        }
+        use crate::generated::transitions::{AskedFlow, RecordsTransitions};
+        matches!(
+            self.store.state_of(AskedFlow(FlowId(flow_id.to_owned()))),
+            Ok(Some(meta_signal_flow::State::Resting))
+        ) || matches!(
+            self.store.flow_node(flow_id),
+            Ok(Some(node)) if self.simplified_first_input_ready(&node)
+        )
     }
 
     fn waits_for_idle(&self, queue: &[QueueEntry], flow_id: &str) -> bool {

@@ -22,8 +22,7 @@
 ; a live flow. HeedsOverrides is the Nexus's: whether it is held, which
 ; every act it takes on its own asks first, its clocks, its deliveries and
 ; its launches; the state a seat is in now: no harness, Asleep; else its
-; last recorded transition's; else resting at its idle event, Resting; else
-; Acting; the seat a subject names, refused UnknownFlow or UnknownAddress
+; last transition's (transitions.ethos); else Acting; the seat a subject names, refused UnknownFlow or UnknownAddress
 ; when there is none; and the override's transition recorded, the cause
 ; Overridden, the moment now: for a seat in the state the override puts it
 ; in, for the seat a subject names in the state it is in now (nothing when

@@ -130,6 +130,7 @@ pub enum Record_Data {
     Transitioned(flow_nexus::Transitioned),
     Switched(flow_nexus::Holding),
     Forgotten(flow_nexus::Transitioned),
+    Caused(flow_nexus::Caused),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

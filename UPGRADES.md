@@ -1,3 +1,31 @@
+# Flow 0.59.0: a flow's state is a record of events
+
+Contracts: signal-flow 64.0.0 (83c04fe) and meta-signal-flow 87.0.0
+(51008bc), unchanged, on build-base `panel-root-f69b5c` (b192e96). Built on
+0.58.0 (a73d5631). **Neither the wire nor the stored format changes.** The
+Flow Nexus version 0 subversion 0-1, the panel's third release.
+
+- **State.** Every report, Claude hooks and the Codex app-server alike, is
+  typed into one Event (Started, Working, Idle, Compacting, Ended) and
+  recorded as a transition with the cause `Reported` and the state it
+  leads to; a delivered request is recorded with the cause `Arrived`. The
+  state the Nexus decides by is the last transition: a Soft request is
+  typed at once into a seat whose last transition is Resting, and waits for
+  its rest otherwise. The transcript and the turn ledger are the evidence
+  the events are typed from, no longer a state read beside them.
+- **Memory: the same families and schemas.** At every open, each live flow
+  whose transitions hold no `Reported` one is given the one its last
+  recorded harness event maps to, with its held context size; a flow the
+  panel recorded gets it first, at its first override's moment, so the
+  owner's word stays its state. A 0.56.2 store opens as 0.57.0 opened it,
+  the transitions and switch families registered empty, then seeded; a
+  0.58.0 store opens as it stands, then seeded. Nothing is refused. A
+  0.58.0 daemon opens a 0.59.0 store (the families are the same); rollback
+  needs no restore.
+- **Deployment.** The daemon alone; no client repins. A Codex flow running
+  across the switch records Started then its state at its thread's next
+  report (the responder's cut at start).
+
 # Flow 0.58.0: the override panel at the root of the meta Signal
 
 Contracts: signal-flow 64.0.0 (83c04fe), unchanged, and meta-signal-flow

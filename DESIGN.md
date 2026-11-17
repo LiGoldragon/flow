@@ -732,8 +732,50 @@ cause `Overridden`, the moment in Unix seconds: `SetState` the state named;
 ended; `Forget` Asleep, in the commit that forgets it; `Deliver` and `Unlock`
 the state the Address's flow (Awake, else the last of its Past) is in now;
 `Hold` and `Resume` that of every live seat. The state a flow is in now is
-Asleep with no harness, else its last recorded transition's, else Resting
-when it rests at its idle event, else Acting.
+Asleep with no harness, else its last transition's, else Acting.
+
+## A flow's state is a record of events
+
+A flow's state is the last of its transitions (`Flow` in `memory.ethos`),
+each recorded with the event that caused it, for every harness alike
+(`crates/flow-nexus/ethos/transitions.ethos`: `Caused`, `CodexReport`,
+`ClaudeReport`, `ReportedEvent`, `CodexFlowReport`, `AskedFlow`,
+`TransitionWrite`; `LeadsToState`, `TypesCodexReport`,
+`SeedsReportedTransition`, the store's `RecordsTransitions` and the Nexus's
+`ReportsEvents`), written through `Record.Caused`. A report is typed into
+one `Event`, recorded with the cause `Reported`: Started and Working lead
+to Acting, Idle to Resting, Ended to Asleep, and Compacting keeps the state
+the flow was in.
+
+- A Claude flow's hooks (`reporting`): a Started naming a session the flow
+  had not started is Started; one naming a session it already started (a
+  restart's resume, or the session going on past a compaction) is Idle
+  when its transcript shows the main turn ended, else Working; its own
+  prompt and each tool boundary are Working; its own Stop is Idle with the
+  size its transcript shows; its own session's end is Ended; a Cleared is
+  none.
+- A Codex flow's app-server (`codex_turns`, `compacting`): its first report
+  is preceded by Started; a ledger batch bringing its thread to rest is
+  Idle, one taking it into a turn or a running item Working; a token usage
+  is Working with its size in a turn and Idle at rest; its thread closed is
+  Ended.
+- A compaction either harness makes, asked for or not, is Compacting.
+- Working and Idle carry the context size Flow last measured where the
+  report carries none.
+
+A request delivered (its logical delivery Delivered, or Read without its
+receipt) is recorded in the same commit with the cause `Arrived` and its
+`RequestId`, leading to Acting (`logical_delivery`). The state the Nexus
+decides by is the last transition: `rests_now`, which a Soft request and a
+drain ask, reads Resting from it (a Simplified Claude seat that opened with
+no prompt is ready for its first input), and the panel's state of a live
+seat is it. Every write of the family takes `transitions_gate`.
+
+At every open, each live flow whose transitions hold no `Reported` one is
+given the one its last recorded harness event maps to, carrying the
+context size Memory holds; a flow the panel recorded is given it first, at
+its first override's moment (`seed_reported_transitions`). No family or
+schema changes.
 
 `CrystallizeNow` sends the flow its handover warning now, whatever its
 context, as the warning goes (`handover_reminding::RendersHandoverWarning`):

@@ -23,6 +23,7 @@ pub use crate::generated::memory::{
 pub use crate::generated::operation::Outcome as OperationOutcome;
 pub use crate::generated::overriding::{Holding, Seat, Subject, Transitioned};
 pub use crate::generated::starter::{LaunchedRecord, ReplacedRecord};
+pub use crate::generated::transitions::Caused;
 pub use signal_curriculum_nexus::{
     ContextProvenance, Input as CurriculumQuery, Output as CurriculumOutcome, StartupComposition,
     StartupSelection,
@@ -98,6 +99,7 @@ pub mod submission;
 #[cfg(test)]
 mod test_faults;
 pub mod title;
+pub mod transitions;
 pub mod turn_ends;
 pub mod undecodable;
 pub mod values;
@@ -3384,6 +3386,7 @@ mod tests {
     mod send_tool;
     mod start_admission;
     mod submission;
+    mod transitions;
     mod turn_ends;
     mod waking;
 

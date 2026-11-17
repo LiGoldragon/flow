@@ -1186,6 +1186,12 @@ fn scheduled_warning_stays_once_during_replace_and_drains_once_to_successor() {
             closing.appeared_by(deadline),
             "the reap never reached close"
         );
+        let before_tick = fixture
+            .nexus
+            .store
+            .logical_delivery_snapshot(&first_warning_id)
+            .unwrap()
+            .unwrap();
         fixture.nexus.send_due_handover_reminders(310);
         assert_eq!(
             stored(&fixture)
@@ -1214,10 +1220,10 @@ fn scheduled_warning_stays_once_during_replace_and_drains_once_to_successor() {
             .logical_delivery_snapshot(&first_warning_id)
             .unwrap()
             .unwrap();
-        assert!(matches!(
-            queued.delivery_state,
-            signal_flow::DeliveryState::Queued
-        ));
+        assert_eq!(
+            queued, before_tick,
+            "a later tick preserves the original delivery state"
+        );
         assert_eq!(typing_calls(&fixture).len(), predecessor_calls);
         release.release();
         reaping.join().expect("the reap settled");

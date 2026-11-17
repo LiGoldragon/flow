@@ -483,7 +483,7 @@ impl ProjectsMetaflow for flow_ethos::Metaflow {
         let value = self;
         meta_signal_flow::VisibleMetaflow {
             address: value.address.clone(),
-            state: value.state.clone(),
+            metaflow_state: value.state.clone(),
             flow_id_vector: value.past.clone().0,
             visible_native_input_vector: value
                 .queue

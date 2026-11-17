@@ -26,8 +26,9 @@ The wire contracts are independent repositories:
   (`MetaflowGone`); `Metaflows` stays the one-shot read.
   Nothing on the ordinary socket writes into a pane.
 - `meta-signal-flow` defines `Configure`, reset-credit consumption, the
-  override panel (`Override`), and the pane writes: `Deliver`, `Vet`,
-  `Command`, plus `ResolvePeer`.
+  override panel at its root (`SetState`, `CrystallizeNow`, `Renew`,
+  `Close`, `Deliver`, `Unlock`, `Forget`, `Hold`, `Resume`), and the pane
+  writes: `TypeMessage`, `Vet`, `Command`, plus `ResolvePeer`.
 
 The ordinary client accepts exactly one inline `Input` Datom from the
 `signal-flow` contract. `Start` and `Replace` also require the caller to name
@@ -147,11 +148,12 @@ every Claude flow; unconfigured, it is the `flow-hook` beside the
 Nexus.
 
 Every write into a pane goes through the privileged socket, and Flow is the
-only writer. `Deliver` carries a typed `Message` whose head is its Priority:
+only writer. `TypeMessage` carries a typed `Message` whose head is its
+Priority, answered `MessageTyped`:
 
 ```sh
-flow-meta 'Deliver.{ m-7f3a2c:00f95a:0 00f95a Soft.{ m-7f3a2c Owner Text.«continue with the implementation» } }'
-flow-meta 'Deliver.{ m-81b0e4:00f95a:0 00f95a HardAbrupt.{ m-81b0e4 Flow.e167d8 Text.«stop the build» } }'
+flow-meta 'TypeMessage.{ m-7f3a2c:00f95a:0 00f95a Soft.{ m-7f3a2c Owner Text.«continue with the implementation» } }'
+flow-meta 'TypeMessage.{ m-81b0e4:00f95a:0 00f95a HardAbrupt.{ m-81b0e4 Flow.e167d8 Text.«stop the build» } }'
 flow-meta 'Command.{ 00f95a Compact }'
 ```
 
@@ -209,26 +211,31 @@ writes nothing — it is a query, and a query does not change what it is asked
 about; only a command that witnesses a pane's fate persists an ended
 lifecycle. The three ended states each name who ended the flow: `Stopped` is
 Flow's own act, `Exited` is the seat's, `Retired` is an owner's, through the
-override panel's `Override.Close`. A pane going away never retires a flow: an exit retains
+override panel's `Close`. A pane going away never retires a flow: an exit retains
 the record, and retirement comes from authority, never from an observation.
 None of the three is a deletion — each keeps the row, its origin and its
-history — and `Deliver`, `ResolveRecipient`, `Stop` and `Replace` treat all three
-as gone. `Override.Close` of a flow that has already ended closes nothing
+history — and `TypeMessage`, `ResolveRecipient`, `Stop` and `Replace` treat all three
+as gone. `Close` of a flow that has already ended closes nothing
 more and answers `Closed`; it closes the flow a Maintained metaflow is
 Awake as on the owner's word.
 
-The override panel (meta `Override`, meta-signal-flow's `panel.ethos`) is
-the owner's hand on what the Nexus holds and does: `SetState`,
-`CrystallizeNow`, `Renew`, `Close`, `Deliver`, `Unlock`, `Forget`, `Hold`
-and `Resume`, each recorded as a transition of the flow it acts on with the
-cause `Overridden`. `Hold` is the shutdown switch, kept in Memory: the Nexus
+The override panel stands at the root of the meta Signal: the owner's hand
+on what the Nexus holds and does, `SetState`, `CrystallizeNow`, `Renew`,
+`Close`, `Deliver`, `Unlock`, `Forget`, `Hold` and `Resume`, each recorded
+as a transition of the flow it acts on with the cause `Overridden`, and
+refused with the one meta `Refused` (`UnknownFlow`, `UnknownAddress`,
+`Harnessed`, `Unharnessed`, `Restarting`, `CapsuleRefused`, `Unrenewed`,
+`StoreRefused`). `Hold` is the shutdown switch, kept in Memory: the Nexus
 takes no act of its own, its clocks, deliveries and launches, and still
-answers; `Resume` takes up what is owed.
+answers; `Resume` takes up what is owed. `Renew` answers its fresh flow's
+`Started`: the old flow's running turn is interrupted, a Claude flow seen
+working by its interrupt keys and a Codex flow's turn by `turn/interrupt`
+in its app-server, and then its pane is closed.
 
 ```sh
-flow-meta 'Override.Hold'                  # Overridden.Held
-flow-meta 'Override.Renew.{ Mind core Sol }'   # Overridden.Renewed.<fresh flow>
-flow-meta 'Override.Resume'                # Overridden.Resumed
+flow-meta 'Hold'                  # Held
+flow-meta 'Renew.{ Mind core Sol }'   # Renewed.<fresh flow>
+flow-meta 'Resume'                # Resumed
 ```
 
 `Start` carries a typed `LaunchProfile` alone. A profile names the module

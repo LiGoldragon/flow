@@ -1377,11 +1377,11 @@ fn restart_interrupted_stop_needs_quiesced_spawn() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch_meta(meta_signal_flow::Input::Override(
-                meta_signal_flow::panel::Input::Close(flow_ethos::FlowId(FLOW.into()))
-            )),
-        meta_signal_flow::Output::Overridden(meta_signal_flow::panel::Output::Refused(
-            meta_signal_flow::panel::Refused_Data::Restarting(flow_ethos::FlowId(FLOW.into()))
+            .dispatch_meta(meta_signal_flow::Input::Close(flow_ethos::FlowId(
+                FLOW.into()
+            ))),
+        meta_signal_flow::Output::Refused(meta_signal_flow::Refused_Data::Restarting(
+            flow_ethos::FlowId(FLOW.into())
         ))
     );
     assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Active);
@@ -3101,12 +3101,10 @@ fn stop_and_retire_protected_from_another_flow_accepted() {
     resolver.flow_id_option = Some(flow_ethos::FlowId("0f0e1d".into()));
     assert!(matches!(
         retiring.nexus.dispatch_meta_from(
-            meta_signal_flow::Input::Override(meta_signal_flow::panel::Input::Close(
-                flow_ethos::FlowId(FLOW.into())
-            )),
+            meta_signal_flow::Input::Close(flow_ethos::FlowId(FLOW.into())),
             Some(resolver)
         ),
-        meta_signal_flow::Output::Overridden(meta_signal_flow::panel::Output::Closed(_))
+        meta_signal_flow::Output::Closed(_)
     ));
     assert_eq!(node(&retiring).flow_lifecycle, FlowLifecycle::Retired);
 }

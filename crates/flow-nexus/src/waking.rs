@@ -2825,7 +2825,7 @@ impl DrainsHeldSeats for RunningNexus {
                 Interrupt, LedgerEvent, PayloadText, PendingLetter,
             };
             let interrupt = match &result {
-                meta_signal_flow::Output::Delivered(delivery)
+                meta_signal_flow::Output::MessageTyped(delivery)
                     if delivery.interrupt_witness
                         != meta_signal_flow::InterruptWitness::NotRequested =>
                 {

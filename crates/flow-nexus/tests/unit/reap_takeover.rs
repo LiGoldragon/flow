@@ -776,7 +776,7 @@ fn a_refused_successor_end_commit_leaves_the_prior_state_for_the_next_end() {
                     world
                         .fixture
                         .nexus
-                        .dispatch_meta(meta_signal_flow::Input::Deliver(
+                        .dispatch_meta(meta_signal_flow::Input::TypeMessage(
                             meta_signal_flow::DeliveryRequest {
                                 delivery_id: meta_signal_flow::DeliveryId(
                                     "to-the-gone-pane".into(),
@@ -868,16 +868,9 @@ fn every_end_of_the_successor_reassigns_what_it_owed() {
                 let retired = world
                     .fixture
                     .nexus
-                    .dispatch_meta(meta_signal_flow::Input::Override(
-                        meta_signal_flow::panel::Input::Close(FlowId(SUCCESSOR.into())),
-                    ));
+                    .dispatch_meta(meta_signal_flow::Input::Close(FlowId(SUCCESSOR.into())));
                 assert!(
-                    matches!(
-                        retired,
-                        meta_signal_flow::Output::Overridden(
-                            meta_signal_flow::panel::Output::Closed(_)
-                        )
-                    ),
+                    matches!(retired, meta_signal_flow::Output::Closed(_)),
                     "{retired:?}"
                 );
                 FlowLifecycle::Retired
@@ -889,7 +882,7 @@ fn every_end_of_the_successor_reassigns_what_it_owed() {
                 let _ = world
                     .fixture
                     .nexus
-                    .dispatch_meta(meta_signal_flow::Input::Deliver(
+                    .dispatch_meta(meta_signal_flow::Input::TypeMessage(
                         meta_signal_flow::DeliveryRequest {
                             delivery_id: meta_signal_flow::DeliveryId("to-the-gone-pane".into()),
                             flow_id: FlowId(SUCCESSOR.into()),

@@ -91,8 +91,8 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
         peer.read_exact(&mut length).expect("query length");
         let mut query = vec![0; u32::from_be_bytes(length) as usize];
         peer.read_exact(&mut query).expect("query");
-        let reply = rkyv::to_bytes::<rkyv::rancor::Error>(&meta_signal_flow::Output::Overridden(
-            meta_signal_flow::panel::Output::Closed(signal_flow::FlowId("fac697".into())),
+        let reply = rkyv::to_bytes::<rkyv::rancor::Error>(&meta_signal_flow::Output::Closed(
+            signal_flow::FlowId("fac697".into()),
         ))
         .expect("reply encodes");
         peer.write_all(&(reply.len() as u32).to_be_bytes())
@@ -103,12 +103,12 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
         runtime.path(),
         configuration.path(),
         &other,
-        &["Override.Close.fac697"],
+        &["Close.fac697"],
     );
     assert!(output.status.success(), "{output:?}");
     answering.join().expect("selected fixture answered");
     assert!(
-        String::from_utf8_lossy(&output.stdout).starts_with("Overridden.Closed.fac697"),
+        String::from_utf8_lossy(&output.stdout).starts_with("Closed.fac697"),
         "{output:?}"
     );
 
@@ -117,7 +117,7 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
         runtime.path(),
         configuration.path(),
         &other,
-        &["main", "Override.Close.fac697"],
+        &["main", "Close.fac697"],
     );
     assert_eq!(refused.status.code(), Some(2), "{refused:?}");
     assert!(
@@ -127,12 +127,7 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
 
     // A configuration that is missing is refused, naming its path.
     let empty = tempfile::tempdir().expect("an empty configuration home");
-    let refused = client(
-        runtime.path(),
-        empty.path(),
-        &other,
-        &["Override.Close.fac697"],
-    );
+    let refused = client(runtime.path(), empty.path(), &other, &["Close.fac697"]);
     assert_eq!(refused.status.code(), Some(2), "{refused:?}");
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
@@ -164,7 +159,7 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
     let refused = Command::new(env!("CARGO_BIN_EXE_flow-meta"))
         .env_clear()
         .env("XDG_CONFIG_HOME", unplaced.path())
-        .arg("Override.Close.fac697")
+        .arg("Close.fac697")
         .output()
         .expect("client runs");
     assert_eq!(refused.status.code(), Some(2), "{refused:?}");
@@ -179,12 +174,7 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
             ),
         "{stderr}"
     );
-    let refused = client(
-        runtime.path(),
-        unplaced.path(),
-        &other,
-        &["Override.Close.fac697"],
-    );
+    let refused = client(runtime.path(), unplaced.path(), &other, &["Close.fac697"]);
     assert_eq!(refused.status.code(), Some(2), "{refused:?}");
     assert_eq!(
         default_listener

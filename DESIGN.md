@@ -5,8 +5,8 @@ the client turns one inline Datom into a typed request, sends an rkyv frame,
 and textualizes the typed reply as Datom. The standalone `signal-flow` repo
 owns `Start`, `Refresh`, `ResolveRecipient`, `Stop`, `List`,
 `Replace`, `LaunchStatus`, `Observe`, and `ResolveCaller`;
-`meta-signal-flow` owns `Configure`, `ConsumeReset`, the override panel
-`Override`, and the pane writes `Deliver`, `Vet`, `Command`, with
+`meta-signal-flow` owns `Configure`, `ConsumeReset`, the override panel at
+its root, and the pane writes `TypeMessage`, `Vet`, `Command`, with
 `ResolvePeer`. Each contract versions its own wire.
 `RunningNexus` dispatches; `FlowStore` owns working state and policy.
 
@@ -150,13 +150,13 @@ has no other role; it writes nothing else, and any other binding is refused as
 never a gate: routing and promotion follow the Herdr route. `ResolvePeer`
 on the meta socket answers the same question for a process Message names.
 
-Flow is the only pane writer. `Deliver`, `Command` and the work handed to a
+Flow is the only pane writer. `TypeMessage`, `Command` and the work handed to a
 woken seat act only on a route that still matches the native Herdr
 snapshot, and each holds the pane's lease (`delivery::lease`) from its first
 key to its last. A route is keyed on what Herdr binds for the pane's life:
 session, pane id and terminal id, with the harness kind. The agent name is a
 label a running flow may change; it is re-read from the snapshot and
-reported, never matched. `Deliver` renders the typed Message (its Priority
+reported, never matched. `TypeMessage` renders the typed Message (its Priority
 head first), refuses a body carrying a control character or a harness command
 (`delivery::body`), and refuses a Blocked recipient and an occupied composer.
 A `Soft` request is handed to it only at its recipient's idle event, the
@@ -171,13 +171,13 @@ again before the letter. Grades are exact: `NotDelivered` (nothing typed),
 settled agent observed reacting on the exact pane, the route still matching
 afterward) and `Uncertain` (typed, reaction unobserved). Each step is written
 to a `PaneLease` row; a row found when the store opens settles `Uncertain`
-and is never retried, and `Deliver` repeats answer the stored `Delivery`. A
-Pending row is promoted only by a Presented Deliver; no probe or marker is
+and is never retried, and `TypeMessage` repeats answer the stored `Delivery`. A
+Pending row is promoted only by a Presented TypeMessage; no probe or marker is
 ever typed to promote it. `Command.Compact` is an emergency measure: before
 the lease is taken it is refused `CompactionRefused` unless the flow's last
 measured context (`flow_nexus_flow_context_sizes`) reached the refresh
 threshold of its model, the model its role records, else the one its launch
-named. A `Deliver` into a flow at or past that threshold is refused
+named. A `TypeMessage` into a flow at or past that threshold is refused
 `PastThreshold`. Stop changes the durable lifecycle only after the
 exact pane closes successfully, and closes under the lease. `List` reads the
 same store rows and sorts them by Flow ID.
@@ -256,7 +256,7 @@ confirmation its Address receives as it: the metaflow row with its
 AddressHold is the one record that names the receiving flow, and the
 confirmation is the one commit that switches it. Until the confirmation the
 hold makes the predecessor receiving and the successor `Unconfirmed`; from it
-the predecessor is `Superseded` and `Vet`, `Deliver` and `Command` refuse it
+the predecessor is `Superseded` and `Vet`, `TypeMessage` and `Command` refuse it
 so (`Superseded.<successor>`), `ResolveRecipient` answers `FlowUnavailable`.
 No obligation, outcome or lifecycle decides routing, so no later write can
 hold a confirmed successor out of it.
@@ -436,8 +436,8 @@ no route. A Herdr that cannot be read changes nothing.
 Reading that truth and recording it are separate. `List` writes nothing,
 because a query does not change what it is asked about; an ended lifecycle is
 persisted only by a command that witnesses a pane's fate — `Stop` and a
-replacement's reap record `Stopped`, a `Deliver` whose bound pane is gone records
-`Exited`, and `Retire` on the meta socket records `Retired`.
+replacement's reap record `Stopped`, a `TypeMessage` whose bound pane is gone records
+`Exited`, and `Close` on the meta socket records `Retired`.
 
 Each ended state names who ended the flow, and they do not stand in for one
 another. `Stopped` is Flow's own act on a pane it held. `Exited` is the seat's
@@ -711,13 +711,17 @@ assigned-flow context, and the reset outcome mapping.
 
 ## The override panel
 
-The meta input `Override` carries the override panel, its own Signal
-(meta-signal-flow `ethos/panel.ethos`), answered `Overridden` with the
-panel's answer; `MetaCall` answers it through the generated
-`panel::Answering` (`src/overriding.rs`). What the Nexus needs for it is
-declared in `crates/flow-nexus/ethos/overriding.ethos`: the store's
-`RemembersOverrides`, the Nexus's `HeedsOverrides`, `Subject`, `Seat`,
-`Transitioned` and `Holding`; a flow's record of transitions (`Flow`,
+The override panel stands at the root of the meta Signal: `SetState`,
+`CrystallizeNow`, `Renew`, `Close`, `Deliver`, `Unlock`, `Forget`, `Hold`
+and `Resume`, answered `StateSet`, `Asked`, `Renewed`, `Closed`,
+`Delivered`, `Unlocked`, `Forgotten`, `Held` and `Resumed`, or the one meta
+`Refused`. `MetaCall` answers each through the generated meta `Answering`
+(`src/lib.rs`). What the Nexus needs for it is declared in
+`crates/flow-nexus/ethos/overriding.ethos`: the store's
+`RemembersOverrides`, the Nexus's `HeedsOverrides` and
+`InterruptsRunningTurns`, the app-server adapter's `InterruptsCodexThreads`,
+`Subject`, `Seat`, `Transitioned`, `Holding`, `CodexThread` and
+`TurnInterruption`; a flow's record of transitions (`Flow`,
 `Transition`, `Cause`, `Event`, `Onward`, `Moment`) and the switch
 (`StoredHold`) are Memory records (`memory.ethos`), written through
 `Record.Transitioned`, `Record.Switched` and `Record.Forgotten`.
@@ -737,8 +741,14 @@ the words its model's handover policy configures, then
 `flows/<FlowId>/handover.md`, a MiddleAbrupt Notice from Flow. `Renew` takes
 the metaflow's hold and starts its successor through Replace before the old
 flow is reaped (`refresh_successor_first`), whatever its continuity and
-whether or not the old flow rests; a Codex thread still in its turn runs on
-in its app-server, its calls refused `FlowEnded`. `Close` is Retire's act on
+whether or not the old flow rests. The successor's `Started` is the event
+the rest answers: the old flow's running turn is interrupted
+(`InterruptsRunningTurns`), a Claude flow Herdr shows Working or Blocked
+pressed its harness's interrupt keys under its pane lease, a Codex flow's
+newest turn, while in progress, interrupted in its app-server
+(`turn/interrupt`), and then its pane, still there, is closed under its
+lease, so no turn of it runs on against calls refused `FlowEnded`; the reap
+owed at that `Started` finds the pane gone and settles. `Close` is Retire's act on
 the owner's word, without its Maintained refusal; a restart that may still
 start a harness refuses it `Restarting`. `Deliver` is the ordinary
 `DeliverAll`. `Unlock` takes away the sender lock held on the Address.

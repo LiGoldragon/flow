@@ -505,6 +505,31 @@ impl SeatsCodexFlows for NexusFixture {
     }
 }
 
+/// Runs `runs` of `fake` answer an interrupt of a running turn: the
+/// thread's newest turn, `turn`, listed in progress, then the interrupt's
+/// answer once the turn has stopped.
+pub(super) fn serve_running_turn(
+    fake: &FakeAppServer,
+    runs: std::ops::RangeInclusive<u64>,
+    turn: &str,
+) {
+    let frames = [
+        frame(&serde_json::json!({ "id": 1, "result": {} })),
+        frame(&serde_json::json!({
+            "id": 2,
+            "result": {
+                "data": [{ "id": turn, "status": "inProgress", "items": [] }],
+                "nextCursor": null
+            }
+        })),
+        frame(&serde_json::json!({ "id": 3, "result": {} })),
+    ]
+    .concat();
+    for run in runs {
+        std::fs::write(fake.directory.path().join(format!("frames-{run}")), &frames).unwrap();
+    }
+}
+
 pub(super) fn accepting_codex_endpoint(
     fixture: &mut NexusFixture,
     model: &str,

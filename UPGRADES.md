@@ -1,3 +1,41 @@
+# Flow 0.58.0: the override panel at the root of the meta Signal
+
+Contracts: signal-flow 64.0.0 (83c04fe), unchanged, and meta-signal-flow
+87.0.0 (51008bc), on build-base `panel-root-f69b5c` (b192e96), which
+registers 87.0.0. Built on 0.57.0 (21110db5). **The wire changes; the
+stored format does not.** The Flow Nexus version 0 subversion 0-1, the
+panel's second release.
+
+- **Wire.** The `Override` wrapper is gone: `SetState`, `CrystallizeNow`,
+  `Renew`, `Close`, `Deliver`, `Unlock`, `Forget`, `Hold` and `Resume` are
+  meta inputs, answered `StateSet`, `Asked`, `Renewed`, `Closed`,
+  `Delivered`, `Unlocked`, `Forgotten`, `Held` and `Resumed`.
+  `flow-meta 'Override.Close.<flow>'` is `flow-meta 'Close.<flow>'`,
+  answered `Closed.<flow>`.
+- **The old meta `Deliver` is `TypeMessage`**, answered `MessageTyped`
+  (was `Delivered.VisibleDelivery`); `Deliver` now hands a permaflow its
+  queue. `DeliveryRejected` and `Vet` are unchanged.
+- **`Refused` is one enum**: `UnknownFlow`, `UnknownAddress`, `Harnessed`,
+  `Unharnessed`, `Restarting`, `CapsuleRefused` (was the panel's
+  `HerdrRefused`), `Unrenewed.RefreshRejection` and
+  `StoreRefused.StoreFailure` (was the meta `Refused.StoreFailure`).
+- **Renew interrupts the old flow's turn.** At its fresh flow's `Started`,
+  the old flow's running turn is interrupted and then its pane closed: a
+  Claude flow Herdr shows Working or Blocked is pressed its harness's
+  interrupt keys under its pane lease; a Codex flow's newest turn, while in
+  progress, is interrupted in its app-server (`turn/interrupt`). No turn of
+  it runs on against tool calls refused `FlowEnded`. The reap owed at that
+  `Started` finds the pane gone and settles.
+- **Memory: unchanged.** The flow's state type moves from
+  `meta_signal_flow::panel::State` to `meta_signal_flow::State` with the
+  same variants and layout; both families keep their schema labels. A
+  0.57.0 store opens as it stands, and 0.57.0 opens a 0.58.0 store.
+- **Deployment.** Every meta client repins to 87 in the same switch: the
+  home's `flow-meta` (this package's) and Message (message-nexus types into
+  panes through meta `Deliver`, which is now `TypeMessage`). Anything that
+  runs `flow-meta 'Override.…'` drops the `Override.` head; the capsule's
+  step 12 and its teardown do.
+
 # Flow 0.57.0: the override panel on the meta socket
 
 Contracts: signal-flow 64.0.0 (83c04fe), unchanged, and meta-signal-flow

@@ -1267,12 +1267,12 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         }
     }
 
-    fn deliver(
+    fn type_message(
         &self,
         delivery_request: &meta_signal_flow::DeliveryRequest,
     ) -> Result<meta_signal_flow::VisibleDelivery, meta_signal_flow::Output> {
         match DeliversMessages::deliver(self.nexus, delivery_request.clone()) {
-            meta_signal_flow::Output::Delivered(delivery) => Ok(delivery),
+            meta_signal_flow::Output::MessageTyped(delivery) => Ok(delivery),
             other => Err(other),
         }
     }
@@ -1369,7 +1369,9 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         address: &signal_flow::Address,
     ) -> Result<meta_signal_flow::DebugSnapshot, meta_signal_flow::Output> {
         self.nexus.store.debug_snapshot(address).map_err(|error| {
-            meta_signal_flow::Output::Refused(meta_signal_flow::StoreFailure(error.to_string()))
+            meta_signal_flow::Output::Refused(meta_signal_flow::Refused_Data::StoreRefused(
+                meta_signal_flow::StoreFailure(error.to_string()),
+            ))
         })
     }
 
@@ -1463,14 +1465,580 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         }
     }
 
-    // The override panel: each override is answered by the panel's own
-    // answer (`overriding`).
-    fn r#override(
+    // The override panel, at the root of the meta Signal: each override is
+    // recorded as a transition of the flow it acts on, the cause Overridden
+    // (`overriding`).
+    fn set_state(
         &self,
-        panel_input: &meta_signal_flow::panel::Input,
-    ) -> Result<meta_signal_flow::panel::Output, meta_signal_flow::Output> {
-        use meta_signal_flow::panel::Answerable;
-        Ok(panel_input.answer(self))
+        set_state: &meta_signal_flow::SetState_Data,
+    ) -> Result<meta_signal_flow::StateSet_Data, meta_signal_flow::Output> {
+        use crate::generated::overriding::{
+            EntersByOverride, HeedsOverrides, Subject, Transitioned,
+        };
+        let nexus = self.nexus;
+        let _turn = nexus
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let seat = nexus.seat_named(Subject::Named(set_state.flow_id.clone()))?;
+        nexus.record_override(Transitioned {
+            seat,
+            transition: set_state.state.overridden(),
+        })?;
+        Ok(meta_signal_flow::StateSet_Data {
+            flow_id: set_state.flow_id.clone(),
+            state: set_state.state.clone(),
+        })
+    }
+
+    // The flow is sent its handover warning now, whatever its context: the
+    // words its model's handover policy configures, then the path its
+    // crystallization is written at, as a MiddleAbrupt Notice from Flow,
+    // reaching it at its next tool boundary.
+    fn crystallize_now(
+        &self,
+        flow_id: &signal_flow::FlowId,
+    ) -> Result<signal_flow::FlowId, meta_signal_flow::Output> {
+        use crate::generated::overriding::{
+            EntersByOverride, HeedsOverrides, Subject, Transitioned,
+        };
+        use crate::handover_reminding::{HandoverReminderNotice, RendersHandoverWarning};
+        use crate::store::ReadsFlowRows;
+        use crate::store::context::NamesFlowModel;
+        use crate::store::handover_configuration::ReadsHandoverConfiguration;
+        use crate::store::logical_delivery::RecordsLogicalDeliveries;
+        use crate::store::metaflow::SleepsMetaflows;
+        use crate::waking::SleepsAndWakesSeats;
+        use meta_signal_flow::{Output, Refused_Data, State, StoreFailure};
+        let nexus = self.nexus;
+        let address = {
+            let _turn = nexus
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let seat = nexus.seat_named(Subject::Named(flow_id.clone()))?;
+            // A flow with no harness, ended or no longer its metaflow's,
+            // has nobody to ask.
+            let live = matches!(
+                nexus.store.flow_node(&flow_id.0),
+                Ok(Some(node)) if node.flow_lifecycle.is_live()
+            );
+            let awake = matches!(
+                nexus.store.metaflow_awake_as(&flow_id.0),
+                Ok(Some(metaflow)) if metaflow.address == seat.address
+            );
+            if !(live && awake) {
+                return Err(Output::Refused(Refused_Data::Unharnessed(flow_id.clone())));
+            }
+            let model = nexus.store.flow_model(&flow_id.0).ok().flatten();
+            let words = match nexus.store.handover_policies() {
+                Ok(meta_signal_flow::HandoverPoliciesConfiguration::Configured(policies)) => {
+                    policies
+                        .into_iter()
+                        .find(|policy| Some(&policy.model_name.0) == model.as_ref())
+                        .map(|policy| policy.reminder_text.0)
+                        .unwrap_or_default()
+                }
+                Ok(meta_signal_flow::HandoverPoliciesConfiguration::Unconfigured) => String::new(),
+                Err(error) => {
+                    return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                        error.to_string(),
+                    ))));
+                }
+            };
+            let warning = HandoverReminderNotice {
+                address: seat.address.clone(),
+                text: words,
+                generation: 0,
+            }
+            .notice_text(&flow_id.0);
+            match nexus.store.accept_logical_delivery(
+                &seat.address,
+                signal_flow::SentBy::Flow,
+                flow_ethos::Delivery::Wake,
+                signal_flow::Message::MiddleAbrupt(signal_flow::Request::Notice(
+                    warning.trim_start().to_owned(),
+                )),
+                None,
+            ) {
+                Ok(signal_flow::PrivateSendResponse::SendAccepted(_)) => {}
+                Ok(refused) => {
+                    return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                        format!("{refused:?}"),
+                    ))));
+                }
+                Err(error) => {
+                    return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                        error.to_string(),
+                    ))));
+                }
+            }
+            nexus.record_override(Transitioned {
+                seat: seat.clone(),
+                transition: State::Crystallizing.overridden(),
+            })?;
+            seat.address
+        };
+        // Handed over off the gate, as any queued MiddleAbrupt request is; a
+        // held Nexus keeps it queued.
+        nexus.drain_awake(&address);
+        Ok(flow_id.clone())
+    }
+
+    // The fresh flow is started from the permaflow's crystallization and
+    // confirmed first; its Started is the event the rest answers: the old
+    // flow's running turn is interrupted and its harness closed, so no turn
+    // of it runs on against tool calls refused FlowEnded. The reap owed at
+    // that Started finds the pane gone and settles.
+    fn renew(
+        &self,
+        address: &signal_flow::Address,
+    ) -> Result<signal_flow::FlowId, meta_signal_flow::Output> {
+        use crate::delivery::lease::LeasesPanes;
+        use crate::generated::memory::RefreshCaller;
+        use crate::generated::operation::{Operation, Outcome, Record_Data};
+        use crate::generated::overriding::{
+            EntersByOverride, HeedsOverrides, InterruptsRunningTurns, Seat, Transitioned,
+        };
+        use crate::herdr::{PanePresence, ReadsHerdrPanes};
+        use crate::performing::Performs;
+        use crate::store::ReadsFlowRows;
+        use crate::store::address_hold::HoldsLaunchAddress;
+        use crate::store::metaflow::SleepsMetaflows;
+        use crate::store::restart::RecordsRestarts;
+        use crate::store::successor::SuccessionCause;
+        use crate::waking::{
+            AtStop, HoldsWakingMetaflows, KeptAtStop, RestsEndedAwake, SleepsAndWakesSeats,
+            WakesInParts,
+        };
+        use meta_signal_flow::{Output, Refused_Data, State, StoreFailure};
+        use signal_flow::{HerdrRouteSelection, RefreshRejection};
+        let nexus = self.nexus;
+        let unrenewed = |rejection| Err(Output::Refused(Refused_Data::Unrenewed(rejection)));
+        let turn = nexus
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(lock) = nexus.waking.hold(address) else {
+            return unrenewed(RefreshRejection::Locked);
+        };
+        nexus.rest_ended_awake(address);
+        let metaflow = match nexus.store.metaflow(address) {
+            Ok(Some(metaflow)) => metaflow,
+            Ok(None) => {
+                return Err(Output::Refused(Refused_Data::UnknownAddress(
+                    address.clone(),
+                )));
+            }
+            Err(error) => {
+                return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                    error.to_string(),
+                ))));
+            }
+        };
+        let flow_ethos::State::Awake(flow_id) = metaflow.state.clone() else {
+            return unrenewed(RefreshRejection::NotAwake);
+        };
+        if !matches!(nexus.store.restart_record(&flow_id.0), Ok(None)) {
+            return Err(Output::Refused(Refused_Data::Restarting(flow_id)));
+        }
+        match nexus.store.address_hold(&flow_id.0) {
+            Ok(None) => {}
+            Ok(Some(_)) => return unrenewed(RefreshRejection::SuccessorUnconfirmed),
+            Err(error) => {
+                return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                    error.to_string(),
+                ))));
+            }
+        }
+        let node = match nexus.store.flow_node(&flow_id.0) {
+            Ok(Some(node)) => node,
+            Ok(None) => return Err(Output::Refused(Refused_Data::UnknownFlow(flow_id))),
+            Err(error) => {
+                return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                    error.to_string(),
+                ))));
+            }
+        };
+        match nexus.herdr.pane_presence(&node) {
+            PanePresence::Present => {}
+            PanePresence::Absent | PanePresence::Bare => {
+                let _ = nexus.perform(Operation::Record(Record_Data::Exited(flow_id)));
+                return unrenewed(RefreshRejection::NotAwake);
+            }
+            PanePresence::Unknown => return unrenewed(RefreshRejection::HerdrUnavailable),
+        }
+        // The successor is started and confirmed first, then the old flow
+        // is reaped, whatever the metaflow's continuity and whether or not
+        // the old flow rests; the lock keeps any wake, drain or delivery of
+        // the metaflow out meanwhile.
+        drop(turn);
+        let renewed = nexus.refresh_successor_first(
+            &flow_id.0,
+            &metaflow,
+            SuccessionCause::Ordered(RefreshCaller::Elsewhere(signal_flow::Origin::Unbound)),
+        );
+        drop(lock);
+        crate::send_tool::ServesLaunchCalls::wake_deferred(nexus);
+        let successor = match renewed {
+            AtStop::ReapPending(pending) => pending.launched.flow_id,
+            AtStop::Refreshed(_) => match nexus.store.metaflow(address) {
+                Ok(Some(metaflow)) => match metaflow.state {
+                    flow_ethos::State::Awake(successor) => successor,
+                    flow_ethos::State::Asleep => {
+                        return unrenewed(RefreshRejection::PersistenceRefused);
+                    }
+                },
+                Ok(None) => {
+                    return Err(Output::Refused(Refused_Data::UnknownAddress(
+                        address.clone(),
+                    )));
+                }
+                Err(error) => {
+                    return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                        error.to_string(),
+                    ))));
+                }
+            },
+            AtStop::Kept(KeptAtStop::RefreshLaunchRefused(response)) => {
+                return unrenewed(match *response {
+                    signal_flow::Output::ReplaceRejected(rejection) => {
+                        RefreshRejection::SuccessorRefused(rejection)
+                    }
+                    signal_flow::Output::StartRejected(rejection) => {
+                        RefreshRejection::SuccessorRefused(
+                            signal_flow::ReplaceRejection::LaunchRefused(rejection),
+                        )
+                    }
+                    signal_flow::Output::LaunchPending(_)
+                    | signal_flow::Output::StartAmbiguous(_) => {
+                        RefreshRejection::SuccessorUnconfirmed
+                    }
+                    _ => RefreshRejection::PersistenceRefused,
+                });
+            }
+            AtStop::Kept(KeptAtStop::RefreshUnplaceable) => {
+                return unrenewed(RefreshRejection::Undeclared);
+            }
+            _ => return unrenewed(RefreshRejection::PersistenceRefused),
+        };
+        // The fresh flow reported Started: the old flow's running turn is
+        // interrupted, then its pane, still there, closed under its lease.
+        let seat = Seat {
+            flow_id,
+            address: address.clone(),
+        };
+        let interruption = nexus.interrupt_running_turn(seat.clone());
+        let closing = match &node.herdr_route_selection {
+            HerdrRouteSelection::Available(route)
+                if matches!(
+                    nexus.herdr.pane_presence(&node),
+                    PanePresence::Present | PanePresence::Bare
+                ) =>
+            {
+                let _lease = nexus.pane_leases.hold(route);
+                Some(nexus.perform(Operation::Close(node.clone())))
+            }
+            _ => None,
+        };
+        eprintln!(
+            "flow-nexus: renewed as {}; the old flow {}: its turn {interruption:?}, its pane {closing:?}",
+            successor.0, seat.flow_id.0
+        );
+        {
+            let _turn = nexus
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            nexus.record_override(Transitioned {
+                seat,
+                transition: State::Asleep.overridden(),
+            })?;
+        }
+        // What queued while the lock stood is handed to the fresh flow,
+        // oldest first; a held Nexus keeps it queued.
+        nexus.wake_due(address.clone());
+        Ok(successor)
+    }
+
+    // Retire's act, on the owner's word: the flow's pane, still there
+    // running its own session or none, is closed under its lease and the
+    // flow recorded Retired; a flow already ended is closed already. A
+    // restart that may still start a harness holds the flow.
+    fn close(
+        &self,
+        flow_id: &signal_flow::FlowId,
+    ) -> Result<signal_flow::FlowId, meta_signal_flow::Output> {
+        use crate::delivery::lease::LeasesPanes;
+        use crate::generated::operation::{Operation, Outcome, Record_Data};
+        use crate::generated::overriding::{
+            EntersByOverride, HeedsOverrides, Subject, Transitioned,
+        };
+        use crate::herdr::{PanePresence, ReadsHerdrPanes};
+        use crate::performing::Performs;
+        use crate::store::ReadsFlowRows;
+        use crate::store::restart::RecordsRestarts;
+        use meta_signal_flow::{Output, Refused_Data, State, StoreFailure};
+        use signal_flow::HerdrRouteSelection;
+        let nexus = self.nexus;
+        let _turn = nexus
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let seat = nexus.seat_named(Subject::Named(flow_id.clone()))?;
+        let node = match nexus.store.flow_node(&flow_id.0) {
+            Ok(Some(node)) => node,
+            Ok(None) => return Err(Output::Refused(Refused_Data::UnknownFlow(flow_id.clone()))),
+            Err(error) => {
+                return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                    error.to_string(),
+                ))));
+            }
+        };
+        if node.flow_lifecycle.is_live() {
+            match nexus.store.restart_record(&flow_id.0) {
+                Ok(None) => {}
+                Ok(Some(record))
+                    if matches!(
+                        record.restart_phase,
+                        meta_signal_flow::RestartPhase::Failed(_)
+                    ) => {}
+                Ok(Some(_)) => {
+                    return Err(Output::Refused(Refused_Data::Restarting(flow_id.clone())));
+                }
+                Err(error) => {
+                    return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                        error.to_string(),
+                    ))));
+                }
+            }
+            if let HerdrRouteSelection::Available(route) = &node.herdr_route_selection
+                && matches!(
+                    nexus.herdr.pane_presence(&node),
+                    PanePresence::Present | PanePresence::Bare
+                )
+            {
+                let closed = {
+                    let _lease = nexus.pane_leases.hold(route);
+                    nexus.perform(Operation::Close(node.clone()))
+                };
+                if closed != Outcome::Closed {
+                    return Err(Output::Refused(Refused_Data::CapsuleRefused(
+                        flow_id.clone(),
+                    )));
+                }
+            }
+            match nexus.perform(Operation::Record(Record_Data::Retired(flow_id.clone()))) {
+                Outcome::Recorded => {}
+                refused => {
+                    return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                        format!("{refused:?}"),
+                    ))));
+                }
+            }
+        }
+        nexus.record_override(Transitioned {
+            seat,
+            transition: State::Asleep.overridden(),
+        })?;
+        Ok(flow_id.clone())
+    }
+
+    // The ordinary DeliverAll: an Awake seat is handed its whole queue now,
+    // an Asleep metaflow holding work is woken with it. A held Nexus hands
+    // an Awake seat its queue, the owner asking, and wakes nothing: a wake
+    // is a launch.
+    fn deliver(
+        &self,
+        address: &signal_flow::Address,
+    ) -> Result<signal_flow::Address, meta_signal_flow::Output> {
+        use crate::generated::overriding::{HeedsOverrides, Subject};
+        use crate::sending::SendsRequests;
+        use meta_signal_flow::{Output, Refused_Data, StoreFailure};
+        let nexus = self.nexus;
+        match nexus.deliver_all(address.clone()) {
+            signal_flow::Output::Drained(_) => {}
+            signal_flow::Output::Refused(signal_flow::Refusal::Unknown(_)) => {
+                return Err(Output::Refused(Refused_Data::UnknownAddress(
+                    address.clone(),
+                )));
+            }
+            refused => {
+                return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                    format!("{refused:?}"),
+                ))));
+            }
+        }
+        let _turn = nexus
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        nexus.record_named(Subject::Permaflow(address.clone()))?;
+        Ok(address.clone())
+    }
+
+    // The sender lock a permaflow holds as a recipient is taken away,
+    // whoever holds it and whether or not it has lapsed.
+    fn unlock(
+        &self,
+        address: &signal_flow::Address,
+    ) -> Result<signal_flow::Address, meta_signal_flow::Output> {
+        use crate::generated::overriding::{HeedsOverrides, Subject};
+        use crate::reminding::CountsUnixSeconds;
+        use crate::store::ManagesMetaflowState;
+        use crate::store::metaflow::SleepsMetaflows;
+        use meta_signal_flow::{Output, Refused_Data, StoreFailure};
+        let nexus = self.nexus;
+        let _turn = nexus
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match nexus.store.metaflow(address) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Err(Output::Refused(Refused_Data::UnknownAddress(
+                    address.clone(),
+                )));
+            }
+            Err(error) => {
+                return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                    error.to_string(),
+                ))));
+            }
+        }
+        match nexus.store.stored_metaflow_lock(address) {
+            Ok(Some(stored)) => {
+                let now = std::time::SystemTime::now().seconds_since_epoch();
+                if let Err(error) = nexus.store.release_metaflow_lock(stored.lock, now) {
+                    return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                        error.to_string(),
+                    ))));
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                    error.to_string(),
+                ))));
+            }
+        }
+        nexus.record_named(Subject::Permaflow(address.clone()))?;
+        Ok(address.clone())
+    }
+
+    // A flow Flow holds live, or one its metaflow is Awake as, or one a
+    // launch or a restart holds, has a harness and is not forgotten: it is
+    // closed first.
+    fn forget(
+        &self,
+        flow_id: &signal_flow::FlowId,
+    ) -> Result<signal_flow::FlowId, meta_signal_flow::Output> {
+        use crate::generated::operation::{Failed_Data, Operation, Outcome, Record_Data};
+        use crate::generated::overriding::{
+            EntersByOverride, HeedsOverrides, Subject, Transitioned,
+        };
+        use crate::performing::Performs;
+        use crate::store::ReadsFlowRows;
+        use crate::store::address_hold::HoldsLaunchAddress;
+        use crate::store::metaflow::SleepsMetaflows;
+        use crate::store::restart::RecordsRestarts;
+        use meta_signal_flow::{Output, Refused_Data, State, StoreFailure};
+        let nexus = self.nexus;
+        let _turn = nexus
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let seat = nexus.seat_named(Subject::Named(flow_id.clone()))?;
+        let node = match nexus.store.flow_node(&flow_id.0) {
+            Ok(Some(node)) => node,
+            Ok(None) => return Err(Output::Refused(Refused_Data::UnknownFlow(flow_id.clone()))),
+            Err(error) => {
+                return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                    error.to_string(),
+                ))));
+            }
+        };
+        let awake = matches!(nexus.store.metaflow_awake_as(&flow_id.0), Ok(Some(_)));
+        if node.flow_lifecycle.is_live()
+            || awake
+            || !matches!(nexus.store.address_hold(&flow_id.0), Ok(None))
+        {
+            return Err(Output::Refused(Refused_Data::Harnessed(flow_id.clone())));
+        }
+        if !matches!(nexus.store.restart_record(&flow_id.0), Ok(None)) {
+            return Err(Output::Refused(Refused_Data::Restarting(flow_id.clone())));
+        }
+        match nexus.perform(Operation::Record(Record_Data::Forgotten(Transitioned {
+            seat,
+            transition: State::Asleep.overridden(),
+        }))) {
+            Outcome::Recorded => Ok(flow_id.clone()),
+            Outcome::Failed(Failed_Data::UnknownFlow) => {
+                Err(Output::Refused(Refused_Data::UnknownFlow(flow_id.clone())))
+            }
+            refused => Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                format!("{refused:?}"),
+            )))),
+        }
+    }
+
+    // The switch is set and every live seat's state recorded as it stands,
+    // the cause Overridden.
+    fn hold(&self) -> Result<(), meta_signal_flow::Output> {
+        use crate::generated::memory::Moment;
+        use crate::generated::operation::{Operation, Outcome, Record_Data};
+        use crate::generated::overriding::{HeedsOverrides, Holding};
+        use crate::performing::Performs;
+        use crate::reminding::CountsUnixSeconds;
+        use meta_signal_flow::{Output, Refused_Data, StoreFailure};
+        let nexus = self.nexus;
+        let _turn = nexus
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let moment = Moment(std::time::SystemTime::now().seconds_since_epoch());
+        match nexus.perform(Operation::Record(Record_Data::Switched(Holding::Held(
+            moment,
+        )))) {
+            Outcome::Recorded => {}
+            refused => {
+                return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                    format!("{refused:?}"),
+                ))));
+            }
+        }
+        eprintln!("flow-nexus: held by the owner; the Nexus takes no act of its own");
+        nexus.record_every_seat().map(|_| ())
+    }
+
+    // The switch is moved back, every live seat's state recorded, and what
+    // the Nexus owes is taken up now, as at its start: a restart, a
+    // successor, a queue, a wake.
+    fn resume(&self) -> Result<(), meta_signal_flow::Output> {
+        use crate::generated::operation::{Operation, Outcome, Record_Data};
+        use crate::generated::overriding::{HeedsOverrides, Holding};
+        use crate::performing::Performs;
+        use crate::waking::SleepsAndWakesSeats;
+        use meta_signal_flow::{Output, Refused_Data, StoreFailure};
+        let nexus = self.nexus;
+        {
+            let _turn = nexus
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match nexus.perform(Operation::Record(Record_Data::Switched(Holding::Acting))) {
+                Outcome::Recorded => {}
+                refused => {
+                    return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                        format!("{refused:?}"),
+                    ))));
+                }
+            }
+            eprintln!("flow-nexus: resumed by the owner; the Nexus acts on its own again");
+            nexus.record_every_seat()?;
+        }
+        nexus.recover_wakes();
+        Ok(())
     }
 }
 
@@ -2120,7 +2688,9 @@ impl ConfiguresFromMeta for RunningNexus {
                 )
             }
             Err(error) => {
-                meta_signal_flow::Output::Refused(meta_signal_flow::StoreFailure(error.to_string()))
+                meta_signal_flow::Output::Refused(meta_signal_flow::Refused_Data::StoreRefused(
+                    meta_signal_flow::StoreFailure(error.to_string()),
+                ))
             }
         }
     }
@@ -2429,9 +2999,11 @@ impl AnswersOnMeta for Output {
             Output::RestartRefused(refusal) => meta_signal_flow::Output::RestartRefused(refusal),
             Output::Refused(refusal) => meta_signal_flow::Output::OrdinaryRefused(refusal),
             // It answers nothing else.
-            other => meta_signal_flow::Output::Refused(meta_signal_flow::StoreFailure(format!(
-                "unexpected answer {other:?}"
-            ))),
+            other => {
+                meta_signal_flow::Output::Refused(meta_signal_flow::Refused_Data::StoreRefused(
+                    meta_signal_flow::StoreFailure(format!("unexpected answer {other:?}")),
+                ))
+            }
         }
     }
 }
@@ -2539,7 +3111,17 @@ impl DispatchesSerially for RunningNexus {
         // A Restart and every override run off the gate, each taking it for
         // its own steps: a Renew, a Deliver and a Resume launch or deliver
         // as a wake does.
-        if let meta_signal_flow::Input::Restart(_) | meta_signal_flow::Input::Override(_) = &query {
+        if let meta_signal_flow::Input::Restart(_)
+        | meta_signal_flow::Input::SetState(_)
+        | meta_signal_flow::Input::CrystallizeNow(_)
+        | meta_signal_flow::Input::Renew(_)
+        | meta_signal_flow::Input::Close(_)
+        | meta_signal_flow::Input::Deliver(_)
+        | meta_signal_flow::Input::Unlock(_)
+        | meta_signal_flow::Input::Forget(_)
+        | meta_signal_flow::Input::Hold
+        | meta_signal_flow::Input::Resume = &query
+        {
             let response = self.dispatch_meta_from(query, resolver);
             {
                 let _turn = self
@@ -4270,14 +4852,18 @@ mod tests {
         }
 
         fn send_to(&self, flow_id: &str, text: &str) -> Sent {
-            match self.nexus.dispatch_meta(meta_signal_flow::Input::Deliver(
-                meta_signal_flow::DeliveryRequest {
-                    delivery_id: meta_signal_flow::DeliveryId(format!("delivery-{flow_id}-{text}")),
-                    flow_id: flow_ethos::FlowId(flow_id.into()),
-                    message: middle_abrupt(text),
-                },
-            )) {
-                meta_signal_flow::Output::Delivered(delivery) => {
+            match self
+                .nexus
+                .dispatch_meta(meta_signal_flow::Input::TypeMessage(
+                    meta_signal_flow::DeliveryRequest {
+                        delivery_id: meta_signal_flow::DeliveryId(format!(
+                            "delivery-{flow_id}-{text}"
+                        )),
+                        flow_id: flow_ethos::FlowId(flow_id.into()),
+                        message: middle_abrupt(text),
+                    },
+                )) {
+                meta_signal_flow::Output::MessageTyped(delivery) => {
                     assert_eq!(
                         delivery.interrupt_witness,
                         meta_signal_flow::InterruptWitness::NotRequested
@@ -5948,7 +6534,6 @@ mod tests {
     fn close_keeps_the_row_and_takes_the_flow_out_of_receiving() {
         use crate::store::ReadsFlowRows;
         use crate::store::metaflow::SeedsMetaflow;
-        use meta_signal_flow::panel;
         let fixture = NexusFixture::new();
         fixture.accept_pane_operations(
             vec![fixture.current_agent()],
@@ -5969,22 +6554,20 @@ mod tests {
         let close = |flow_id: &str| {
             fixture
                 .nexus
-                .dispatch_meta(meta_signal_flow::Input::Override(panel::Input::Close(
-                    flow_ethos::FlowId(flow_id.into()),
+                .dispatch_meta(meta_signal_flow::Input::Close(flow_ethos::FlowId(
+                    flow_id.into(),
                 )))
         };
 
         assert_eq!(
             close("unknown"),
-            meta_signal_flow::Output::Overridden(panel::Output::Refused(
-                panel::Refused_Data::UnknownFlow(flow_ethos::FlowId("unknown".into()))
+            meta_signal_flow::Output::Refused(meta_signal_flow::Refused_Data::UnknownFlow(
+                flow_ethos::FlowId("unknown".into())
             ))
         );
         assert_eq!(
             close("908786"),
-            meta_signal_flow::Output::Overridden(panel::Output::Closed(flow_ethos::FlowId(
-                "908786".into()
-            )))
+            meta_signal_flow::Output::Closed(flow_ethos::FlowId("908786".into()))
         );
         let retired = fixture
             .nexus
@@ -5999,9 +6582,7 @@ mod tests {
         // Closing it again closes nothing more and says it is closed.
         assert_eq!(
             close("908786"),
-            meta_signal_flow::Output::Overridden(panel::Output::Closed(flow_ethos::FlowId(
-                "908786".into()
-            )))
+            meta_signal_flow::Output::Closed(flow_ethos::FlowId("908786".into()))
         );
 
         // Its pane is closed, and though Herdr still shows it live, it
@@ -6294,6 +6875,28 @@ mod tests {
             close_status: i32,
             agents: Vec<serde_json::Value>,
         ) -> PathBuf {
+            self.herdr_for_replacement_answering(close_status, agents, "")
+        }
+
+        /// As `herdr_for_replacement_showing`, Herdr also taking the keys
+        /// pressed into a pane and showing at once that its agent left
+        /// Working, so an interrupt reaches the pane it is pressed into.
+        fn herdr_for_replacement_taking_keys(&self, agents: Vec<serde_json::Value>) -> PathBuf {
+            self.herdr_for_replacement_answering(
+                0,
+                agents,
+                "  *\" pane send-keys \"*|*\" agent wait \"*) printf '%s\\n' '{\"result\":{}}' ;;\n",
+            )
+        }
+
+        /// The replacement's Herdr, answering `more` cases before refusing
+        /// what it does not know.
+        fn herdr_for_replacement_answering(
+            &self,
+            close_status: i32,
+            agents: Vec<serde_json::Value>,
+            more: &str,
+        ) -> PathBuf {
             let mut agents = agents;
             agents.push(self.successor_agent());
             let log = self.directory.path().join("herdr-calls.log");
@@ -6316,12 +6919,13 @@ mod tests {
                 "type":"session_snapshot"}
             });
             let body = format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n{}\ncase \"$*\" in\n  \"--session fixture-session agent get w1:p1\") printf '%s\\n' '{}' ;;\n  *\" api snapshot\") printf '%s\\n' '{}' ;;\n  *\" pane close \"*) exit {} ;;\n  *\" agent read \"*) printf '%s\\n' '› ' ;;\n  *) exit 64 ;;\nesac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n{}\ncase \"$*\" in\n  \"--session fixture-session agent get w1:p1\") printf '%s\\n' '{}' ;;\n  *\" api snapshot\") printf '%s\\n' '{}' ;;\n  *\" pane close \"*) exit {} ;;\n  *\" agent read \"*) printf '%s\\n' '› ' ;;\n{}  *) exit 64 ;;\nesac\n",
                 log.display(),
                 self.session_listing(),
                 agent,
                 snapshot,
-                close_status
+                close_status,
+                more
             );
             FixtureExecutable {
                 path: self.snapshot_program.clone(),

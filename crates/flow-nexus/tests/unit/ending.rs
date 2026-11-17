@@ -91,15 +91,13 @@ fn awake_seat(fixture: &NexusFixture) {
 fn close(fixture: &NexusFixture) -> meta_signal_flow::Output {
     fixture
         .nexus
-        .dispatch_meta(meta_signal_flow::Input::Override(
-            meta_signal_flow::panel::Input::Close(flow_ethos::FlowId(CLAUDE_SEAT.into())),
-        ))
+        .dispatch_meta(meta_signal_flow::Input::Close(flow_ethos::FlowId(
+            CLAUDE_SEAT.into(),
+        )))
 }
 
 fn closed_answer() -> meta_signal_flow::Output {
-    meta_signal_flow::Output::Overridden(meta_signal_flow::panel::Output::Closed(
-        flow_ethos::FlowId(CLAUDE_SEAT.into()),
-    ))
+    meta_signal_flow::Output::Closed(flow_ethos::FlowId(CLAUDE_SEAT.into()))
 }
 
 /// A closed flow's pane, still there running its own session, is closed
@@ -282,7 +280,7 @@ fn a_start_after_no_clear_of_its_own_session_rebinds_nothing() {
 /// A Close whose pane close Herdr refuses answers HerdrRefused and records
 /// nothing: the flow stays live, its metaflow Awake as it.
 #[test]
-fn a_close_herdr_refuses_answers_herdr_refused_and_records_nothing() {
+fn a_close_herdr_refuses_answers_capsule_refused_and_records_nothing() {
     let fixture = NexusFixture::new();
     awake_seat(&fixture);
     let live = lifecycle(&fixture);
@@ -290,10 +288,8 @@ fn a_close_herdr_refuses_answers_herdr_refused_and_records_nothing() {
 
     assert_eq!(
         close(&fixture),
-        meta_signal_flow::Output::Overridden(meta_signal_flow::panel::Output::Refused(
-            meta_signal_flow::panel::Refused_Data::HerdrRefused(flow_ethos::FlowId(
-                CLAUDE_SEAT.into()
-            ))
+        meta_signal_flow::Output::Refused(meta_signal_flow::Refused_Data::CapsuleRefused(
+            flow_ethos::FlowId(CLAUDE_SEAT.into())
         ))
     );
     assert_eq!(lifecycle(&fixture), live);

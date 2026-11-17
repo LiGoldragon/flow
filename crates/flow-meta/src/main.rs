@@ -318,27 +318,28 @@ mod tests {
 
     #[test]
     fn renew_and_restart_are_the_meta_surface_s_own() {
-        // The meta surface renews an Address through the override panel and
-        // restarts a flow, a protected Address's included.
+        // The meta surface renews an Address, the override panel's input at
+        // its root, and restarts a flow, a protected Address's included.
         let client = FlowMetaClient;
         assert_eq!(
             client
-                .parse_query(["Override.Renew.{ Mind flow Sol }".to_owned()].into_iter())
+                .parse_query(["Renew.{ Mind flow Sol }".to_owned()].into_iter())
                 .expect("Renew parses"),
-            Input::Override(meta_signal_flow::panel::Input::Renew(
-                signal_flow::Address {
-                    aspect: signal_flow::Aspect::Mind,
-                    topic: flow_ethos::Topic("flow".into()),
-                    model: signal_flow::Model::Sol,
-                }
-            ))
+            Input::Renew(signal_flow::Address {
+                aspect: signal_flow::Aspect::Mind,
+                topic: flow_ethos::Topic("flow".into()),
+                model: signal_flow::Model::Sol,
+            })
         );
-        assert!(
-            client
-                .parse_query(["Refresh.{ Mind flow Sol }".to_owned()].into_iter())
-                .is_err(),
-            "Refresh is no meta input: Renew takes its place"
-        );
+        for gone in [
+            "Refresh.{ Mind flow Sol }",
+            "Override.Renew.{ Mind flow Sol }",
+        ] {
+            assert!(
+                client.parse_query([gone.to_owned()].into_iter()).is_err(),
+                "{gone} is no meta input: Renew stands at the root"
+            );
+        }
         assert_eq!(
             client
                 .parse_query(["Restart.c1a0de".to_owned()].into_iter())
@@ -348,16 +349,16 @@ mod tests {
     }
 
     #[test]
-    fn deliver_is_one_inline_datom_carrying_a_typed_message() {
+    fn type_message_is_one_inline_datom_carrying_a_typed_message() {
         let client = FlowMetaClient;
-        let Input::Deliver(request) = client
+        let Input::TypeMessage(request) = client
             .parse_query(
-                ["Deliver.{ m-7f3a2c:7d41e0:0 7d41e0 Soft.{ Notification Text.«Stage 1 is deployed; run the tier tests.» } }".into()]
+                ["TypeMessage.{ m-7f3a2c:7d41e0:0 7d41e0 Soft.{ Notification Text.«Stage 1 is deployed; run the tier tests.» } }".into()]
                     .into_iter(),
             )
-            .expect("deliver datom parses")
+            .expect("TypeMessage datom parses")
         else {
-            panic!("Deliver datom must stay a Deliver query")
+            panic!("TypeMessage datom must stay a TypeMessage query")
         };
         assert_eq!(
             request.delivery_id,

@@ -28,20 +28,40 @@
 ; Overridden, the moment now: for a seat in the state the override puts it
 ; in, for the seat a subject names in the state it is in now (nothing when
 ; it names no seat), and for every live seat as it stands.
+;
+; A Renew answers its fresh flow's Started: the old flow's running turn is
+; interrupted, then its harness closed, so no turn of it runs on against
+; tool calls refused FlowEnded. InterruptsRunningTurns is the Nexus's: the
+; seat's running turn interrupted, whatever its harness; a Claude seat
+; seen Working or Blocked in its pane is pressed its harness's interrupt
+; keys under its pane lease, a Codex seat's thread is asked of its
+; app-server. InterruptsCodexThreads is the app-server adapter's: the
+; thread's newest turn read and, while it is in progress, interrupted
+; (turn/interrupt). A TurnInterruption says what became of the turn:
+; none ran, its harness was told to stop it, or its harness could not be
+; told, and why.
 
 Library
 [ :flow_nexus:store:[ FlowStore StoreError ]                ; imports
   :sema_engine:[ TableDescriptor ]
   :flow_nexus:[ RunningNexus ]
   :flow_nexus:generated:memory:[ Flow Transition Moment StoredHold ]
-  :meta_signal_flow:panel:[ State PanelOutput.Output ]
+  :meta_signal_flow:generated:signal:[ State MetaOutput.Output ]
+  :flow_nexus:codex:[ CodexAdapter CodexAdapterUnavailable ]
   :signal_flow:[ FlowId Address ] ]
 [ Subject.[ Named.FlowId                                    ; types: what an override names
             Permaflow.Address ]
   Seat.{ FlowId Address }                                   ;   a flow at its Address
   Transitioned.{ Seat Transition }                          ;   one transition of one seat
   Holding.[ Held.Moment                                     ;   the panel's switch
-            Acting ] ]
+            Acting ]
+  CodexThread.String                                        ;   a Codex thread, by its id
+  TurnInterruption.[ Rested                                 ;   what became of a seat's running turn: none ran
+                     Interrupted                            ;     its harness was told to stop it
+                     PaneUnreadable                         ;     Herdr could not read the Claude seat's pane
+                     KeysRefused                            ;     Herdr refused the interrupt keys
+                     AppServerRefused.String                ;     the Codex app-server was not reached, or refused, and why
+                     StoreRefused.String ] ]                ;     Memory could not name the seat's harness, and why
 [ RemembersOverrides.[ record_transition.{ [ Transitioned ] [ Result<Boolean StoreError> ] } ; traits
                        transitions.[ Result<Vector<Flow> StoreError> ]
                        holding.[ Result<Holding StoreError> ]
@@ -51,14 +71,18 @@ Library
                        seats.[ Result<Vector<Seat> StoreError> ] ]
   HeedsOverrides.[ held.[ Boolean ]
                    state_now.{ [ Seat ] [ State ] }
-                   seat_named.{ [ Subject ] [ Result<Seat PanelOutput> ] }
-                   record_override.{ [ Transitioned ] [ Result<Boolean PanelOutput> ] }
-                   record_named.{ [ Subject ] [ Result<Boolean PanelOutput> ] }
-                   record_every_seat.[ Result<Boolean PanelOutput> ] ]
+                   seat_named.{ [ Subject ] [ Result<Seat MetaOutput> ] }
+                   record_override.{ [ Transitioned ] [ Result<Boolean MetaOutput> ] }
+                   record_named.{ [ Subject ] [ Result<Boolean MetaOutput> ] }
+                   record_every_seat.[ Result<Boolean MetaOutput> ] ]
   DescribesOverrideTable.[ descriptor:[ TableDescriptor<Self> ] ]
-  EntersByOverride.[ overridden.[ Transition ] ] ]
+  EntersByOverride.[ overridden.[ Transition ] ]
+  InterruptsRunningTurns.[ interrupt_running_turn.{ [ Seat ] [ TurnInterruption ] } ]
+  InterruptsCodexThreads.[ interrupt_thread.{ [ CodexThread ] [ Result<TurnInterruption CodexAdapterUnavailable> ] } ] ]
 [ FlowStore.[ RemembersOverrides ]                          ; associations
-  RunningNexus.[ HeedsOverrides ]
+  RunningNexus.[ HeedsOverrides
+                 InterruptsRunningTurns ]
+  CodexAdapter.[ InterruptsCodexThreads ]
   Flow.[ DescribesOverrideTable ]
   StoredHold.[ DescribesOverrideTable ]
   State.[ EntersByOverride ] ]

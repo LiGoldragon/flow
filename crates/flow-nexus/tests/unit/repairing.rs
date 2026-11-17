@@ -182,7 +182,7 @@ fn inspect_answers_the_metaflow_whole() {
     let private = stored(&fixture);
     assert_eq!(inspected.visible_metaflow.address, private.address);
     assert_eq!(
-        inspected.visible_metaflow.state,
+        inspected.visible_metaflow.metaflow_state,
         State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
     );
     assert_eq!(inspected.visible_metaflow.flow_id_vector, private.past.0);
@@ -215,7 +215,7 @@ fn inspect_answers_the_metaflow_whole() {
     let MetaResponse::Inspected(launching) = inspect(&fixture, seat_address()) else {
         panic!("the metaflow is inspected")
     };
-    let State::Awake(launched) = &launching.visible_metaflow.state else {
+    let State::Awake(launched) = &launching.visible_metaflow.metaflow_state else {
         panic!("the launch holds the Address")
     };
     assert_eq!(

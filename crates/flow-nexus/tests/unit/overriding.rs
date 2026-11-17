@@ -1,12 +1,13 @@
-//! The override panel on the meta socket: each override does what it names
+//! The override panel at the root of the meta Signal: each override does what it names
 //! and records its transition, the cause Overridden; Hold stands the
 //! Nexus's clocks, deliveries and launches while every query still answers,
 //! and Resume takes up what is owed.
 
 use super::refreshing::refreshable_with_successor;
 use super::waking::{
-    CLAUDE_SEAT, ReadsFreshWorld, WakesFreshClaude, address, append_main_rows, claude_agent,
-    claude_seat, end_turn, ended_claude, maintain, metaflow, stored,
+    CLAUDE_SEAT, ReadsFreshWorld, WORKING_CODEX_THREAD, WakesFreshClaude, address,
+    append_main_rows, claude_agent, claude_seat, codex_seat_in_fresh_world, end_turn, ended_claude,
+    maintain, metaflow, stored,
 };
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
 use crate::Dispatches;
@@ -19,18 +20,12 @@ use crate::store::reminder::RecordsReminders;
 use crate::store::{ManagesMetaflowState, ReadsFlowRows};
 use crate::waking::{AtStop, SleepsAndWakesSeats};
 use flow_ethos::State;
-use meta_signal_flow::panel;
+use meta_signal_flow as meta;
 use signal_flow::{FlowLifecycle, Message, Metaflow, Model, PrivateSendResponse, Request, SentBy};
 
-/// One override, answered by the panel.
-fn overridden(fixture: &NexusFixture, input: panel::Input) -> panel::Output {
-    match fixture
-        .nexus
-        .dispatch_meta(meta_signal_flow::Input::Override(input))
-    {
-        meta_signal_flow::Output::Overridden(output) => output,
-        other => panic!("an override is answered by the panel: {other:?}"),
-    }
+/// One override, an input at the root of the meta Signal, and its answer.
+fn overridden(fixture: &NexusFixture, input: meta::Input) -> meta::Output {
+    fixture.nexus.dispatch_meta(input)
 }
 
 fn seat_id() -> flow_ethos::FlowId {
@@ -52,7 +47,7 @@ fn transitions(fixture: &NexusFixture, flow_id: &str) -> Vec<Transition> {
 
 /// The last transition held for `flow_id` is the override's, into `state`,
 /// at the seat's Sol Address.
-fn overridden_into(fixture: &NexusFixture, flow_id: &str, state: panel::State) {
+fn overridden_into(fixture: &NexusFixture, flow_id: &str, state: meta::State) {
     let held = transitions(fixture, flow_id);
     let last = held.last().expect("the override's transition is recorded");
     assert_eq!(last.state, state, "{held:?}");
@@ -109,28 +104,28 @@ fn set_state_corrects_the_state_held_and_records_its_transition() {
     assert_eq!(
         overridden(
             &fixture,
-            panel::Input::SetState(panel::SetState_Data {
+            meta::Input::SetState(meta::SetState_Data {
                 flow_id: seat_id(),
-                state: panel::State::Crystallizing,
+                state: meta::State::Crystallizing,
             })
         ),
-        panel::Output::StateSet(panel::StateSet_Data {
+        meta::Output::StateSet(meta::StateSet_Data {
             flow_id: seat_id(),
-            state: panel::State::Crystallizing,
+            state: meta::State::Crystallizing,
         })
     );
-    overridden_into(&fixture, CLAUDE_SEAT, panel::State::Crystallizing);
+    overridden_into(&fixture, CLAUDE_SEAT, meta::State::Crystallizing);
 
     let unknown = flow_ethos::FlowId("0000ff".into());
     assert_eq!(
         overridden(
             &fixture,
-            panel::Input::SetState(panel::SetState_Data {
+            meta::Input::SetState(meta::SetState_Data {
                 flow_id: unknown.clone(),
-                state: panel::State::Resting,
+                state: meta::State::Resting,
             })
         ),
-        panel::Output::Refused(panel::Refused_Data::UnknownFlow(unknown))
+        meta::Output::Refused(meta::Refused_Data::UnknownFlow(unknown))
     );
     assert_eq!(transitions(&fixture, CLAUDE_SEAT).len(), 1);
 }
@@ -140,16 +135,13 @@ fn crystallize_now_asks_the_flow_for_its_handover_and_records_crystallizing() {
     let fixture = NexusFixture::new();
     resting_seat(&fixture);
     // Held, so the ask stays queued where it can be read.
-    assert_eq!(
-        overridden(&fixture, panel::Input::Hold),
-        panel::Output::Held
-    );
+    assert_eq!(overridden(&fixture, meta::Input::Hold), meta::Output::Held);
 
     assert_eq!(
-        overridden(&fixture, panel::Input::CrystallizeNow(seat_id())),
-        panel::Output::Asked(seat_id())
+        overridden(&fixture, meta::Input::CrystallizeNow(seat_id())),
+        meta::Output::Asked(seat_id())
     );
-    overridden_into(&fixture, CLAUDE_SEAT, panel::State::Crystallizing);
+    overridden_into(&fixture, CLAUDE_SEAT, meta::State::Crystallizing);
     let queued = stored(&fixture, Model::Sol).queue.0;
     assert!(
         queued.iter().any(|entry| entry.sent_by == SentBy::Flow
@@ -169,8 +161,8 @@ fn crystallize_now_asks_the_flow_for_its_handover_and_records_crystallizing() {
         .sleep_metaflow(&address(Model::Sol), CLAUDE_SEAT)
         .unwrap();
     assert_eq!(
-        overridden(&fixture, panel::Input::CrystallizeNow(seat_id())),
-        panel::Output::Refused(panel::Refused_Data::Unharnessed(seat_id()))
+        overridden(&fixture, meta::Input::CrystallizeNow(seat_id())),
+        meta::Output::Refused(meta::Refused_Data::Unharnessed(seat_id()))
     );
 }
 
@@ -182,8 +174,8 @@ fn renew_starts_a_fresh_flow_and_closes_the_old_one() {
     );
 
     assert_eq!(
-        overridden(&fixture, panel::Input::Renew(address(Model::Sol))),
-        panel::Output::Renewed(flow_ethos::FlowId("908786".into()))
+        overridden(&fixture, meta::Input::Renew(address(Model::Sol))),
+        meta::Output::Renewed(flow_ethos::FlowId("908786".into()))
     );
     super::reaping::finish_reaps(&fixture);
     let renewed = stored(&fixture, Model::Sol);
@@ -202,11 +194,112 @@ fn renew_starts_a_fresh_flow_and_closes_the_old_one() {
             .flow_lifecycle,
         FlowLifecycle::Stopped
     );
-    overridden_into(&fixture, CLAUDE_SEAT, panel::State::Asleep);
+    overridden_into(&fixture, CLAUDE_SEAT, meta::State::Asleep);
+    // The old flow rested: no key went into its pane, which is closed.
+    let calls = std::fs::read_to_string(fixture.directory.path().join("herdr-calls.log"))
+        .unwrap_or_default();
+    assert!(!calls.contains("send-keys"), "{calls}");
+    assert!(calls.contains("pane close w1:p3"), "{calls}");
 
     assert_eq!(
-        overridden(&fixture, panel::Input::Renew(address(Model::Haiku))),
-        panel::Output::Refused(panel::Refused_Data::UnknownAddress(address(Model::Haiku)))
+        overridden(&fixture, meta::Input::Renew(address(Model::Haiku))),
+        meta::Output::Refused(meta::Refused_Data::UnknownAddress(address(Model::Haiku)))
+    );
+}
+
+/// Renew answers its fresh flow's Started: the old Claude flow, seen
+/// Working, is pressed its harness's interrupt keys, and then its pane is
+/// closed, so no turn of it runs on against tool calls refused FlowEnded.
+#[test]
+fn renew_interrupts_a_working_claude_flow_and_then_closes_its_pane() {
+    let (fixture, _) = refreshable_with_successor(
+        meta_signal_flow::Continuity::OnDemand,
+        flow_ethos::Delivery::Queue,
+    );
+    let mut working = claude_agent(&fixture);
+    working["agent_status"] = serde_json::Value::String("working".into());
+    let calls = fixture.herdr_for_replacement_taking_keys(vec![working]);
+
+    assert_eq!(
+        overridden(&fixture, meta::Input::Renew(address(Model::Sol))),
+        meta::Output::Renewed(flow_ethos::FlowId("908786".into()))
+    );
+    let calls = std::fs::read_to_string(calls).unwrap_or_default();
+    let lines = calls.lines().collect::<Vec<_>>();
+    let pressed = lines
+        .iter()
+        .position(|call| call.contains("pane send-keys w1:p3"))
+        .unwrap_or_else(|| panic!("the old flow's turn is interrupted: {calls}"));
+    let closed = lines
+        .iter()
+        .position(|call| call.contains("pane close w1:p3"))
+        .unwrap_or_else(|| panic!("the old flow's pane is closed: {calls}"));
+    assert!(pressed < closed, "interrupted, then closed: {calls}");
+    assert!(
+        !lines
+            .iter()
+            .any(|call| call.contains("send-keys") && call.contains("w1:p1")),
+        "the fresh flow is pressed nothing: {calls}"
+    );
+    super::reaping::finish_reaps(&fixture);
+    assert_eq!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(flow_ethos::FlowId("908786".into()))
+    );
+    overridden_into(&fixture, CLAUDE_SEAT, meta::State::Asleep);
+}
+
+/// Renew answers its fresh flow's Started: the old Codex flow's running
+/// turn, which goes on in its app-server whatever its pane, is interrupted
+/// there (turn/interrupt), and then its pane is closed.
+#[test]
+fn renew_interrupts_a_codex_flow_s_running_turn_in_its_app_server_and_closes_its_pane() {
+    use super::send_tool::{RunsFakeAppServer, accepting_codex_endpoint, serve_running_turn};
+    use crate::store::RegistersFlowIdentity;
+    let mut fixture = NexusFixture::new();
+    let world = codex_seat_in_fresh_world(&mut fixture);
+    let seat = fixture
+        .nexus
+        .store
+        .flow_node("abc123")
+        .unwrap()
+        .expect("the Codex seat is held");
+    assert!(matches!(
+        fixture.nexus.store.register_flow_in_role(
+            seat,
+            signal_flow::CallerIdentity {
+                flow_id: flow_ethos::FlowId("abc123".into()),
+                aspect: flow_ethos::Aspect::Mind,
+                model_name: flow_ethos::ModelName("gpt-sol".into()),
+            },
+        ),
+        Ok(crate::store::FlowRegistration::Registered(_))
+    ));
+    let fake = accepting_codex_endpoint(&mut fixture, "gpt-sol", WORKING_CODEX_THREAD);
+    serve_running_turn(&fake, 1..=4, "turn-running");
+
+    let renewed = overridden(&fixture, meta::Input::Renew(address(Model::Sol)));
+    let meta::Output::Renewed(successor) = &renewed else {
+        panic!("{renewed:?}; Herdr calls: {}", world.calls());
+    };
+    assert_ne!(successor.0, "abc123");
+    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+    let interrupts = (1..=fake.runs())
+        .flat_map(|run| fake.written_on(run, |_| true))
+        .filter(|message| message["method"] == "turn/interrupt")
+        .collect::<Vec<_>>();
+    assert_eq!(interrupts.len(), 1, "{interrupts:?}");
+    assert_eq!(interrupts[0]["params"]["threadId"], WORKING_CODEX_THREAD);
+    assert_eq!(interrupts[0]["params"]["turnId"], "turn-running");
+    assert!(
+        world.calls().contains("pane close w1:p3"),
+        "the old flow's pane is closed: {}",
+        world.calls()
+    );
+    assert!(
+        !world.calls().contains("send-keys"),
+        "a Codex turn is interrupted in its app-server, not its pane: {}",
+        world.calls()
     );
 }
 
@@ -216,8 +309,8 @@ fn close_closes_the_flow_s_harness_and_records_it_asleep() {
     resting_seat(&fixture);
 
     assert_eq!(
-        overridden(&fixture, panel::Input::Close(seat_id())),
-        panel::Output::Closed(seat_id())
+        overridden(&fixture, meta::Input::Close(seat_id())),
+        meta::Output::Closed(seat_id())
     );
     assert_eq!(
         fixture
@@ -229,7 +322,7 @@ fn close_closes_the_flow_s_harness_and_records_it_asleep() {
             .flow_lifecycle,
         FlowLifecycle::Retired
     );
-    overridden_into(&fixture, CLAUDE_SEAT, panel::State::Asleep);
+    overridden_into(&fixture, CLAUDE_SEAT, meta::State::Asleep);
 }
 
 #[test]
@@ -247,8 +340,8 @@ fn deliver_hands_the_permaflow_its_queue_now_and_records_its_transition() {
     fixture.nexus.store.seed_metaflow(idle);
 
     assert_eq!(
-        overridden(&fixture, panel::Input::Deliver(address(Model::Sol))),
-        panel::Output::Delivered(address(Model::Sol))
+        overridden(&fixture, meta::Input::Deliver(address(Model::Sol))),
+        meta::Output::Delivered(address(Model::Sol))
     );
     let typed = fixture
         .typed()
@@ -261,8 +354,8 @@ fn deliver_hands_the_permaflow_its_queue_now_and_records_its_transition() {
     );
 
     assert_eq!(
-        overridden(&fixture, panel::Input::Deliver(address(Model::Haiku))),
-        panel::Output::Refused(panel::Refused_Data::UnknownAddress(address(Model::Haiku)))
+        overridden(&fixture, meta::Input::Deliver(address(Model::Haiku))),
+        meta::Output::Refused(meta::Refused_Data::UnknownAddress(address(Model::Haiku)))
     );
 }
 
@@ -295,8 +388,8 @@ fn unlock_releases_the_permaflow_s_lock_and_records_its_transition() {
     ));
 
     assert_eq!(
-        overridden(&fixture, panel::Input::Unlock(address(Model::Sol))),
-        panel::Output::Unlocked(address(Model::Sol))
+        overridden(&fixture, meta::Input::Unlock(address(Model::Sol))),
+        meta::Output::Unlocked(address(Model::Sol))
     );
     assert!(
         fixture
@@ -310,7 +403,7 @@ fn unlock_releases_the_permaflow_s_lock_and_records_its_transition() {
     let held = transitions(&fixture, CLAUDE_SEAT);
     assert_eq!(held.len(), 1);
     assert_eq!(held[0].cause, Cause::Overridden);
-    assert_eq!(held[0].state, panel::State::Resting, "the seat rests");
+    assert_eq!(held[0].state, meta::State::Resting, "the seat rests");
 }
 
 #[test]
@@ -319,13 +412,13 @@ fn forget_removes_the_record_of_a_flow_with_no_harness_and_records_it() {
     resting_seat(&fixture);
 
     assert_eq!(
-        overridden(&fixture, panel::Input::Forget(seat_id())),
-        panel::Output::Refused(panel::Refused_Data::Harnessed(seat_id())),
+        overridden(&fixture, meta::Input::Forget(seat_id())),
+        meta::Output::Refused(meta::Refused_Data::Harnessed(seat_id())),
         "a flow with a harness is closed first"
     );
     assert_eq!(
-        overridden(&fixture, panel::Input::Close(seat_id())),
-        panel::Output::Closed(seat_id())
+        overridden(&fixture, meta::Input::Close(seat_id())),
+        meta::Output::Closed(seat_id())
     );
     fixture
         .nexus
@@ -334,8 +427,8 @@ fn forget_removes_the_record_of_a_flow_with_no_harness_and_records_it() {
         .ok();
 
     assert_eq!(
-        overridden(&fixture, panel::Input::Forget(seat_id())),
-        panel::Output::Forgotten(seat_id())
+        overridden(&fixture, meta::Input::Forget(seat_id())),
+        meta::Output::Forgotten(seat_id())
     );
     assert!(
         fixture
@@ -351,12 +444,12 @@ fn forget_removes_the_record_of_a_flow_with_no_harness_and_records_it() {
     );
     let held = transitions(&fixture, CLAUDE_SEAT);
     assert_eq!(held.len(), 2, "Close's transition, then Forget's: {held:?}");
-    assert_eq!(held[1].state, panel::State::Asleep);
+    assert_eq!(held[1].state, meta::State::Asleep);
     assert_eq!(held[1].cause, Cause::Overridden);
 
     assert_eq!(
-        overridden(&fixture, panel::Input::Forget(seat_id())),
-        panel::Output::Refused(panel::Refused_Data::UnknownFlow(seat_id()))
+        overridden(&fixture, meta::Input::Forget(seat_id())),
+        meta::Output::Refused(meta::Refused_Data::UnknownFlow(seat_id()))
     );
 }
 
@@ -369,10 +462,7 @@ fn hold_stops_deliveries_while_queries_answer_and_resume_hands_them_over() {
     let fixture = NexusFixture::new();
     resting_seat(&fixture);
 
-    assert_eq!(
-        overridden(&fixture, panel::Input::Hold),
-        panel::Output::Held
-    );
+    assert_eq!(overridden(&fixture, meta::Input::Hold), meta::Output::Held);
     assert!(matches!(
         fixture.nexus.store.holding().unwrap(),
         Holding::Held(_)
@@ -403,8 +493,8 @@ fn hold_stops_deliveries_while_queries_answer_and_resume_hands_them_over() {
     ));
 
     assert_eq!(
-        overridden(&fixture, panel::Input::Resume),
-        panel::Output::Resumed
+        overridden(&fixture, meta::Input::Resume),
+        meta::Output::Resumed
     );
     assert_eq!(fixture.nexus.store.holding().unwrap(), Holding::Acting);
     let held = transitions(&fixture, CLAUDE_SEAT);
@@ -447,10 +537,7 @@ fn hold_stops_launches_and_resume_starts_what_is_owed() {
         .expect("the Primary's model configured");
     assert!(fixture.nexus.wake_is_due(&stored(&fixture, Model::Astra)));
 
-    assert_eq!(
-        overridden(&fixture, panel::Input::Hold),
-        panel::Output::Held
-    );
+    assert_eq!(overridden(&fixture, meta::Input::Hold), meta::Output::Held);
     fixture.nexus.wake_due(at.clone());
     fixture.nexus.recover_wakes();
     assert_eq!(stored(&fixture, Model::Astra).state, State::Asleep);
@@ -462,8 +549,8 @@ fn hold_stops_launches_and_resume_starts_what_is_owed() {
     );
 
     assert_eq!(
-        overridden(&fixture, panel::Input::Resume),
-        panel::Output::Resumed
+        overridden(&fixture, meta::Input::Resume),
+        meta::Output::Resumed
     );
     assert!(
         matches!(stored(&fixture, Model::Astra).state, State::Awake(_)),
@@ -522,10 +609,7 @@ fn hold_stands_the_clocks_and_resume_lets_them_run() {
     reminder.due_option = Some(crate::generated::memory::Due(0));
     fixture.nexus.store.hold_reminder(reminder).unwrap();
 
-    assert_eq!(
-        overridden(&fixture, panel::Input::Hold),
-        panel::Output::Held
-    );
+    assert_eq!(overridden(&fixture, meta::Input::Hold), meta::Output::Held);
     fixture.nexus.send_due_reminders();
     assert!(
         fixture
@@ -541,8 +625,8 @@ fn hold_stands_the_clocks_and_resume_lets_them_run() {
     );
 
     assert_eq!(
-        overridden(&fixture, panel::Input::Resume),
-        panel::Output::Resumed
+        overridden(&fixture, meta::Input::Resume),
+        meta::Output::Resumed
     );
     fixture.nexus.send_due_reminders();
     assert_eq!(

@@ -1000,7 +1000,7 @@ pub enum Cause {
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Transition {
-    pub state: meta_signal_flow::panel::State,
+    pub state: meta_signal_flow::generated::signal::State,
     pub cause: Cause,
     pub moment: Moment,
 }

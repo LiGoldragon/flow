@@ -934,7 +934,7 @@ rec {
       };
       "flow" = rec {
         crateName = "flow";
-        version = "0.57.0";
+        version = "0.58.0";
         edition = "2024";
         crateBin = [
           {
@@ -1012,7 +1012,7 @@ rec {
       };
       "flow-defaults" = rec {
         crateName = "flow-defaults";
-        version = "0.57.0";
+        version = "0.58.0";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/flow-defaults; };
         libName = "flow_defaults";
@@ -1079,7 +1079,7 @@ rec {
       };
       "flow-meta" = rec {
         crateName = "flow-meta";
-        version = "0.57.0";
+        version = "0.58.0";
         edition = "2024";
         crateBin = [
           {
@@ -1107,7 +1107,7 @@ rec {
           }
           {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow 86.0.0";
+            packageId = "meta-signal-flow 87.0.0";
             features = [ "datom" ];
           }
           {
@@ -1154,7 +1154,7 @@ rec {
       };
       "flow-native" = rec {
         crateName = "flow-native";
-        version = "0.57.0";
+        version = "0.58.0";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/flow-native; };
         libName = "flow_native";
@@ -1168,7 +1168,7 @@ rec {
       };
       "flow-nexus" = rec {
         crateName = "flow-nexus";
-        version = "0.57.0";
+        version = "0.58.0";
         edition = "2024";
         crateBin = [
           {
@@ -1235,7 +1235,7 @@ rec {
           }
           {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow 86.0.0";
+            packageId = "meta-signal-flow 87.0.0";
             features = [ "datom" ];
           }
           {
@@ -1350,7 +1350,7 @@ rec {
       };
       "flow-place" = rec {
         crateName = "flow-place";
-        version = "0.57.0";
+        version = "0.58.0";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/flow-place; };
         libName = "flow_place";
@@ -1949,15 +1949,15 @@ rec {
         };
         resolvedDefaultFeatures = [ "datom" "default" ];
       };
-      "meta-signal-flow 86.0.0" = rec {
+      "meta-signal-flow 87.0.0" = rec {
         crateName = "meta-signal-flow";
-        version = "86.0.0";
+        version = "87.0.0";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-flow";
-          rev = "37e370c0796215566d525abe32a151b9ce3c3140";
-          sha256 = "1iyrkamklc7pm0r3gclzldj61yxfs4z7fy0rna44pyh76ff61p0s";
+          rev = "51008bc150ddae5db7d6ab2b4ceb692aa4cdf92b";
+          sha256 = "0jdwqlisqmvsj98s364dx99jj9021013sx9x0nww39qqgwigzm07";
         };
         libName = "meta_signal_flow";
         dependencies = [

@@ -231,7 +231,7 @@ impl DeliversMessages for RunningNexus {
     fn deliver(&self, request: DeliveryRequest) -> Output {
         match self.store.delivery(&request.delivery_id.0) {
             Ok(Some(delivery)) => {
-                return Output::Delivered(
+                return Output::MessageTyped(
                     crate::message_projection::ProjectsDelivery::visible_delivery(&delivery),
                 );
             }
@@ -261,7 +261,7 @@ impl DeliversMessages for RunningNexus {
     fn deliver_inner(&self, request: DeliveryRequest, lease: Option<&WakingLease<'_>>) -> Output {
         match self.store.delivery(&request.delivery_id.0) {
             Ok(Some(delivery)) => {
-                return Output::Delivered(
+                return Output::MessageTyped(
                     crate::message_projection::ProjectsDelivery::visible_delivery(&delivery),
                 );
             }
@@ -319,7 +319,7 @@ impl DeliversMessages for RunningNexus {
         }
         let _lease = self.pane_leases.hold(&target.route);
         match LeasedDelivery::new(self, &request, &target).run() {
-            Ok(delivery) => Output::Delivered(
+            Ok(delivery) => Output::MessageTyped(
                 crate::message_projection::ProjectsDelivery::visible_delivery(&delivery),
             ),
             Err(rejection) => Output::DeliveryRejected(rejection),

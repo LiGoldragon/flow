@@ -10,7 +10,7 @@ use crate::store::ReadsFlowRows;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::repair::RepairsMetaflows;
 use meta_signal_flow::{
-    Output, Rebind_Data, RebindRejected_Data, Rebinding, StoreFailure, Withdraw_Data,
+    Output, Rebind_Data, RebindRejected_Data, Rebinding, Refused_Data, StoreFailure, Withdraw_Data,
 };
 use signal_flow::{Address, HerdrRouteSelection};
 
@@ -31,7 +31,7 @@ trait RefusesStore {
 
 impl RefusesStore for RunningNexus {
     fn store_refused(error: impl ToString) -> Output {
-        Output::Refused(StoreFailure(error.to_string()))
+        Output::Refused(Refused_Data::StoreRefused(StoreFailure(error.to_string())))
     }
 }
 

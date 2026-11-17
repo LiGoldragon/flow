@@ -1341,6 +1341,67 @@ impl SubmitsQueuedCodexTurn for CodexAdapter {
     }
 }
 
+/// The thread's newest turn, read on one connection with `thread/turns/list`,
+/// and interrupted with `turn/interrupt` while it is in progress: the
+/// app-server answers the interrupt once the turn has stopped. A thread
+/// with no turn, or whose newest turn has ended, rests.
+impl crate::generated::overriding::InterruptsCodexThreads for CodexAdapter {
+    fn interrupt_thread(
+        &self,
+        thread: crate::generated::overriding::CodexThread,
+    ) -> Result<crate::generated::overriding::TurnInterruption, CodexAdapterUnavailable> {
+        use crate::codex_turns::ReadsTurnReport;
+        use crate::generated::overriding::TurnInterruption;
+        use crate::generated::turn_ledger::CodexTurnStatus;
+        let mut session = self.initialize_bound_session()?;
+        let result = (|| {
+            let listed = session.request(
+                2,
+                "thread/turns/list",
+                serde_json::json!({
+                    "threadId": thread.0,
+                    "limit": 1,
+                    "sortDirection": "desc",
+                    "itemsView": "notLoaded"
+                }),
+                self.timeout,
+            )?;
+            let newest = listed
+                .get("data")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    CodexAdapterUnavailable::Protocol("thread/turns/list has no data".into())
+                })?
+                .first()
+                .map(|turn| {
+                    turn.turn_report().ok_or_else(|| {
+                        CodexAdapterUnavailable::Protocol(
+                            "a listed turn has no id or status".into(),
+                        )
+                    })
+                })
+                .transpose()?;
+            match newest {
+                Some(report) if report.codex_turn_status == CodexTurnStatus::InProgress => {
+                    session.request(
+                        3,
+                        "turn/interrupt",
+                        serde_json::json!({
+                            "threadId": thread.0,
+                            "turnId": report.codex_turn_id.0
+                        }),
+                        self.timeout,
+                    )?;
+                    Ok(TurnInterruption::Interrupted)
+                }
+                Some(_) | None => Ok(TurnInterruption::Rested),
+            }
+        })();
+        session.stop_proxy();
+        result
+    }
+}
+
 impl ReadsCodexTurnHistory for CodexAdapter {
     fn newest_turn(&self, thread_id: &str) -> Result<Option<String>, CodexAdapterUnavailable> {
         let mut session = self.initialize_bound_session()?;

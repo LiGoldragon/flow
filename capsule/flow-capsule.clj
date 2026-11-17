@@ -1007,15 +1007,15 @@
          :pass (boolean (and (str/includes? reply "TopicRefused") (= before (pane-ids))))
          :watched "no pane opened"}))]
 
-   ["12 Override.Close: the owner closes the flow a Maintained metaflow is Awake as"
+   ["12 Close: the owner closes the flow a Maintained metaflow is Awake as"
     (fn []
       (let [flow-id (str (awake-flow secondary))
             pane (sender-pane)
-            reply (flow-meta (str "Override.Close." flow-id))
+            reply (flow-meta (str "Close." flow-id))
             gone (await-events 10 [(herdr-events [{:type "pane.closed"}])] #(not (contains? (pane-ids) pane)))
             m (watch 20 #(let [m (current secondary)] (when (not= (str (:flow m)) flow-id) m)))]
-        {:reply (str "Override.Close: " reply)
-         :pass (boolean (and (str/starts-with? reply "Overridden.Closed.") gone))
+        {:reply (str "Close: " reply)
+         :pass (boolean (and (str/starts-with? reply "Closed.") gone))
          :watched (str "after the Close, pane " pane " " (if gone "closed" "still open") "; Opus afterwards "
                        (if m (str (name (:state m)) " " (:flow m)) "unchanged after 20 s"))}))]])
 
@@ -1536,7 +1536,7 @@
         (doseq [m (items (body listed))]
           (let [[a state] (items m)]
             (when (= (head state) "Awake")
-              (swap! steps conj (str "Override.Close." (body state) " -> " (flow-meta (str "Override.Close." (body state))))))))))
+              (swap! steps conj (str "Close." (body state) " -> " (flow-meta (str "Close." (body state))))))))))
     (doseq [w (get-in (herdr-json "workspace" "list") [:result :workspaces])]
       (swap! steps conj (str "close workspace " (:workspace_id w) " (" (:label w) ") -> " (str/trim (:out (herdr "workspace" "close" (:workspace_id w)))))))
     (when @sender

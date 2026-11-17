@@ -87,7 +87,7 @@ impl FixtureComposer {
 impl NexusFixture {
     fn deliver_soft(&self, delivery_id: &str, text: &str) -> MetaResponse {
         self.nexus
-            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+            .dispatch_meta(MetaQuery::TypeMessage(DeliveryRequest {
                 delivery_id: meta_signal_flow::DeliveryId(delivery_id.into()),
                 flow_id: flow_ethos::FlowId("908786".into()),
                 message: Message::Soft(Letter {
@@ -250,7 +250,7 @@ impl NexusFixture {
 }
 
 fn delivered(_delivery_id: &str, delivery_grade: DeliveryGrade) -> MetaResponse {
-    MetaResponse::Delivered(meta_signal_flow::VisibleDelivery {
+    MetaResponse::MessageTyped(meta_signal_flow::VisibleDelivery {
         interrupt_witness: InterruptWitness::NotRequested,
         delivery_grade,
     })
@@ -294,7 +294,7 @@ fn a_letter_that_will_not_submit_is_taken_back_and_parked() {
     fixture.composer_keeps_the_letter(Composer::SubmitsOnEnter);
     assert!(matches!(
         fixture.deliver_soft("stuck-2", "first line\nsecond line"),
-        MetaResponse::Delivered(_)
+        MetaResponse::MessageTyped(_)
     ));
 }
 
@@ -375,12 +375,12 @@ fn a_letter_an_interrupt_put_back_is_taken_out_and_the_hard_abrupt_lands() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+            .dispatch_meta(MetaQuery::TypeMessage(DeliveryRequest {
                 delivery_id: meta_signal_flow::DeliveryId("hard-restored".into()),
                 flow_id: flow_ethos::FlowId("908786".into()),
                 message: hard_abrupt("stop"),
             })),
-        MetaResponse::Delivered(meta_signal_flow::VisibleDelivery {
+        MetaResponse::MessageTyped(meta_signal_flow::VisibleDelivery {
             interrupt_witness: InterruptWitness::Observed,
             delivery_grade: DeliveryGrade::Transported,
         })
@@ -416,12 +416,12 @@ fn a_letter_claudes_interrupt_put_back_is_taken_out_by_one_ctrl_c() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+            .dispatch_meta(MetaQuery::TypeMessage(DeliveryRequest {
                 delivery_id: meta_signal_flow::DeliveryId("claude-restored".into()),
                 flow_id: flow_ethos::FlowId("908786".into()),
                 message: hard_abrupt("stop"),
             })),
-        MetaResponse::Delivered(meta_signal_flow::VisibleDelivery {
+        MetaResponse::MessageTyped(meta_signal_flow::VisibleDelivery {
             interrupt_witness: InterruptWitness::Observed,
             delivery_grade: DeliveryGrade::Transported,
         })
@@ -458,12 +458,12 @@ fn a_prompt_claudes_interrupt_put_back_is_submitted_again_and_the_hard_abrupt_fo
     assert_eq!(
         fixture
             .nexus
-            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+            .dispatch_meta(MetaQuery::TypeMessage(DeliveryRequest {
                 delivery_id: meta_signal_flow::DeliveryId("claude-cancelled".into()),
                 flow_id: flow_ethos::FlowId("908786".into()),
                 message: hard_abrupt("stop"),
             })),
-        MetaResponse::Delivered(meta_signal_flow::VisibleDelivery {
+        MetaResponse::MessageTyped(meta_signal_flow::VisibleDelivery {
             interrupt_witness: InterruptWitness::Observed,
             delivery_grade: DeliveryGrade::Transported,
         })
@@ -498,7 +498,7 @@ fn a_cancelled_prompt_that_will_not_submit_is_left_in_place() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+            .dispatch_meta(MetaQuery::TypeMessage(DeliveryRequest {
                 delivery_id: meta_signal_flow::DeliveryId("claude-stuck".into()),
                 flow_id: flow_ethos::FlowId("908786".into()),
                 message: hard_abrupt("stop"),
@@ -532,7 +532,7 @@ fn a_draft_already_in_claudes_composer_refuses_a_hard_abrupt_before_any_key() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+            .dispatch_meta(MetaQuery::TypeMessage(DeliveryRequest {
                 delivery_id: meta_signal_flow::DeliveryId("claude-draft".into()),
                 flow_id: flow_ethos::FlowId("908786".into()),
                 message: hard_abrupt("stop"),
@@ -583,12 +583,12 @@ fn a_native_input_matching_a_letter_shaped_prompt_is_submitted_again_never_retra
     assert!(matches!(
         fixture
             .nexus
-            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+            .dispatch_meta(MetaQuery::TypeMessage(DeliveryRequest {
                 delivery_id: meta_signal_flow::DeliveryId("native-letter-shaped-prompt".into()),
                 flow_id: flow_ethos::FlowId("908786".into()),
                 message,
             })),
-        MetaResponse::Delivered(_)
+        MetaResponse::MessageTyped(_)
     ));
     assert_eq!(fixture.key_presses(), ["esc esc", "enter", "enter"]);
     assert_eq!(fixture.resubmitted().as_deref(), Some(text));
@@ -607,12 +607,12 @@ fn a_prompt_codexs_interrupt_put_back_is_submitted_again() {
     assert!(matches!(
         fixture
             .nexus
-            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+            .dispatch_meta(MetaQuery::TypeMessage(DeliveryRequest {
                 delivery_id: meta_signal_flow::DeliveryId("hard-cancelled".into()),
                 flow_id: flow_ethos::FlowId("908786".into()),
                 message: hard_abrupt("stop"),
             })),
-        MetaResponse::Delivered(_)
+        MetaResponse::MessageTyped(_)
     ));
     assert_eq!(fixture.key_presses(), ["esc", "enter"]);
     assert_eq!(

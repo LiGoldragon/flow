@@ -30,7 +30,7 @@ impl NexusFixture {
 
     fn deliver_to(&self, flow_id: &str, delivery_id: &str, message: Message) -> MetaResponse {
         self.nexus
-            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+            .dispatch_meta(MetaQuery::TypeMessage(DeliveryRequest {
                 delivery_id: meta_signal_flow::DeliveryId(delivery_id.into()),
                 flow_id: flow_ethos::FlowId(flow_id.into()),
                 message,
@@ -205,7 +205,7 @@ fn both_harnesses_deliver_every_priority_and_only_hard_interrupts_working() {
                     &format!("{harness_name}-{working}-{priority}"),
                     message,
                 );
-                let MetaResponse::Delivered(delivery) = response else {
+                let MetaResponse::MessageTyped(delivery) = response else {
                     panic!("{harness_name} {working} {priority}: {response:?}")
                 };
                 let expected = if working && priority == "hard" {
@@ -304,7 +304,7 @@ fn hard_abrupt_interrupts_a_working_recipient_before_typing() {
     fixture.register_with(FlowLifecycle::Active);
     assert_eq!(
         fixture.deliver("hard-1", Message::HardAbrupt(letter("stop the build"))),
-        MetaResponse::Delivered(meta_signal_flow::VisibleDelivery {
+        MetaResponse::MessageTyped(meta_signal_flow::VisibleDelivery {
             interrupt_witness: InterruptWitness::Observed,
             delivery_grade: DeliveryGrade::Transported,
         })
@@ -334,7 +334,7 @@ fn hard_abrupt_presses_the_interrupt_again_while_the_recipient_still_works() {
     );
     fixture.leave_working_after(Some(1));
     fixture.register_with(FlowLifecycle::Active);
-    let MetaResponse::Delivered(delivery) =
+    let MetaResponse::MessageTyped(delivery) =
         fixture.deliver("hard-again", Message::HardAbrupt(letter("stop now")))
     else {
         panic!("the letter is typed after the interrupt")
@@ -363,7 +363,7 @@ fn an_interrupt_that_never_shows_is_pressed_a_bounded_number_of_times() {
     );
     fixture.leave_working_after(None);
     fixture.register_with(FlowLifecycle::Active);
-    let MetaResponse::Delivered(delivery) =
+    let MetaResponse::MessageTyped(delivery) =
         fixture.deliver("hard-stuck", Message::HardAbrupt(letter("stop now")))
     else {
         panic!("the letter is still typed")
@@ -382,7 +382,7 @@ fn a_resting_recipient_is_not_interrupted() {
         PromptFixture::Prompted("w1:p3"),
     );
     fixture.register_with(FlowLifecycle::Active);
-    let MetaResponse::Delivered(delivery) =
+    let MetaResponse::MessageTyped(delivery) =
         fixture.deliver("hard-2", Message::HardAbrupt(letter("now")))
     else {
         panic!("a resting recipient takes the text")
@@ -476,7 +476,7 @@ fn a_repeated_delivery_answers_its_outcome_and_types_nothing_more() {
     fixture.register_with(FlowLifecycle::Active);
     let first = fixture.deliver("once", middle_abrupt("only once"));
     let second = fixture.deliver("once", middle_abrupt("only once"));
-    assert!(matches!(first, MetaResponse::Delivered(_)));
+    assert!(matches!(first, MetaResponse::MessageTyped(_)));
     assert_eq!(first, second);
     assert_eq!(prompts(&log).len(), 1);
 }
@@ -493,7 +493,7 @@ fn a_recorded_delivery_answers_while_refresh_custody_is_held_without_input() {
     fixture.register_with(FlowLifecycle::Active);
     fixture.at_secondary_refreshing_at(200_000);
     let first = fixture.deliver("refresh-receipt", middle_abrupt("only once"));
-    assert!(matches!(first, MetaResponse::Delivered(_)));
+    assert!(matches!(first, MetaResponse::MessageTyped(_)));
     let address = Address {
         aspect: Aspect::Psyche,
         topic: flow_ethos::Topic("flow".into()),
@@ -845,23 +845,23 @@ fn a_deliver_into_a_flow_past_its_threshold_reaches_the_pane() {
     assert!(matches!(
         fixture
             .nexus
-            .dispatch_meta(MetaQuery::Deliver(meta_signal_flow::DeliveryRequest {
+            .dispatch_meta(MetaQuery::TypeMessage(meta_signal_flow::DeliveryRequest {
                 delivery_id: meta_signal_flow::DeliveryId("delivery-past".into()),
                 flow_id: flow_ethos::FlowId("908786".into()),
                 message: middle_abrupt("one more thing"),
             })),
-        MetaResponse::Delivered(_)
+        MetaResponse::MessageTyped(_)
     ));
     assert!(!prompts(&log).is_empty(), "payload reached the pane");
     assert!(matches!(
         fixture
             .nexus
-            .dispatch_meta(MetaQuery::Deliver(meta_signal_flow::DeliveryRequest {
+            .dispatch_meta(MetaQuery::TypeMessage(meta_signal_flow::DeliveryRequest {
                 delivery_id: meta_signal_flow::DeliveryId("warning-past".into()),
                 flow_id: flow_ethos::FlowId("908786".into()),
                 message: Message::HardAbrupt(letter("warning")),
             })),
-        MetaResponse::Delivered(_)
+        MetaResponse::MessageTyped(_)
     ));
     assert!(
         prompts(&log)
@@ -903,7 +903,7 @@ fn direct_delivery_is_refused_while_refresh_owns_address() {
     drop(lease);
     assert!(matches!(
         fixture.deliver("released", middle_abrupt("released")),
-        MetaResponse::Delivered(_)
+        MetaResponse::MessageTyped(_)
     ));
     assert_eq!(prompts(&log).len(), 1);
 }
@@ -1044,7 +1044,7 @@ fn public_direct_delivery_finishes_before_a_concurrent_existing_bind() {
             let delivery_fixture: &'static NexusFixture = fixture;
             let delivering = scope.spawn(move || {
                 let response = delivery_fixture.nexus.dispatch_meta_serially(
-                    MetaQuery::Deliver(DeliveryRequest {
+                    MetaQuery::TypeMessage(DeliveryRequest {
                         delivery_id: meta_signal_flow::DeliveryId("public-serial-delivery".into()),
                         flow_id: flow_ethos::FlowId("908786".into()),
                         message: middle_abrupt("serialized delivery"),
@@ -1092,7 +1092,7 @@ fn public_direct_delivery_finishes_before_a_concurrent_existing_bind() {
         })
     });
     assert!(
-        matches!(delivered, MetaResponse::Delivered(_)),
+        matches!(delivered, MetaResponse::MessageTyped(_)),
         "{delivered:?}"
     );
     assert!(

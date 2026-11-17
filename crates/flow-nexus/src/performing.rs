@@ -882,6 +882,29 @@ impl PerformsInParts for RunningNexus {
                     _ => Outcome::Failed(Failed_Data::StoreRefused),
                 }
             }
+            // The override panel's writes: a transition appended to its
+            // flow's record; the switch set, a switch already where it is
+            // asked to be recorded as set; a flow with no harness forgotten
+            // with its transition, one Flow holds no row for UnknownFlow.
+            Record_Data::Transitioned(transitioned) => {
+                use crate::generated::overriding::RemembersOverrides;
+                self.store.record_transition(transitioned).recorded()
+            }
+            Record_Data::Switched(holding) => {
+                use crate::generated::overriding::RemembersOverrides;
+                match self.store.switch(holding) {
+                    Ok(_) => Outcome::Recorded,
+                    Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
+                }
+            }
+            Record_Data::Forgotten(transitioned) => {
+                use crate::generated::overriding::RemembersOverrides;
+                match self.store.forget_flow(transitioned) {
+                    Ok(true) => Outcome::Recorded,
+                    Ok(false) => Outcome::Failed(Failed_Data::UnknownFlow),
+                    Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
+                }
+            }
         }
     }
 }

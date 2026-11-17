@@ -25,8 +25,9 @@ The wire contracts are independent repositories:
   stands (`MetaflowChanged`) and the Address of each no longer listed
   (`MetaflowGone`); `Metaflows` stays the one-shot read.
   Nothing on the ordinary socket writes into a pane.
-- `meta-signal-flow` defines `Configure`, reset-credit consumption, `Retire`,
-  and the pane writes: `Deliver`, `Vet`, `Command`, plus `ResolvePeer`.
+- `meta-signal-flow` defines `Configure`, reset-credit consumption, the
+  override panel (`Override`), and the pane writes: `Deliver`, `Vet`,
+  `Command`, plus `ResolvePeer`.
 
 The ordinary client accepts exactly one inline `Input` Datom from the
 `signal-flow` contract. `Start` and `Replace` also require the caller to name
@@ -208,13 +209,27 @@ writes nothing — it is a query, and a query does not change what it is asked
 about; only a command that witnesses a pane's fate persists an ended
 lifecycle. The three ended states each name who ended the flow: `Stopped` is
 Flow's own act, `Exited` is the seat's, `Retired` is an owner's, through the
-privileged `Retire`. A pane going away never retires a flow: an exit retains
+override panel's `Override.Close`. A pane going away never retires a flow: an exit retains
 the record, and retirement comes from authority, never from an observation.
 None of the three is a deletion — each keeps the row, its origin and its
 history — and `Deliver`, `ResolveRecipient`, `Stop` and `Replace` treat all three
-as gone. `Retire` refuses `AlreadyGone` for a flow that has already ended,
-and `Maintained`, changing nothing, for the flow a Maintained metaflow is
-Awake as; that metaflow's declaration is changed to `OnDemand` first.
+as gone. `Override.Close` of a flow that has already ended closes nothing
+more and answers `Closed`; it closes the flow a Maintained metaflow is
+Awake as on the owner's word.
+
+The override panel (meta `Override`, meta-signal-flow's `panel.ethos`) is
+the owner's hand on what the Nexus holds and does: `SetState`,
+`CrystallizeNow`, `Renew`, `Close`, `Deliver`, `Unlock`, `Forget`, `Hold`
+and `Resume`, each recorded as a transition of the flow it acts on with the
+cause `Overridden`. `Hold` is the shutdown switch, kept in Memory: the Nexus
+takes no act of its own, its clocks, deliveries and launches, and still
+answers; `Resume` takes up what is owed.
+
+```sh
+flow-meta 'Override.Hold'                  # Overridden.Held
+flow-meta 'Override.Renew.{ Mind core Sol }'   # Overridden.Renewed.<fresh flow>
+flow-meta 'Override.Resume'                # Overridden.Resumed
+```
 
 `Start` carries a typed `LaunchProfile` alone. A profile names the module
 identities of its system prompt and of its first USER message, the launched

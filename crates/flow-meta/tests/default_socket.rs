@@ -91,8 +91,8 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
         peer.read_exact(&mut length).expect("query length");
         let mut query = vec![0; u32::from_be_bytes(length) as usize];
         peer.read_exact(&mut query).expect("query");
-        let reply = rkyv::to_bytes::<rkyv::rancor::Error>(&meta_signal_flow::Output::FlowRetired(
-            retired(),
+        let reply = rkyv::to_bytes::<rkyv::rancor::Error>(&meta_signal_flow::Output::Overridden(
+            meta_signal_flow::panel::Output::Closed(signal_flow::FlowId("fac697".into())),
         ))
         .expect("reply encodes");
         peer.write_all(&(reply.len() as u32).to_be_bytes())
@@ -103,12 +103,12 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
         runtime.path(),
         configuration.path(),
         &other,
-        &["Retire.fac697"],
+        &["Override.Close.fac697"],
     );
     assert!(output.status.success(), "{output:?}");
     answering.join().expect("selected fixture answered");
     assert!(
-        String::from_utf8_lossy(&output.stdout).starts_with("FlowRetired."),
+        String::from_utf8_lossy(&output.stdout).starts_with("Overridden.Closed.fac697"),
         "{output:?}"
     );
 
@@ -117,7 +117,7 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
         runtime.path(),
         configuration.path(),
         &other,
-        &["main", "Retire.fac697"],
+        &["main", "Override.Close.fac697"],
     );
     assert_eq!(refused.status.code(), Some(2), "{refused:?}");
     assert!(
@@ -127,7 +127,12 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
 
     // A configuration that is missing is refused, naming its path.
     let empty = tempfile::tempdir().expect("an empty configuration home");
-    let refused = client(runtime.path(), empty.path(), &other, &["Retire.fac697"]);
+    let refused = client(
+        runtime.path(),
+        empty.path(),
+        &other,
+        &["Override.Close.fac697"],
+    );
     assert_eq!(refused.status.code(), Some(2), "{refused:?}");
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
@@ -159,7 +164,7 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
     let refused = Command::new(env!("CARGO_BIN_EXE_flow-meta"))
         .env_clear()
         .env("XDG_CONFIG_HOME", unplaced.path())
-        .arg("Retire.fac697")
+        .arg("Override.Close.fac697")
         .output()
         .expect("client runs");
     assert_eq!(refused.status.code(), Some(2), "{refused:?}");
@@ -174,7 +179,12 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
             ),
         "{stderr}"
     );
-    let refused = client(runtime.path(), unplaced.path(), &other, &["Retire.fac697"]);
+    let refused = client(
+        runtime.path(),
+        unplaced.path(),
+        &other,
+        &["Override.Close.fac697"],
+    );
     assert_eq!(refused.status.code(), Some(2), "{refused:?}");
     assert_eq!(
         default_listener
@@ -183,16 +193,4 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
             .kind(),
         std::io::ErrorKind::WouldBlock
     );
-}
-
-fn retired() -> signal_flow::FlowNode {
-    signal_flow::FlowNode {
-        flow_id: signal_flow::FlowId("fac697".into()),
-        session_id: signal_flow::SessionId("session-1".into()),
-        harness_kind: signal_flow::HarnessKind::Claude,
-        endpoint_selection: signal_flow::EndpointSelection::Unavailable,
-        herdr_route_selection: signal_flow::HerdrRouteSelection::Unavailable,
-        origin: signal_flow::Origin::Unbound,
-        flow_lifecycle: signal_flow::FlowLifecycle::Retired,
-    }
 }

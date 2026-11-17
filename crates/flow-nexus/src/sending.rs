@@ -348,10 +348,13 @@ impl SendsRequests for RunningNexus {
             // submit this same request independently. A metaflow another
             // holds takes the request into its queue instead. A Soft request
             // to a seat in its turn is queued for the seat's idle event.
-            let direct_requested = abrupt
-                || self
-                    .live_awake_flow(&recipient)
-                    .is_some_and(|flow_id| self.rests_now(&flow_id));
+            // A held Nexus delivers nothing on its own: the request is
+            // queued, and handed over once it resumes.
+            let direct_requested = !crate::generated::overriding::HeedsOverrides::held(self)
+                && (abrupt
+                    || self
+                        .live_awake_flow(&recipient)
+                        .is_some_and(|flow_id| self.rests_now(&flow_id)));
             let direct_lease = if direct_requested {
                 match self.direct_send_lease(&recipient) {
                     Ok(lease) => lease,

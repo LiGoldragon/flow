@@ -1,0 +1,64 @@
+; What the override panel needs of the Flow Nexus: the seat an override
+; acts on, the state that seat is in now, and Flow's Memory of overrides.
+;
+; A Subject is what an override names, a flow or a permaflow's Address. Its
+; Seat is the flow and the Address it runs at: the flow named and the
+; Address whose flow it is or was, or the flow an Address is Awake as, else
+; the last flow of its Past. A Transitioned is one transition of one seat,
+; what an override records with the cause Overridden. Holding is the
+; panel's switch: Held since a moment, or Acting on its own.
+;
+; EntersByOverride is a state entered by an override: its transition, the
+; cause Overridden, the moment now.
+;
+; DescribesOverrideTable names the table a record of the override panel is
+; kept in: a flow's transitions, and the switch.
+;
+; RemembersOverrides is the store's: it appends a seat's transition to its
+; flow's record, reads every flow's record, reads and sets the switch,
+; forgets a flow (its row, route, role, owner proof, events and context
+; size, and its place in its metaflow's Past) in the commit that records its
+; transition, finds the seat a subject names, and lists every seat Awake as
+; a live flow. HeedsOverrides is the Nexus's: whether it is held, which
+; every act it takes on its own asks first, its clocks, its deliveries and
+; its launches; the state a seat is in now: no harness, Asleep; else its
+; last recorded transition's; else resting at its idle event, Resting; else
+; Acting; the seat a subject names, refused UnknownFlow or UnknownAddress
+; when there is none; and the override's transition recorded, the cause
+; Overridden, the moment now: for a seat in the state the override puts it
+; in, for the seat a subject names in the state it is in now (nothing when
+; it names no seat), and for every live seat as it stands.
+
+Library
+[ :flow_nexus:store:[ FlowStore StoreError ]                ; imports
+  :sema_engine:[ TableDescriptor ]
+  :flow_nexus:[ RunningNexus ]
+  :flow_nexus:generated:memory:[ Flow Transition Moment StoredHold ]
+  :meta_signal_flow:panel:[ State PanelOutput.Output ]
+  :signal_flow:[ FlowId Address ] ]
+[ Subject.[ Named.FlowId                                    ; types: what an override names
+            Permaflow.Address ]
+  Seat.{ FlowId Address }                                   ;   a flow at its Address
+  Transitioned.{ Seat Transition }                          ;   one transition of one seat
+  Holding.[ Held.Moment                                     ;   the panel's switch
+            Acting ] ]
+[ RemembersOverrides.[ record_transition.{ [ Transitioned ] [ Result<Boolean StoreError> ] } ; traits
+                       transitions.[ Result<Vector<Flow> StoreError> ]
+                       holding.[ Result<Holding StoreError> ]
+                       switch.{ [ Holding ] [ Result<Boolean StoreError> ] }
+                       forget_flow.{ [ Transitioned ] [ Result<Boolean StoreError> ] }
+                       seat.{ [ Subject ] [ Result<Option<Seat> StoreError> ] }
+                       seats.[ Result<Vector<Seat> StoreError> ] ]
+  HeedsOverrides.[ held.[ Boolean ]
+                   state_now.{ [ Seat ] [ State ] }
+                   seat_named.{ [ Subject ] [ Result<Seat PanelOutput> ] }
+                   record_override.{ [ Transitioned ] [ Result<Boolean PanelOutput> ] }
+                   record_named.{ [ Subject ] [ Result<Boolean PanelOutput> ] }
+                   record_every_seat.[ Result<Boolean PanelOutput> ] ]
+  DescribesOverrideTable.[ descriptor:[ TableDescriptor<Self> ] ]
+  EntersByOverride.[ overridden.[ Transition ] ] ]
+[ FlowStore.[ RemembersOverrides ]                          ; associations
+  RunningNexus.[ HeedsOverrides ]
+  Flow.[ DescribesOverrideTable ]
+  StoredHold.[ DescribesOverrideTable ]
+  State.[ EntersByOverride ] ]

@@ -87,25 +87,32 @@ fn awake_seat(fixture: &NexusFixture) {
     });
 }
 
-/// A retired flow's pane, still there running its own session, is closed
-/// in the Retire: the flow is Retired, its row kept, and no harness of it
+/// The override panel's Close of the seat.
+fn close(fixture: &NexusFixture) -> meta_signal_flow::Output {
+    fixture
+        .nexus
+        .dispatch_meta(meta_signal_flow::Input::Override(
+            meta_signal_flow::panel::Input::Close(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        ))
+}
+
+fn closed_answer() -> meta_signal_flow::Output {
+    meta_signal_flow::Output::Overridden(meta_signal_flow::panel::Output::Closed(
+        flow_ethos::FlowId(CLAUDE_SEAT.into()),
+    ))
+}
+
+/// A closed flow's pane, still there running its own session, is closed
+/// in the Close: the flow is Retired, its row kept, and no harness of it
 /// is left running.
 #[test]
-fn after_retire_the_flow_s_pane_is_closed() {
+fn after_close_the_flow_s_pane_is_closed() {
     let fixture = NexusFixture::new();
     awake_seat(&fixture);
 
-    let meta_signal_flow::Output::FlowRetired(retired) =
-        fixture
-            .nexus
-            .dispatch_meta(meta_signal_flow::Input::Retire(flow_ethos::FlowId(
-                CLAUDE_SEAT.into(),
-            )))
-    else {
-        panic!("a live flow is retired")
-    };
-    assert_eq!(retired.flow_lifecycle, FlowLifecycle::Retired);
-    assert!(closed(&fixture), "the retired flow's pane is closed");
+    assert_eq!(close(&fixture), closed_answer());
+    assert_eq!(lifecycle(&fixture), FlowLifecycle::Retired);
+    assert!(closed(&fixture), "the closed flow's pane is closed");
     assert!(fixture.typed().is_none(), "nothing is typed");
 }
 
@@ -135,43 +142,17 @@ fn declare_secondary(fixture: &NexusFixture, continuity: meta_signal_flow::Conti
         .expect("metaflow declared");
 }
 
-/// The flow a Maintained metaflow is Awake as is not retired: Retire
-/// answers Maintained and changes nothing, its pane open and the metaflow
-/// Awake as it. Once its declaration is OnDemand, the same Retire retires it.
+/// Close acts on the owner's word: the flow a Maintained metaflow is
+/// Awake as is closed as any other, its pane closed and the flow Retired.
 #[test]
-fn retire_of_a_maintained_metaflow_s_flow_is_refused_and_changes_nothing() {
+fn close_of_a_maintained_metaflow_s_flow_closes_it() {
     let fixture = NexusFixture::new();
     awake_seat(&fixture);
     declare_secondary(&fixture, meta_signal_flow::Continuity::Maintained);
 
-    assert_eq!(
-        fixture
-            .nexus
-            .dispatch_meta(meta_signal_flow::Input::Retire(flow_ethos::FlowId(
-                CLAUDE_SEAT.into()
-            ))),
-        meta_signal_flow::Output::RetireRejected(meta_signal_flow::RetireRejection::Maintained)
-    );
-    assert!(lifecycle(&fixture).is_live(), "the flow stays live");
-    assert_eq!(
-        state(&fixture),
-        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
-    );
-    assert!(!closed(&fixture), "its pane is not closed");
-    assert!(fixture.typed().is_none(), "nothing is typed");
-
-    declare_secondary(&fixture, meta_signal_flow::Continuity::OnDemand);
-    let meta_signal_flow::Output::FlowRetired(retired) =
-        fixture
-            .nexus
-            .dispatch_meta(meta_signal_flow::Input::Retire(flow_ethos::FlowId(
-                CLAUDE_SEAT.into(),
-            )))
-    else {
-        panic!("an OnDemand metaflow's flow is retired")
-    };
-    assert_eq!(retired.flow_lifecycle, FlowLifecycle::Retired);
-    assert!(closed(&fixture), "the retired flow's pane is closed");
+    assert_eq!(close(&fixture), closed_answer());
+    assert_eq!(lifecycle(&fixture), FlowLifecycle::Retired);
+    assert!(closed(&fixture), "the closed flow's pane is closed");
 }
 
 /// A flow whose own session end its hook reports is recorded Exited, and
@@ -298,22 +279,22 @@ fn a_start_after_no_clear_of_its_own_session_rebinds_nothing() {
     assert!(lifecycle(&fixture).is_live());
 }
 
-/// A Retire whose pane close Herdr refuses answers CloseRefused and records
+/// A Close whose pane close Herdr refuses answers HerdrRefused and records
 /// nothing: the flow stays live, its metaflow Awake as it.
 #[test]
-fn a_retire_whose_close_herdr_refuses_answers_close_refused_and_records_nothing() {
+fn a_close_herdr_refuses_answers_herdr_refused_and_records_nothing() {
     let fixture = NexusFixture::new();
     awake_seat(&fixture);
     let live = lifecycle(&fixture);
     close_answers(&fixture, "exit 1");
 
     assert_eq!(
-        fixture
-            .nexus
-            .dispatch_meta(meta_signal_flow::Input::Retire(flow_ethos::FlowId(
+        close(&fixture),
+        meta_signal_flow::Output::Overridden(meta_signal_flow::panel::Output::Refused(
+            meta_signal_flow::panel::Refused_Data::HerdrRefused(flow_ethos::FlowId(
                 CLAUDE_SEAT.into()
-            ))),
-        meta_signal_flow::Output::RetireRejected(meta_signal_flow::RetireRejection::CloseRefused)
+            ))
+        ))
     );
     assert_eq!(lifecycle(&fixture), live);
     assert_eq!(

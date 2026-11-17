@@ -104,6 +104,7 @@ use crate::generated::memory::{Device, Inode, Offset, RefreshCaller};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
 };
+use crate::generated::overriding::HeedsOverrides;
 use crate::generated::starter::ProfilesFreshSeat;
 use crate::herdr::pane::{PaneAgent, WritesPane};
 use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes};
@@ -716,7 +717,7 @@ pub(crate) enum FreshRefusal {
 /// A fresh run together with the exact launch that placed its first prompt.
 /// A wake keeps both so it never receipts another launch later bound to the
 /// same run.
-struct FreshStarted {
+pub(crate) struct FreshStarted {
     flow_id: FlowId,
     launch_request_id: String,
 }
@@ -759,7 +760,7 @@ impl StartsUnbound for RunningNexus {
 }
 
 /// The steps a wake takes.
-trait WakesInParts {
+pub(crate) trait WakesInParts {
     /// The body of `wake`, every early exit a typed refusal.
     fn waken(&self, address: &Address) -> Result<FlowId, WakeRefusal>;
     fn start_fresh(
@@ -1522,6 +1523,13 @@ impl SleepsAndWakesSeats for RunningNexus {
             );
             return AtStop::Kept(KeptAtStop::Restarting);
         }
+        // A held Nexus does not act on its own: the seat is neither handed
+        // work, put to sleep nor refreshed at its rest. Resume takes up what
+        // is owed.
+        if self.held() {
+            eprintln!("flow-nexus: flow {flow_id} kept at its Stop: the Nexus is held");
+            return AtStop::Idle;
+        }
         let at_stop = self.settle_rested(flow_id);
         match &at_stop {
             AtStop::Kept(reason) if reason.successor_refused() => {
@@ -1566,6 +1574,10 @@ impl SleepsAndWakesSeats for RunningNexus {
     }
 
     fn drain_awake(&self, address: &Address) {
+        // A held Nexus delivers nothing on its own.
+        if self.held() {
+            return;
+        }
         {
             let _turn = self
                 .dispatch_gate
@@ -1614,6 +1626,10 @@ impl SleepsAndWakesSeats for RunningNexus {
     }
 
     fn wake_due(&self, address: Address) {
+        // A held Nexus delivers and launches nothing on its own.
+        if self.held() {
+            return;
+        }
         // Work queued for an Awake seat known resting is handed to it now,
         // as its turn's end would; one in a turn waits for the turn's end.
         // An Awake seat whose pane is gone is put Asleep, to wake below.
@@ -1717,6 +1733,15 @@ impl SleepsAndWakesSeats for RunningNexus {
     }
 
     fn recover_wakes(&self) {
+        // A Nexus held when it starts reconciles what its store holds and
+        // acts on none of it: no restart, successor, drain or wake is taken
+        // up until Resume.
+        if self.held() {
+            self.recover_deliveries();
+            crate::reaping::TakesUpObligations::recover_obligations(self);
+            eprintln!("flow-nexus: the Nexus is held; what it owes is taken up at Resume");
+            return;
+        }
         self.recover_deliveries();
         // A restart an earlier Nexus left is taken up first, so a seat it
         // binds is handed its queue below.

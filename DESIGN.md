@@ -5,9 +5,9 @@ the client turns one inline Datom into a typed request, sends an rkyv frame,
 and textualizes the typed reply as Datom. The standalone `signal-flow` repo
 owns `Start`, `Refresh`, `ResolveRecipient`, `Stop`, `List`,
 `Replace`, `LaunchStatus`, `Observe`, and `ResolveCaller`;
-`meta-signal-flow` owns `Configure`, `ConsumeReset`, `Retire`, and the pane
-writes `Deliver`, `Vet`, `Command`, with `ResolvePeer`. Each contract versions
-its own wire.
+`meta-signal-flow` owns `Configure`, `ConsumeReset`, the override panel
+`Override`, and the pane writes `Deliver`, `Vet`, `Command`, with
+`ResolvePeer`. Each contract versions its own wire.
 `RunningNexus` dispatches; `FlowStore` owns working state and policy.
 
 What the Nexus does is its Operation root, `crates/flow-nexus/ethos/operation.ethos`,
@@ -708,6 +708,53 @@ administrative protocol surface from the ordinary surface inside one Unix
 account and does not distinguish processes with the same UID. Reset callers
 supply the idempotency key so retries reuse it. Protocol tests cover framing, refusal, timeout,
 assigned-flow context, and the reset outcome mapping.
+
+## The override panel
+
+The meta input `Override` carries the override panel, its own Signal
+(meta-signal-flow `ethos/panel.ethos`), answered `Overridden` with the
+panel's answer; `MetaCall` answers it through the generated
+`panel::Answering` (`src/overriding.rs`). What the Nexus needs for it is
+declared in `crates/flow-nexus/ethos/overriding.ethos`: the store's
+`RemembersOverrides`, the Nexus's `HeedsOverrides`, `Subject`, `Seat`,
+`Transitioned` and `Holding`; a flow's record of transitions (`Flow`,
+`Transition`, `Cause`, `Event`, `Onward`, `Moment`) and the switch
+(`StoredHold`) are Memory records (`memory.ethos`), written through
+`Record.Transitioned`, `Record.Switched` and `Record.Forgotten`.
+
+Every override is recorded as a transition of the flow it acts on, the
+cause `Overridden`, the moment in Unix seconds: `SetState` the state named;
+`CrystallizeNow` Crystallizing; `Renew` and `Close` Asleep, for the flow
+ended; `Forget` Asleep, in the commit that forgets it; `Deliver` and `Unlock`
+the state the Address's flow (Awake, else the last of its Past) is in now;
+`Hold` and `Resume` that of every live seat. The state a flow is in now is
+Asleep with no harness, else its last recorded transition's, else Resting
+when it rests at its idle event, else Acting.
+
+`CrystallizeNow` sends the flow its handover warning now, whatever its
+context, as the warning goes (`handover_reminding::RendersHandoverWarning`):
+the words its model's handover policy configures, then
+`flows/<FlowId>/handover.md`, a MiddleAbrupt Notice from Flow. `Renew` takes
+the metaflow's hold and starts its successor through Replace before the old
+flow is reaped (`refresh_successor_first`), whatever its continuity and
+whether or not the old flow rests; a Codex thread still in its turn runs on
+in its app-server, its calls refused `FlowEnded`. `Close` is Retire's act on
+the owner's word, without its Maintained refusal; a restart that may still
+start a harness refuses it `Restarting`. `Deliver` is the ordinary
+`DeliverAll`. `Unlock` takes away the sender lock held on the Address.
+`Forget` refuses a flow Flow holds live, Awake at its metaflow, or held by a
+launch or restart (`Harnessed`); otherwise it retracts the flow's row, route,
+role, owner proof, events and context size and takes it out of its
+metaflow's Past.
+
+`Hold` is kept in Memory (`flow_nexus_hold`), so a Nexus that starts held
+stays held: its start reconciles deliveries and obligations and takes up
+nothing else. While held, `settle_stopped`, `drain_awake`, `wake_due` and
+the reminder and heartbeat clocks do nothing, and a Send is queued, not
+typed. Everything a caller or the owner asks is answered and done, a
+`Deliver` handing an Awake seat its queue among it; an Asleep metaflow is
+not woken. `Resume` runs the start's recovery pass (`recover_wakes`) at
+once, before it answers.
 
 ## The approval pipeline
 

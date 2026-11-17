@@ -34,6 +34,7 @@ pub mod metaflow_watch;
 pub(crate) mod nexus_configuration;
 pub(crate) mod opened_thread;
 pub(crate) mod ordered_replacement;
+pub(crate) mod overriding;
 pub(crate) mod pending_handover;
 pub(crate) mod pending_reap;
 pub(crate) mod queue_delivery;
@@ -207,6 +208,11 @@ const META_HARNESS_HOOK_CONFIGURATION_SCHEMA: &str =
 /// Added with meta-signal-flow 83: a store written before it declares no
 /// ended-turn retention, and holds the seed.
 const OPTIONAL_TURN_RETENTION_TABLE: &str = "flow_nexus_meta_turn_retention_configuration";
+/// Added in 0.57.0 with the override panel: a store written before holds no
+/// flow's transitions and no switch, and is opened with each registered
+/// empty.
+const OPTIONAL_FLOW_TRANSITIONS_TABLE: &str = overriding::TRANSITIONS_TABLE;
+const OPTIONAL_HOLD_TABLE: &str = overriding::HOLD_TABLE;
 const META_TURN_RETENTION_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_turn_retention_configuration");
 const META_TURN_RETENTION_CONFIGURATION_FAMILY: &str =
@@ -318,6 +324,8 @@ const RUNNING_TABLES: &[&str] = &[
     OPTIONAL_PENDING_REAP_TABLE,
     OPTIONAL_PENDING_HANDOVER_TABLE,
     OPTIONAL_TURN_RETENTION_TABLE,
+    OPTIONAL_FLOW_TRANSITIONS_TABLE,
+    OPTIONAL_HOLD_TABLE,
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -1738,6 +1746,8 @@ pub struct FlowStore {
     turn_ends: TableReference<turn_end::TurnEndRecord>,
     kept_answers: TableReference<kept_answer::KeptAnswer>,
     scheduled_reminders: TableReference<scheduled_reminder::ScheduledReminder>,
+    flow_transitions: TableReference<crate::generated::memory::Flow>,
+    hold: TableReference<crate::generated::memory::StoredHold>,
     queue_delivery: QueueDeliveryTables,
     send_outcomes: SendOutcomeTables,
     logical_deliveries: LogicalDeliveryTables,
@@ -2832,6 +2842,12 @@ impl OpensFlowStore for FlowStore {
         let scheduled_reminders = engine.register_table(
             <scheduled_reminder::ScheduledReminder as scheduled_reminder::DescribesScheduledReminderTable>::descriptor(),
         )?;
+        let flow_transitions = engine.register_table(
+            <crate::generated::memory::Flow as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
+        )?;
+        let hold = engine.register_table(
+            <crate::generated::memory::StoredHold as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2869,6 +2885,8 @@ impl OpensFlowStore for FlowStore {
             turn_ends,
             kept_answers,
             scheduled_reminders,
+            flow_transitions,
+            hold,
             queue_delivery,
             send_outcomes,
             logical_deliveries,
@@ -3055,6 +3073,12 @@ impl OpensFlowStore for FlowStore {
         let scheduled_reminders = engine.register_table(
             <scheduled_reminder::ScheduledReminder as scheduled_reminder::DescribesScheduledReminderTable>::descriptor(),
         )?;
+        let flow_transitions = engine.register_table(
+            <crate::generated::memory::Flow as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
+        )?;
+        let hold = engine.register_table(
+            <crate::generated::memory::StoredHold as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -3092,6 +3116,8 @@ impl OpensFlowStore for FlowStore {
             turn_ends,
             kept_answers,
             scheduled_reminders,
+            flow_transitions,
+            hold,
             queue_delivery,
             send_outcomes,
             logical_deliveries,
@@ -5522,6 +5548,11 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                 META_TURN_RETENTION_CONFIGURATION_FAMILY,
                 META_TURN_RETENTION_CONFIGURATION_SCHEMA,
             ),
+            "flow_nexus_flow_transitions" => (
+                overriding::TRANSITIONS_FAMILY,
+                overriding::TRANSITIONS_SCHEMA,
+            ),
+            "flow_nexus_hold" => (overriding::HOLD_FAMILY, overriding::HOLD_SCHEMA),
             "flow_nexus_meta_protected_address_configuration" => (
                 META_PROTECTED_ADDRESS_CONFIGURATION_FAMILY,
                 META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA,
@@ -5874,6 +5905,8 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                     || *name == OPTIONAL_PENDING_HANDOVER_TABLE
                     || *name == OPTIONAL_HARNESS_HOOK_TABLE
                     || *name == OPTIONAL_TURN_RETENTION_TABLE
+                    || *name == OPTIONAL_FLOW_TRANSITIONS_TABLE
+                    || *name == OPTIONAL_HOLD_TABLE
                     || *name == OPTIONAL_REQUEST_ID_TABLE
                     || *name == OPTIONAL_DELIVER_CALL_TABLE
                     || *name == OPTIONAL_STORE_IDENTITY_TABLE

@@ -127,6 +127,9 @@ pub enum Record_Data {
     HandoverRefused(Record_Data_HandoverRefused_Data),
     HandedOver(signal_flow::Address),
     StartedHandedOver(flow_nexus::LaunchedRecord),
+    Transitioned(flow_nexus::Transitioned),
+    Switched(flow_nexus::Holding),
+    Forgotten(flow_nexus::Transitioned),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

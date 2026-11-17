@@ -317,19 +317,27 @@ mod tests {
     }
 
     #[test]
-    fn refresh_and_restart_are_the_meta_surface_s_own() {
-        // The meta surface refreshes an Address and restarts a flow, a
-        // protected Address's included.
+    fn renew_and_restart_are_the_meta_surface_s_own() {
+        // The meta surface renews an Address through the override panel and
+        // restarts a flow, a protected Address's included.
         let client = FlowMetaClient;
         assert_eq!(
             client
+                .parse_query(["Override.Renew.{ Mind flow Sol }".to_owned()].into_iter())
+                .expect("Renew parses"),
+            Input::Override(meta_signal_flow::panel::Input::Renew(
+                signal_flow::Address {
+                    aspect: signal_flow::Aspect::Mind,
+                    topic: flow_ethos::Topic("flow".into()),
+                    model: signal_flow::Model::Sol,
+                }
+            ))
+        );
+        assert!(
+            client
                 .parse_query(["Refresh.{ Mind flow Sol }".to_owned()].into_iter())
-                .expect("Refresh parses"),
-            Input::Refresh(signal_flow::Address {
-                aspect: signal_flow::Aspect::Mind,
-                topic: flow_ethos::Topic("flow".into()),
-                model: signal_flow::Model::Sol,
-            })
+                .is_err(),
+            "Refresh is no meta input: Renew takes its place"
         );
         assert_eq!(
             client

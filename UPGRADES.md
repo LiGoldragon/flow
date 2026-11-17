@@ -1,3 +1,43 @@
+# Flow 0.57.0: the override panel on the meta socket
+
+Contracts: signal-flow 64.0.0 (83c04fe), unchanged, and meta-signal-flow
+86.0.0 (37e370c), on build-base `override-panel-f69b5c` (2a014b9), which
+registers 86.0.0. Built on the 0.56.2 line at a044e39a. **Both the wire and
+the stored format change.** The Flow Nexus version 0 subversion 0-1,
+release 1.
+
+- **Wire.** The meta input `Override` carries the override panel
+  (meta-signal-flow `panel`): `SetState`, `CrystallizeNow`, `Renew`,
+  `Close`, `Deliver`, `Unlock`, `Forget`, `Hold`, `Resume`, answered
+  `Overridden`. **Meta `Retire` and meta `Refresh` are gone**:
+  `Override.Close` takes Retire's place and `Override.Renew` Refresh's. The
+  ordinary `Refresh` is unchanged. A meta-signal-flow 83 peer is refused at
+  its greeting; every meta client repins to 86 in the same switch: the
+  home's `flow-meta` (this package's) and, where it runs, Message
+  (message-nexus speaks meta `Deliver`, which is unchanged, but the
+  contract digest moves).
+- **Hold** is the shutdown switch, held in Memory: while it stands the
+  Nexus takes no act of its own (no reminder, handover reminder or
+  heartbeat is sent; nothing queued is handed to a seat or wakes one; no
+  seat is slept, refreshed or given its successor at its rest; a Send is
+  queued, not typed) and answers everything. A Nexus started held stays
+  held. `Resume` runs the start's recovery pass at once.
+- **Every override is recorded** as a transition of the flow it acts on,
+  the cause `Overridden` (memory.ethos `Flow.{ FlowId Address
+  Vector<Transition> }`).
+- **Memory: two new families, registered empty when absent**, the way
+  0.56's ended-turn retention family was: `flow_nexus_flow_transitions`
+  (`flow-nexus-flow-transitions-v1`, one `Flow` per FlowId) and
+  `flow_nexus_hold` (`flow-nexus-hold-v1`, one row while held). No existing
+  family changes and no row is rewritten; the open refuses nothing a 0.56.2
+  store holds. A store opened by 0.57.0 starts Acting (no Hold row). An
+  older daemon refuses the store once these families exist (an unrecognized
+  catalog); rollback is the restore of the store copy taken before the
+  deploy.
+- **Deployment.** Anything that runs `flow-meta 'Retire.…'` or
+  `flow-meta 'Refresh.…'` moves to `Override.Close.…` and
+  `Override.Renew.…`; the capsule's step 12 and its teardown do.
+
 # Integration 98df55 (unreleased): k7jy native rest and caller-bound Refresh, with the warning lane's recovery consumer
 
 Contracts: signal-flow 64.0.0 (83c04fe) and meta-signal-flow 83.0.0 (06fff39),

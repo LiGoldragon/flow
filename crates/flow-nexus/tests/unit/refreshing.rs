@@ -581,7 +581,7 @@ fn typing_calls(fixture: &NexusFixture) -> Vec<String> {
 /// as `continuity`, holding one Order queued with `delivery`, and its
 /// successor staged so a Replace of `LaunchProfile` resumes it and finds it
 /// confirmed.
-fn refreshable_with_successor(
+pub(super) fn refreshable_with_successor(
     continuity: Continuity,
     delivery: Delivery,
 ) -> (NexusFixture, signal_flow::LaunchProfile) {

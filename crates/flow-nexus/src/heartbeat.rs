@@ -345,7 +345,11 @@ impl RunsHeartbeat for crate::RunningNexus {
                 (Some(config), Some(beat)) => {
                     if !self.configuration_changes.until(seen, beat) {
                         next_beat = Some(beat + config.period());
-                        self.heartbeat_tick(&config.heartbeat_recipients.0);
+                        // A held Nexus's clocks stand: the beat passes
+                        // unsent.
+                        if !crate::generated::overriding::HeedsOverrides::held(self) {
+                            self.heartbeat_tick(&config.heartbeat_recipients.0);
+                        }
                     }
                 }
                 _ => {

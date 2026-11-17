@@ -70,13 +70,18 @@
 ; gave it, and answers Closed once Herdr shows it gone. While a restart
 ; holds a flow, no end of it is recorded: Record.Exited fails Restarting.
 ;
+; The override panel writes through Record too: Record.Transitioned
+; appends an override's transition to its flow's record, Record.Switched
+; sets the panel's switch, and Record.Forgotten forgets a flow that has no
+; harness in the commit that records its transition (overriding.ethos).
+;
 ; LaunchOutcome, Replacement and SeatBirth are the Memory root's record
 ; types (memory.ethos), named through the Nexus crate.
 
 Operation
 [ signal_flow:[ FlowId LaunchRequestId FlowNode CallerIdentity LaunchProfile ComposedLaunch Origin LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event Address Request QueueEntry LogicalDeliveryId ContextRefusal CompositionRefusal LeaveOutRefusal NativeSessionId HarnessSpawnRefusal NativeLaunchRefusal ReapStanding HandoverCloseRefusal ]
   meta_signal_flow:[ Root RestartRecord ]
-  flow_nexus:[ LaunchOutcome Replacement SeatBirth PendingReap PendingHandover SupersededHandover LaunchedRecord ReplacedRecord ] ]
+  flow_nexus:[ LaunchOutcome Replacement SeatBirth PendingReap PendingHandover SupersededHandover LaunchedRecord ReplacedRecord Transitioned Holding ] ]
 [ Compose.LaunchProfile
   Reserve.{ ComposedLaunch Origin }
   Record.[ Intent.NativeLaunchIntent
@@ -115,7 +120,14 @@ Operation
            HandedOver.Address
            ; One commit: the generation closed (when any moves), Started, and
            ; the supersession at its Address.
-           StartedHandedOver.LaunchedRecord ]
+           StartedHandedOver.LaunchedRecord
+           ; An override's transition appended to its flow's record.
+           Transitioned
+           ; The override panel's switch set.
+           Switched.Holding
+           ; One commit: a flow with no harness forgotten, its transition
+           ; recorded.
+           Forgotten.Transitioned ]
   ; Judge a successfully recorded native observation under dispatch; admit
   ; the notice and its terminal warning stages in one store commit.
   ContextWarning.{ FlowId Tokens }

@@ -1007,23 +1007,16 @@
          :pass (boolean (and (str/includes? reply "TopicRefused") (= before (pane-ids))))
          :watched "no pane opened"}))]
 
-   ["12 Retire: refused while Maintained; retired once declared OnDemand"
+   ["12 Override.Close: the owner closes the flow a Maintained metaflow is Awake as"
     (fn []
       (let [flow-id (str (awake-flow secondary))
             pane (sender-pane)
-            refused (flow-meta (str "Retire." flow-id))
-            kept (and (contains? (pane-ids) pane) (= (str (awake-flow secondary)) flow-id))
-            declared (flow-meta (on-demand-secondary))
-            reply (flow-meta (str "Retire." flow-id))
+            reply (flow-meta (str "Override.Close." flow-id))
             gone (await-events 10 [(herdr-events [{:type "pane.closed"}])] #(not (contains? (pane-ids) pane)))
             m (watch 20 #(let [m (current secondary)] (when (not= (str (:flow m)) flow-id) m)))]
-        {:reply (str "Retire while Maintained: " refused " / Configure.Metaflows (Opus OnDemand): "
-                     declared " / Retire: " reply)
-         :pass (boolean (and (= refused "RetireRejected.Maintained") kept
-                             (str/starts-with? declared "Configured.")
-                             (str/starts-with? reply "FlowRetired.") gone))
-         :watched (str "after the refused Retire, pane " pane (if kept " open and Opus Awake as " " changed; Opus ")
-                       flow-id "; after the second, pane " (if gone "closed" "still open") "; Opus afterwards "
+        {:reply (str "Override.Close: " reply)
+         :pass (boolean (and (str/starts-with? reply "Overridden.Closed.") gone))
+         :watched (str "after the Close, pane " pane " " (if gone "closed" "still open") "; Opus afterwards "
                        (if m (str (name (:state m)) " " (:flow m)) "unchanged after 20 s"))}))]])
 
 
@@ -1543,7 +1536,7 @@
         (doseq [m (items (body listed))]
           (let [[a state] (items m)]
             (when (= (head state) "Awake")
-              (swap! steps conj (str "Retire." (body state) " -> " (flow-meta (str "Retire." (body state))))))))))
+              (swap! steps conj (str "Override.Close." (body state) " -> " (flow-meta (str "Override.Close." (body state))))))))))
     (doseq [w (get-in (herdr-json "workspace" "list") [:result :workspaces])]
       (swap! steps conj (str "close workspace " (:workspace_id w) " (" (:label w) ") -> " (str/trim (:out (herdr "workspace" "close" (:workspace_id w)))))))
     (when @sender

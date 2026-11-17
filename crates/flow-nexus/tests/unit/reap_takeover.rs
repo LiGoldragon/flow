@@ -868,9 +868,16 @@ fn every_end_of_the_successor_reassigns_what_it_owed() {
                 let retired = world
                     .fixture
                     .nexus
-                    .dispatch_meta(meta_signal_flow::Input::Retire(FlowId(SUCCESSOR.into())));
+                    .dispatch_meta(meta_signal_flow::Input::Override(
+                        meta_signal_flow::panel::Input::Close(FlowId(SUCCESSOR.into())),
+                    ));
                 assert!(
-                    matches!(retired, meta_signal_flow::Output::FlowRetired(_)),
+                    matches!(
+                        retired,
+                        meta_signal_flow::Output::Overridden(
+                            meta_signal_flow::panel::Output::Closed(_)
+                        )
+                    ),
                     "{retired:?}"
                 );
                 FlowLifecycle::Retired

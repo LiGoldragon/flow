@@ -1355,7 +1355,7 @@ fn restart_crash_around_bind_commit_delivers_once() {
 }
 
 /// An Interrupted restart whose pane is unknown cannot be shown quiesced:
-/// Stop answers SpawnUnproven and keeps it, and Retire does not free its
+/// Stop answers SpawnUnproven and keeps it, and Close does not free its
 /// Address. One whose recorded pane Herdr shows is closed by the Stop, and
 /// only then recorded Stopped; a retry resumes it.
 #[test]
@@ -1377,12 +1377,12 @@ fn restart_interrupted_stop_needs_quiesced_spawn() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch_meta(meta_signal_flow::Input::Retire(flow_ethos::FlowId(
-                FLOW.into()
-            ))),
-        meta_signal_flow::Output::RetireRejected(
-            meta_signal_flow::RetireRejection::RestartUnresolved
-        )
+            .dispatch_meta(meta_signal_flow::Input::Override(
+                meta_signal_flow::panel::Input::Close(flow_ethos::FlowId(FLOW.into()))
+            )),
+        meta_signal_flow::Output::Overridden(meta_signal_flow::panel::Output::Refused(
+            meta_signal_flow::panel::Refused_Data::Restarting(flow_ethos::FlowId(FLOW.into()))
+        ))
     );
     assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Active);
     assert_eq!(
@@ -3101,10 +3101,12 @@ fn stop_and_retire_protected_from_another_flow_accepted() {
     resolver.flow_id_option = Some(flow_ethos::FlowId("0f0e1d".into()));
     assert!(matches!(
         retiring.nexus.dispatch_meta_from(
-            meta_signal_flow::Input::Retire(flow_ethos::FlowId(FLOW.into())),
+            meta_signal_flow::Input::Override(meta_signal_flow::panel::Input::Close(
+                flow_ethos::FlowId(FLOW.into())
+            )),
             Some(resolver)
         ),
-        meta_signal_flow::Output::FlowRetired(_)
+        meta_signal_flow::Output::Overridden(meta_signal_flow::panel::Output::Closed(_))
     ));
     assert_eq!(node(&retiring).flow_lifecycle, FlowLifecycle::Retired);
 }

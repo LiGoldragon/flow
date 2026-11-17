@@ -21,6 +21,7 @@ pub use crate::generated::memory::{
     LaunchOutcome, PendingHandover, PendingReap, Replacement, SeatBirth, SupersededHandover,
 };
 pub use crate::generated::operation::Outcome as OperationOutcome;
+pub use crate::generated::overriding::{Holding, Seat, Subject, Transitioned};
 pub use crate::generated::starter::{LaunchedRecord, ReplacedRecord};
 pub use signal_curriculum_nexus::{
     ContextProvenance, Input as CurriculumQuery, Output as CurriculumOutcome, StartupComposition,
@@ -82,6 +83,7 @@ pub mod observe_agent;
 pub mod observe_configuration;
 pub mod observe_metaflows;
 pub mod observe_sends;
+pub mod overriding;
 pub mod peer;
 pub mod performing;
 pub mod place;
@@ -1252,90 +1254,8 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         })
     }
 
-    // A seat Flow lost. Retire keeps the row, its origin and its history,
-    // and takes the flow out of receiving: it is not a delete. No pane
-    // outlives its flow: a pane still there, its harness running the flow's
-    // own session or none, is closed in the same event, under its lease. A
-    // close Herdr refuses answers CloseRefused and records nothing: the flow
-    // is not retired while its pane stays. The flow a Maintained metaflow is
-    // Awake as is not retired: Retire answers Maintained and changes
-    // nothing, and the declaration's continuity is changed first.
-    // Privileged, because it changes what Flow holds of a flow without that
-    // flow acting.
-    fn retire(&self, flow_id: &signal_flow::FlowId) -> Result<FlowNode, meta_signal_flow::Output> {
-        let nexus = self.nexus;
-        let rejected = meta_signal_flow::Output::RetireRejected;
-        let node = match nexus.store.flow_node(&flow_id.0) {
-            Ok(Some(node)) => node,
-            Ok(None) => return Err(rejected(meta_signal_flow::RetireRejection::UnknownFlow)),
-            Err(_) => return Err(rejected(meta_signal_flow::RetireRejection::StoreRefused)),
-        };
-        if !node.flow_lifecycle.is_live() {
-            return Err(rejected(meta_signal_flow::RetireRejection::AlreadyGone));
-        }
-        // A restart that may still start a harness, or is running, keeps its
-        // Address: only a Failed one is retired, and its record goes with the
-        // flow.
-        {
-            use crate::store::restart::RecordsRestarts;
-            match nexus.store.restart_record(&flow_id.0) {
-                Ok(None) => {}
-                Ok(Some(record))
-                    if matches!(
-                        record.restart_phase,
-                        meta_signal_flow::RestartPhase::Failed(_)
-                    ) => {}
-                Ok(Some(_)) => {
-                    return Err(rejected(
-                        meta_signal_flow::RetireRejection::RestartUnresolved,
-                    ));
-                }
-                Err(_) => return Err(rejected(meta_signal_flow::RetireRejection::StoreRefused)),
-            }
-        }
-        {
-            use crate::store::metaflow::SleepsMetaflows;
-            use crate::store::successor::ReadsContinuity;
-            let maintained = nexus.store.metaflow_awake_as(&flow_id.0).and_then(|awake| {
-                awake
-                    .map(|metaflow| nexus.store.continuity(&metaflow.address))
-                    .transpose()
-            });
-            match maintained {
-                Ok(Some(meta_signal_flow::Continuity::Maintained)) => {
-                    return Err(rejected(meta_signal_flow::RetireRejection::Maintained));
-                }
-                Ok(_) => {}
-                Err(_) => return Err(rejected(meta_signal_flow::RetireRejection::StoreRefused)),
-            }
-        }
-        if let HerdrRouteSelection::Available(route) = &node.herdr_route_selection
-            && matches!(
-                nexus.herdr.pane_presence(&node),
-                herdr::PanePresence::Present | herdr::PanePresence::Bare
-            )
-        {
-            let closed = {
-                let _lease = nexus.pane_leases.hold(route);
-                nexus.perform(Operation::Close(node.clone()))
-            };
-            if closed != Outcome::Closed {
-                return Err(rejected(meta_signal_flow::RetireRejection::CloseRefused));
-            }
-        }
-        if nexus.perform(Operation::Record(Record_Data::Retired(flow_id.clone())))
-            != Outcome::Recorded
-        {
-            return Err(rejected(meta_signal_flow::RetireRejection::StoreRefused));
-        }
-        match nexus.store.flow_node(&flow_id.0) {
-            Ok(Some(retired)) => Ok(retired),
-            Ok(None) | Err(_) => Err(rejected(meta_signal_flow::RetireRejection::StoreRefused)),
-        }
-    }
-
-    // The meta surface restarts and refreshes as the ordinary socket does;
-    // each runs off the gate and takes it for its steps.
+    // The meta surface restarts as the ordinary socket does, off the gate,
+    // taking it for its steps.
     fn restart(
         &self,
         flow_id: &signal_flow::FlowId,
@@ -1343,21 +1263,6 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         use crate::restarting::RestartsFlows;
         match self.nexus.restart(&flow_id.0).into_meta() {
             meta_signal_flow::Output::Restarted(restarted) => Ok(restarted),
-            other => Err(other),
-        }
-    }
-
-    fn refresh(
-        &self,
-        address: &signal_flow::Address,
-    ) -> Result<signal_flow::Refreshed, meta_signal_flow::Output> {
-        use crate::waking::RefreshesMetaflows;
-        // A meta peer is no flow of the Address: it refreshes the current
-        // flow.
-        let caller =
-            crate::generated::memory::RefreshCaller::Elsewhere(signal_flow::Origin::Unbound);
-        match self.nexus.refresh(address, &caller).into_meta() {
-            meta_signal_flow::Output::Refreshed(refreshed) => Ok(refreshed),
             other => Err(other),
         }
     }
@@ -1556,6 +1461,16 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
             meta_signal_flow::Output::Removed(removed) => Ok(removed),
             other => Err(other),
         }
+    }
+
+    // The override panel: each override is answered by the panel's own
+    // answer (`overriding`).
+    fn r#override(
+        &self,
+        panel_input: &meta_signal_flow::panel::Input,
+    ) -> Result<meta_signal_flow::panel::Output, meta_signal_flow::Output> {
+        use meta_signal_flow::panel::Answerable;
+        Ok(panel_input.answer(self))
     }
 }
 
@@ -2501,7 +2416,7 @@ impl ReconcilesListedFlows for RunningNexus {
     }
 }
 
-/// An ordinary Restart's or Refresh's answer as the meta surface gives it.
+/// An ordinary Restart's answer as the meta surface gives it.
 trait AnswersOnMeta {
     fn into_meta(self) -> meta_signal_flow::Output;
 }
@@ -2512,13 +2427,8 @@ impl AnswersOnMeta for Output {
             Output::Restarted(flow_id) => meta_signal_flow::Output::Restarted(flow_id),
             Output::RestartQueued(flow_id) => meta_signal_flow::Output::RestartQueued(flow_id),
             Output::RestartRefused(refusal) => meta_signal_flow::Output::RestartRefused(refusal),
-            Output::Refreshed(refreshed) => meta_signal_flow::Output::Refreshed(refreshed),
-            Output::RefreshQueued(queued) => meta_signal_flow::Output::RefreshQueued(queued),
-            Output::RefreshRejected(rejection) => {
-                meta_signal_flow::Output::RefreshRejected(rejection)
-            }
             Output::Refused(refusal) => meta_signal_flow::Output::OrdinaryRefused(refusal),
-            // Neither answers anything else.
+            // It answers nothing else.
             other => meta_signal_flow::Output::Refused(meta_signal_flow::StoreFailure(format!(
                 "unexpected answer {other:?}"
             ))),
@@ -2626,7 +2536,10 @@ impl DispatchesSerially for RunningNexus {
         query: meta_signal_flow::Input,
         resolver: Option<meta_signal_flow::ResolverIdentity>,
     ) -> meta_signal_flow::Output {
-        if let meta_signal_flow::Input::Restart(_) | meta_signal_flow::Input::Refresh(_) = &query {
+        // A Restart and every override run off the gate, each taking it for
+        // its own steps: a Renew, a Deliver and a Resume launch or deliver
+        // as a wake does.
+        if let meta_signal_flow::Input::Restart(_) | meta_signal_flow::Input::Override(_) = &query {
             let response = self.dispatch_meta_from(query, resolver);
             {
                 let _turn = self
@@ -2871,6 +2784,7 @@ mod tests {
     mod model;
     mod observe_metaflows;
     mod open_requests;
+    mod overriding;
     mod queue_drain;
     mod queue_operations;
     mod reap_takeover;
@@ -6028,8 +5942,13 @@ mod tests {
         );
     }
 
+    /// Close is the owner's act Retire was: the flow's row and history are
+    /// kept, its pane closed, and it leaves receiving.
     #[test]
-    fn retire_keeps_the_row_and_takes_the_flow_out_of_receiving() {
+    fn close_keeps_the_row_and_takes_the_flow_out_of_receiving() {
+        use crate::store::ReadsFlowRows;
+        use crate::store::metaflow::SeedsMetaflow;
+        use meta_signal_flow::panel;
         let fixture = NexusFixture::new();
         fixture.accept_pane_operations(
             vec![fixture.current_agent()],
@@ -6037,42 +5956,52 @@ mod tests {
         );
         let node = fixture.node();
         fixture.register_with(FlowLifecycle::Active);
+        fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+            address: signal_flow::Address {
+                aspect: signal_flow::Aspect::Mind,
+                topic: signal_flow::Topic("core".into()),
+                model: signal_flow::Model::Sol,
+            },
+            state: flow_ethos::State::Awake(flow_ethos::FlowId("908786".into())),
+            past: flow_ethos::Past(vec![]),
+            queue: flow_ethos::Queue(vec![]),
+        });
+        let close = |flow_id: &str| {
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Input::Override(panel::Input::Close(
+                    flow_ethos::FlowId(flow_id.into()),
+                )))
+        };
 
         assert_eq!(
-            fixture
-                .nexus
-                .dispatch_meta(meta_signal_flow::Input::Retire(flow_ethos::FlowId(
-                    "unknown".into()
-                ))),
-            meta_signal_flow::Output::RetireRejected(
-                meta_signal_flow::RetireRejection::UnknownFlow
-            )
+            close("unknown"),
+            meta_signal_flow::Output::Overridden(panel::Output::Refused(
+                panel::Refused_Data::UnknownFlow(flow_ethos::FlowId("unknown".into()))
+            ))
         );
-
-        let meta_signal_flow::Output::FlowRetired(retired) =
-            fixture
-                .nexus
-                .dispatch_meta(meta_signal_flow::Input::Retire(flow_ethos::FlowId(
-                    "908786".into(),
-                )))
-        else {
-            panic!("a live flow is retired")
-        };
+        assert_eq!(
+            close("908786"),
+            meta_signal_flow::Output::Overridden(panel::Output::Closed(flow_ethos::FlowId(
+                "908786".into()
+            )))
+        );
+        let retired = fixture
+            .nexus
+            .store
+            .flow_node("908786")
+            .unwrap()
+            .expect("the closed flow's row is kept");
         assert_eq!(retired.flow_lifecycle, FlowLifecycle::Retired);
-        assert_eq!(retired.flow_id, flow_ethos::FlowId("908786".into()));
         assert_eq!(retired.session_id, node.session_id, "its history is kept");
         assert_eq!(retired.origin, node.origin);
 
-        // Retiring it again changes nothing and says so.
+        // Closing it again closes nothing more and says it is closed.
         assert_eq!(
-            fixture
-                .nexus
-                .dispatch_meta(meta_signal_flow::Input::Retire(flow_ethos::FlowId(
-                    "908786".into()
-                ))),
-            meta_signal_flow::Output::RetireRejected(
-                meta_signal_flow::RetireRejection::AlreadyGone
-            )
+            close("908786"),
+            meta_signal_flow::Output::Overridden(panel::Output::Closed(flow_ethos::FlowId(
+                "908786".into()
+            )))
         );
 
         // Its pane is closed, and though Herdr still shows it live, it

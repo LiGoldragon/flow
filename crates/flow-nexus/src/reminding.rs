@@ -45,6 +45,10 @@ pub trait RemindsCallers {
 impl RemindsCallers for RunningNexus {
     fn send_due_reminders(&self) {
         use crate::handover_reminding::RemindsHandoverCallers;
+        // A held Nexus's clocks stand: nothing due is sent.
+        if crate::generated::overriding::HeedsOverrides::held(self) {
+            return;
+        }
         use crate::reminding::ArchivesHandoverOnTick;
         let now = SystemTime::now().seconds_since_epoch();
         let mut reminded: Vec<Address> = Vec::new();
@@ -175,6 +179,12 @@ impl RemindsCallers for RunningNexus {
         // thread blocks on the announcement, bounded by that due time.
         while !self.stopping.requested() {
             let seen = self.store.reminder_changes.current();
+            // A held Nexus's clocks stand: nothing due is sent until the
+            // switch moves, which is announced as a reminder change.
+            if crate::generated::overriding::HeedsOverrides::held(self) {
+                self.store.reminder_changes.after(seen);
+                continue;
+            }
             self.send_due_reminders();
             match self.next_reminder_due() {
                 Some(due) => {

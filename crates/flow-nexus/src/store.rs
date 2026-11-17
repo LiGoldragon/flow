@@ -10104,7 +10104,7 @@ mod tests {
     #[test]
     fn panel_families_are_preserved_unread_while_latest_memory_advances() {
         use crate::store::context::RecordsContextSize;
-        use redb::{ReadableDatabase as _, ReadableTable as _};
+        use redb::{ReadableDatabase as _, ReadableTable as _, ReadableTableMetadata as _};
         for running in [false, true] {
             let fixture = StoreFixture::new();
             fixture.configured();

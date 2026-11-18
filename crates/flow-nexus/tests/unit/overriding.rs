@@ -1173,7 +1173,7 @@ fn refused_parked_launch_is_terminal_and_never_reexecuted_after_release_or_resta
     use crate::launching::LaunchesFlows;
     use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
     use crate::store::{NamesConfiguredModel, RecordsLaunchOutcome};
-    for (change_model, change_purpose) in [(false, false), (true, false), (false, true)] {
+    for change_model in [false, true] {
         let mut fixture = NexusFixture::new();
         let seat = ended_claude(&fixture);
         let at = address(Model::Sol);
@@ -1229,14 +1229,6 @@ fn refused_parked_launch_is_terminal_and_never_reexecuted_after_release_or_resta
                     },
                 ]))
                 .unwrap();
-        } else if change_purpose {
-            let mut declaration = original_declaration.clone();
-            declaration.purpose = meta::Purpose("Changed after the launch was parked.".into());
-            fixture
-                .nexus
-                .store
-                .configure_change(meta::ConfigurationChange::Metaflows(vec![declaration]))
-                .unwrap();
         } else {
             let mut declaration = original_declaration.clone();
             declaration.root_option = Some(meta::Root(
@@ -1260,7 +1252,7 @@ fn refused_parked_launch_is_terminal_and_never_reexecuted_after_release_or_resta
             .launch_outcome(&profile.launch_request_id.0)
             .unwrap()
             .expect("a resumed refusal settles the parked request");
-        if change_model || change_purpose {
+        if change_model {
             assert_eq!(
                 outcome,
                 crate::store::LaunchOutcome::StartRejected(
@@ -1436,5 +1428,85 @@ fn a_retained_settled_marker_is_removed_without_executing_its_launch() {
         signal_flow::Output::StartRejected(signal_flow::StartRejection::LaunchPersistenceRefused)
     );
     overridden(&fixture, meta::Input::ReleasePermaflow(at));
+    assert_eq!(world.claude_starts(), 0, "{}", world.calls());
+}
+
+#[test]
+fn a_parked_prompt_fingerprint_conflict_is_terminal_without_a_profile_conflict() {
+    use crate::generated::operation::{LaunchReservation, Operation, Outcome};
+    use crate::generated::overriding::ParksHeldLaunches;
+    use crate::launching::{LaunchesFlows, NamesLaunchSession};
+    use crate::performing::Performs;
+    use crate::store::{
+        LaunchOutcome, NamesConfiguredModel, ReadsLaunchAttempt, RecordsLaunchOutcome,
+    };
+    let mut fixture = NexusFixture::new();
+    let seat = ended_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let world = fixture.fresh_claude_world();
+    let mut profile = seat.profile;
+    profile.launch_request_id = signal_flow::LaunchRequestId("changed-parked-prompt".into());
+    profile.herdr_session_name = fixture.nexus.launch_session().unwrap();
+    profile.model_name =
+        signal_flow::ModelName(fixture.nexus.store.configured_model(&at).unwrap().unwrap());
+    overridden(&fixture, meta::Input::HoldPermaflow(at.clone()));
+    let Outcome::Composed(mut launch) = fixture.nexus.perform(Operation::Compose(profile.clone()))
+    else {
+        panic!("the parked launch composes");
+    };
+    let current_fingerprint = launch.first_prompt_payload.prompt_sha256.clone();
+    // Preserve the exact profile, with the fingerprint of earlier prompt content.
+    launch.first_prompt_payload.prompt_sha256 = signal_flow::PromptSha256("0".repeat(64));
+    assert_ne!(
+        launch.first_prompt_payload.prompt_sha256,
+        current_fingerprint
+    );
+    fixture
+        .nexus
+        .store
+        .park_held_launch(LaunchReservation {
+            composed_launch: launch,
+            origin: signal_flow::Origin::Unbound,
+        })
+        .unwrap();
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .launch_attempt(&profile.launch_request_id.0)
+            .unwrap()
+            .unwrap()
+            .launch_profile,
+        profile
+    );
+    overridden(&fixture, meta::Input::ReleasePermaflow(at.clone()));
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .launch_outcome(&profile.launch_request_id.0)
+            .unwrap(),
+        Some(LaunchOutcome::StartRejected(
+            signal_flow::StartRejection::LaunchRequestConflict
+        ))
+    );
+    assert!(
+        !fixture
+            .nexus
+            .store
+            .marked_held_launch(profile.launch_request_id.clone())
+            .unwrap()
+    );
+    assert_eq!(world.claude_starts(), 0, "{}", world.calls());
+    fixture.restarted();
+    overridden(&fixture, meta::Input::ReleasePermaflow(at));
+    assert_eq!(
+        fixture.nexus.start(profile, signal_flow::Origin::Unbound),
+        signal_flow::Output::StartRejected(signal_flow::StartRejection::LaunchRequestConflict)
+    );
     assert_eq!(world.claude_starts(), 0, "{}", world.calls());
 }

@@ -914,8 +914,8 @@ fn the_declared_result_shape_names_and_requires_the_request_id_the_parser_reads(
     let schema = &specification["inputSchema"];
     assert_eq!(schema["properties"]["request"]["type"], "string");
     assert_eq!(
-        schema["allOf"][0]["if"]["properties"]["kind"]["const"],
-        "Result"
+        schema["allOf"][0]["if"]["properties"]["kind"]["enum"],
+        serde_json::json!(["Result", "Done"])
     );
     assert_eq!(schema["allOf"][0]["then"]["required"][0], "request");
 
@@ -938,6 +938,17 @@ fn the_declared_result_shape_names_and_requires_the_request_id_the_parser_reads(
         SendKind::Result(flow_ethos::RequestId("a001".into()))
     );
 
+    let mut done: serde_json::Value = serde_json::from_str(&result.arguments.0).unwrap();
+    done["kind"] = serde_json::json!("Done");
+    result.arguments = crate::generated::send_tool::Arguments(done.to_string());
+    assert_eq!(
+        result
+            .send_arguments()
+            .expect("declared Done parses")
+            .send_kind,
+        SendKind::Done(flow_ethos::RequestId("a001".into()))
+    );
+
     for malformed in [
         serde_json::json!({
             "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },
@@ -946,6 +957,14 @@ fn the_declared_result_shape_names_and_requires_the_request_id_the_parser_reads(
         serde_json::json!({
             "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },
             "priority": "Soft", "kind": "Result", "body": "wrong id", "request": 1
+        }),
+        serde_json::json!({
+            "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },
+            "priority": "Soft", "kind": "Done", "body": "missing id"
+        }),
+        serde_json::json!({
+            "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },
+            "priority": "Soft", "kind": "Done", "body": "wrong id", "request": 1
         }),
         serde_json::json!({
             "target": { "aspect": "Mind", "topic": "gamma", "model": "Sol" },

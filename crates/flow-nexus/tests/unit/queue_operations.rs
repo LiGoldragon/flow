@@ -1439,3 +1439,281 @@ fn silence_withdraws_the_queued_reminder_of_its_task() {
         "the Task stays open"
     );
 }
+
+/// Exercises the JSON parser and actual handler, before routing an answer,
+/// rather than passing an already-private answer straight to the store.
+fn answer_through_tool(
+    fixture: &NexusFixture,
+    kind: &str,
+    request_id: &signal_flow::RequestId,
+    call_id: &str,
+) -> crate::generated::send_tool::SendOutcome {
+    use crate::generated::send_tool::HandlesSendCall;
+    let mut call = super::send_tool::tool_call("answer-thread", call_id, "Landed.");
+    call.arguments = crate::generated::send_tool::Arguments(
+        serde_json::json!({
+            "target": { "aspect": "Mind", "topic": "unusedTarget", "model": "Luna" },
+            "priority": "Soft", "kind": kind, "body": "Landed.", "request": request_id.0
+        })
+        .to_string(),
+    );
+    fixture.nexus.handle_held_send_call(call)
+}
+
+#[test]
+fn result_cannot_close_a_task_through_the_tool_or_ordinary_send() {
+    use crate::generated::send_tool::{SendOutcome, SendRefusal};
+    use crate::store::logical_delivery::RequestClosure;
+    for origin in [
+        SentBy::Sender(at("taskAnswerSender")),
+        SentBy::Unbound,
+        SentBy::Flow,
+        SentBy::Unknown,
+    ] {
+        let fixture = NexusFixture::new();
+        let recipient = at("taskAnswerRecipient");
+        asleep(&fixture, &at("taskAnswerSender"));
+        asleep(&fixture, &recipient);
+        let task = admitted(
+            &fixture,
+            &recipient,
+            origin,
+            Request::Task(flow_ethos::AnswerableTask {
+                minutes: flow_ethos::Minutes(30),
+                string: "Land the line.".into(),
+            }),
+        );
+        delivered(&fixture, &recipient, &task);
+        assert_eq!(
+            answer_through_tool(&fixture, "Result", &task.request_id, "wrong-kind"),
+            SendOutcome::Refused(SendRefusal::Unresolved)
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .send_request(
+                    SendRequest {
+                        address: recipient.clone(),
+                        sendable_message: signal_flow::SendableMessage::Soft(
+                            signal_flow::SendableRequest::Result(
+                                signal_flow::SendableRequest_Result_Data {
+                                    request_id: task.request_id.clone(),
+                                    string: "Landed.".into()
+                                }
+                            )
+                        ),
+                    },
+                    None
+                )
+                .response,
+            Output::SendRefused(signal_flow::VisibleRefusal::Unresolved)
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .request_binding(&task.request_id)
+                .unwrap()
+                .unwrap()
+                .request_closure,
+            RequestClosure::Open
+        );
+        assert!(
+            fixture
+                .nexus
+                .store
+                .reminder(&task.logical_delivery_id.0)
+                .unwrap()
+                .is_some()
+        );
+        assert!(queued(&fixture, &at("taskAnswerSender")).is_empty());
+        let done = answer_through_tool(&fixture, "Done", &task.request_id, "right-kind");
+        assert!(
+            matches!(done, SendOutcome::Accepted(_) | SendOutcome::Kept(_)),
+            "{done:?}"
+        );
+        assert!(matches!(
+            fixture
+                .nexus
+                .store
+                .request_binding(&task.request_id)
+                .unwrap()
+                .unwrap()
+                .request_closure,
+            RequestClosure::Answered(_)
+        ));
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .reminder(&task.logical_delivery_id.0)
+                .unwrap(),
+            None
+        );
+    }
+}
+
+#[test]
+fn done_after_silence_closes_the_open_task_through_both_paths_and_origins() {
+    use crate::generated::send_tool::{SendOutcome, SendRefusal};
+    use crate::store::logical_delivery::RequestClosure;
+    for tool in [false, true] {
+        for origin in [
+            SentBy::Sender(at("silencedAnswerSender")),
+            SentBy::Unbound,
+            SentBy::Flow,
+            SentBy::Unknown,
+        ] {
+            let kept = !matches!(&origin, SentBy::Sender(_));
+            let fixture = NexusFixture::new();
+            let recipient = at("silencedAnswerRecipient");
+            asleep(&fixture, &at("silencedAnswerSender"));
+            asleep(&fixture, &recipient);
+            let task = admitted(
+                &fixture,
+                &recipient,
+                origin,
+                Request::Task(flow_ethos::AnswerableTask {
+                    minutes: flow_ethos::Minutes(30),
+                    string: "Land the line.".into(),
+                }),
+            );
+            delivered(&fixture, &recipient, &task);
+            assert_eq!(
+                fixture
+                    .nexus
+                    .dispatch(Input::Silence(task.request_id.clone())),
+                Output::Silenced(task.request_id.clone())
+            );
+            assert_eq!(
+                fixture
+                    .nexus
+                    .store
+                    .reminder(&task.logical_delivery_id.0)
+                    .unwrap(),
+                None
+            );
+            assert_eq!(
+                fixture
+                    .nexus
+                    .store
+                    .request_binding(&task.request_id)
+                    .unwrap()
+                    .unwrap()
+                    .request_closure,
+                RequestClosure::Open
+            );
+            if tool {
+                let outcome = answer_through_tool(&fixture, "Done", &task.request_id, "done");
+                if kept {
+                    assert!(matches!(outcome, SendOutcome::Kept(_)), "{outcome:?}");
+                } else {
+                    assert!(matches!(outcome, SendOutcome::Accepted(_)), "{outcome:?}");
+                }
+                assert_eq!(
+                    answer_through_tool(&fixture, "Done", &task.request_id, "done"),
+                    outcome,
+                    "a replay admits nothing twice"
+                );
+            } else {
+                let outcome = fixture
+                    .nexus
+                    .send_request(
+                        SendRequest {
+                            address: recipient.clone(),
+                            sendable_message: signal_flow::SendableMessage::Soft(
+                                signal_flow::SendableRequest::Done(
+                                    signal_flow::SendableRequest_Done_Data {
+                                        request_id: task.request_id.clone(),
+                                        string: "Landed.".into(),
+                                    },
+                                ),
+                            ),
+                        },
+                        None,
+                    )
+                    .response;
+                assert!(
+                    matches!(outcome, Output::SendAccepted(_) | Output::Sent(_)),
+                    "{outcome:?}"
+                );
+            }
+            assert!(matches!(
+                fixture
+                    .nexus
+                    .store
+                    .request_binding(&task.request_id)
+                    .unwrap()
+                    .unwrap()
+                    .request_closure,
+                RequestClosure::Answered(_)
+            ));
+            assert_eq!(
+                answer_through_tool(&fixture, "Done", &task.request_id, "done-again"),
+                SendOutcome::Refused(SendRefusal::Unresolved)
+            );
+            assert!(
+                fixture
+                    .nexus
+                    .store
+                    .due_reminders(i64::MAX)
+                    .unwrap()
+                    .is_empty()
+            );
+            if !kept {
+                assert_eq!(queued(&fixture, &at("silencedAnswerSender")).len(), 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn tool_answers_require_an_open_delivered_request_of_the_right_kind() {
+    use crate::generated::send_tool::{SendOutcome, SendRefusal};
+    let fixture = NexusFixture::new();
+    let sender = at("answerValidationSender");
+    let recipient = at("answerValidationRecipient");
+    asleep(&fixture, &sender);
+    asleep(&fixture, &recipient);
+    let order = admitted(
+        &fixture,
+        &recipient,
+        SentBy::Sender(sender.clone()),
+        Request::Order("Land the line.".into()),
+    );
+    assert_eq!(
+        answer_through_tool(&fixture, "Result", &order.request_id, "undelivered"),
+        SendOutcome::Refused(SendRefusal::Unresolved)
+    );
+    delivered(&fixture, &recipient, &order);
+    assert_eq!(
+        answer_through_tool(&fixture, "Done", &order.request_id, "done-order"),
+        SendOutcome::Refused(SendRefusal::Unresolved)
+    );
+    let accepted = answer_through_tool(&fixture, "Result", &order.request_id, "result-order");
+    assert!(matches!(accepted, SendOutcome::Accepted(_)), "{accepted:?}");
+    assert_eq!(
+        answer_through_tool(&fixture, "Result", &order.request_id, "closed-order"),
+        SendOutcome::Refused(SendRefusal::Unresolved)
+    );
+    assert_eq!(
+        answer_through_tool(
+            &fixture,
+            "Result",
+            &signal_flow::RequestId("zzzz".into()),
+            "unknown"
+        ),
+        SendOutcome::Refused(SendRefusal::Unresolved)
+    );
+    let answers = queued(&fixture, &sender);
+    assert_eq!(answers.len(), 1);
+    let Message::Soft(Request::Result(flow_ethos::ResultPayload::Answered(answer))) =
+        &answers[0].message
+    else {
+        panic!("a routed Result")
+    };
+    assert_eq!(
+        answer.logical_delivery_id, order.logical_delivery_id,
+        "the resolver records the original logical identity"
+    );
+}

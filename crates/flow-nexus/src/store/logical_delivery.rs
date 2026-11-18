@@ -2142,13 +2142,6 @@ impl RecordsLogicalDeliveries for FlowStore {
             | Message::MiddleAbrupt(request)
             | Message::Soft(request) => request.clone(),
         };
-        if let Request::Done(flow_ethos::DonePayload::Answered(done)) = &request
-            && self.reminder(&done.logical_delivery_id.0)?.is_none()
-        {
-            return Ok(signal_flow::PrivateSendResponse::Refused(
-                Refusal::Unresolved,
-            ));
-        }
         // Flow owns the Minutes rule at admission: above zero, and every
         // deadline its reminders reach, computed with checked arithmetic,
         // inside the clock. No policy maximum exists.
@@ -2347,10 +2340,16 @@ impl RecordsLogicalDeliveries for FlowStore {
                     },
                 )
             }
-            Request::Done(flow_ethos::DonePayload::Answered(done)) => commit.retract(
-                self.reminders,
-                RecordKey::new(done.logical_delivery_id.clone().0),
-            ),
+            Request::Done(flow_ethos::DonePayload::Answered(done)) => {
+                if self.reminder(&done.logical_delivery_id.0)?.is_some() {
+                    commit.retract(
+                        self.reminders,
+                        RecordKey::new(done.logical_delivery_id.clone().0),
+                    )
+                } else {
+                    commit
+                }
+            }
             Request::Done(flow_ethos::DonePayload::Historical(_)) => commit,
             _ => commit,
         };

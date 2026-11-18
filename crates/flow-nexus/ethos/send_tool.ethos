@@ -30,7 +30,7 @@
 Library
 [ signal_flow:[ Address Message SendAcceptance SendPayloadSize Topic RequestId SentBy ]
   serde_json:JsonValue.Value ]
-[ SendKind.[ Order Question Result.RequestId Notice ]
+[ SendKind.[ Order Question Result.RequestId Done.RequestId Notice ]
   Target.Address
   Body.String
   ; What the model passes the tool, typed.

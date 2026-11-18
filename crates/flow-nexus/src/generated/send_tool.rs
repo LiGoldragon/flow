@@ -11,6 +11,7 @@ pub enum SendKind {
     Order,
     Question,
     Result(signal_flow::RequestId),
+    Done(signal_flow::RequestId),
     Notice,
 }
 #[rustfmt::skip]

@@ -541,23 +541,30 @@ mod tests {
         }
     }
 
-    /// A process tree: pid, its parent, its start, its command line, and
-    /// the session its Claude record names.
-    struct Table(Vec<(u32, u32, i64, &'static [&'static str], Option<&'static str>)>);
+    struct ProcessRow {
+        pid: u32,
+        parent: u32,
+        started: i64,
+        arguments: &'static [&'static str],
+        claude_session: Option<&'static str>,
+    }
+
+    /// A process tree with each process and the session its Claude record names.
+    struct Table(Vec<ProcessRow>);
 
     impl ReadsProcessTable for Table {
         fn parent_and_start(&self, pid: u32) -> Option<(u32, i64)> {
             self.0
                 .iter()
-                .find(|row| row.0 == pid)
-                .map(|row| (row.1, row.2))
+                .find(|row| row.pid == pid)
+                .map(|row| (row.parent, row.started))
         }
         fn arguments(&self, pid: u32) -> Vec<String> {
             self.0
                 .iter()
-                .find(|row| row.0 == pid)
+                .find(|row| row.pid == pid)
                 .map(|row| {
-                    row.3
+                    row.arguments
                         .iter()
                         .map(|argument| (*argument).to_owned())
                         .collect()
@@ -567,8 +574,8 @@ mod tests {
         fn claude_session(&self, pid: u32, started: i64) -> Option<String> {
             self.0
                 .iter()
-                .find(|row| row.0 == pid && row.2 == started)
-                .and_then(|row| row.4.map(str::to_owned))
+                .find(|row| row.pid == pid && row.started == started)
+                .and_then(|row| row.claude_session.map(str::to_owned))
         }
     }
 
@@ -578,16 +585,34 @@ mod tests {
     #[test]
     fn the_hook_names_the_harness_that_runs_its_session() {
         let resumed = Table(vec![
-            (900, 800, 9_000, &["flow-hook"], None),
-            (800, 700, 8_000, &["sh", "-c", "flow-hook"], None),
-            (
-                700,
-                600,
-                7_000,
-                &["claude", "--resume", "s1", "--model", "m"],
-                None,
-            ),
-            (600, 1, 6_000, &["herdr"], None),
+            ProcessRow {
+                pid: 900,
+                parent: 800,
+                started: 9_000,
+                arguments: &["flow-hook"],
+                claude_session: None,
+            },
+            ProcessRow {
+                pid: 800,
+                parent: 700,
+                started: 8_000,
+                arguments: &["sh", "-c", "flow-hook"],
+                claude_session: None,
+            },
+            ProcessRow {
+                pid: 700,
+                parent: 600,
+                started: 7_000,
+                arguments: &["claude", "--resume", "s1", "--model", "m"],
+                claude_session: None,
+            },
+            ProcessRow {
+                pid: 600,
+                parent: 1,
+                started: 6_000,
+                arguments: &["herdr"],
+                claude_session: None,
+            },
         ]);
         assert_eq!(
             resumed.harness_above(900, "s1"),
@@ -598,8 +623,20 @@ mod tests {
         );
         assert_eq!(resumed.harness_above(900, "s2"), None);
         let recorded = Table(vec![
-            (900, 700, 9_000, &["flow-hook"], None),
-            (700, 1, 7_100, &["node", "claude"], Some("s1")),
+            ProcessRow {
+                pid: 900,
+                parent: 700,
+                started: 9_000,
+                arguments: &["flow-hook"],
+                claude_session: None,
+            },
+            ProcessRow {
+                pid: 700,
+                parent: 1,
+                started: 7_100,
+                arguments: &["node", "claude"],
+                claude_session: Some("s1"),
+            },
         ]);
         assert_eq!(
             recorded.harness_above(900, "s1"),

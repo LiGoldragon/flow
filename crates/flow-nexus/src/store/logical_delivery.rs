@@ -1755,6 +1755,19 @@ impl RecordsLogicalDeliveries for FlowStore {
         } else {
             commit
         };
+        // A Done closes its Task's reminders in the same commit, as a Done
+        // admitted by a Send does; a Task the send tool admitted holds none.
+        let commit = match &request {
+            Request::Done(flow_ethos::DonePayload::Answered(done))
+                if self.reminder(&done.logical_delivery_id.0)?.is_some() =>
+            {
+                commit.retract(
+                    self.reminders,
+                    RecordKey::new(done.logical_delivery_id.clone().0),
+                )
+            }
+            _ => commit,
+        };
         self.engine.commit_atomic(
             commit
                 .mutate(self.metaflows, stored)

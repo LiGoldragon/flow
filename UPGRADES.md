@@ -15,6 +15,13 @@ neither wire does.** Psyche hgvl, option a of 2ezk.
   Before, the queued reminder stayed and reached the sender after its Task
   was closed. A reminder queued by 0.60.0 carries no tie and is delivered
   as it was.
+- **Silence withdraws the queued reminder too.** A Silence ends the Task's
+  reminders and leaves it open, as before, and now also withdraws its
+  reminder Notices still queued and not yet handed over, as a closing does.
+- **A Done admitted by the send tool ends its Task's reminders.** It
+  retracts the Task's reminder in the commit that admits it, as a Done sent
+  by Send does. Before, the Task was closed and its reminders kept falling
+  due.
 - **Memory: one new family, registered empty when absent**, the way
   0.60.0's was: `flow_nexus_task_reminder_notices`
   (`flow-nexus-task-reminder-notice-v1`), one `TaskReminderNotice.{

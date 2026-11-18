@@ -2,9 +2,10 @@
 //! the failure that comes with the last, tied to their Task by a record of
 //! their own, so that whatever closes the Task withdraws the ones still
 //! waiting in a queue: a Done naming it, a Cancel, a CloseRequest, an
-//! ArchiveRequest. A Notice already handed to its seat or delivered stays
-//! as it is. The family is new in 0.60.1: a store written before holds none
-//! and is opened with it registered empty.
+//! ArchiveRequest; a Silence, which ends its reminders and leaves it open,
+//! withdraws them the same. A Notice already handed to its seat or
+//! delivered stays as it is. The family is new in 0.60.1: a store written
+//! before holds none and is opened with it registered empty.
 
 use super::logical_delivery::{LogicalDeliveryTransition, RecordsLogicalDeliveries};
 use super::metaflow::SleepsMetaflows;
@@ -81,13 +82,14 @@ pub(crate) trait TiesNoticesToTasks {
         text: String,
         of: ReminderOfTask,
     ) -> Result<signal_flow::PrivateSendResponse, StoreError>;
-    /// The Task bound to `task` is closed: every Notice tied to it that is
-    /// still queued and that no hand-over holds leaves its queue unsent and
-    /// ends Withdrawn, and every tie to it is retracted; a Notice already
-    /// handed over or delivered stays as it stands. Called once the commit
-    /// that closed the Task is made, with none of the store's write gates
-    /// held. The Task stays closed whatever this meets: a store that
-    /// refuses leaves the Notices queued and is logged.
+    /// The Task bound to `task` is reminded no more, closed or silenced:
+    /// every Notice tied to it that is still queued and that no hand-over
+    /// holds leaves its queue unsent and ends Withdrawn, and every tie to
+    /// it is retracted; a Notice already handed over or delivered stays as
+    /// it stands. Called once the commit that ended its reminders is made,
+    /// with none of the store's write gates held. That commit stands
+    /// whatever this meets: a store that refuses leaves the Notices queued
+    /// and is logged.
     fn close_task_reminder_notices(&self, task: &LogicalDeliveryId);
 }
 
@@ -118,7 +120,7 @@ impl TiesNoticesToTasks for FlowStore {
     fn close_task_reminder_notices(&self, task: &LogicalDeliveryId) {
         if let Err(error) = self.withdraw_task_reminder_notices(task) {
             eprintln!(
-                "flow-nexus: the reminder Notices of closed Task {} were not withdrawn: {error}",
+                "flow-nexus: the reminder Notices of Task {} were not withdrawn: {error}",
                 task.0
             );
         }
@@ -126,7 +128,7 @@ impl TiesNoticesToTasks for FlowStore {
 }
 
 trait WithdrawsTaskReminderNotices {
-    /// The ties to the Task bound to `task`, oldest Notice first.
+    /// The ties to the Task bound to `task`.
     fn ties_to(&self, task: &LogicalDeliveryId) -> Result<Vec<TaskReminderNotice>, StoreError>;
     /// What `close_task_reminder_notices` does, answering what refused.
     fn withdraw_task_reminder_notices(&self, task: &LogicalDeliveryId) -> Result<(), StoreError>;
@@ -166,7 +168,7 @@ impl WithdrawsTaskReminderNotices for FlowStore {
                 self.withdraw_queued(&snapshot.address, &tie.logical_delivery_id.0)?
             {
                 eprintln!(
-                    "flow-nexus: a reminder Notice {} of a closed Task stayed queued: {rejected:?}",
+                    "flow-nexus: a reminder Notice {} of an ended Task stayed queued: {rejected:?}",
                     tie.logical_delivery_id.0
                 );
             }
@@ -184,15 +186,13 @@ impl WithdrawsTaskReminderNotices for FlowStore {
     }
 
     fn ties_to(&self, task: &LogicalDeliveryId) -> Result<Vec<TaskReminderNotice>, StoreError> {
-        let mut ties: Vec<TaskReminderNotice> = self
+        Ok(self
             .engine
             .match_records(QueryPlan::all(self.task_reminder_notices))?
             .records()
             .iter()
             .filter(|tie| tie.reminded_task.0 == *task)
             .cloned()
-            .collect();
-        ties.sort_by(|left, right| left.logical_delivery_id.cmp(&right.logical_delivery_id));
-        Ok(ties)
+            .collect())
     }
 }

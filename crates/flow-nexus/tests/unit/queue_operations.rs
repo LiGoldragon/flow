@@ -1316,3 +1316,126 @@ fn close_request_leaves_a_delivered_reminder_and_withdraws_the_queued_one() {
     assert!(queued(&fixture, &sender).is_empty());
     assert!(queued(&fixture, &recipient).is_empty());
 }
+
+/// A Done the send tool admits ends its Task's reminders in the same commit,
+/// as a Done sent by Send does: no reminder of the Task is held after it,
+/// and none falls due.
+#[test]
+fn a_done_through_the_send_tool_removes_its_tasks_reminder() {
+    use crate::generated::send_tool::{CallId, SendOutcome, Target, ThreadId, ToolCallKey, TurnId};
+    let fixture = NexusFixture::new();
+    let sender = at("toolDoneSender");
+    let recipient = at("toolDoneRecipient");
+    asleep(&fixture, &sender);
+    asleep(&fixture, &recipient);
+    let task = admitted(
+        &fixture,
+        &recipient,
+        SentBy::Sender(sender.clone()),
+        Request::Task(flow_ethos::AnswerableTask {
+            minutes: flow_ethos::Minutes(30),
+            string: "Land the line.".into(),
+        }),
+    );
+    delivered(&fixture, &recipient, &task);
+    assert!(
+        fixture
+            .nexus
+            .store
+            .reminder(&task.logical_delivery_id.0)
+            .unwrap()
+            .is_some(),
+        "the Task is reminded"
+    );
+
+    let outcome = fixture
+        .nexus
+        .store
+        .accept_tool_send(
+            &ToolCallKey {
+                thread_id: ThreadId("tool-done-thread".into()),
+                turn_id: TurnId("tool-done-turn".into()),
+                call_id: CallId("tool-done-call".into()),
+            },
+            "tool-done-content",
+            SentBy::Sender(recipient.clone()),
+            &Target(sender.clone()),
+            Message::Soft(Request::Done(flow_ethos::DonePayload::Answered(
+                flow_ethos::DonePayload_Answered_Data {
+                    logical_delivery_id: task.logical_delivery_id.clone(),
+                    request_id: task.request_id.clone(),
+                    string: "Landed.".into(),
+                },
+            ))),
+            0,
+        )
+        .expect("the tool send is admitted");
+    assert!(matches!(outcome, SendOutcome::Accepted(_)), "{outcome:?}");
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .reminder(&task.logical_delivery_id.0)
+            .unwrap(),
+        None,
+        "the Done removed the Task's reminder"
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .due_reminders(i64::MAX)
+            .unwrap()
+            .is_empty(),
+        "no reminder of the Task falls due"
+    );
+}
+
+/// Silence ends a Task's reminders and withdraws the one already queued
+/// for its sender and not yet delivered; the Task stays open and no one is
+/// told.
+#[test]
+fn silence_withdraws_the_queued_reminder_of_its_task() {
+    let fixture = NexusFixture::new();
+    let sender = at("remindedSilenceSender");
+    let recipient = at("remindedSilenceRecipient");
+    let (task, reminder) = reminded_task(&fixture, &sender, &recipient);
+
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch(Input::Silence(task.request_id.clone())),
+        Output::Silenced(task.request_id.clone())
+    );
+    assert!(
+        queued(&fixture, &sender).is_empty(),
+        "the reminder left the sender's queue and no Notice took its place"
+    );
+    assert!(
+        queued(&fixture, &recipient).is_empty(),
+        "the recipient is told nothing"
+    );
+    assert_eq!(
+        delivery_state(&fixture, &reminder.logical_delivery_id),
+        Some(DeliveryState::Withdrawn),
+        "the reminder is never delivered"
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .reminder(&task.logical_delivery_id.0)
+            .unwrap(),
+        None,
+        "no reminder follows"
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .request_binding(&task.request_id)
+            .unwrap()
+            .is_some(),
+        "the Task stays open"
+    );
+}

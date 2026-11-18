@@ -36,7 +36,9 @@ pub trait OperatesOnRequestsAndQueues {
     /// reminder, a reminder not yet sent is retired, and `closer`, the
     /// process the caller's connection showed, is recorded with it.
     fn close_request(&self, request_id: &RequestId, closer: Option<&Process>) -> Output;
-    /// Stops a Task's reminders; the Task stays open.
+    /// Stops a Task's reminders: none follows, and one already queued for
+    /// its sender and not yet handed over is withdrawn unsent. The Task
+    /// stays open.
     fn silence(&self, request_id: &RequestId) -> Output;
     /// Everything queued for `address` leaves its queue.
     fn clear(&self, address: &Address) -> Output;
@@ -266,7 +268,14 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
 
     fn silence(&self, request_id: &RequestId) -> Output {
         use crate::store::reminder::RecordsReminders;
+        use crate::store::task_reminder_notice::TiesNoticesToTasks;
         let refused = |rejection| Output::SilenceRejected(rejection);
+        // The Task's reminders still queued leave their queues, as a Cancel
+        // takes a request out: under the dispatch gate.
+        let _turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let binding = match self.store.request_binding(request_id) {
             Ok(Some(binding)) => binding,
             Ok(None) => return refused(RequestRejection::UnknownRequest),
@@ -291,7 +300,13 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
             return refused(RequestRejection::NotTask);
         }
         match self.store.close_reminder(&binding.logical_delivery_id.0) {
-            Ok(_) => Output::Silenced(request_id.clone()),
+            Ok(_) => {
+                // No reminder follows, and one already queued and not yet
+                // handed over is withdrawn unsent.
+                self.store
+                    .close_task_reminder_notices(&binding.logical_delivery_id);
+                Output::Silenced(request_id.clone())
+            }
             Err(_) => refused(RequestRejection::StoreRefused),
         }
     }

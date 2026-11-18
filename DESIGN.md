@@ -232,7 +232,8 @@ ending answers, a CloseRequest records the process the caller's connection
 showed, `ClosedRequest.{ LogicalDeliveryId RequestId Closer.Option<Process> }`
 keyed by the logical delivery (a request id is drawn again once archived),
 in the commit that archives it; whoever asks is served, as for a Cancel;
-`Silence.RequestId` closes a Task's reminder and leaves the Task open;
+`Silence.RequestId` closes a Task's reminder, withdraws its reminder
+Notices still queued, and leaves the Task open;
 `Clear.Address` and `ClearAll` withdraw everything queued, answering the ids;
 `Push.{ Address Priority }` delivers the whole queue of an Awake seat now as
 one Waking at the priority named (the waking lease carries it,
@@ -256,12 +257,14 @@ A Task left with no Done reminds its sender by Soft Notices from Flow, each
 reminder and the failure that comes with the last, and each is tied to its
 Task in the commit that queues it (`store::task_reminder_notice`,
 `TaskReminderNotice.{ LogicalDeliveryId RemindedTask.LogicalDeliveryId
-RequestId }`, keyed by the Notice's logical delivery). Whatever closes the
-Task, a Done naming it or the archive a Cancel, a CloseRequest or an
-ArchiveRequest makes, is the event that ends its Notices: once that commit
-is made, each Notice tied to the Task that is still queued and that no
-hand-over holds leaves its queue unsent and ends Withdrawn, and every tie to
-the Task is retracted. A Notice already handed to its seat or delivered
+RequestId }`, keyed by the Notice's logical delivery). A Done naming the
+Task, sent by Send or admitted by a Codex thread's send tool, retracts its
+reminder in the commit that admits it. Whatever ends the Task's reminders,
+a Done naming it, the archive a Cancel, a CloseRequest or an ArchiveRequest
+makes, or a Silence, which leaves the Task open, is the event that ends its
+Notices: once that commit is made, each Notice tied to the Task that is
+still queued and that no hand-over holds leaves its queue unsent and ends
+Withdrawn, and every tie to the Task is retracted. A Notice already handed to its seat or delivered
 stays as it stands. Nothing is told of the withdrawal; a Cancel's own Notice
 is queued as before.
 

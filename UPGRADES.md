@@ -8,8 +8,12 @@ priority woke: a Soft Order to an Asleep metaflow was queued and nothing
 woke it, while a MiddleAbrupt or HardAbrupt Notice woke it. Priority keeps
 its meaning for an Awake seat: HardAbrupt interrupts, MiddleAbrupt arrives
 at the next tool boundary, Soft at the seat's rest. A queue entry records
-the decision as its Delivery, Wake or Queue; a Push or Deliver still marks
-every entry Wake, so the metaflow it names is woken whatever it holds.
+the decision as its Delivery, Wake or Queue. The owner's Deliver, the hand
+override, still marks every entry Wake, so the metaflow it names is woken
+whatever it holds; a Push follows the kinds, so a Push of a queue holding
+Notices alone leaves an Asleep metaflow asleep, and a Push of one holding an
+Order wakes it. A Reminder wakes, and a Soft Order to an Asleep metaflow is
+answered Queued and then woken.
 
 Entries queued before 0.59.4 keep the Delivery they were recorded with: an
 abrupt Notice still waiting for an Asleep metaflow wakes it at the Nexus's

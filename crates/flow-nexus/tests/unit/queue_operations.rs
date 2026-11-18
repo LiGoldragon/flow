@@ -340,9 +340,9 @@ fn clear_and_clear_all_empty_queues_that_queues_reads() {
     );
 }
 
-/// Push wakes every entry of a queue: an Address Flow holds no metaflow for
-/// is unknown, an empty queue pushes nothing, and an Asleep metaflow that
-/// cannot be woken keeps its queue, each entry now waking it.
+/// Push delivers a queue: an Address Flow holds no metaflow for is
+/// unknown, an empty queue pushes nothing, and an Asleep metaflow holding a
+/// Notice alone keeps its queue, the Notice still waiting for a waking.
 #[test]
 fn push_forces_a_queue_and_answers_what_was_delivered() {
     let fixture = NexusFixture::new();
@@ -373,12 +373,12 @@ fn push_forces_a_queue_and_answers_what_was_delivered() {
     assert_eq!(
         push(&recipient, signal_flow::Priority::HardAbrupt),
         Output::Pushed(vec![]),
-        "a metaflow with no launch record is not woken; nothing was delivered"
+        "a Notice alone wakes nothing; nothing was delivered"
     );
     let entries = queued(&fixture, &recipient);
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].request_id, held.request_id);
-    assert_eq!(entries[0].delivery, flow_ethos::Delivery::Wake);
+    assert_eq!(entries[0].delivery, flow_ethos::Delivery::Queue);
 }
 
 /// Hot names every live flow's Address by the minutes since its own last

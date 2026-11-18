@@ -224,9 +224,10 @@ still queued, archives it with its id and a Task's reminder, and queues a
 Soft Notice for its sender, and for its recipient when it reached it;
 `Silence.RequestId` closes a Task's reminder and leaves the Task open;
 `Clear.Address` and `ClearAll` withdraw everything queued, answering the ids;
-`Push.{ Address Priority }` wakes every queued entry and delivers the whole
-queue now as one Waking at the priority named (the waking lease carries it,
-`waking::PushesAtPriority`), waking an Asleep metaflow; `Queues` reads every
+`Push.{ Address Priority }` delivers the whole queue of an Awake seat now as
+one Waking at the priority named (the waking lease carries it,
+`waking::PushesAtPriority`), and wakes an Asleep metaflow when its queue holds
+a request whose kind wakes it (`request_waking`); `Queues` reads every
 queue that holds something, each message as it would land in the prompt,
 its sender and priority with it; `Hot` reads every live flow's Address with the
 minutes since its last turn ended, from a per-Address turn end kept beside
@@ -576,8 +577,10 @@ answer. A metaflow of any Model is due a wake when it is Asleep and holds a
 request whose kind wakes it, whatever its priority (`request_waking`): an
 Order, a Question, a Task, the living's words, a Result, a Done or a
 Reminder. A Notice alone waits in the queue for the next waking. The owner's
-`Push` and `Deliver` mark every queued entry Wake, so the metaflow they name
-is woken whatever its queue holds. A Send or a locked Deliver to a recipient
+`Deliver`, the hand override, marks every queued entry Wake, so the metaflow
+it names is woken whatever its queue holds. A `Push` adds no mark: it wakes
+an Asleep metaflow by the kinds its queue holds, so a queue of Notices alone
+stays asleep under it. A Send or a locked Deliver to a recipient
 with no live flow starts it before answering only for an abrupt request that
 wakes it; an abrupt Notice is queued for the next waking, and a Soft request
 that wakes it is answered queued and woken after its answer. To an Awake

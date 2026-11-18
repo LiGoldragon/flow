@@ -15,10 +15,11 @@
 //! open requests a refresh carries to the successor it owes.
 //!
 //! A queue entry records the decision as its `Delivery`, Wake or Queue, when
-//! it is admitted. The owner's `Push` and `Deliver` mark every entry they
-//! find Wake (`force_queue_wake`), so an Asleep metaflow they are asked to
-//! deliver is woken whatever its queue holds. A queued entry wakes by its
-//! kind or by that mark.
+//! it is admitted. The owner's `Deliver`, the hand override, marks every
+//! entry it finds Wake (`force_queue_wake`), so an Asleep metaflow it is
+//! asked to deliver is woken whatever its queue holds; a `Push` adds no mark
+//! and wakes by the kinds the queue holds. A queued entry wakes by its kind
+//! or by its mark.
 
 use flow_ethos::Delivery;
 use signal_flow::{Message, QueueEntry, Request, SendableMessage, SendableRequest};

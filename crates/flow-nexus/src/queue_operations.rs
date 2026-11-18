@@ -34,7 +34,8 @@ pub trait OperatesOnRequestsAndQueues {
     /// Every queue is emptied.
     fn clear_all(&self) -> Output;
     /// The whole queue of `address` is delivered now, as one message at
-    /// `priority`; an Asleep metaflow is woken with it.
+    /// `priority`; an Asleep metaflow is woken with it when it holds a
+    /// request whose kind wakes it.
     fn push(&self, address: &Address, priority: &Priority) -> Output;
     /// Every queue that holds something, oldest first.
     fn queues(&self) -> Output;
@@ -315,10 +316,9 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
                 .iter()
                 .map(|entry| entry.request_id.clone())
                 .collect::<Vec<_>>();
-            // Every entry wakes, so an Asleep metaflow is woken with it.
-            if let Err(error) = self.store.force_queue_wake(address) {
-                return Output::Refused(Refusal::Store(error.to_string()));
-            }
+            // Each entry wakes an Asleep metaflow by its own kind and the
+            // mark its admission recorded (`request_waking`); a Push adds no
+            // mark, so a queue of Notices leaves the metaflow asleep.
             let asleep = metaflow.state == flow_ethos::State::Asleep;
             if !asleep && let Some(lease) = self.waking.hold(address) {
                 let _ = self.drain_all_held(address.clone(), &lease.pushed_at(priority.clone()));

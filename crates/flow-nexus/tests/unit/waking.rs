@@ -1116,7 +1116,7 @@ fn a_flow_that_stopped_while_working_or_awaited_is_kept() {
     assert!(!closes(&waking));
 }
 
-/// An entry marked Wake, as a Push or Deliver marks every entry it finds,
+/// An entry marked Wake, as a Deliver marks every entry it finds,
 /// makes a wake due without judging its request kind.
 #[test]
 fn an_entry_marked_wake_makes_a_wake_due_at_every_layer() {
@@ -8523,6 +8523,106 @@ fn a_queued_notice_arrives_with_the_order_that_wakes_its_permaflow_oldest_first(
         &fixture,
         Message::Soft(Request::Order("Deploy the build.".into())),
     );
+
+    let woken = stored(&fixture, Model::Sol);
+    assert!(
+        matches!(woken.state, State::Awake(_)),
+        "the Order wakes the permaflow: {woken:?}; Herdr calls: {}",
+        world.calls()
+    );
+    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+    assert!(woken.queue.0.is_empty(), "{woken:?}");
+    let turns = world.user_turns(&fixture);
+    let first = turns.first().expect("the fresh flow's first prompt");
+    let notice = first
+        .find("The build is green.")
+        .unwrap_or_else(|| panic!("the Notice arrives with the Order: {turns:?}"));
+    let order = first
+        .find("Deploy the build.")
+        .unwrap_or_else(|| panic!("the Order is in the first prompt: {turns:?}"));
+    assert!(notice < order, "oldest first: {first}");
+}
+
+/// Pushes the Sol Address's queue at Soft, as the owner's `Push` does.
+fn push_sol(fixture: &NexusFixture) -> signal_flow::Output {
+    use crate::Dispatches;
+    fixture
+        .nexus
+        .dispatch(signal_flow::Input::Push(signal_flow::Push_Data {
+            address: address(Model::Sol),
+            priority: signal_flow::Priority::Soft,
+        }))
+}
+
+/// The Asleep Sol permaflow holding `requests`, each queued Soft and
+/// recorded waiting, as an entry its admission did not mark Wake.
+fn asleep_holding(fixture: &NexusFixture, requests: Vec<Request>) {
+    let mut asleep = metaflow(Model::Sol, State::Asleep, vec!["abc123"], requests);
+    for entry in &mut asleep.queue.0 {
+        let (Message::HardAbrupt(request)
+        | Message::MiddleAbrupt(request)
+        | Message::Soft(request)) = entry.message.clone();
+        entry.message = Message::Soft(request);
+        entry.delivery = Delivery::Queue;
+    }
+    fixture.nexus.store.seed_metaflow(asleep);
+}
+
+/// A Push follows the request kind: a queue holding Notices alone leaves
+/// its Asleep permaflow asleep, each Notice still waiting and unmarked. On
+/// the first 0.59.4 build a Push marked every entry Wake and woke it.
+#[test]
+fn a_push_of_notices_alone_leaves_an_asleep_permaflow_asleep() {
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    asleep_holding(
+        &fixture,
+        vec![
+            Request::Notice("The build is green.".into()),
+            Request::Notice("The deploy is done.".into()),
+        ],
+    );
+    let world = fixture.fresh_claude_world();
+
+    assert_eq!(push_sol(&fixture), signal_flow::Output::Pushed(vec![]));
+
+    let asleep = stored(&fixture, Model::Sol);
+    assert_eq!(asleep.state, State::Asleep, "{asleep:?}");
+    assert_eq!(world.claude_starts(), 0, "{}", world.calls());
+    assert_eq!(asleep.queue.0.len(), 2, "both Notices wait: {asleep:?}");
+    assert!(
+        asleep
+            .queue
+            .0
+            .iter()
+            .all(|entry| entry.delivery == Delivery::Queue),
+        "the Push marks nothing: {asleep:?}"
+    );
+}
+
+/// A Push of a queue holding an Order wakes its Asleep permaflow by the
+/// Order's kind: a fresh flow takes the whole queue, the Notice before it
+/// first, and the Push answers both delivered.
+#[test]
+fn a_push_of_a_queue_holding_an_order_wakes_its_asleep_permaflow() {
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    asleep_holding(
+        &fixture,
+        vec![
+            Request::Notice("The build is green.".into()),
+            Request::Order("Deploy the build.".into()),
+        ],
+    );
+    let queued = stored(&fixture, Model::Sol)
+        .queue
+        .0
+        .iter()
+        .map(|entry| entry.request_id.clone())
+        .collect::<Vec<_>>();
+    let world = fixture.fresh_claude_world();
+
+    assert_eq!(push_sol(&fixture), signal_flow::Output::Pushed(queued));
 
     let woken = stored(&fixture, Model::Sol);
     assert!(

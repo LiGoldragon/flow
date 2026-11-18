@@ -3229,8 +3229,13 @@ impl OpensFlowStore for FlowStore {
         // history once the Nexus runs (`ReconcilesQueueDelivery`).
         for attempt in store.recover_outstanding_deliveries()? {
             match attempt.queue_delivery_phase {
+                // The store opens before any native history is read: the
+                // arrival is folded as in a turn not shown ended.
                 QueueDeliveryPhase::ReceiptRecorded(_) => {
-                    if !store.settle_recorded_delivery(&attempt.queue_attempt_id.0)? {
+                    if !store.settle_recorded_delivery(
+                        &attempt.queue_attempt_id.0,
+                        crate::generated::transitions::ReceiptTurn::Running,
+                    )? {
                         return Err(StoreError::StateInvariant);
                     }
                 }

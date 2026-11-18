@@ -854,7 +854,10 @@ fn codex_partial_cohorts_release_the_queued_refresh_preserving_terminal_bytes() 
         fixture
             .nexus
             .store
-            .settle_recorded_delivery(&attempts[0].queue_attempt_id.0)
+            .settle_recorded_delivery(
+                &attempts[0].queue_attempt_id.0,
+                crate::generated::transitions::ReceiptTurn::Running,
+            )
             .unwrap();
         let answer = fixture
             .nexus
@@ -984,4 +987,150 @@ fn codex_partial_cohorts_release_the_queued_refresh_preserving_terminal_bytes() 
             .unwrap_or_default()
             .contains("pane close w1:p3")
     );
+}
+
+/// The Codex turn-completed event: a letter typed into a resting Codex seat
+/// is taken by the turn it starts, and its receipt is settled at that
+/// turn's completion, by the drain the rest allows, once the rest is
+/// recorded. The receipt lies in the turn that completed, so its arrival
+/// leaves the seat at that rest and the next Soft finds it resting. On
+/// 0.59.4 the arrival led to Acting after the rest.
+#[test]
+fn a_letter_settled_at_its_turns_completion_leaves_the_codex_seat_resting() {
+    use super::send_tool::{RunsFakeAppServer, accepting_codex_endpoint};
+    use super::waking::{address, stored};
+    use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
+    use crate::codex_turns::SettlesRestingCodexSeats;
+    use crate::composition::RendersQueuedWork;
+    use crate::generated::memory::{Cause, NativeHistoryAnchor};
+    use crate::generated::overriding::RemembersOverrides;
+    use crate::store::SeedsRole;
+    use crate::store::logical_delivery::RecordsLogicalDeliveries;
+    use crate::store::metaflow::SeedsMetaflow;
+    use crate::store::queue_delivery::{AccountsQueueDelivery, PrepareQueueDelivery};
+    use crate::waking::HoldsSoftForIdle;
+    use signal_flow::{FlowLifecycle, Message, Model, Request, SentBy};
+
+    let mut fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![fixture.settled_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.register_with(FlowLifecycle::Active);
+    let target = address(Model::Sol);
+    fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+        address: target.clone(),
+        state: flow_ethos::State::Awake(flow_ethos::FlowId("908786".into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
+    });
+    super::refresh_and_compaction::declare_seat(
+        &fixture,
+        meta_signal_flow::Continuity::Maintained,
+        vec![],
+    );
+    fixture.nexus.store.seed_role(signal_flow::CallerIdentity {
+        flow_id: flow_ethos::FlowId("908786".into()),
+        aspect: signal_flow::Aspect::Mind,
+        model_name: flow_ethos::ModelName("gpt-sol".into()),
+    });
+    let thread = fixture.node().session_id.0;
+    let fake = accepting_codex_endpoint(&mut fixture, "gpt-sol", &thread);
+    // The seat rests: its thread's cut shows no turn.
+    fixture.nexus.codex_events(&thread, vec![idle()]);
+    assert!(fixture.nexus.rests_now("908786"));
+
+    // A Soft Order, typed into the resting seat's pane as the drain types
+    // a letter, its receipt not yet read.
+    let admitted = fixture
+        .nexus
+        .store
+        .accept_logical_delivery(
+            &target,
+            SentBy::Flow,
+            flow_ethos::Delivery::Queue,
+            Message::Soft(Request::Order("Carry the design on.".into())),
+            None,
+        )
+        .unwrap();
+    let signal_flow::PrivateSendResponse::SendAccepted(accepted) = admitted else {
+        panic!("admitted: {admitted:?}")
+    };
+    let payload = stored(&fixture, Model::Sol).queue.0.prompt_text(&target);
+    let PrepareQueueDelivery::Prepared(letter) = fixture
+        .nexus
+        .store
+        .prepare_oldest_delivery(
+            &target,
+            "908786",
+            &thread,
+            signal_flow::HarnessKind::Codex,
+            NativeHistoryAnchor::CodexTurns(Some("before-letter".into())),
+        )
+        .unwrap()
+    else {
+        panic!("the letter prepared")
+    };
+    fixture
+        .nexus
+        .store
+        .mark_delivery_uncertain(&letter.queue_attempt_id.0)
+        .unwrap();
+    fixture.nexus.codex_turns.apply(
+        &thread,
+        typed(&letter.queue_attempt_id.0, &payload, Interrupt::NotPressed),
+    );
+
+    // The letter starts a turn, its user message item takes it, and the
+    // turn completes; the thread's history shows the letter in that turn.
+    fixture
+        .nexus
+        .codex_events(&thread, vec![started("letter-turn")]);
+    fixture
+        .nexus
+        .codex_events(&thread, vec![seen("letter-turn", "letter-item", &payload)]);
+    let history = vec![
+        serde_json::json!({"id":"letter-turn","status":"completed","items":[{
+            "type":"userMessage","id":"letter-item","content":[{"type":"text","text":payload}]
+        }]}),
+        serde_json::json!({"id":"before-letter","status":"completed","items":[]}),
+    ];
+    for run in 1..=16 {
+        fake.serve_turn_history(run, &thread, true, history.clone());
+    }
+    fixture
+        .nexus
+        .codex_events(&thread, vec![completed("letter-turn")]);
+
+    assert!(
+        fixture
+            .nexus
+            .store
+            .unsettled_deliveries(&target)
+            .unwrap()
+            .is_empty(),
+        "the letter settled on its receipt"
+    );
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
+    let held = fixture
+        .nexus
+        .store
+        .transitions()
+        .unwrap()
+        .into_iter()
+        .find(|flow| flow.flow_id.0 == "908786")
+        .map(|flow| flow.transition_vector)
+        .unwrap_or_default();
+    let last = held.last().expect("a transition is recorded");
+    assert_eq!(
+        last.cause,
+        Cause::Arrived(accepted.request_id.clone()),
+        "the arrival is recorded after the rest: {held:?}"
+    );
+    assert_eq!(
+        last.state,
+        meta_signal_flow::State::Resting,
+        "the arrival leaves the seat at its rest: {held:?}"
+    );
+    assert!(fixture.nexus.rests_now("908786"));
 }

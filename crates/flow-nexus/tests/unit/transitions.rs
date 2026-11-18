@@ -408,6 +408,181 @@ fn a_request_its_turn_took_arrives_before_that_turns_rest() {
     assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
 }
 
+/// The fold rule: an arrival whose receipt lies in a turn that has
+/// already ended keeps the state before, and none when none was held; one
+/// whose turn runs leads to Acting, so a seat genuinely in its turn still
+/// waits for its idle event.
+#[test]
+fn an_arrival_in_an_ended_turn_keeps_the_state_before() {
+    use crate::generated::transitions::{Arrival, Caused, LeadsToState, ReceiptTurn};
+    let arrival = |receipt_turn| Arrival {
+        caused: Caused {
+            seat: Seat {
+                flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+                address: address(Model::Sol),
+            },
+            cause: Cause::Arrived(flow_ethos::RequestId("r3c1".into())),
+            moment: Moment(0),
+        },
+        receipt_turn,
+    };
+    for before in [
+        None,
+        Some(meta::State::Resting),
+        Some(meta::State::Acting),
+        Some(meta::State::Asleep),
+    ] {
+        assert_eq!(
+            arrival(ReceiptTurn::Ended).leads_to(before.clone()),
+            before,
+            "an ended turn's arrival keeps {before:?}"
+        );
+        assert_eq!(
+            arrival(ReceiptTurn::Running).leads_to(before.clone()),
+            Some(meta::State::Acting),
+            "a running turn's arrival from {before:?}"
+        );
+    }
+}
+
+/// The seat Awake at the Sol Address, in its turn, holding "Read the
+/// ruling." typed into its pane at the rest of that turn and taken by none
+/// of its receipts yet: what a Soft sent to a seat in its turn leaves once
+/// the Stop that ends the turn hands it over. Answers the text typed and
+/// the sender's process.
+fn handed_over_at_a_stop(
+    fixture: &NexusFixture,
+) -> (super::MarkedProcess, signal_flow::Process, String) {
+    use super::codex_agent_in;
+    use super::waking::{claude_agent, send_soft, soft_recipient};
+    let (caller, peer) = soft_recipient(fixture, false);
+    let response = send_soft(fixture, &peer, "Read the ruling.");
+    assert!(
+        matches!(response, signal_flow::Output::SendAccepted(_)),
+        "{response:?}"
+    );
+    assert!(fixture.typed().is_none(), "held for the seat's idle event");
+    append_main_rows(fixture, &[end_turn("first-turn")]);
+    fixture.accept_pane_operations(
+        vec![
+            codex_agent_in("pane-1", "terminal-pane-1"),
+            claude_agent(fixture),
+        ],
+        PromptFixture::PromptedUnrecorded("w1:p3"),
+    );
+    report_claude_stop(fixture, vec![]);
+    let typed = fixture.typed().expect("typed at the Stop");
+    assert!(typed.contains("Read the ruling."), "{typed}");
+    (caller, peer, typed)
+}
+
+/// The receipt row of `typed` and the end of the turn that took it, as
+/// Claude writes them into the seat's transcript.
+fn taken_and_turn_ended(fixture: &NexusFixture, typed: &str) {
+    append_main_rows(
+        fixture,
+        &[
+            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,
+                "uuid":"late-receipt","message":{"content":typed}}),
+            end_turn("second-turn"),
+        ],
+    );
+}
+
+/// The seat rests with the request arrived and nothing queued, and the next
+/// Soft Send is typed into it at once, with no hand Deliver.
+fn rests_with_the_request_arrived(fixture: &NexusFixture, peer: &signal_flow::Process) {
+    use super::codex_agent_in;
+    use super::waking::{claude_agent, send_soft, stored};
+    let held = held(fixture, CLAUDE_SEAT);
+    assert!(
+        matches!(held.last(), Some((meta::State::Resting, Cause::Arrived(_)))),
+        "the arrival leaves the seat at its rest: {held:?}"
+    );
+    assert!(fixture.nexus.rests_now(CLAUDE_SEAT));
+    assert!(stored(fixture, Model::Sol).queue.0.is_empty());
+    fixture.accept_pane_operations(
+        vec![
+            codex_agent_in("pane-1", "terminal-pane-1"),
+            claude_agent(fixture),
+        ],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    send_soft(fixture, peer, "The next ruling.");
+    let typed = fixture.typed().expect("typed into the resting seat");
+    assert!(typed.contains("The next ruling."), "{typed}");
+    assert!(stored(fixture, Model::Sol).queue.0.is_empty());
+}
+
+/// Recovery at the Nexus's start, shaped on the live fcov case (Mind
+/// subscription Opus, a Claude seat Herdr showed resting, on 0.59.3): a
+/// request typed into the seat at a Stop is taken by its next turn, which
+/// ends while the Nexus is down, so neither its prompt nor its Stop reaches
+/// Flow. The Nexus that starts settles the request on the receipt its
+/// transcript shows, in a turn that has ended: the arrival leaves the seat
+/// at its rest. On 0.59.4 the arrival led to Acting, the seat came back
+/// recorded not resting, and the next Soft queued for an idle event that
+/// had already come.
+#[test]
+fn a_request_settled_at_start_in_a_turn_that_ended_leaves_its_seat_resting() {
+    use crate::store::queue_delivery::AccountsQueueDelivery;
+    use crate::waking::ReconcilesQueueDelivery;
+    let fixture = NexusFixture::new();
+    let (_caller, peer, typed) = handed_over_at_a_stop(&fixture);
+    assert_eq!(last(&fixture, CLAUDE_SEAT).state, meta::State::Resting);
+
+    // The Nexus is down: the seat takes the request and ends that turn.
+    taken_and_turn_ended(&fixture, &typed);
+    // It starts again: every receipt-less attempt is Uncertain, and each
+    // is reconciled from native history.
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .recover_outstanding_deliveries()
+            .unwrap()
+            .len(),
+        1
+    );
+    fixture.nexus.recover_deliveries();
+
+    rests_with_the_request_arrived(&fixture, &peer);
+}
+
+/// The Claude Stop, reaching Flow before Claude writes the receipt of what
+/// its turn took: the Stop's own settlement finds no receipt and its rest
+/// is recorded; the rows land before the drain that rest runs, which
+/// settles the receipt in the turn that Stop ended. The arrival leaves the
+/// seat at that rest. On 0.59.4 it led to Acting after the rest, and the
+/// next Soft queued.
+#[test]
+fn a_request_settled_after_the_stop_of_its_turn_leaves_its_seat_resting() {
+    use crate::waking::PerformsWakeAndDrain;
+    let fixture = NexusFixture::new();
+    let (_caller, peer, typed) = handed_over_at_a_stop(&fixture);
+
+    // The seat takes it, its hook naming a digest of the text as Claude
+    // shows it, and its turn's Stop reaches Flow before Claude writes the
+    // turn's rows.
+    report(
+        &fixture,
+        signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
+            native_session_id_option: session(),
+            prompt_id_option: None,
+            prompt_sha256: signal_flow::PromptSha256("0".repeat(64)),
+        }),
+    );
+    assert_eq!(last(&fixture, CLAUDE_SEAT).state, meta::State::Acting);
+    report_claude_stop(&fixture, vec![]);
+    assert_eq!(last(&fixture, CLAUDE_SEAT).state, meta::State::Resting);
+
+    // The rows land, and the drain at that rest settles the receipt.
+    taken_and_turn_ended(&fixture, &typed);
+    fixture.nexus.drain_all(address(Model::Sol));
+
+    rests_with_the_request_arrived(&fixture, &peer);
+}
+
 /// The state the Nexus decides by is the last transition: the seat rests
 /// once its last transition is Resting, and not once it is Acting,
 /// whatever its transcript shows; an owner's SetState is a transition too.

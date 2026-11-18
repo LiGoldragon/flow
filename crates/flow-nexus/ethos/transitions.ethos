@@ -6,7 +6,9 @@
 ; event leads to its state: Started and Working to Acting, Idle to Resting,
 ; Ended to Asleep; Compacting keeps the state the flow was in. A request the
 ; Nexus delivers is recorded with the cause Arrived, its RequestId, and leads
-; to Acting. The state the Nexus decides by is the last transition's.
+; to Acting, unless its receipt lies in a turn that has already ended: then
+; it records no Acting and the seat stays as it is. The state the Nexus
+; decides by is the last transition's.
 ;
 ; The intake is one typed Event, so its source can change without touching
 ; the state logic. Today a Claude flow's hooks report it: a Started of a
@@ -23,7 +25,12 @@
 ; makes is Compacting. Working carries the context size Flow last measured
 ; where the report itself carries none.
 ;
-; Caused is one cause at one seat, at its moment. CodexReport is what a
+; Caused is one cause at one seat, at its moment. An Arrival is a request
+; settled on its receipt: its Caused, the cause Arrived, and ReceiptTurn, the
+; turn the receipt lies in as the seat's native history shows it when the
+; receipt is settled: Ended when the seat rests past it (a Claude transcript
+; whose main turn ended with no later prompt, a Codex thread its ledger
+; shows at rest), Running otherwise. CodexReport is what a
 ; batch of a Codex thread's ledger events, or one token usage, says:
 ; Stepped, the thread's standing before and after the batch; Measured, the
 ; standing it stands in and the tokens its last model call carried; Closed,
@@ -34,7 +41,13 @@
 ;
 ; LeadsToState is a cause's: the state it leads to from the state before,
 ; None for a cause this release decides no state by (CoolingDue,
-; Crystallized, and Overridden, whose override names its own state).
+; Crystallized, and Overridden, whose override names its own state). A
+; Caused leads where its cause does. An Arrival whose receipt lies in an
+; ended turn leads to the state before, and to none when none was held; one
+; whose turn runs leads where Arrived does. That is the one place the fold
+; rule stands: a request's arrival settled after the rest of the turn that
+; took it, whatever order the events reached Flow in, leaves the seat at
+; that rest.
 ; TypesCodexReport is a Codex report's: the Event it is, given the size Flow
 ; last measured, or None when it changes nothing. SeedsReportedTransition is
 ; a flow's recorded harness events': the Event its last report maps to, with
@@ -43,8 +56,8 @@
 ;
 ; RecordsTransitions is the store's: a cause appended to its seat's flow as
 ; the transition it leads to, None when it leads to none; the records the
-; arrivals of delivered requests write, which the caller commits with the
-; delivery under the transitions' gate; the state a flow is in, its last transition's; and
+; arrivals of delivered requests write, each as its Arrival leads, which the
+; caller commits with the delivery under the transitions' gate; the state a flow is in, its last transition's; and
 ; the Memory upgrade, run at every open: each live flow whose transitions
 ; hold no Reported one is given the one its last recorded report maps to,
 ; placed before the overrides it holds, the count answered.
@@ -72,18 +85,23 @@ Library
   CodexFlowReport.{ FlowId CodexReport }                                         ;   one Codex report of one flow
   AskedFlow.FlowId                                                               ;   the flow whose state is asked
   TransitionWrite.[ Appended.Flow                                                ;   a flow's record to write: held, one transition longer
-                    Opened.Flow ] ]                                              ;     new, with its first
+                    Opened.Flow ]                                                ;     new, with its first
+  ReceiptTurn.[ Running                                                          ;   the turn a settled receipt lies in: not shown ended
+                Ended ]                                                          ;     ended, the seat resting past it
+  Arrival.{ Caused ReceiptTurn } ]                                               ;   a request settled on its receipt, at its seat
 [ LeadsToState.[ leads_to.{ [ Option<State> ] [ Option<State> ] } ]              ; traits
   TypesCodexReport.[ codex_event.{ [ Option<Tokens> ] [ Option<Event> ] } ]
   SeedsReportedTransition.[ last_reported.{ [ Option<Tokens> ] [ Option<Event> ] } ]
   RecordsTransitions.[ record_caused.{ [ Caused ] [ Result<Option<Transition> StoreError> ] }
-                       arrivals.{ [ Vector<Caused> ] [ Result<Vector<TransitionWrite> StoreError> ] }
+                       arrivals.{ [ Vector<Arrival> ] [ Result<Vector<TransitionWrite> StoreError> ] }
                        state_of.{ [ AskedFlow ] [ Result<Option<State> StoreError> ] }
                        seed_reported_transitions.[ Result<Integer StoreError> ] ]
   ReportsEvents.[ claude_event.{ [ ClaudeReport ] [ Option<Event> ] }
                   report_event.{ [ ReportedEvent ] [ Boolean ] }
                   report_codex.{ [ CodexFlowReport ] [ Boolean ] } ] ]
 [ Cause.[ LeadsToState ]                                                         ; associations
+  Caused.[ LeadsToState ]
+  Arrival.[ LeadsToState ]
   CodexReport.[ TypesCodexReport ]
   FlowEvents.[ SeedsReportedTransition ]
   FlowStore.[ RecordsTransitions ]

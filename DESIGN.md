@@ -776,11 +776,24 @@ the flow was in.
 
 A request delivered (its logical delivery Delivered, or Read without its
 receipt) is recorded in the same commit with the cause `Arrived` and its
-`RequestId`, leading to Acting (`logical_delivery`). A Claude flow's own
-Stop settles first every hand-over its ended turn took whose receipt its
-transcript shows (`settle_turn_receipts`), so each arrival is recorded
-before the Idle that ends its turn and the flow's last transition is that
-rest. The state the Nexus
+`RequestId` (`logical_delivery`), folded as an `Arrival` with the turn its
+receipt lies in (`ReceiptTurn`). The Nexus reads that turn from the seat's
+own native history when it settles the receipt (`ReadsReceiptTurn`):
+Ended when the seat rests past it, a Claude transcript whose main turn
+ended with no later prompt or a Codex thread its ledger shows at rest;
+Running otherwise. The fold rule stands in one place, `LeadsToState for
+Arrival`: an arrival whose receipt lies in a turn that has already ended
+records no Acting, and the seat stays as it is; one whose turn runs leads
+to Acting, so a seat genuinely in its turn still waits for its idle event.
+So a receipt settled after the rest of the turn that took it, whatever
+order the events reached Flow in, leaves the seat at that rest: at the
+Nexus's start (`recover_deliveries`), at a Codex turn's completion (the
+drain its rest allows), and at a Claude Stop (the drain that rest runs).
+A store opening settles a receipt recorded before a crash before any
+native history is read, and folds it as Running. A Claude flow's own
+Stop also settles first every hand-over its ended turn took whose receipt
+its transcript shows (`settle_turn_receipts`), so each arrival is
+recorded before the Idle that ends its turn. The state the Nexus
 decides by is the last transition: `rests_now`, which a Soft request and a
 drain ask, reads Resting from it (a Simplified Claude seat that opened with
 no prompt is ready for its first input), and the panel's state of a live

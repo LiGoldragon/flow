@@ -401,7 +401,10 @@ fn deliver_oldest_migrated(
     );
     assert!(
         store
-            .settle_recorded_delivery(&attempt.queue_attempt_id.0)
+            .settle_recorded_delivery(
+                &attempt.queue_attempt_id.0,
+                crate::generated::transitions::ReceiptTurn::Running,
+            )
             .expect("migrated delivered request leaves its queue")
     );
 }
@@ -449,7 +452,10 @@ fn deliver_through_migrated(
         );
         assert!(
             store
-                .settle_recorded_delivery(&attempt.queue_attempt_id.0)
+                .settle_recorded_delivery(
+                    &attempt.queue_attempt_id.0,
+                    crate::generated::transitions::ReceiptTurn::Running,
+                )
                 .expect("migrated delivered prefix leaves its queue")
         );
         if delivered_logical_id.0 == expected_logical_id {

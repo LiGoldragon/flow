@@ -119,8 +119,11 @@ impl DeliversRequests for FlowStore {
             .expect("the receipt records")
         );
         assert!(
-            self.settle_recorded_delivery(&attempt.queue_attempt_id.0)
-                .expect("the delivery settles")
+            self.settle_recorded_delivery(
+                &attempt.queue_attempt_id.0,
+                crate::generated::transitions::ReceiptTurn::Running,
+            )
+            .expect("the delivery settles")
         );
     }
 
@@ -386,7 +389,10 @@ fn delivered_to_codex(store: &FlowStore, address: &Address, flow_id: &str, threa
     );
     assert!(
         store
-            .settle_recorded_delivery(&attempt.queue_attempt_id.0)
+            .settle_recorded_delivery(
+                &attempt.queue_attempt_id.0,
+                crate::generated::transitions::ReceiptTurn::Running,
+            )
             .expect("the delivery settles")
     );
 }

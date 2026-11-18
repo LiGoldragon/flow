@@ -75,6 +75,20 @@ pub enum TransitionWrite {
     Opened(flow_nexus::generated::memory::Flow),
 }
 #[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum ReceiptTurn {
+    Running,
+    Ended,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Arrival {
+    pub caused: Caused,
+    pub receipt_turn: ReceiptTurn,
+}
+#[rustfmt::skip]
 pub trait LeadsToState {
     fn leads_to(
         &self,
@@ -106,7 +120,7 @@ pub trait RecordsTransitions {
     >;
     fn arrivals(
         &self,
-        input: std::vec::Vec<Caused>,
+        input: std::vec::Vec<Arrival>,
     ) -> std::result::Result<
         std::vec::Vec<TransitionWrite>,
         flow_nexus::store::StoreError,
@@ -135,6 +149,16 @@ pub trait ReportsEvents {
 const _: () = {
     fn assert_cause_leadstostate<T: LeadsToState>() {}
     let _ = assert_cause_leadstostate::<flow_nexus::generated::memory::Cause>;
+};
+#[rustfmt::skip]
+const _: () = {
+    fn assert_caused_leadstostate<T: LeadsToState>() {}
+    let _ = assert_caused_leadstostate::<Caused>;
+};
+#[rustfmt::skip]
+const _: () = {
+    fn assert_arrival_leadstostate<T: LeadsToState>() {}
+    let _ = assert_arrival_leadstostate::<Arrival>;
 };
 #[rustfmt::skip]
 const _: () = {

@@ -1182,7 +1182,13 @@ fn the_store_sleeps_and_awakens_removing_only_the_confirmed_startup_batch() {
     };
     assert!(
         store
-            .settle_wake_startup_receipts(&at, "bbbbbb", &startup, Some(&receipt))
+            .settle_wake_startup_receipts(
+                &at,
+                "bbbbbb",
+                &startup,
+                Some(&receipt),
+                crate::generated::transitions::ReceiptTurn::Running
+            )
             .unwrap()
     );
     let woken = store.metaflow(&at).unwrap().unwrap();
@@ -1260,21 +1266,39 @@ fn a_wake_receipt_settles_its_logical_prefix_atomically_and_preserves_the_suffix
 
     assert!(
         !store
-            .settle_wake_startup_receipts(&at, "notbbb", &startup, Some(&receipt))
+            .settle_wake_startup_receipts(
+                &at,
+                "notbbb",
+                &startup,
+                Some(&receipt),
+                crate::generated::transitions::ReceiptTurn::Running
+            )
             .unwrap(),
         "a different flow changes neither lifecycle nor queue"
     );
     assert_eq!(store.metaflow(&at).unwrap().unwrap().queue, queued);
     assert!(
         !store
-            .settle_wake_startup_receipts(&at, "bbbbbb", &startup[1..], Some(&receipt))
+            .settle_wake_startup_receipts(
+                &at,
+                "bbbbbb",
+                &startup[1..],
+                Some(&receipt),
+                crate::generated::transitions::ReceiptTurn::Running
+            )
             .unwrap(),
         "a non-prefix changes neither lifecycle nor queue"
     );
     assert_eq!(store.metaflow(&at).unwrap().unwrap().queue, queued);
     assert!(
         store
-            .settle_wake_startup_receipts(&at, "bbbbbb", &startup, None)
+            .settle_wake_startup_receipts(
+                &at,
+                "bbbbbb",
+                &startup,
+                None,
+                crate::generated::transitions::ReceiptTurn::Running
+            )
             .is_err(),
         "logical deliveries require an exact receipt"
     );
@@ -1295,7 +1319,13 @@ fn a_wake_receipt_settles_its_logical_prefix_atomically_and_preserves_the_suffix
     };
     assert!(
         store
-            .settle_wake_startup_receipts(&at, "bbbbbb", &startup, Some(&conflicting))
+            .settle_wake_startup_receipts(
+                &at,
+                "bbbbbb",
+                &startup,
+                Some(&conflicting),
+                crate::generated::transitions::ReceiptTurn::Running
+            )
             .is_err(),
         "a conflicting receipt cannot rewrite evidence or drain the queue"
     );
@@ -1310,7 +1340,13 @@ fn a_wake_receipt_settles_its_logical_prefix_atomically_and_preserves_the_suffix
     ));
     assert!(
         store
-            .settle_wake_startup_receipts(&at, "bbbbbb", &startup, Some(&receipt))
+            .settle_wake_startup_receipts(
+                &at,
+                "bbbbbb",
+                &startup,
+                Some(&receipt),
+                crate::generated::transitions::ReceiptTurn::Running
+            )
             .unwrap()
     );
     let settled = store.metaflow(&at).unwrap().unwrap();
@@ -7443,7 +7479,8 @@ fn a_simplified_answer_uses_bound_transcript_b_and_never_hook_a() {
                     harness_kind: HarnessKind::Claude,
                     native_session_id: signal_flow::NativeSessionId(launched.session.clone()),
                     native_prompt_id: signal_flow::NativePromptId("bound-prompt".into()),
-                })
+                }),
+                crate::generated::transitions::ReceiptTurn::Running,
             )
             .unwrap()
     );

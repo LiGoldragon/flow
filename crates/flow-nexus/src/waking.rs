@@ -1325,6 +1325,35 @@ pub enum SeatAfter {
     InItsTurn,
 }
 
+/// The turn a receipt Flow settles now lies in, read from the seat's own
+/// native history at the settlement (`transitions`, `Arrival`): Ended when
+/// the seat rests past it, a Claude transcript whose main turn ended with
+/// no later prompt or a Codex thread its ledger shows at rest; Running
+/// otherwise. The receipt is already in that history, so a seat resting
+/// past every prompt rests past it.
+pub(crate) trait ReadsReceiptTurn {
+    fn receipt_turn(&self, flow_id: &str) -> crate::generated::transitions::ReceiptTurn;
+}
+
+impl ReadsReceiptTurn for RunningNexus {
+    fn receipt_turn(&self, flow_id: &str) -> crate::generated::transitions::ReceiptTurn {
+        use crate::codex_turns::SettlesRestingCodexSeats;
+        use crate::generated::transitions::ReceiptTurn;
+        let ended = match self.store.flow_node(flow_id) {
+            Ok(Some(node)) => match node.harness_kind {
+                HarnessKind::Claude => self.claude_main_turn_ended(&node),
+                HarnessKind::Codex => self.codex_resting(flow_id),
+            },
+            _ => false,
+        };
+        if ended {
+            ReceiptTurn::Ended
+        } else {
+            ReceiptTurn::Running
+        }
+    }
+}
+
 /// What reconciling one outstanding hand-over found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reconciled {
@@ -1400,7 +1429,10 @@ impl ReconcilesQueueDelivery for RunningNexus {
             QueueDeliveryPhase::ReceiptRecorded(_) => {
                 return if self
                     .store
-                    .settle_recorded_delivery(&attempt.queue_attempt_id.0)
+                    .settle_recorded_delivery(
+                        &attempt.queue_attempt_id.0,
+                        self.receipt_turn(&attempt.flow_id.0),
+                    )
                     .unwrap_or(false)
                 {
                     attempt.as_settled(SeatAfter::InItsTurn)
@@ -1454,6 +1486,9 @@ impl ReconcilesQueueDelivery for RunningNexus {
                 );
             }
         }
+        // Read once the ledger has taken the letters above: the turn the one
+        // receipt lies in is every member's.
+        let receipt_turn = self.receipt_turn(&attempt.flow_id.0);
         for member in run.iter().filter(|member| {
             matches!(
                 member.queue_delivery_phase,
@@ -1476,7 +1511,7 @@ impl ReconcilesQueueDelivery for RunningNexus {
                 .unwrap_or(false)
                 && self
                     .store
-                    .settle_recorded_delivery(&member.queue_attempt_id.0)
+                    .settle_recorded_delivery(&member.queue_attempt_id.0, receipt_turn.clone())
                     .unwrap_or(false))
             {
                 return Reconciled::Refused;
@@ -3708,7 +3743,13 @@ impl WakesInParts for RunningNexus {
             None if has_logical => self.carry_startup(address, flow_id, startup),
             receipt => self
                 .store
-                .settle_wake_startup_receipts(address, flow_id, startup, receipt.as_ref())
+                .settle_wake_startup_receipts(
+                    address,
+                    flow_id,
+                    startup,
+                    receipt.as_ref(),
+                    self.receipt_turn(flow_id),
+                )
                 .unwrap_or(false),
         }
     }

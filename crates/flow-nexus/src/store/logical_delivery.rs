@@ -695,10 +695,15 @@ pub(crate) trait RecordsLogicalDeliveries {
         id: &LogicalDeliveryId,
         state: DeliveryState,
     ) -> Result<DeliverySnapshot, StoreError>;
+    /// Moves the request to `state` in `commit`. A Delivered or Read state
+    /// makes the request arrive at the flow its metaflow is Awake as, in
+    /// the same commit, folded with `receipt_turn`, the turn its receipt
+    /// lies in; any other state reads no receipt turn.
     fn commit_logical_transition(
         &self,
         id: &LogicalDeliveryId,
         state: DeliveryState,
+        receipt_turn: crate::generated::transitions::ReceiptTurn,
         commit: AtomicCommit,
     ) -> Result<DeliverySnapshot, StoreError>;
     fn logical_delivery_snapshot(
@@ -715,13 +720,15 @@ pub(crate) trait RecordsLogicalDeliveries {
     ) -> Result<usize, StoreError>;
     /// Under one durable commit, records the exact native receipt for every
     /// logical request in a fresh wake's fixed startup prefix and removes
-    /// only that prefix from the metaflow queue.
+    /// only that prefix from the metaflow queue; each arrives folded with
+    /// `receipt_turn`, the turn the first prompt lies in.
     fn settle_wake_startup_receipts(
         &self,
         address: &Address,
         flow_id: &str,
         startup: &[QueueEntry],
         receipt: Option<&signal_flow::NativeReceipt>,
+        receipt_turn: crate::generated::transitions::ReceiptTurn,
     ) -> Result<bool, StoreError>;
     /// The deliveries of one sender.
     fn read_logical_delivery_snapshots(
@@ -1157,6 +1164,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         flow_id: &str,
         startup: &[QueueEntry],
         receipt: Option<&signal_flow::NativeReceipt>,
+        receipt_turn: crate::generated::transitions::ReceiptTurn,
     ) -> Result<bool, StoreError> {
         let _guard = self
             .logical_deliveries
@@ -1258,7 +1266,9 @@ impl RecordsLogicalDeliveries for FlowStore {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         commit = {
-            use crate::generated::transitions::{Caused, RecordsTransitions, TransitionWrite};
+            use crate::generated::transitions::{
+                Arrival, Caused, RecordsTransitions, TransitionWrite,
+            };
             let moment = crate::generated::memory::Moment(
                 crate::reminding::CountsUnixSeconds::seconds_since_epoch(
                     &std::time::SystemTime::now(),
@@ -1268,16 +1278,19 @@ impl RecordsLogicalDeliveries for FlowStore {
                 flow_id: signal_flow::FlowId(flow_id.to_owned()),
                 address: address.clone(),
             };
-            let causes = arrived
+            let arrivals = arrived
                 .into_iter()
-                .map(|request_id| Caused {
-                    seat: seat.clone(),
-                    cause: crate::generated::memory::Cause::Arrived(request_id),
-                    moment,
+                .map(|request_id| Arrival {
+                    caused: Caused {
+                        seat: seat.clone(),
+                        cause: crate::generated::memory::Cause::Arrived(request_id),
+                        moment,
+                    },
+                    receipt_turn: receipt_turn.clone(),
                 })
                 .collect();
             let mut commit = commit;
-            for write in self.arrivals(causes)? {
+            for write in self.arrivals(arrivals)? {
                 commit = match write {
                     TransitionWrite::Appended(flow) => commit.mutate(self.flow_transitions, flow),
                     TransitionWrite::Opened(flow) => commit.assert(self.flow_transitions, flow),
@@ -2387,7 +2400,12 @@ impl RecordsLogicalDeliveries for FlowStore {
         id: &LogicalDeliveryId,
         state: DeliveryState,
     ) -> Result<DeliverySnapshot, StoreError> {
-        self.commit_logical_transition(id, state, self.engine.begin_atomic_commit())
+        self.commit_logical_transition(
+            id,
+            state,
+            crate::generated::transitions::ReceiptTurn::Running,
+            self.engine.begin_atomic_commit(),
+        )
     }
     fn mark_queue_retryable(
         &self,
@@ -2409,6 +2427,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 self.commit_logical_transition(
                     &entry.logical_delivery_id,
                     retryable,
+                    crate::generated::transitions::ReceiptTurn::Running,
                     self.engine.begin_atomic_commit(),
                 )?;
                 changed += 1;
@@ -2420,6 +2439,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         &self,
         id: &LogicalDeliveryId,
         state: DeliveryState,
+        receipt_turn: crate::generated::transitions::ReceiptTurn,
         commit: AtomicCommit,
     ) -> Result<DeliverySnapshot, StoreError> {
         let _guard = self
@@ -2501,7 +2521,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             Some(metaflow) if arriving => match metaflow.state {
                 flow_ethos::State::Awake(flow_id) => {
                     use crate::generated::transitions::{
-                        Caused, RecordsTransitions, TransitionWrite,
+                        Arrival, Caused, RecordsTransitions, TransitionWrite,
                     };
                     let moment = crate::generated::memory::Moment(
                         crate::reminding::CountsUnixSeconds::seconds_since_epoch(
@@ -2512,16 +2532,18 @@ impl RecordsLogicalDeliveries for FlowStore {
                         flow_id,
                         address: snapshot.address.clone(),
                     };
-                    let causes = vec![snapshot.request_id.clone()]
-                        .into_iter()
-                        .map(|request_id| Caused {
-                            seat: seat.clone(),
-                            cause: crate::generated::memory::Cause::Arrived(request_id),
+                    let arrival = Arrival {
+                        caused: Caused {
+                            seat,
+                            cause: crate::generated::memory::Cause::Arrived(
+                                snapshot.request_id.clone(),
+                            ),
                             moment,
-                        })
-                        .collect();
+                        },
+                        receipt_turn,
+                    };
                     let mut commit = commit;
-                    for write in self.arrivals(causes)? {
+                    for write in self.arrivals(vec![arrival])? {
                         commit = match write {
                             TransitionWrite::Appended(flow) => {
                                 commit.mutate(self.flow_transitions, flow)

@@ -1,3 +1,27 @@
+# Flow 0.59.5: an arrival in an ended turn leaves the seat at its rest
+
+A request's receipt settled after the rest of the turn that took it
+recorded Arrived leading to Acting, so a seat at rest stood Acting and
+every Soft sent to it queued for an idle event that had already come. It
+happened at the Nexus's start, when a hand-over the seat took and finished
+while the Nexus was down settled on its transcript; at a Codex turn's
+completion, when the drain the rest allows settled the letter that turn
+took; and at a Claude Stop, when the drain that rest runs settled a receipt
+Claude wrote after the Stop's own settlement.
+
+The fold holds the rule once (`LeadsToState for Arrival`): an arrival whose
+receipt lies in a turn that has already ended records no Acting, and the
+seat stays as it is. The Nexus reads the turn from the seat's native
+history at the settlement (`ReadsReceiptTurn`): Ended when a Claude
+transcript shows its main turn ended with no later prompt, or a Codex
+thread's ledger shows it at rest; Running otherwise, which leads to Acting
+as before. The 0.59.3 order, a Stop's arrivals before its rest, is kept.
+
+transitions.ethos gains `ReceiptTurn` and `Arrival`; `arrivals` takes
+Arrivals. Memory, families, schemas and wires are unchanged from 0.59.4: an
+Arrived transition is stored as before, its state the one it leads to.
+Only the flow-nexus crate moves to 0.59.5.
+
 # Flow 0.59.4: a request wakes a sleeping permaflow by its kind
 
 What wakes an Asleep metaflow is the request's kind, whatever its priority

@@ -68,7 +68,12 @@ impl CommitsAttemptState for FlowStore {
         commit: AtomicCommit,
     ) -> Result<(), StoreError> {
         if let QueueEvidence::Logical(entry) = evidence {
-            self.commit_logical_transition(&entry.logical_delivery_id, state, commit)?;
+            self.commit_logical_transition(
+                &entry.logical_delivery_id,
+                state,
+                crate::generated::transitions::ReceiptTurn::Running,
+                commit,
+            )?;
         } else {
             // Legacy attempts retain history without a fabricated lifecycle link.
             self.engine.commit_atomic(commit)?;
@@ -307,8 +312,14 @@ pub trait AccountsQueueDelivery {
     ) -> Result<bool, StoreError>;
 
     /// Atomically removes the request if it remains oldest and retains the
-    /// settled attempt, so a duplicate completion is idempotent.
-    fn settle_recorded_delivery(&self, attempt_id: &str) -> Result<bool, StoreError>;
+    /// settled attempt, so a duplicate completion is idempotent. The
+    /// request arrives folded with `receipt_turn`, the turn its receipt
+    /// lies in.
+    fn settle_recorded_delivery(
+        &self,
+        attempt_id: &str,
+        receipt_turn: crate::generated::transitions::ReceiptTurn,
+    ) -> Result<bool, StoreError>;
 
     /// Adds an authenticated answer's settlement of one Uncertain attempt to
     /// the caller's admission commit.  There must be exactly one unfinished
@@ -848,6 +859,7 @@ impl AccountsQueueDelivery for FlowStore {
         self.commit_logical_transition(
             &logical_delivery_id,
             DeliveryState::Attempting,
+            crate::generated::transitions::ReceiptTurn::Running,
             commit.assert(self.queue_delivery.attempts, attempt.clone()),
         )?;
         Ok(PrepareQueueDelivery::Prepared(attempt))
@@ -987,7 +999,11 @@ impl AccountsQueueDelivery for FlowStore {
             .mutate(self.queue_delivery.attempts, attempt))
     }
 
-    fn settle_recorded_delivery(&self, attempt_id: &str) -> Result<bool, StoreError> {
+    fn settle_recorded_delivery(
+        &self,
+        attempt_id: &str,
+        receipt_turn: crate::generated::transitions::ReceiptTurn,
+    ) -> Result<bool, StoreError> {
         let Some(mut attempt) = self.queue_delivery_attempt(attempt_id)? else {
             return Ok(false);
         };
@@ -1056,6 +1072,7 @@ impl AccountsQueueDelivery for FlowStore {
         self.commit_logical_transition(
             &logical_id,
             DeliveryState::Delivered(native_receipt),
+            receipt_turn,
             commit,
         )?;
         Ok(true)
@@ -1087,7 +1104,10 @@ impl AccountsQueueDelivery for FlowStore {
                 attempt.queue_delivery_phase,
                 QueueDeliveryPhase::ReceiptRecorded(_)
             ) {
-                self.settle_recorded_delivery(&attempt.queue_attempt_id.0)?;
+                self.settle_recorded_delivery(
+                    &attempt.queue_attempt_id.0,
+                    crate::generated::transitions::ReceiptTurn::Running,
+                )?;
                 return self
                     .logical_delivery_snapshot(&logical_id)?
                     .map(|snapshot| snapshot.delivery_state)
@@ -1143,7 +1163,12 @@ impl AccountsQueueDelivery for FlowStore {
             commit.mutate(self.queue_delivery.requests, request)
         };
         let state = DeliveryState::Failed(signal_flow::Refusal::Direct(reason.into()));
-        self.commit_logical_transition(&logical_id, state.clone(), commit)?;
+        self.commit_logical_transition(
+            &logical_id,
+            state.clone(),
+            crate::generated::transitions::ReceiptTurn::Running,
+            commit,
+        )?;
         Ok(state)
     }
 
@@ -1471,9 +1496,10 @@ impl AccountsQueueDelivery for FlowStore {
                 QueueEvidence::Logical(entry) if entry.logical_delivery_id.0 == id)
         {
             let closed = match attempt.queue_delivery_phase {
-                QueueDeliveryPhase::ReceiptRecorded(_) => {
-                    self.settle_recorded_delivery(&attempt.queue_attempt_id.0)?
-                }
+                QueueDeliveryPhase::ReceiptRecorded(_) => self.settle_recorded_delivery(
+                    &attempt.queue_attempt_id.0,
+                    crate::generated::transitions::ReceiptTurn::Running,
+                )?,
                 // A prepared hand-over is potentially native input: it is
                 // never taken for absent.
                 _ => {
@@ -1510,7 +1536,12 @@ impl AccountsQueueDelivery for FlowStore {
         };
         let logical_id = flow_ethos::LogicalDeliveryId(id.to_owned());
         if self.logical_delivery_snapshot(&logical_id)?.is_some() {
-            self.commit_logical_transition(&logical_id, DeliveryState::Withdrawn, commit)?;
+            self.commit_logical_transition(
+                &logical_id,
+                DeliveryState::Withdrawn,
+                crate::generated::transitions::ReceiptTurn::Running,
+                commit,
+            )?;
         } else {
             self.engine.commit_atomic(commit)?;
         }
@@ -1818,7 +1849,10 @@ mod tests {
         assert!(store.awaken_metaflow(&address(), "successor", 0).unwrap());
         assert!(
             store
-                .settle_recorded_delivery(&old.queue_attempt_id.0)
+                .settle_recorded_delivery(
+                    &old.queue_attempt_id.0,
+                    crate::generated::transitions::ReceiptTurn::Running,
+                )
                 .unwrap()
         );
         assert_eq!(
@@ -1999,7 +2033,10 @@ mod tests {
         );
         assert!(
             !reopened
-                .settle_recorded_delivery(&prepared.queue_attempt_id.0)
+                .settle_recorded_delivery(
+                    &prepared.queue_attempt_id.0,
+                    crate::generated::transitions::ReceiptTurn::Running,
+                )
                 .unwrap()
         );
         assert_eq!(
@@ -2058,7 +2095,10 @@ mod tests {
         );
         assert!(
             reopened
-                .settle_recorded_delivery(&prepared.queue_attempt_id.0)
+                .settle_recorded_delivery(
+                    &prepared.queue_attempt_id.0,
+                    crate::generated::transitions::ReceiptTurn::Running,
+                )
                 .unwrap()
         );
         assert_eq!(
@@ -2146,6 +2186,7 @@ mod tests {
             .commit_logical_transition(
                 &flow_ethos::LogicalDeliveryId("logical-first".into()),
                 DeliveryState::Read,
+                crate::generated::transitions::ReceiptTurn::Running,
                 commit,
             )
             .expect("answer admission and Read settle atomically");
@@ -2209,7 +2250,10 @@ mod tests {
         );
         assert!(
             reopened
-                .settle_recorded_delivery(&prepared.queue_attempt_id.0)
+                .settle_recorded_delivery(
+                    &prepared.queue_attempt_id.0,
+                    crate::generated::transitions::ReceiptTurn::Running,
+                )
                 .unwrap(),
             "settlement is idempotent on Read"
         );
@@ -2285,7 +2329,10 @@ mod tests {
         );
         assert!(
             store
-                .settle_recorded_delivery(&prepared.queue_attempt_id.0)
+                .settle_recorded_delivery(
+                    &prepared.queue_attempt_id.0,
+                    crate::generated::transitions::ReceiptTurn::Running,
+                )
                 .unwrap()
         );
         assert_eq!(
@@ -2353,7 +2400,10 @@ mod tests {
         );
         assert!(
             reopened
-                .settle_recorded_delivery(&prepared.queue_attempt_id.0)
+                .settle_recorded_delivery(
+                    &prepared.queue_attempt_id.0,
+                    crate::generated::transitions::ReceiptTurn::Running,
+                )
                 .unwrap()
         );
         // A duplicate completion observes the retained settled attempt and
@@ -2365,7 +2415,10 @@ mod tests {
         );
         assert!(
             reopened
-                .settle_recorded_delivery(&prepared.queue_attempt_id.0)
+                .settle_recorded_delivery(
+                    &prepared.queue_attempt_id.0,
+                    crate::generated::transitions::ReceiptTurn::Running,
+                )
                 .unwrap()
         );
         assert_eq!(
@@ -2524,7 +2577,10 @@ mod tests {
         );
         assert!(
             !store
-                .settle_recorded_delivery(&prepared.queue_attempt_id.0)
+                .settle_recorded_delivery(
+                    &prepared.queue_attempt_id.0,
+                    crate::generated::transitions::ReceiptTurn::Running,
+                )
                 .unwrap()
         );
         assert_eq!(
@@ -2677,7 +2733,10 @@ mod tests {
         );
         assert!(
             reopened
-                .settle_recorded_delivery(&first.queue_attempt_id.0)
+                .settle_recorded_delivery(
+                    &first.queue_attempt_id.0,
+                    crate::generated::transitions::ReceiptTurn::Running,
+                )
                 .unwrap()
         );
         assert_eq!(
@@ -2778,7 +2837,10 @@ mod tests {
         );
         assert!(
             !store
-                .settle_recorded_delivery(&attempt.queue_attempt_id.0)
+                .settle_recorded_delivery(
+                    &attempt.queue_attempt_id.0,
+                    crate::generated::transitions::ReceiptTurn::Running,
+                )
                 .unwrap()
         );
         assert_eq!(store.observe_legacy_archive().unwrap(), archive);
@@ -3035,7 +3097,10 @@ mod tests {
         );
         assert!(
             store
-                .settle_recorded_delivery(&prepared.queue_attempt_id.0)
+                .settle_recorded_delivery(
+                    &prepared.queue_attempt_id.0,
+                    crate::generated::transitions::ReceiptTurn::Running,
+                )
                 .unwrap()
         );
         // Settled is not Uncertain.
@@ -3356,7 +3421,10 @@ mod tests {
         );
         assert!(
             store
-                .settle_recorded_delivery(&prepared.queue_attempt_id.0)
+                .settle_recorded_delivery(
+                    &prepared.queue_attempt_id.0,
+                    crate::generated::transitions::ReceiptTurn::Running,
+                )
                 .unwrap()
         );
         assert_eq!(

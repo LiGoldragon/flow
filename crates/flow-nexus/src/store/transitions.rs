@@ -6,7 +6,9 @@
 //! Every write of that family takes `transitions_gate`, so two causes
 //! recorded at once each read the record the other wrote. A delivery that
 //! makes a request arrive takes the gate over its own commit and writes the
-//! arrival in it (`logical_delivery`).
+//! arrival in it (`logical_delivery`), folded with the turn its receipt
+//! lies in: one whose turn has already ended records no Acting, and the
+//! seat stays as it is (`LeadsToState for Arrival`).
 //!
 //! The Memory upgrade runs at every open (`seed_reported_transitions`): a
 //! store an earlier Flow wrote holds each flow's reports as harness events
@@ -21,7 +23,8 @@ use crate::generated::memory::{Cause, Event, Flow, FlowEvents, Moment, Transitio
 use crate::generated::overriding::{RemembersOverrides, Seat, Subject};
 use crate::generated::transitions::LeadsToState;
 use crate::generated::transitions::{
-    AskedFlow, Caused, RecordsTransitions, SeedsReportedTransition, TransitionWrite,
+    Arrival, AskedFlow, Caused, ReceiptTurn, RecordsTransitions, SeedsReportedTransition,
+    TransitionWrite,
 };
 use crate::reminding::CountsUnixSeconds;
 use crate::store::NamesLiveFlow;
@@ -46,6 +49,107 @@ impl LeadsToState for Cause {
             Cause::Reported(Event::Compacting) => Some(before.unwrap_or(State::Acting)),
             Cause::CoolingDue | Cause::Crystallized(_) | Cause::Overridden => None,
         }
+    }
+}
+
+impl LeadsToState for Caused {
+    /// Where its cause leads.
+    fn leads_to(&self, before: Option<State>) -> Option<State> {
+        self.cause.leads_to(before)
+    }
+}
+
+impl LeadsToState for Arrival {
+    /// The fold rule, placed here once: an arrival whose receipt lies in a
+    /// turn that has already ended records no Acting, and the seat stays
+    /// as it is, at the state before or at none when none was held. Its
+    /// rest came first, by whatever order the events reached Flow: a Stop's
+    /// or a turn's completion before the settlement, or a restart between
+    /// them. An arrival whose turn runs leads where Arrived does.
+    fn leads_to(&self, before: Option<State>) -> Option<State> {
+        match self.receipt_turn {
+            ReceiptTurn::Ended => before,
+            ReceiptTurn::Running => self.caused.leads_to(before),
+        }
+    }
+}
+
+/// What the fold appends to its seat's flow: one cause, and the state it
+/// leads to from the state before.
+trait FoldsIntoTransition: LeadsToState {
+    fn caused(&self) -> &Caused;
+}
+
+impl FoldsIntoTransition for Caused {
+    fn caused(&self) -> &Caused {
+        self
+    }
+}
+
+impl FoldsIntoTransition for Arrival {
+    fn caused(&self) -> &Caused {
+        &self.caused
+    }
+}
+
+impl FlowStore {
+    /// One write per flow, each cause appended in order to what the flow's
+    /// record holds, or to what an earlier cause of the same call wrote. A
+    /// cause that leads to no state writes nothing.
+    fn fold(
+        &self,
+        causes: Vec<impl FoldsIntoTransition>,
+    ) -> Result<Vec<TransitionWrite>, StoreError> {
+        let mut writes: Vec<TransitionWrite> = Vec::new();
+        for folded in causes {
+            let caused = folded.caused();
+            let flow_id = caused.seat.flow_id.clone();
+            let position = writes.iter().position(|write| match write {
+                TransitionWrite::Appended(flow) | TransitionWrite::Opened(flow) => {
+                    flow.flow_id == flow_id
+                }
+            });
+            let mut write = match position {
+                Some(position) => writes.remove(position),
+                None => match self
+                    .engine
+                    .match_records(QueryPlan::key(
+                        self.flow_transitions,
+                        RecordKey::new(flow_id.0.clone()),
+                    ))?
+                    .records()
+                    .first()
+                    .cloned()
+                {
+                    Some(flow) => TransitionWrite::Appended(flow),
+                    None => TransitionWrite::Opened(Flow {
+                        flow_id: flow_id.clone(),
+                        address: caused.seat.address.clone(),
+                        transition_vector: Vec::new(),
+                    }),
+                },
+            };
+            let flow = match &mut write {
+                TransitionWrite::Appended(flow) | TransitionWrite::Opened(flow) => flow,
+            };
+            let before = flow.transition_vector.last().map(|last| last.state.clone());
+            let Some(state) = folded.leads_to(before) else {
+                // Nothing appended: a record this call already wrote stays
+                // written, and one it only read is not written again.
+                if position.is_some() {
+                    writes.push(write);
+                }
+                continue;
+            };
+            flow.address = caused.seat.address.clone();
+            flow.transition_vector.push(Transition {
+                state,
+                cause: caused.cause.clone(),
+                moment: caused.moment,
+            });
+            writes.push(write);
+        }
+        Ok(writes)
     }
 }
 
@@ -86,18 +190,14 @@ impl RecordsTransitions for FlowStore {
             .transitions_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let transition = self
-            .arrivals(vec![caused])?
-            .into_iter()
-            .next()
-            .map(|write| {
-                let transition = match &write {
-                    TransitionWrite::Appended(flow) | TransitionWrite::Opened(flow) => {
-                        flow.transition_vector.last().cloned()
-                    }
-                };
-                (write, transition)
-            });
+        let transition = self.fold(vec![caused])?.into_iter().next().map(|write| {
+            let transition = match &write {
+                TransitionWrite::Appended(flow) | TransitionWrite::Opened(flow) => {
+                    flow.transition_vector.last().cloned()
+                }
+            };
+            (write, transition)
+        });
         let Some((write, transition)) = transition else {
             return Ok(None);
         };
@@ -110,59 +210,10 @@ impl RecordsTransitions for FlowStore {
         Ok(transition)
     }
 
-    /// One write per flow, each cause appended in order to what the flow's
-    /// record holds, or to what an earlier cause of the same call wrote. A
-    /// cause that leads to no state writes nothing.
-    fn arrivals(&self, causes: Vec<Caused>) -> Result<Vec<TransitionWrite>, StoreError> {
-        let mut writes: Vec<TransitionWrite> = Vec::new();
-        for caused in causes {
-            let flow_id = caused.seat.flow_id.clone();
-            let position = writes.iter().position(|write| match write {
-                TransitionWrite::Appended(flow) | TransitionWrite::Opened(flow) => {
-                    flow.flow_id == flow_id
-                }
-            });
-            let mut write = match position {
-                Some(position) => writes.remove(position),
-                None => match self
-                    .engine
-                    .match_records(QueryPlan::key(
-                        self.flow_transitions,
-                        RecordKey::new(flow_id.0.clone()),
-                    ))?
-                    .records()
-                    .first()
-                    .cloned()
-                {
-                    Some(flow) => TransitionWrite::Appended(flow),
-                    None => TransitionWrite::Opened(Flow {
-                        flow_id: flow_id.clone(),
-                        address: caused.seat.address.clone(),
-                        transition_vector: Vec::new(),
-                    }),
-                },
-            };
-            let flow = match &mut write {
-                TransitionWrite::Appended(flow) | TransitionWrite::Opened(flow) => flow,
-            };
-            let before = flow.transition_vector.last().map(|last| last.state.clone());
-            let Some(state) = caused.cause.leads_to(before) else {
-                // Nothing appended: a record this call already wrote stays
-                // written, and one it only read is not written again.
-                if position.is_some() {
-                    writes.push(write);
-                }
-                continue;
-            };
-            flow.address = caused.seat.address;
-            flow.transition_vector.push(Transition {
-                state,
-                cause: caused.cause,
-                moment: caused.moment,
-            });
-            writes.push(write);
-        }
-        Ok(writes)
+    /// Each arrival folded as it leads (`LeadsToState for Arrival`), one
+    /// write per flow.
+    fn arrivals(&self, arrivals: Vec<Arrival>) -> Result<Vec<TransitionWrite>, StoreError> {
+        self.fold(arrivals)
     }
 
     fn state_of(&self, asked: AskedFlow) -> Result<Option<State>, StoreError> {

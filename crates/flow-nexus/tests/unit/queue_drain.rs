@@ -922,7 +922,10 @@ fn partial_cohort_settlement_preserves_original_payload_and_terminal_history() {
         fixture
             .nexus
             .store
-            .settle_recorded_delivery(&first.queue_attempt_id.0)
+            .settle_recorded_delivery(
+                &first.queue_attempt_id.0,
+                crate::generated::transitions::ReceiptTurn::Running,
+            )
             .unwrap()
     );
     let terminal = fixture

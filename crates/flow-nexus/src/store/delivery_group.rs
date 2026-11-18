@@ -1538,4 +1538,105 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn selector_failure_leaves_the_selected_group_and_suffix_unchanged() {
+        let (_fixture, store) = Fixture::new();
+        let accepted = admit(&store, vec![order("first"), order("second")]);
+        admit(&store, vec![notice("later suffix")]);
+        let queue = store.metaflow(&address()).unwrap().unwrap().queue.0;
+        let group = store
+            .delivery_group(&accepted[0].logical_delivery_id)
+            .unwrap();
+        // An existing fixture seam removes required read evidence. This
+        // exercises an invariant failure, not an injected read-I/O fault.
+        store
+            .engine
+            .commit_atomic(store.engine.begin_atomic_commit().retract(
+                store.logical_deliveries.current,
+                RecordKey::new(accepted[1].logical_delivery_id.0.clone()),
+            ))
+            .unwrap();
+        let digest = store.memory_digest().unwrap();
+        assert!(store.oldest_delivery_group(&address(), &queue).is_err());
+        assert!(
+            store
+                .refuse_delivery_group(&address(), &queue[..2], Refusal::Unresolved)
+                .is_err()
+        );
+        assert_eq!(store.memory_digest().unwrap(), digest);
+        assert_eq!(store.metaflow(&address()).unwrap().unwrap().queue.0, queue);
+        assert_eq!(
+            store
+                .delivery_group(&accepted[0].logical_delivery_id)
+                .unwrap(),
+            group
+        );
+    }
+
+    #[test]
+    fn refusal_atomic_duplicate_event_failure_leaves_every_member_queued() {
+        use crate::store::logical_delivery::{LogicalDeliveryEvent, NextCursor};
+        let (_fixture, store) = Fixture::new();
+        let accepted = admit(
+            &store,
+            vec![order("first awaiting"), order("second awaiting")],
+        );
+        admit(&store, vec![notice("later suffix")]);
+        let queue = store.metaflow(&address()).unwrap().unwrap().queue.0;
+        let group = store
+            .delivery_group(&accepted[0].logical_delivery_id)
+            .unwrap();
+        let original = store
+            .logical_delivery_snapshot(&accepted[0].logical_delivery_id)
+            .unwrap()
+            .unwrap();
+        let expected_key = LogicalDeliveryEvent {
+            delivery_snapshot: original.clone(),
+        }
+        .record_key()
+        .to_owned_string();
+        let counters = store
+            .engine
+            .match_records(QueryPlan::all(store.logical_deliveries.counter))
+            .unwrap();
+        let [counter] = counters.records() else {
+            panic!("admission created one logical counter");
+        };
+        let mut rewound = counter.clone();
+        // The first new refusal event will collide with a real existing
+        // event. Engine must refuse atomic preparation before materializing.
+        rewound.next_cursor = NextCursor(original.delivery_cursor.0);
+        store
+            .engine
+            .commit_atomic(
+                store
+                    .engine
+                    .begin_atomic_commit()
+                    .mutate(store.logical_deliveries.counter, rewound),
+            )
+            .unwrap();
+        let digest = store.memory_digest().unwrap();
+        let result = store.refuse_delivery_group(&address(), &queue[..2], Refusal::Unresolved);
+        assert!(
+            matches!(result, Err(StoreError::Engine(sema_engine::Error::DuplicateAssertKey { key, .. })) if key == expected_key)
+        );
+        assert_eq!(store.memory_digest().unwrap(), digest);
+        assert_eq!(store.metaflow(&address()).unwrap().unwrap().queue.0, queue);
+        assert_eq!(
+            store
+                .delivery_group(&accepted[0].logical_delivery_id)
+                .unwrap(),
+            group
+        );
+        for member in &accepted {
+            assert_eq!(
+                store
+                    .logical_delivery_snapshot(&member.logical_delivery_id)
+                    .unwrap()
+                    .unwrap()
+                    .delivery_state,
+                DeliveryState::Queued
+            );
+        }
+    }
 }

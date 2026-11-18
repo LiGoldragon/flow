@@ -1141,9 +1141,9 @@ fn cancellation_selects_roles_before_deduplicating_addresses() {
         (Telling::Told, Telling::Told, 2),
     ] {
         let settings = CancelNotices { sender: Sender(sender_telling), recipient: Recipient(recipient_telling) };
-        let roles = CancellationRoles { sender: Some(sender.clone()), recipient: Some(recipient.clone()) };
+        let roles = CancellationRoles { sender: Some(sender.clone()), recipient: Some(recipient.clone()), settings: None };
         assert_eq!(roles.selected(&settings).len(), expected);
-        let same = CancellationRoles { sender: Some(sender.clone()), recipient: Some(sender.clone()) };
+        let same = CancellationRoles { sender: Some(sender.clone()), recipient: Some(sender.clone()), settings: None };
         assert_eq!(same.selected(&settings).len(), usize::from(expected > 0));
     }
 }

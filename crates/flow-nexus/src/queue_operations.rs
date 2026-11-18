@@ -117,6 +117,7 @@ impl EmptiesQueues for RunningNexus {
 pub(crate) struct CancellationRoles {
     pub(crate) sender: Option<Address>,
     pub(crate) recipient: Option<Address>,
+    pub(crate) settings: Option<meta_signal_flow::CancelNotices>,
 }
 
 pub(crate) trait SelectsCancellationNotices {
@@ -148,6 +149,7 @@ trait EndsRequests {
     /// Task's reminder. A closed request's closer is recorded in the same
     /// commit. Answers the Addresses that knew of it: a reminder's asker;
     /// otherwise its sender, and its recipient when it reached it.
+    fn cancellation_notice_settings(&self) -> Result<meta_signal_flow::CancelNotices, RequestRejection>;
     fn end_request(
         &self,
         request_id: &RequestId,
@@ -156,17 +158,28 @@ trait EndsRequests {
 }
 
 impl EndsRequests for RunningNexus {
+    fn cancellation_notice_settings(&self) -> Result<meta_signal_flow::CancelNotices, RequestRejection> {
+        match self.store.configuration_snapshot() {
+            Ok(Some(snapshot)) => Ok(snapshot.configured_cancel_notices.0),
+            Ok(None) => Ok(meta_signal_flow::CancelNotices::default_cancel_notices()),
+            Err(_) => Err(RequestRejection::StoreRefused),
+        }
+    }
+
     fn end_request(
         &self,
         request_id: &RequestId,
         ending: &RequestEnding,
     ) -> Result<CancellationRoles, RequestRejection> {
         use crate::store::scheduled_reminder::{MarksScheduledReminder, SchedulesReminders};
-        let mut roles = CancellationRoles { sender: None, recipient: None };
+        let mut roles = CancellationRoles { sender: None, recipient: None, settings: None };
         // A reminder not yet sent is ended where it waits; it reached no
         // one, so only its asker knew of it.
         match self.store.scheduled_reminder(request_id) {
             Ok(Some(reminder)) => {
+                if matches!(ending, RequestEnding::Cancelled) {
+                    roles.settings = Some(self.cancellation_notice_settings()?);
+                }
                 let commit =
                     self.store
                         .ending_commit(ending, &request_id.scheduled_marker(), request_id);
@@ -202,14 +215,21 @@ impl EndsRequests for RunningNexus {
         let Some(retained) = retained else {
             return Err(RequestRejection::UnknownRequest);
         };
+        if matches!(ending, RequestEnding::Cancelled) {
+            roles.settings = Some(self.cancellation_notice_settings()?);
+        }
         let reached = self
             .store
             .delivered_to_be_answered(&binding.logical_delivery_id)
             .map_err(|_| RequestRejection::StoreRefused)?;
-        let recipient_eligible = self.store.logical_delivery_snapshot(&binding.logical_delivery_id)
-            .map_err(|_| RequestRejection::StoreRefused)?
-            .is_some_and(|delivery| matches!(delivery.delivery_state,
-                signal_flow::DeliveryState::Delivered(_) | signal_flow::DeliveryState::Read | signal_flow::DeliveryState::Uncertain));
+        let recipient_eligible = if matches!(ending, RequestEnding::Cancelled) {
+            self.store.logical_delivery_snapshot(&binding.logical_delivery_id)
+                .map_err(|_| RequestRejection::StoreRefused)?
+                .is_some_and(|delivery| matches!(delivery.delivery_state,
+                    signal_flow::DeliveryState::Delivered(_) | signal_flow::DeliveryState::Read | signal_flow::DeliveryState::Uncertain))
+        } else {
+            false
+        };
         let queued = match self.store.metaflow(&retained.address) {
             Ok(metaflow) => metaflow.is_some_and(|metaflow| {
                 metaflow
@@ -261,15 +281,11 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let settings = match self.store.configuration_snapshot() {
-                Ok(Some(snapshot)) => snapshot.configured_cancel_notices.0,
-                Ok(None) => meta_signal_flow::CancelNotices::default_cancel_notices(),
-                Err(_) => return Output::CancelRejected(RequestRejection::StoreRefused),
-            };
             let roles = match self.end_request(request_id, &RequestEnding::Cancelled) {
                 Ok(roles) => roles,
                 Err(rejection) => return Output::CancelRejected(rejection),
             };
+            let settings = roles.settings.clone().expect("Cancel reads its settings before ending");
             let told = roles.selected(&settings);
             let text = format!("Request {} was cancelled.", request_id.0);
             for address in &told {

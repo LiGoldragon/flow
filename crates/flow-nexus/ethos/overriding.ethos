@@ -47,7 +47,7 @@ Library
   :flow_nexus:generated:memory:[ Flow Transition Moment StoredHold ]
   :meta_signal_flow:generated:signal:[ State MetaOutput.Output ]
   :flow_nexus:codex:[ CodexAdapter CodexAdapterUnavailable ]
-  :signal_flow:[ FlowId Address ] ]
+  :signal_flow:[ FlowId Address LaunchAttempt ] ]
 [ Subject.[ Named.FlowId                                    ; types: what an override names
             Permaflow.Address ]
   Seat.{ FlowId Address }                                   ;   a flow at its Address
@@ -74,11 +74,17 @@ Library
                    record_override.{ [ Transitioned ] [ Result<Boolean MetaOutput> ] }
                    record_named.{ [ Subject ] [ Result<Boolean MetaOutput> ] }
                    record_every_seat.[ Result<Boolean MetaOutput> ] ]
+  ; An opened launch's pre-acknowledgement Codex intent is interrupted
+  ; only while its outcome remains unsettled. Cleanup and responder
+  ; selection ask this one classification.
+  LaunchAttemptCarrying.[ carried_launch_attempt.[ LaunchAttempt ] ]
+  RecognizesInterruptedLaunches.[ launch_is_interrupted.{ [ LaunchAttemptCarrying ] [ Result<Boolean StoreError> ] } ]
   DescribesOverrideTable.[ descriptor:[ TableDescriptor<Self> ] ]
   EntersByOverride.[ overridden.[ Transition ] ]
   InterruptsRunningTurns.[ interrupt_running_turn.{ [ Seat ] [ TurnInterruption ] } ]
   InterruptsCodexThreads.[ interrupt_thread.{ [ CodexThread ] [ Result<TurnInterruption CodexAdapterUnavailable> ] } ] ]
-[ FlowStore.[ RemembersOverrides ]                          ; associations
+[ LaunchAttempt.[ LaunchAttemptCarrying ]
+  FlowStore.[ RemembersOverrides RecognizesInterruptedLaunches ]                          ; associations
   RunningNexus.[ HeedsOverrides
                  InterruptsRunningTurns ]
   CodexAdapter.[ InterruptsCodexThreads ]

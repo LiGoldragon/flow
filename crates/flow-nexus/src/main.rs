@@ -149,7 +149,8 @@ fn main() -> ExitCode {
     };
     // A Codex launch the last Nexus left mid-way, its first turn perhaps
     // pending on a send call, is refused and settled before anything is
-    // served.
+    // served, unless a persisted global Hold leaves it for owner Resume.
+    // Interrupted threads are excluded from normal responder selection.
     nexus.reconcile_interrupted_launches();
     if let Err(error) = Readiness::announce_ready() {
         eprintln!("flow-nexus: readiness not announced: {error}");

@@ -1318,6 +1318,32 @@ impl KeepsSendToolResponders for SendToolResponders {
             {
                 continue;
             }
+            // Before acknowledgement, the launch's own connection answers
+            // calls under the gate. After an exit, cleanup alone owns them.
+            // A persisted Hold defers that cleanup, not send authority.
+            use crate::generated::overriding::RecognizesInterruptedLaunches;
+            use crate::store::ReadsLaunchAttempt;
+            use crate::store::opened_thread::RecordsOpenedThreads;
+            let interrupted = (|| -> Result<bool, crate::store::StoreError> {
+                let Some(request) = nexus.store.thread_launch(&node.session_id.0)? else {
+                    return Ok(false);
+                };
+                let Some(attempt) = nexus.store.launch_attempt(&request)? else {
+                    return Ok(false);
+                };
+                nexus.store.launch_is_interrupted(attempt)
+            })();
+            match interrupted {
+                Ok(false) => {}
+                Ok(true) => continue,
+                Err(error) => {
+                    eprintln!(
+                        "flow-nexus: send tool thread {} interruption unreadable: {error}",
+                        node.session_id.0
+                    );
+                    continue;
+                }
+            }
             let adapter = nexus
                 .store
                 .role(&node.flow_id.0)

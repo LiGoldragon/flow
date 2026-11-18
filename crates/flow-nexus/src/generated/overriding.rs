@@ -97,6 +97,17 @@ pub trait HeedsOverrides {
     ) -> std::result::Result<bool, meta_signal_flow::generated::signal::Output>;
 }
 #[rustfmt::skip]
+pub trait LaunchAttemptCarrying {
+    fn carried_launch_attempt(&self) -> signal_flow::LaunchAttempt;
+}
+#[rustfmt::skip]
+pub trait RecognizesInterruptedLaunches {
+    fn launch_is_interrupted<N: LaunchAttemptCarrying>(
+        &self,
+        input: N,
+    ) -> std::result::Result<bool, flow_nexus::store::StoreError>;
+}
+#[rustfmt::skip]
 pub trait DescribesOverrideTable {
     fn descriptor() -> sema_engine::TableDescriptor<Self>
     where
@@ -122,8 +133,17 @@ pub trait InterruptsCodexThreads {
 }
 #[rustfmt::skip]
 const _: () = {
+    fn assert_launchattempt_launchattemptcarrying<T: LaunchAttemptCarrying>() {}
+    let _ = assert_launchattempt_launchattemptcarrying::<signal_flow::LaunchAttempt>;
+};
+#[rustfmt::skip]
+const _: () = {
     fn assert_flowstore_remembersoverrides<T: RemembersOverrides>() {}
     let _ = assert_flowstore_remembersoverrides::<flow_nexus::store::FlowStore>;
+    fn assert_flowstore_recognizesinterruptedlaunches<T: RecognizesInterruptedLaunches>() {}
+    let _ = assert_flowstore_recognizesinterruptedlaunches::<
+        flow_nexus::store::FlowStore,
+    >;
 };
 #[rustfmt::skip]
 const _: () = {

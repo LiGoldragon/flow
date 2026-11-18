@@ -43,6 +43,8 @@ pub(crate) enum CrashPoint {
 /// The writes a refusal switch fails once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum RefusedWrite {
+    /// A seat's override transition, before the commit.
+    OverrideTransition,
     /// W3, ReapOwed.
     ReapOwing,
     /// A ReapRefused rewrite.

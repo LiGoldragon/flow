@@ -121,6 +121,14 @@ use signal_flow::{
     RegistrationAcknowledgement, ReplaceRejection, Replaced, RouteReadiness, StartRejection,
 };
 
+// Recovery recognizes these newer families by catalog identity alone.
+const PERMAFLOW_HOLD_TABLE: &str = "flow_nexus_permaflow_holds";
+const PERMAFLOW_HOLD_FAMILY: &str = "flow-nexus-permaflow-holds";
+const PERMAFLOW_HOLD_SCHEMA: &str = "flow-nexus-permaflow-holds-v1";
+const HELD_LAUNCH_TABLE: &str = "flow_nexus_held_launches";
+const HELD_LAUNCH_FAMILY: &str = "flow-nexus-held-launches";
+const HELD_LAUNCH_SCHEMA: &str = "flow-nexus-held-launches-v1";
+
 const FLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_flows");
 const FLOW_NATIVE_OWNER_PROOF_TABLE_NAME: TableName =
     TableName::new("flow_nexus_native_owner_proofs");
@@ -5461,13 +5469,8 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
 
     fn current_flow_family_identity(table_name: &str) -> Option<(&'static str, SchemaHash)> {
         let (family, version) = match table_name {
-            "flow_nexus_permaflow_holds" => (
-                "flow-nexus-permaflow-holds",
-                "flow-nexus-permaflow-holds-v1",
-            ),
-            "flow_nexus_held_launches" => {
-                ("flow-nexus-held-launches", "flow-nexus-held-launches-v1")
-            }
+            PERMAFLOW_HOLD_TABLE => (PERMAFLOW_HOLD_FAMILY, PERMAFLOW_HOLD_SCHEMA),
+            HELD_LAUNCH_TABLE => (HELD_LAUNCH_FAMILY, HELD_LAUNCH_SCHEMA),
             context_warnings::POLICY_TABLE => (
                 context_warnings::POLICY_FAMILY,
                 context_warnings::POLICY_SCHEMA,
@@ -5891,8 +5894,8 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
         let is = |tables: &[&str]| {
             actual.iter().all(|name| {
                 tables.contains(&name.as_str())
-                    || name == "flow_nexus_permaflow_holds"
-                    || name == "flow_nexus_held_launches"
+                    || name == PERMAFLOW_HOLD_TABLE
+                    || name == HELD_LAUNCH_TABLE
                     || name == context_warnings::POLICY_TABLE
                     || name == context_warnings::HOOK_TABLE
                     || name == context_warnings::PROGRESS_TABLE
@@ -10276,37 +10279,42 @@ mod tests {
             ("flow_nexus_permaflow_holds", "flow-nexus-permaflow-holds"),
             ("flow_nexus_held_launches", "flow-nexus-held-launches"),
         ] {
-            for wrong_schema in [false, true] {
-                let fixture = StoreFixture::new();
-                fixture.configured();
-                {
-                    let mut engine = Engine::open(EngineOpen::new(
-                        fixture.path(),
-                        SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
-                    ))
-                    .unwrap();
-                    engine
-                        .register_table(TableDescriptor::<super::FlowRecord>::new(
-                            TableName::new(table),
-                            FamilyName::new(if wrong_schema { family } else { "foreign" }),
-                            if wrong_schema {
-                                SchemaHash::for_label("future-v2")
-                            } else {
-                                SchemaHash::for_label(format!("{family}-v1"))
-                            },
+            for running in [false, true] {
+                for wrong_schema in [false, true] {
+                    let fixture = StoreFixture::new();
+                    fixture.configured();
+                    if running {
+                        drop(fixture.configured_store());
+                    }
+                    {
+                        let mut engine = Engine::open(EngineOpen::new(
+                            fixture.path(),
+                            SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
                         ))
                         .unwrap();
+                        engine
+                            .register_table(TableDescriptor::<super::FlowRecord>::new(
+                                TableName::new(table),
+                                FamilyName::new(if wrong_schema { family } else { "foreign" }),
+                                if wrong_schema {
+                                    SchemaHash::for_label("future-v2")
+                                } else {
+                                    SchemaHash::for_label(format!("{family}-v1"))
+                                },
+                            ))
+                            .unwrap();
+                    }
+                    let before = std::fs::read(fixture.path()).unwrap();
+                    assert!(matches!(
+                        ConfigurationOnlyStore::open(&fixture.path()),
+                        Err(super::StoreError::UnrecognizedMemory { .. })
+                    ));
+                    assert!(matches!(
+                        FlowStore::open_configured(&fixture.path()),
+                        Err(super::StoreError::UnrecognizedMemory { .. })
+                    ));
+                    assert_eq!(std::fs::read(fixture.path()).unwrap(), before);
                 }
-                let before = std::fs::read(fixture.path()).unwrap();
-                assert!(matches!(
-                    ConfigurationOnlyStore::open(&fixture.path()),
-                    Err(super::StoreError::UnrecognizedMemory { .. })
-                ));
-                assert!(matches!(
-                    FlowStore::open_configured(&fixture.path()),
-                    Err(super::StoreError::UnrecognizedMemory { .. })
-                ));
-                assert_eq!(std::fs::read(fixture.path()).unwrap(), before);
             }
         }
     }

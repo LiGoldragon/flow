@@ -62,9 +62,7 @@ use crate::{HoldsStopRequest, RunningNexus, store::AnnouncesLaunchChanges};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
-use signal_flow::{
-    Address, Aspect, HarnessKind, Message, Model, Request, SendableMessage, SendableRequest,
-};
+use signal_flow::{Address, Aspect, HarnessKind, Model, SendableMessage, SendableRequest};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, mpsc},

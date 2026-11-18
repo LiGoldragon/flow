@@ -1394,7 +1394,8 @@ fn a_retained_settled_marker_is_removed_without_executing_its_launch() {
     else {
         panic!("the retained launch composes");
     };
-    let outcome = LaunchOutcome::StartRejected(signal_flow::StartRejection::LaunchRequestConflict);
+    let outcome =
+        LaunchOutcome::StartRejected(signal_flow::StartRejection::LaunchPersistenceRefused);
     // Seed the state an older writer could leave: terminal outcome plus parked marker.
     fixture
         .nexus
@@ -1432,7 +1433,7 @@ fn a_retained_settled_marker_is_removed_without_executing_its_launch() {
     );
     assert_eq!(
         fixture.nexus.start(profile, signal_flow::Origin::Unbound),
-        signal_flow::Output::StartRejected(signal_flow::StartRejection::LaunchRequestConflict)
+        signal_flow::Output::StartRejected(signal_flow::StartRejection::LaunchPersistenceRefused)
     );
     overridden(&fixture, meta::Input::ReleasePermaflow(at));
     assert_eq!(world.claude_starts(), 0, "{}", world.calls());

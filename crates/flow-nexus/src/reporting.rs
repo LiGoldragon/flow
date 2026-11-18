@@ -5,8 +5,10 @@
 //! adopted. The owner reads the events back over the meta socket with
 //! `ReadEvents`. A `Stopped` event, once answered, lets a launch waiting on
 //! it send its next part; when it names the flow's registered session and
-//! that session's transcript, it is the flow's turn end: it writes the
-//! flow's context size, and may drain its queue. A `PromptSubmitted` event
+//! that session's transcript, it is the flow's turn end: the hand-overs
+//! that turn took settle on their receipts, then its rest is recorded, so
+//! the rest is the flow's last transition; it writes the flow's context
+//! size, and may drain its queue. A `PromptSubmitted` event
 //! in the flow's registered session is the seat's word that it took a
 //! prompt, which a writer that typed into its pane waits for
 //! (`submission`); whose digest is exactly the request a hand-over typed is
@@ -132,8 +134,23 @@ impl RecordsReports for RunningNexus {
         // compaction its harness made on its own; SessionStart follows one
         // at once.
         crate::compacting::WatchesCompactions::watch_claude_compactions(self, &flow_id.0);
+        // A Stop in the flow's own session ends the turn that took what was
+        // typed into it: those hand-overs are settled first, each arrival
+        // recorded before the rest that ends its turn, so the flow's last
+        // transition is that rest.
+        if let Event::Stopped(stop) = event
+            && self.correlated_stop(&flow_id.0, stop)
+        {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Ok(Some(metaflow)) = self.store.metaflow_awake_as(&flow_id.0) {
+                self.settle_turn_receipts(&metaflow.address);
+            }
+        }
         // The report is typed into its Event and recorded as the flow's
-        // transition before anything it sets going; a tool boundary is
+        // transition before anything else it sets going; a tool boundary is
         // recorded once its context is observed, below.
         if !matches!(event, Event::ToolUsed(_))
             && let Some(typed) = self.claude_event(ClaudeReport {
@@ -192,17 +209,14 @@ impl RecordsReports for RunningNexus {
                     crate::turn_ends::RecordsTurnEnd::turn_ended(self, &flow_id.0);
                     // A simplified seat's answer is read from its own
                     // transcript once its input is received there: the
-                    // payloads typed into it settle first, since the
-                    // prompt's hook may have reported before Claude wrote
-                    // its user row.
+                    // payloads typed into it were settled above, before the
+                    // rest, since the prompt's hook may have reported before
+                    // Claude wrote its user row.
                     let answer = {
                         let _turn = self
                             .dispatch_gate
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        if let Ok(Some(metaflow)) = self.store.metaflow_awake_as(&flow_id.0) {
-                            self.reconcile_typed(&metaflow.address);
-                        }
                         self.queue_simplified_answer(&flow_id.0)
                     };
                     let later = "it is looked for again at the seat's next rest or drain";

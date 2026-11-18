@@ -765,7 +765,11 @@ the flow was in.
 
 A request delivered (its logical delivery Delivered, or Read without its
 receipt) is recorded in the same commit with the cause `Arrived` and its
-`RequestId`, leading to Acting (`logical_delivery`). The state the Nexus
+`RequestId`, leading to Acting (`logical_delivery`). A Claude flow's own
+Stop settles first every hand-over its ended turn took whose receipt its
+transcript shows (`settle_turn_receipts`), so each arrival is recorded
+before the Idle that ends its turn and the flow's last transition is that
+rest. The state the Nexus
 decides by is the last transition: `rests_now`, which a Soft request and a
 drain ask, reads Resting from it (a Simplified Claude seat that opened with
 no prompt is ready for its first input), and the panel's state of a live

@@ -3079,6 +3079,13 @@ pub(crate) trait ParksCohort {
     /// Under the gate the caller holds: reconciles every disjoint pending
     /// payload of the seat `address` is Awake as, using exact native receipts.
     fn reconcile_typed(&self, address: &Address);
+    /// Under the gate the caller holds, at the seat's own turn end: settles
+    /// every hand-over the ended turn took whose exact native receipt its
+    /// history shows, each payload typed past the queue's head and then the
+    /// hand-over holding that head, so each request arrives before the turn
+    /// end's rest is recorded. One whose receipt does not show is left as
+    /// it stands, for the drain at that rest.
+    fn settle_turn_receipts(&self, address: &Address);
     /// At start, with no gate held: reads native history for every
     /// payload still to settle, then takes the gate only to settle each
     /// one whose receipt it found. A read that cannot decide, or that
@@ -3340,6 +3347,30 @@ impl ParksCohort for RunningNexus {
                 covered.extend(run.iter().map(|member| member.queue_attempt_id.0.clone()));
                 let _ = self.settle_received(&attempt, &run, turn_id, native_receipt, seat_after);
             }
+        }
+    }
+
+    fn settle_turn_receipts(&self, address: &Address) {
+        // The typed payloads first: settling the head first would make the
+        // next typed attempt the head, and leave it to the drain after the
+        // rest.
+        self.reconcile_typed(address);
+        let Ok(Some(head)) = self.store.outstanding_delivery(address) else {
+            return;
+        };
+        match head.queue_delivery_phase {
+            QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_) => {
+                if let Ok((run, turn_id, native_receipt, seat_after)) = self.find_receipt(&head) {
+                    let _ = self.settle_received(&head, &run, turn_id, native_receipt, seat_after);
+                }
+            }
+            QueueDeliveryPhase::ReceiptRecorded(_) => {
+                let _ = self.reconcile_delivery(&head);
+            }
+            QueueDeliveryPhase::Settled(_)
+            | QueueDeliveryPhase::Read { .. }
+            | QueueDeliveryPhase::Absent(_)
+            | QueueDeliveryPhase::Resolved(_) => {}
         }
     }
 

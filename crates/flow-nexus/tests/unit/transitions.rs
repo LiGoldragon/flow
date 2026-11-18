@@ -328,6 +328,86 @@ fn a_delivered_request_arrives_at_its_flow() {
     assert_eq!(arrived.cause, Cause::Arrived(accepted.request_id.clone()));
 }
 
+/// A request typed into a seat whose receipt its transcript shows only once
+/// the turn that took it has ended arrives before that turn's rest: the
+/// Stop settles it first, so the seat's last transition is its rest and the
+/// next Soft Send is typed into it at once.
+#[test]
+fn a_request_its_turn_took_arrives_before_that_turns_rest() {
+    use super::codex_agent_in;
+    use super::waking::{CLAUDE_SESSION, claude_agent, send_soft, soft_recipient, stored};
+    let fixture = NexusFixture::new();
+    let (_caller, peer) = soft_recipient(&fixture, false);
+    let response = send_soft(&fixture, &peer, "Read the ruling.");
+    assert!(
+        matches!(response, signal_flow::Output::SendAccepted(_)),
+        "{response:?}"
+    );
+    assert!(fixture.typed().is_none(), "held for the seat's idle event");
+
+    // The turn ends; Claude writes the row of what is typed into it only
+    // once its prompt is taken, later.
+    append_main_rows(&fixture, &[end_turn("first-turn")]);
+    fixture.accept_pane_operations(
+        vec![
+            codex_agent_in("pane-1", "terminal-pane-1"),
+            claude_agent(&fixture),
+        ],
+        PromptFixture::PromptedUnrecorded("w1:p3"),
+    );
+    report_claude_stop(&fixture, vec![]);
+    let typed = fixture.typed().expect("typed at the Stop");
+    assert!(typed.contains("Read the ruling."), "{typed}");
+
+    // The seat takes it, its hook naming a digest of the text as Claude
+    // shows it; its row and its turn's end land in its transcript.
+    report(
+        &fixture,
+        signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
+            native_session_id_option: session(),
+            prompt_id_option: None,
+            prompt_sha256: signal_flow::PromptSha256("0".repeat(64)),
+        }),
+    );
+    assert_eq!(last(&fixture, CLAUDE_SEAT).state, meta::State::Acting);
+    append_main_rows(
+        &fixture,
+        &[
+            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,
+                "uuid":"late-receipt","message":{"content":typed}}),
+            end_turn("second-turn"),
+        ],
+    );
+    report_claude_stop(&fixture, vec![]);
+
+    let held = held(&fixture, CLAUDE_SEAT);
+    let arrived = held
+        .iter()
+        .rposition(|(_, cause)| matches!(cause, Cause::Arrived(_)))
+        .expect("the request arrived");
+    let rested = held
+        .iter()
+        .rposition(|(state, _)| *state == meta::State::Resting)
+        .expect("the seat rested");
+    assert!(arrived < rested, "its arrival precedes its rest: {held:?}");
+    assert_eq!(last(&fixture, CLAUDE_SEAT).state, meta::State::Resting);
+    assert!(fixture.nexus.rests_now(CLAUDE_SEAT));
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
+
+    // The next Soft Send is typed at once, with no hand Deliver.
+    fixture.accept_pane_operations(
+        vec![
+            codex_agent_in("pane-1", "terminal-pane-1"),
+            claude_agent(&fixture),
+        ],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    send_soft(&fixture, &peer, "The next ruling.");
+    let typed = fixture.typed().expect("typed into the resting seat");
+    assert!(typed.contains("The next ruling."), "{typed}");
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
+}
+
 /// The state the Nexus decides by is the last transition: the seat rests
 /// once its last transition is Resting, and not once it is Acting,
 /// whatever its transcript shows; an owner's SetState is a transition too.

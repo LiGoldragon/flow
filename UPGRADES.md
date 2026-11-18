@@ -1,3 +1,14 @@
+# Flow 0.59.3: a Stop's arrivals precede its rest
+
+A Claude flow's own Stop settles every hand-over its ended turn took whose
+receipt its transcript shows before it records the Idle, so the flow's last
+transition is its rest and a Soft Send to it is typed at once. In 0.59.2 the
+Stop recorded Idle first and its settlement then recorded Arrived, leaving
+the resting seat Acting until a hand Deliver.
+
+Memory, families, schemas and wires are unchanged from 0.59.2; only the
+flow-nexus crate moves to 0.59.3.
+
 # Flow 0.59.1: recorded transitions on the live recovery lineage
 
 Merges the gated0.59.0 behavior with live0.56.3 ancestry. The accepted0v72

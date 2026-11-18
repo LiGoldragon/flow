@@ -6059,11 +6059,12 @@ fn resumed_connection(state: &std::path::Path, record: &str) -> Vec<serde_json::
 /// that debt, using the same cleanup body as a normal unheld startup.
 #[test]
 fn persisted_global_hold_defers_interrupted_launch_cleanup_until_owner_resume() {
+    use crate::Dispatches;
     use crate::generated::overriding::{Holding, RemembersOverrides};
     use crate::launching::ReconcilesInterruptedLaunches;
     use crate::send_tool::{KeepsSendToolResponders, SendToolResponders};
     use crate::store::opened_thread::RecordsOpenedThreads;
-    use crate::store::{RecordsCreatedLaunchPane, RecordsLaunchOutcome};
+    use crate::store::{ReadsLaunchAttempt, RecordsCreatedLaunchPane, RecordsLaunchOutcome};
     use crate::test_faults::{InjectsCrashes, RefusedWrite};
     for registered in [false, true] {
         use crate::store::launch_cleanup::{CompletesCleanup, KeepsLaunchCleanups};

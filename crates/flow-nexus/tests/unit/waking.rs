@@ -6077,18 +6077,13 @@ fn persisted_global_hold_defers_interrupted_launch_cleanup_until_owner_resume() 
             serde_json::json!([launch_pane_agent(Some(FRESH_THREAD))]).to_string(),
         )
         .unwrap();
-        fixture
+        let pane = fixture
             .nexus
             .store
             .request_harness_start(&launch.0)
+            .unwrap()
             .unwrap();
         if registered {
-            let pane = fixture
-                .nexus
-                .store
-                .request_harness_start(&launch.0)
-                .unwrap()
-                .unwrap();
             let binding = NativeLaunchBinding {
                 launch_request_id: launch.clone(),
                 flow_id: flow_ethos::FlowId("abc123".into()),
@@ -6107,6 +6102,8 @@ fn persisted_global_hold_defers_interrupted_launch_cleanup_until_owner_resume() 
             node.flow_id = binding.flow_id.clone();
             node.session_id = signal_flow::SessionId(FRESH_THREAD.into());
             node.flow_lifecycle = FlowLifecycle::Pending;
+            node.origin = Origin::Unbound;
+            node.endpoint_selection = EndpointSelection::Unavailable;
             node.herdr_route_selection = HerdrRouteSelection::Available(HerdrRoute {
                 herdr_session_name: pane.herdr_session_name,
                 herdr_agent_name: pane.herdr_agent_name,

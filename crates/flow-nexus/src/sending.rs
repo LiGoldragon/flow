@@ -292,11 +292,6 @@ impl SendsRequests for RunningNexus {
                     }
                 },
             };
-            let delivery = if abrupt {
-                flow_ethos::Delivery::Wake
-            } else {
-                flow_ethos::Delivery::Queue
-            };
             let message = match self
                 .store
                 .resolve_sendable_message(send.sendable_message.clone())
@@ -310,6 +305,8 @@ impl SendsRequests for RunningNexus {
             if let Some(refusal) = message.oversized_refusal(&sender) {
                 return PrivateSendResponse::Refused(refusal).into();
             }
+            use crate::request_waking::WakesSleepingPermaflow;
+            let delivery = message.queued_delivery();
             // A Result or Done goes to the sender of the request it names,
             // whatever Address the Send writes. One whose sender is no
             // Address is kept with the request, answered Sent with its id.
@@ -350,14 +347,12 @@ impl SendsRequests for RunningNexus {
             // to a seat in its turn is queued for the seat's idle event.
             // A held Nexus delivers nothing on its own: the request is
             // queued, and handed over once it resumes.
+            let live = self.live_awake_flow(&recipient);
             let direct_requested = !crate::generated::overriding::HeedsOverrides::permaflow_held(
                 self,
                 recipient.clone(),
             ) && !crate::generated::overriding::HeedsOverrides::held(self)
-                && (abrupt
-                    || self
-                        .live_awake_flow(&recipient)
-                        .is_some_and(|flow_id| self.rests_now(&flow_id)));
+                && (abrupt || live.as_ref().is_some_and(|flow_id| self.rests_now(flow_id)));
             let direct_lease = if direct_requested {
                 match self.direct_send_lease(&recipient) {
                     Ok(lease) => lease,
@@ -366,6 +361,12 @@ impl SendsRequests for RunningNexus {
             } else {
                 None
             };
+            // A recipient with no live flow is started by the direct call only
+            // for a request whose kind wakes it: a Notice is queued for the
+            // next waking. A Soft request that wakes it is answered queued and
+            // woken after its answer (`wake_is_due`).
+            let direct_lease =
+                direct_lease.filter(|_| live.is_some() || message.wakes_sleeping_permaflow());
             let admitted_at = std::time::SystemTime::now();
             let admitted = self.store.accept_logical_delivery(
                 &recipient,

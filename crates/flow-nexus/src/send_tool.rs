@@ -30,8 +30,9 @@
 //!
 //! The recipient state and priority determine submission: an Awake seat
 //! receives HardAbrupt and MiddleAbrupt now, and Soft at its next idle event
-//! unless it rests already; Asleep retains Soft and wakes for either abrupt
-//! priority.
+//! unless it rests already. An Asleep metaflow is woken by the request's
+//! kind, whatever its priority ([`crate::request_waking`]): a Notice alone
+//! waits in its queue for the next waking.
 
 use crate::caller::NamesRootThread;
 use crate::codex::{

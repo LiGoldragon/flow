@@ -65,10 +65,12 @@
 //! closed by the living, its harness crashed, or the flow replaced. Work queued for an
 //! Awake seat whose pane Herdr shows gone records that flow Exited, which
 //! puts its metaflow Asleep. A request queued for an Asleep metaflow wakes
-//! it (`Operation::Wake`): a fresh flow is launched from the native model
-//! configured for its Model and the module identities the metaflow's last launch named,
-//! composed again as any Start is, with the whole queue, oldest first, as
-//! its brief. The requests leave the queue only in the write that records
+//! it by its kind, whatever its priority ([`crate::request_waking`]): an
+//! Order, Question, Task, Living, Result, Done or Reminder does, and a
+//! Notice alone waits for the next waking. The wake (`Operation::Wake`)
+//! launches a fresh flow from the native model configured for its Model and
+//! the module identities the metaflow's last launch named, composed again
+//! as any Start is, with the whole queue, oldest first, as its brief. The requests leave the queue only in the write that records
 //! the started flow Awake, so a Nexus that dies mid-wake loses none: at its
 //! next start it wakes every Asleep metaflow still holding work. Requests
 //! that arrive while the wake runs are handed to the woken flow once it is
@@ -111,6 +113,7 @@ use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes};
 use crate::launching::LaunchesFlows;
 use crate::live::HoldsLiveValue;
 use crate::performing::Performs;
+use crate::request_waking::HoldsWakingRequest;
 use crate::send_tool::ServesLaunchCalls;
 use crate::store::NamesConfiguredModel;
 use crate::store::address_hold::HoldsLaunchAddress;
@@ -1869,11 +1872,7 @@ impl SleepsAndWakesSeats for RunningNexus {
         }
 
         metaflow.state == flow_ethos::State::Asleep
-            && (metaflow
-                .queue
-                .0
-                .iter()
-                .any(|entry| !matches!(entry.message, signal_flow::Message::Soft(_)))
+            && (metaflow.queue.0.holds_waking_request()
                 || matches!(self.store.successor_intent(&metaflow.address), Ok(Some(_))))
     }
 
@@ -2304,11 +2303,7 @@ impl WaitsForRestToReplace for RunningNexus {
             Ok(continuity) => continuity,
             Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
         };
-        let wakes = metaflow
-            .queue
-            .0
-            .iter()
-            .any(|entry| !matches!(entry.message, signal_flow::Message::Soft(_)));
+        let wakes = metaflow.queue.0.holds_waking_request();
         let refreshed = Output::Refreshed(Refreshed {
             address: address.clone(),
             flow_id: flow_id.clone(),
@@ -4402,11 +4397,7 @@ impl WakesInParts for RunningNexus {
             return AtStop::Idle;
         }
         if refresh_due {
-            let wakes = metaflow
-                .queue
-                .0
-                .iter()
-                .any(|entry| !matches!(entry.message, signal_flow::Message::Soft(_)));
+            let wakes = metaflow.queue.0.holds_waking_request();
             // A Maintained metaflow, or one holding work that wakes it, is
             // owed its successor, started before the predecessor rests.
             if continuity == Continuity::Maintained || wakes {

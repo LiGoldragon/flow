@@ -168,10 +168,9 @@ impl DispatchesMetaflowPeer for RunningNexus {
                     );
                     // A Soft request to a seat in its turn is queued for the
                     // seat's idle event.
-                    let direct_requested = abrupt
-                        || self
-                            .live_awake_flow(&recipient)
-                            .is_some_and(|flow_id| self.rests_now(&flow_id));
+                    let live = self.live_awake_flow(&recipient);
+                    let direct_requested =
+                        abrupt || live.as_ref().is_some_and(|flow_id| self.rests_now(flow_id));
                     // A metaflow another holds takes the request into its
                     // queue instead.
                     let direct_lease = if direct_requested {
@@ -182,6 +181,14 @@ impl DispatchesMetaflowPeer for RunningNexus {
                     } else {
                         None
                     };
+                    // A recipient with no live flow is started by the direct
+                    // call only for a request whose kind wakes it: a Notice
+                    // is queued for the next waking, and a Soft request that
+                    // wakes it is woken after its answer.
+                    use crate::request_waking::WakesSleepingPermaflow;
+                    let direct_lease = direct_lease.filter(|_| {
+                        live.is_some() || request.sendable_message.wakes_sleeping_permaflow()
+                    });
                     let mut response: MetaflowAnswer = match self.store.queue_metaflow(request, now)
                     {
                         Ok(response) => response.into(),

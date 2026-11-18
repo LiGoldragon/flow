@@ -1116,9 +1116,10 @@ fn a_flow_that_stopped_while_working_or_awaited_is_kept() {
     assert!(!closes(&waking));
 }
 
-/// An explicit wake applies to queued work without judging its request kind.
+/// An entry marked Wake, as a Push or Deliver marks every entry it finds,
+/// makes a wake due without judging its request kind.
 #[test]
-fn abrupt_priority_makes_a_wake_due_at_every_layer() {
+fn an_entry_marked_wake_makes_a_wake_due_at_every_layer() {
     assert!(RunningNexus::rests_at(&signal_flow::AgentState::Idle));
     assert!(RunningNexus::rests_at(&signal_flow::AgentState::Done));
     assert!(!RunningNexus::rests_at(&signal_flow::AgentState::Working));
@@ -4003,7 +4004,7 @@ fn a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer() {
     };
     assert_eq!(entry.logical_delivery_id, accepted.logical_delivery_id);
     assert_eq!(entry.sent_by, SentBy::Sender(sender_address));
-    assert_eq!(entry.delivery, flow_ethos::Delivery::Queue);
+    assert_eq!(entry.delivery, flow_ethos::Delivery::Wake);
     assert_eq!(entry.message, Message::Soft(order));
 }
 
@@ -8350,4 +8351,194 @@ fn retention_exceeded_is_logged_and_reconciles() {
         Some(AtStop::Idle),
         "the next cut reconciles the ledger"
     );
+}
+
+/// Sends `message` to the Sol Address from no flow, as the living at a
+/// shell sends, and schedules the request it left pending as a flow's own
+/// Send is answered.
+fn send_unbound(fixture: &NexusFixture, message: Message) -> signal_flow::Output {
+    use crate::sending::SendsRequests;
+    let answer = fixture.nexus.send_request(
+        signal_flow::SendRequest {
+            address: address(Model::Sol),
+            sendable_message: super::sendable_message(message),
+        },
+        None,
+    );
+    if let Some(pending) = answer.pending {
+        fixture.nexus.wake_due(pending.address);
+    }
+    answer.response
+}
+
+/// What wakes a sleeping permaflow is the request's kind: every kind but a
+/// Notice wakes it, at every priority, and a Notice waits at every priority.
+#[test]
+fn the_request_kind_alone_decides_whether_a_sleeping_permaflow_wakes() {
+    use crate::request_waking::WakesSleepingPermaflow;
+    let waking = [
+        Request::Order("order".into()),
+        Request::Question("question".into()),
+        Request::Living(flow_ethos::Living_Data {
+            context: flow_ethos::Context("the drain".into()),
+            verbatim: flow_ethos::Verbatim("Fix it today.".into()),
+        }),
+        Request::Result(flow_ethos::ResultPayload::Historical("result".into())),
+        Request::Task(flow_ethos::AnswerableTask {
+            minutes: flow_ethos::Minutes(30),
+            string: "task".into(),
+        }),
+        Request::Done(flow_ethos::DonePayload::Historical(
+            flow_ethos::Historical_Data {
+                logical_delivery_id: flow_ethos::LogicalDeliveryId("logical-done".into()),
+                string: "done".into(),
+            },
+        )),
+        Request::Reminder(flow_ethos::Reminder_Data {
+            request_id: flow_ethos::RequestId("r3m1".into()),
+            string: "reminder".into(),
+        }),
+    ];
+    for request in waking {
+        for message in [
+            Message::HardAbrupt(request.clone()),
+            Message::MiddleAbrupt(request.clone()),
+            Message::Soft(request.clone()),
+        ] {
+            assert!(message.wakes_sleeping_permaflow(), "{message:?} wakes");
+            assert_eq!(message.queued_delivery(), Delivery::Wake, "{message:?}");
+        }
+    }
+    let notice = Request::Notice("fyi".into());
+    for message in [
+        Message::HardAbrupt(notice.clone()),
+        Message::MiddleAbrupt(notice.clone()),
+        Message::Soft(notice.clone()),
+    ] {
+        assert!(!message.wakes_sleeping_permaflow(), "{message:?} waits");
+        assert_eq!(message.queued_delivery(), Delivery::Queue, "{message:?}");
+        assert!(
+            !super::sendable_message(message.clone()).wakes_sleeping_permaflow(),
+            "{message:?} waits on the wire too"
+        );
+    }
+}
+
+/// A Soft Order sent to an Asleep permaflow wakes it: a fresh flow starts
+/// with the Order as its first prompt. Its priority is Soft, which on
+/// 0.59.3 queued it with nothing to wake the permaflow.
+#[test]
+fn a_soft_order_wakes_an_asleep_permaflow() {
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let world = fixture.fresh_claude_world();
+
+    let response = send_unbound(
+        &fixture,
+        Message::Soft(Request::Order("Carry the design on.".into())),
+    );
+
+    let woken = stored(&fixture, Model::Sol);
+    let State::Awake(flow_id) = &woken.state else {
+        panic!(
+            "the Soft Order wakes the permaflow: {woken:?}; answered {response:?}; Herdr calls: {}",
+            world.calls()
+        );
+    };
+    assert_ne!(flow_id.0, "abc123", "a fresh flow");
+    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+    assert!(woken.queue.0.is_empty(), "the first prompt took the Order");
+    let turns = world.user_turns(&fixture);
+    assert!(
+        turns
+            .first()
+            .is_some_and(|turn| turn.contains("Order.{") && turn.contains("Carry the design on.")),
+        "the Order is the first prompt: {turns:?}"
+    );
+}
+
+/// A Notice alone, at any priority, leaves an Asleep permaflow asleep: it
+/// is queued for the next waking and no flow starts. On 0.59.3 a
+/// MiddleAbrupt Notice woke it.
+#[test]
+fn a_notice_alone_leaves_an_asleep_permaflow_asleep() {
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let world = fixture.fresh_claude_world();
+
+    for message in [
+        Message::Soft(Request::Notice("The build is green.".into())),
+        Message::MiddleAbrupt(Request::Notice("The deploy is done.".into())),
+    ] {
+        let response = send_unbound(&fixture, message);
+        assert!(
+            matches!(response, signal_flow::Output::SendAccepted(_)),
+            "the Notice is admitted: {response:?}"
+        );
+    }
+
+    let asleep = stored(&fixture, Model::Sol);
+    assert_eq!(asleep.state, State::Asleep, "{asleep:?}");
+    assert_eq!(world.claude_starts(), 0, "{}", world.calls());
+    assert_eq!(asleep.queue.0.len(), 2, "both Notices wait: {asleep:?}");
+    assert!(
+        asleep
+            .queue
+            .0
+            .iter()
+            .all(|entry| entry.delivery == Delivery::Queue),
+        "each is recorded waiting: {asleep:?}"
+    );
+    assert!(!fixture.nexus.wake_is_due(&asleep));
+}
+
+/// A Notice queued for an Asleep permaflow arrives with the Order that
+/// later wakes it, in the fresh flow's first prompt, oldest first.
+#[test]
+fn a_queued_notice_arrives_with_the_order_that_wakes_its_permaflow_oldest_first() {
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let world = fixture.fresh_claude_world();
+
+    send_unbound(
+        &fixture,
+        Message::Soft(Request::Notice("The build is green.".into())),
+    );
+    assert_eq!(stored(&fixture, Model::Sol).state, State::Asleep);
+    assert_eq!(world.claude_starts(), 0, "{}", world.calls());
+
+    send_unbound(
+        &fixture,
+        Message::Soft(Request::Order("Deploy the build.".into())),
+    );
+
+    let woken = stored(&fixture, Model::Sol);
+    assert!(
+        matches!(woken.state, State::Awake(_)),
+        "the Order wakes the permaflow: {woken:?}; Herdr calls: {}",
+        world.calls()
+    );
+    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+    assert!(woken.queue.0.is_empty(), "{woken:?}");
+    let turns = world.user_turns(&fixture);
+    let first = turns.first().expect("the fresh flow's first prompt");
+    let notice = first
+        .find("The build is green.")
+        .unwrap_or_else(|| panic!("the Notice arrives with the Order: {turns:?}"));
+    let order = first
+        .find("Deploy the build.")
+        .unwrap_or_else(|| panic!("the Order is in the first prompt: {turns:?}"));
+    assert!(notice < order, "oldest first: {first}");
 }

@@ -134,15 +134,17 @@ impl RemindsCallers for RunningNexus {
                 }
             };
             for reminder in asked {
+                use crate::request_waking::WakesSleepingPermaflow;
                 let address = reminder.address.clone();
+                let message = Message::MiddleAbrupt(Request::Reminder(flow_ethos::Reminder_Data {
+                    request_id: reminder.request_id.clone(),
+                    string: reminder.text.0.clone(),
+                }));
                 let closed_by = match self.store.accept_logical_delivery(
                     &address,
                     reminder.sent_by.clone(),
-                    flow_ethos::Delivery::Wake,
-                    Message::MiddleAbrupt(Request::Reminder(flow_ethos::Reminder_Data {
-                        request_id: reminder.request_id.clone(),
-                        string: reminder.text.0.clone(),
-                    })),
+                    message.queued_delivery(),
+                    message,
                     None,
                 ) {
                     Ok(signal_flow::PrivateSendResponse::SendAccepted(acceptance)) => {

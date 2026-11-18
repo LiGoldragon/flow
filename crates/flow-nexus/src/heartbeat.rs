@@ -302,11 +302,13 @@ impl RunsHeartbeat for crate::RunningNexus {
             return;
         }
         for delivery in deliveries {
+            use crate::request_waking::WakesSleepingPermaflow;
+            let message = flow_ethos::Message::Soft(signal_flow::Request::Notice(delivery.body));
             let accepted = self.store.accept_logical_delivery_for(
                 &delivery.recipient,
                 signal_flow::SentBy::Flow,
-                flow_ethos::Delivery::Wake,
-                flow_ethos::Message::Soft(signal_flow::Request::Notice(delivery.body)),
+                message.queued_delivery(),
+                message,
                 None,
                 DeliveryPurpose::Heartbeat,
             );

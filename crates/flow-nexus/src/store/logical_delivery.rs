@@ -1645,10 +1645,9 @@ impl RecordsLogicalDeliveries for FlowStore {
         let cursor = allocation.cursor;
         let create_counter = !allocation.existing;
         let id = format!("logical-delivery-{cursor:020}");
-        let delivery = if matches!(message, Message::Soft(_)) {
-            flow_ethos::Delivery::Queue
-        } else {
-            flow_ethos::Delivery::Wake
+        let delivery = {
+            use crate::request_waking::WakesSleepingPermaflow;
+            message.queued_delivery()
         };
         let entry = QueueEntry {
             logical_delivery_id: flow_ethos::LogicalDeliveryId(id.clone()),

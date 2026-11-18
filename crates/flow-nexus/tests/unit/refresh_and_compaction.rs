@@ -305,8 +305,8 @@ fn a_flow_s_context_is_judged_against_its_model_s_threshold() {
 
 /// A seat that rests past its model's threshold is told nothing and handed
 /// nothing: its pane is closed and its flow recorded Stopped, its metaflow
-/// Asleep with the flow in Past, in the same event, and the request queued
-/// for it stays queued for the metaflow's next flow.
+/// Asleep with the flow in Past, in the same event, and the Notice queued
+/// for it, which wakes nothing, stays queued for the metaflow's next flow.
 #[test]
 fn a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_flow() {
     let fixture = NexusFixture::new();
@@ -324,7 +324,7 @@ fn a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_fl
     );
     seat_metaflow(
         &fixture,
-        vec![Request::Order("Held for the next flow.".into())],
+        vec![Request::Notice("Held for the next flow.".into())],
     );
 
     fixture.nexus.after_report(
@@ -365,7 +365,7 @@ fn a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_fl
                 | Message::Soft(request) => request,
             })
             .collect::<Vec<_>>(),
-        [&Request::Order("Held for the next flow.".into())],
+        [&Request::Notice("Held for the next flow.".into())],
         "the work waits for the next flow"
     );
 }
@@ -373,7 +373,7 @@ fn a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_fl
 /// A seat past its threshold whose Stop finds it working, Herdr showing its
 /// pane Working and its transcript no ended turn, is refreshed at that Stop:
 /// the Stop is its idle event, whatever it shows. Its pane is closed, its
-/// flow recorded Stopped, and the work queued for it stays queued for its
+/// flow recorded Stopped, and the Notice queued for it stays queued for its
 /// next flow.
 #[test]
 fn a_seat_past_its_threshold_shown_working_is_refreshed_at_its_stop() {
@@ -395,7 +395,7 @@ fn a_seat_past_its_threshold_shown_working_is_refreshed_at_its_stop() {
     );
     seat_metaflow(
         &fixture,
-        vec![Request::Order("Held for the next flow.".into())],
+        vec![Request::Notice("Held for the next flow.".into())],
     );
 
     fixture.nexus.after_report(
@@ -438,7 +438,7 @@ fn a_stop_with_live_background_work_past_the_threshold_refreshes() {
     );
     seat_metaflow(
         &fixture,
-        vec![Request::Order("Held for the next flow.".into())],
+        vec![Request::Notice("Held for the next flow.".into())],
     );
 
     report_claude_stop(
@@ -1264,7 +1264,7 @@ fn fable_seat_past_its_threshold(fixture: &NexusFixture, protected: Vec<Address>
             .configure_change(change)
             .expect("configured");
     }
-    let mut metaflow = seat_metaflow_with(vec![Request::Order("Kept for this flow.".into())]);
+    let mut metaflow = seat_metaflow_with(vec![Request::Notice("Kept for this flow.".into())]);
     metaflow.address = fable_address("core");
     fixture.nexus.store.seed_metaflow(metaflow);
     fixture

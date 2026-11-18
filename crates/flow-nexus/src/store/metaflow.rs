@@ -266,10 +266,9 @@ impl MutatesMetaflows for FlowStore {
             }
             return Ok(signal_flow::PrivateSendResponse::Refused(refusal));
         }
-        let delivery = if matches!(message, signal_flow::Message::Soft(_)) {
-            flow_ethos::Delivery::Queue
-        } else {
-            flow_ethos::Delivery::Wake
+        let delivery = {
+            use crate::request_waking::WakesSleepingPermaflow;
+            message.queued_delivery()
         };
         self.accept_deliver_call(
             &request.lock.second_address,

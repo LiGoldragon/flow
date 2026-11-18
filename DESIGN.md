@@ -572,9 +572,17 @@ Every lock a metaflow holds as a sender is retracted in the write that ends
 its flow, Stopped, Exited or Retired, so a recipient is never held by a
 sender that has ended.
 Whether a target wakes is read from Flow's records, never carried with the
-answer. A metaflow of any Model is due a wake when it is Asleep and holds an
-Order, a Question or the living's words. After every commit that queues a request, from a send-tool call
-or a Deliver, and after a replayed call is answered from its record, the
+answer. A metaflow of any Model is due a wake when it is Asleep and holds a
+request whose kind wakes it, whatever its priority (`request_waking`): an
+Order, a Question, a Task, the living's words, a Result, a Done or a
+Reminder. A Notice alone waits in the queue for the next waking. The owner's
+`Push` and `Deliver` mark every queued entry Wake, so the metaflow they name
+is woken whatever its queue holds. A Send or a locked Deliver to a recipient
+with no live flow starts it before answering only for an abrupt request that
+wakes it; an abrupt Notice is queued for the next waking, and a Soft request
+that wakes it is answered queued and woken after its answer. To an Awake
+seat the priority decides, as before. After every commit that queues a
+request, from a send-tool call or a Deliver, and after a replayed call is answered from its record, the
 target's Awake seat is read first: a seat whose pane Herdr shows gone has
 its flow recorded Exited, which puts the metaflow Asleep, and a seat known
 resting (a Claude transcript whose main turn ended with no later prompt, a

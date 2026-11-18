@@ -962,8 +962,10 @@ fn the_declared_result_shape_names_and_requires_the_request_id_the_parser_reads(
     }
 }
 
+/// A Soft Order to an Asleep recipient is queued by the call alone and
+/// recorded to wake it: the wake follows the call's answer.
 #[test]
-fn soft_dynamic_admission_queues_without_waking() {
+fn soft_dynamic_admission_of_an_order_queues_it_to_wake() {
     let fixture = NexusFixture::new();
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
     fixture.asleep_at(asleep_target());
@@ -982,7 +984,7 @@ fn soft_dynamic_admission_queues_without_waking() {
     let held = fixture.stored_at(&asleep_target());
     assert_eq!(held.state, State::Asleep);
     assert_eq!(held.queue.0.len(), 1);
-    assert_eq!(held.queue.0[0].delivery, flow_ethos::Delivery::Queue);
+    assert_eq!(held.queue.0[0].delivery, flow_ethos::Delivery::Wake);
     assert_eq!(
         held.queue.0[0].message,
         Message::Soft(Request::Order("retain this".into()))

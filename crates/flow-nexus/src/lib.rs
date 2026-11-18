@@ -91,6 +91,7 @@ pub mod place;
 pub mod placed_socket;
 pub mod reaping;
 pub mod reporting;
+pub mod request_waking;
 pub mod send_tool;
 pub mod sending;
 pub mod store;
@@ -1583,13 +1584,15 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
                 generation: 0,
             }
             .notice_text(&flow_id.0);
+            use crate::request_waking::WakesSleepingPermaflow;
+            let message = signal_flow::Message::MiddleAbrupt(signal_flow::Request::Notice(
+                warning.trim_start().to_owned(),
+            ));
             match nexus.store.accept_logical_delivery(
                 &seat.address,
                 signal_flow::SentBy::Flow,
-                flow_ethos::Delivery::Wake,
-                signal_flow::Message::MiddleAbrupt(signal_flow::Request::Notice(
-                    warning.trim_start().to_owned(),
-                )),
+                message.queued_delivery(),
+                message,
                 None,
             ) {
                 Ok(signal_flow::PrivateSendResponse::SendAccepted(_)) => {}
@@ -8113,7 +8116,7 @@ mod tests {
                 .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase())
         );
         assert_eq!(queued.sent_by, SentBy::Sender(sender));
-        assert_eq!(queued.delivery, flow_ethos::Delivery::Queue);
+        assert_eq!(queued.delivery, flow_ethos::Delivery::Wake);
         assert_eq!(queued.message, Message::Soft(order.clone()));
         let stranger = MarkedProcess::spawn("sleep", &["30"], "pane-9");
         let stranger =

@@ -1,3 +1,23 @@
+# Flow 0.59.4: a request wakes a sleeping permaflow by its kind
+
+What wakes an Asleep metaflow is the request's kind, whatever its priority
+(`request_waking`): an Order, Question, Task, Living, Result, Done or
+Reminder wakes it, a fresh flow taking the whole queue, oldest first, and a
+Notice alone waits in the queue for the next waking. In 0.59.3 only the
+priority woke: a Soft Order to an Asleep metaflow was queued and nothing
+woke it, while a MiddleAbrupt or HardAbrupt Notice woke it. Priority keeps
+its meaning for an Awake seat: HardAbrupt interrupts, MiddleAbrupt arrives
+at the next tool boundary, Soft at the seat's rest. A queue entry records
+the decision as its Delivery, Wake or Queue; a Push or Deliver still marks
+every entry Wake, so the metaflow it names is woken whatever it holds.
+
+Entries queued before 0.59.4 keep the Delivery they were recorded with: an
+abrupt Notice still waiting for an Asleep metaflow wakes it at the Nexus's
+start, and a Soft Order still waiting wakes it there by its kind.
+
+Memory, families, schemas and wires are unchanged from 0.59.3; only the
+flow-nexus crate moves to 0.59.4.
+
 # Flow 0.59.3: a Stop's arrivals precede its rest
 
 A Claude flow's own Stop settles every hand-over its ended turn took whose

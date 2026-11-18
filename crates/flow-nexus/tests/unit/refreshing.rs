@@ -155,7 +155,8 @@ fn requests(metaflow: &Metaflow) -> Vec<Request> {
 
 /// An Awake metaflow is refreshed: its flow's pane is closed with nothing
 /// typed into it, the flow is recorded Stopped and joins Past, the metaflow
-/// is Asleep with its queue kept, and no successor is started.
+/// is Asleep with its queue kept, and no successor is started: a Notice
+/// wakes nothing.
 #[test]
 fn a_refresh_ends_the_awake_flow_without_a_turn_and_leaves_the_metaflow_asleep() {
     let fixture = NexusFixture::new();
@@ -165,7 +166,7 @@ fn a_refresh_ends_the_awake_flow_without_a_turn_and_leaves_the_metaflow_asleep()
     );
     awake_seat(
         &fixture,
-        vec![Request::Order("Kept for the next flow.".into())],
+        vec![Request::Notice("Kept for the next flow.".into())],
     );
     declare(&fixture, seat_address());
 
@@ -192,7 +193,7 @@ fn a_refresh_ends_the_awake_flow_without_a_turn_and_leaves_the_metaflow_asleep()
     );
     assert_eq!(
         requests(&metaflow),
-        vec![Request::Order("Kept for the next flow.".into())],
+        vec![Request::Notice("Kept for the next flow.".into())],
         "the queue stays on the metaflow"
     );
     assert!(

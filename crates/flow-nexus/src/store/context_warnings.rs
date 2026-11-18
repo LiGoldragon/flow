@@ -415,6 +415,7 @@ impl AdmitsContextWarnings for FlowStore {
                 handover_reminder: None,
                 deliver_call: None,
                 upgrade_notice: None,
+                task_reminder: None,
             },
         )
         .map(Some)

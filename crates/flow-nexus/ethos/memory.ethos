@@ -384,4 +384,9 @@ Memory
   ; archived: the id it had, and the process that closed it as the Nexus
   ; read it off the caller's connection, None when the connection showed
   ; none.
-  ClosedRequest.{ LogicalDeliveryId RequestId Closer.Option<Process> } ]
+  ClosedRequest.{ LogicalDeliveryId RequestId Closer.Option<Process> }
+  ; A Notice Flow queued about a Task that has no Done, a reminder or its
+  ; failure, keyed by the Notice's logical delivery: the Task it is about,
+  ; by the logical delivery the Task was bound to, and the id the Task had.
+  ; Whatever closes the Task withdraws the Notices still queued.
+  TaskReminderNotice.{ LogicalDeliveryId RemindedTask.LogicalDeliveryId RequestId } ]

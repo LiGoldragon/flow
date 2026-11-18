@@ -772,6 +772,7 @@ impl SettlesUpgradeNotices for super::FlowStore {
                 deliver_call: None,
                 upgrade_notice: Some(transition.clone()),
                 context_warning: None,
+                task_reminder: None,
             },
         )?;
         if let signal_flow::PrivateSendResponse::Refused(refusal) = response {

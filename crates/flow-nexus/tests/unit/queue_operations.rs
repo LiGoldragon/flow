@@ -1111,3 +1111,208 @@ fn close_request_records_the_process_its_connection_showed() {
     assert!(queued(&fixture, &sender).is_empty());
     assert!(queued(&fixture, &recipient).is_empty());
 }
+
+/// Lets the reminder of `task` fall due now and sends it: a Soft Notice
+/// from Flow queued for `sender`, the Task's sender, and answered here.
+fn reminder_falls_due(
+    fixture: &NexusFixture,
+    sender: &Address,
+    task: &SendAcceptance,
+) -> flow_ethos::QueueEntry {
+    use crate::reminding::RemindsCallers;
+    let before = queued(fixture, sender);
+    let mut reminder = fixture
+        .nexus
+        .store
+        .reminder(&task.logical_delivery_id.0)
+        .expect("the reminders read")
+        .expect("the Task is reminded");
+    reminder.due_option = Some(crate::generated::memory::Due(0));
+    fixture
+        .nexus
+        .store
+        .hold_reminder(reminder)
+        .expect("the reminder is held");
+    fixture.nexus.send_due_reminders();
+    let mut sent = queued(fixture, sender)
+        .into_iter()
+        .filter(|entry| !before.contains(entry))
+        .collect::<Vec<_>>();
+    assert_eq!(sent.len(), 1, "one reminder is queued for the sender");
+    let reminder = sent.remove(0);
+    assert_eq!(reminder.sent_by, SentBy::Flow);
+    assert!(matches!(
+        reminder.message,
+        Message::Soft(Request::Notice(_))
+    ));
+    reminder
+}
+
+/// A Task from `sender` delivered to `recipient`, with its first reminder
+/// fallen due and queued for `sender`.
+fn reminded_task(
+    fixture: &NexusFixture,
+    sender: &Address,
+    recipient: &Address,
+) -> (SendAcceptance, flow_ethos::QueueEntry) {
+    asleep(fixture, sender);
+    asleep(fixture, recipient);
+    let task = admitted(
+        fixture,
+        recipient,
+        SentBy::Sender(sender.clone()),
+        Request::Task(flow_ethos::AnswerableTask {
+            minutes: flow_ethos::Minutes(30),
+            string: "Land the line.".into(),
+        }),
+    );
+    delivered(fixture, recipient, &task);
+    let reminder = reminder_falls_due(fixture, sender, &task);
+    (task, reminder)
+}
+
+fn delivery_state(
+    fixture: &NexusFixture,
+    logical_delivery_id: &signal_flow::LogicalDeliveryId,
+) -> Option<DeliveryState> {
+    fixture
+        .nexus
+        .store
+        .logical_delivery_snapshot(logical_delivery_id)
+        .expect("the deliveries read")
+        .map(|snapshot| snapshot.delivery_state)
+}
+
+/// A Task closed by CloseRequest takes its reminder with it: the reminder
+/// queued for its sender and not yet delivered leaves the queue unsent and
+/// ends Withdrawn, and neither side is told anything.
+#[test]
+fn close_request_withdraws_the_queued_reminder_of_its_task() {
+    let fixture = NexusFixture::new();
+    let sender = at("remindedCloseSender");
+    let recipient = at("remindedCloseRecipient");
+    let (task, reminder) = reminded_task(&fixture, &sender, &recipient);
+
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch(Input::CloseRequest(task.request_id.clone())),
+        Output::RequestClosed(task.request_id.clone())
+    );
+    assert!(
+        queued(&fixture, &sender).is_empty(),
+        "the reminder left the sender's queue and no Notice took its place"
+    );
+    assert!(
+        queued(&fixture, &recipient).is_empty(),
+        "the recipient is told nothing"
+    );
+    assert_eq!(
+        delivery_state(&fixture, &reminder.logical_delivery_id),
+        Some(DeliveryState::Withdrawn),
+        "the reminder is never delivered"
+    );
+}
+
+/// A Done closes its Task, and the Task's reminder still queued for its
+/// sender is withdrawn: the sender is given the Done alone.
+#[test]
+fn a_done_withdraws_the_queued_reminder_of_its_task() {
+    let fixture = NexusFixture::new();
+    let sender = at("remindedDoneSender");
+    let recipient = at("remindedDoneRecipient");
+    let (task, reminder) = reminded_task(&fixture, &sender, &recipient);
+    let done = SendRequest {
+        address: recipient.clone(),
+        sendable_message: signal_flow::SendableMessage::Soft(signal_flow::SendableRequest::Done(
+            signal_flow::SendableRequest_Done_Data {
+                request_id: task.request_id.clone(),
+                string: "Landed.".into(),
+            },
+        )),
+    };
+
+    assert!(matches!(
+        fixture.nexus.send_request(done, None).response,
+        Output::SendAccepted(_) | Output::Sent(_)
+    ));
+    let left = queued(&fixture, &sender);
+    assert_eq!(left.len(), 1, "the sender holds the Done alone: {left:?}");
+    assert!(matches!(
+        &left[0].message,
+        Message::Soft(Request::Done(flow_ethos::DonePayload::Answered(_)))
+    ));
+    assert!(notices(&fixture, &sender).is_empty());
+    assert_eq!(
+        delivery_state(&fixture, &reminder.logical_delivery_id),
+        Some(DeliveryState::Withdrawn),
+        "the reminder is never delivered"
+    );
+}
+
+/// A Cancel closes the Task and withdraws its queued reminder; its own
+/// Notice of the cancellation still reaches the sender and the recipient.
+#[test]
+fn cancel_withdraws_the_queued_reminder_of_its_task_and_keeps_its_notice() {
+    let fixture = NexusFixture::new();
+    let sender = at("remindedCancelSender");
+    let recipient = at("remindedCancelRecipient");
+    let (task, reminder) = reminded_task(&fixture, &sender, &recipient);
+
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch(Input::Cancel(task.request_id.clone())),
+        Output::Cancelled(task.request_id.clone())
+    );
+    let cancelled = format!("Request {} was cancelled.", task.request_id.0);
+    assert_eq!(notices(&fixture, &sender), vec![cancelled.clone()]);
+    assert_eq!(notices(&fixture, &recipient), vec![cancelled]);
+    assert_eq!(
+        delivery_state(&fixture, &reminder.logical_delivery_id),
+        Some(DeliveryState::Withdrawn),
+        "the reminder is never delivered"
+    );
+}
+
+/// A reminder already delivered is left as it was when its Task closes;
+/// the next one, still queued, is withdrawn.
+#[test]
+fn close_request_leaves_a_delivered_reminder_and_withdraws_the_queued_one() {
+    let fixture = NexusFixture::new();
+    let sender = at("remindedTwiceSender");
+    let recipient = at("remindedTwiceRecipient");
+    let (task, first) = reminded_task(&fixture, &sender, &recipient);
+    delivered(
+        &fixture,
+        &sender,
+        &SendAcceptance {
+            logical_delivery_id: first.logical_delivery_id.clone(),
+            request_id: first.request_id.clone(),
+            delivery_cursor: signal_flow::DeliveryCursor(0),
+            delivery_state: DeliveryState::Queued,
+        },
+    );
+    let second = reminder_falls_due(&fixture, &sender, &task);
+
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch(Input::CloseRequest(task.request_id.clone())),
+        Output::RequestClosed(task.request_id.clone())
+    );
+    assert!(
+        matches!(
+            delivery_state(&fixture, &first.logical_delivery_id),
+            Some(DeliveryState::Delivered(_))
+        ),
+        "the delivered reminder is untouched"
+    );
+    assert_eq!(
+        delivery_state(&fixture, &second.logical_delivery_id),
+        Some(DeliveryState::Withdrawn),
+        "the queued reminder is never delivered"
+    );
+    assert!(queued(&fixture, &sender).is_empty());
+    assert!(queued(&fixture, &recipient).is_empty());
+}

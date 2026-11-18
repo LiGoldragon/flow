@@ -410,6 +410,9 @@ pub(crate) struct LogicalDeliveryTransition {
     pub(crate) handover_reminder: Option<crate::store::handover_reminders::HandoverReminder>,
     pub(crate) deliver_call: Option<DeliverCallSpec>,
     pub(crate) upgrade_notice: Option<crate::store::request_id_upgrade::UpgradeNoticeAdmission>,
+    /// A Notice about a Task that has no Done, tied to its Task in the
+    /// commit that admits it.
+    pub(crate) task_reminder: Option<crate::store::task_reminder_notice::ReminderOfTask>,
 }
 
 #[derive(Clone)]
@@ -881,6 +884,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 deliver_call: Some(spec),
                 upgrade_notice: None,
                 context_warning: None,
+                task_reminder: None,
             },
         )
     }
@@ -1090,6 +1094,13 @@ impl RecordsLogicalDeliveries for FlowStore {
         };
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
+        drop(_guard);
+        // An archived Task is closed, by a Cancel, a CloseRequest or an
+        // ArchiveRequest: its reminder Notices still queued are withdrawn.
+        if is_task {
+            use super::task_reminder_notice::TiesNoticesToTasks;
+            self.close_task_reminder_notices(&binding.logical_delivery_id);
+        }
         Ok(Ok(()))
     }
 
@@ -1782,6 +1793,13 @@ impl RecordsLogicalDeliveries for FlowStore {
                 .assert(self.send_calls, record(outcome.clone())),
         )?;
         self.launch_changes.announce();
+        drop(_guard);
+        // A Done closed its Task in that commit: the Task's reminder
+        // Notices still queued are withdrawn.
+        if let Request::Done(flow_ethos::DonePayload::Answered(done)) = &request {
+            use super::task_reminder_notice::TiesNoticesToTasks;
+            self.close_task_reminder_notices(&done.logical_delivery_id);
+        }
         Ok(outcome)
     }
     fn force_queue_wake(&self, address: &Address) -> Result<(), StoreError> {
@@ -1980,6 +1998,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 deliver_call: None,
                 upgrade_notice: None,
                 context_warning: None,
+                task_reminder: None,
             },
         )
     }
@@ -2001,6 +2020,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 deliver_call: None,
                 upgrade_notice: None,
                 context_warning: None,
+                task_reminder: None,
             },
         )
     }
@@ -2031,6 +2051,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             deliver_call,
             upgrade_notice,
             context_warning,
+            task_reminder,
         } = transition;
         let admission = if deliver_call.is_some() {
             DeliveryAdmission::Message
@@ -2383,8 +2404,23 @@ impl RecordsLogicalDeliveries for FlowStore {
         } else {
             commit
         };
+        let commit = match task_reminder {
+            Some(of) => commit.assert(
+                self.task_reminder_notices,
+                of.notice(LogicalDeliveryId(id.clone())),
+            ),
+            None => commit,
+        };
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
+        drop(_handover_guard);
+        drop(_guard);
+        // A Done closed its Task in that commit: the Task's reminder
+        // Notices still queued are withdrawn.
+        if let Request::Done(flow_ethos::DonePayload::Answered(done)) = &request {
+            use super::task_reminder_notice::TiesNoticesToTasks;
+            self.close_task_reminder_notices(&done.logical_delivery_id);
+        }
         Ok(signal_flow::PrivateSendResponse::SendAccepted(
             SendAcceptance {
                 logical_delivery_id: signal_flow::LogicalDeliveryId(id),

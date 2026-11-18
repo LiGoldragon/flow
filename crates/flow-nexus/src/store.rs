@@ -56,6 +56,7 @@ pub(crate) mod sent;
 mod staged_open;
 pub(crate) mod successor;
 pub(crate) mod successor_upgrade;
+pub(crate) mod task_reminder_notice;
 pub(crate) mod transitions;
 pub(crate) mod turn_end;
 pub(crate) mod undecodable_frame;
@@ -220,6 +221,10 @@ const OPTIONAL_HELD_LAUNCH_TABLE: &str = overriding::HELD_LAUNCH_TABLE;
 /// Added in 0.60.0 with CloseRequest: a store written before holds no
 /// closed request, and is opened with the family registered empty.
 const OPTIONAL_CLOSED_REQUEST_TABLE: &str = closed_request::CLOSED_REQUEST_TABLE;
+/// Added in 0.60.1 with the tie of a Task's reminder Notices to their Task:
+/// a store written before holds none, and is opened with the family
+/// registered empty.
+const OPTIONAL_TASK_REMINDER_NOTICE_TABLE: &str = task_reminder_notice::TASK_REMINDER_NOTICE_TABLE;
 const META_TURN_RETENTION_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_turn_retention_configuration");
 const META_TURN_RETENTION_CONFIGURATION_FAMILY: &str =
@@ -336,6 +341,7 @@ const RUNNING_TABLES: &[&str] = &[
     OPTIONAL_PERMAFLOW_HOLD_TABLE,
     OPTIONAL_HELD_LAUNCH_TABLE,
     OPTIONAL_CLOSED_REQUEST_TABLE,
+    OPTIONAL_TASK_REMINDER_NOTICE_TABLE,
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -1763,6 +1769,7 @@ pub struct FlowStore {
     permaflow_holds: TableReference<crate::generated::memory::StoredPermaflowHold>,
     held_launches: TableReference<crate::generated::memory::StoredHeldLaunch>,
     closed_requests: TableReference<closed_request::ClosedRequest>,
+    task_reminder_notices: TableReference<task_reminder_notice::TaskReminderNotice>,
     queue_delivery: QueueDeliveryTables,
     send_outcomes: SendOutcomeTables,
     logical_deliveries: LogicalDeliveryTables,
@@ -2872,6 +2879,9 @@ impl OpensFlowStore for FlowStore {
         let closed_requests = engine.register_table(
             <closed_request::ClosedRequest as closed_request::DescribesClosedRequestTable>::descriptor(),
         )?;
+        let task_reminder_notices = engine.register_table(
+            <task_reminder_notice::TaskReminderNotice as task_reminder_notice::DescribesTaskReminderNoticeTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2915,6 +2925,7 @@ impl OpensFlowStore for FlowStore {
             permaflow_holds,
             held_launches,
             closed_requests,
+            task_reminder_notices,
             queue_delivery,
             send_outcomes,
             logical_deliveries,
@@ -3117,6 +3128,9 @@ impl OpensFlowStore for FlowStore {
         let closed_requests = engine.register_table(
             <closed_request::ClosedRequest as closed_request::DescribesClosedRequestTable>::descriptor(),
         )?;
+        let task_reminder_notices = engine.register_table(
+            <task_reminder_notice::TaskReminderNotice as task_reminder_notice::DescribesTaskReminderNoticeTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -3160,6 +3174,7 @@ impl OpensFlowStore for FlowStore {
             permaflow_holds,
             held_launches,
             closed_requests,
+            task_reminder_notices,
             queue_delivery,
             send_outcomes,
             logical_deliveries,
@@ -5632,6 +5647,10 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                 closed_request::CLOSED_REQUEST_FAMILY,
                 closed_request::CLOSED_REQUEST_SCHEMA,
             ),
+            "flow_nexus_task_reminder_notices" => (
+                task_reminder_notice::TASK_REMINDER_NOTICE_FAMILY,
+                task_reminder_notice::TASK_REMINDER_NOTICE_SCHEMA,
+            ),
             "flow_nexus_meta_protected_address_configuration" => (
                 META_PROTECTED_ADDRESS_CONFIGURATION_FAMILY,
                 META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA,
@@ -5989,6 +6008,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                     || *name == OPTIONAL_PERMAFLOW_HOLD_TABLE
                     || *name == OPTIONAL_HELD_LAUNCH_TABLE
                     || *name == OPTIONAL_CLOSED_REQUEST_TABLE
+                    || *name == OPTIONAL_TASK_REMINDER_NOTICE_TABLE
                     || *name == OPTIONAL_REQUEST_ID_TABLE
                     || *name == OPTIONAL_DELIVER_CALL_TABLE
                     || *name == OPTIONAL_STORE_IDENTITY_TABLE

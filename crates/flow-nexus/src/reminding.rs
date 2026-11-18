@@ -2,7 +2,9 @@
 //! asked for by Remind. Each is held in Flow's Memory (`store::reminder`,
 //! `store::scheduled_reminder`), so a refresh of the reminded metaflow or a
 //! restart of the Nexus keeps it. A Task's reminder due is queued for its
-//! metaflow as Soft.Notice, as from Flow; a reminder asked for is queued for
+//! metaflow as Soft.Notice, as from Flow, tied to its Task
+//! (`store::task_reminder_notice`) so that whatever closes the Task
+//! withdraws it while it is still queued; a reminder asked for is queued for
 //! the Address it names as MiddleAbrupt `Reminder.{ RequestId String }`,
 //! from whoever asked. Each is woken or handed over as any waking request
 //! is.
@@ -13,8 +15,9 @@ use crate::handover_archive::AccessesExistingGitHandoverArchive;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::reminder::{AdvancesReminder, RecordsReminders};
+use crate::store::task_reminder_notice::{RemindedTask, ReminderOfTask, TiesNoticesToTasks};
 use crate::waking::SleepsAndWakesSeats;
-use signal_flow::{Address, Message, Request, SentBy};
+use signal_flow::{Address, Message, Request};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// A time as Unix seconds.
@@ -72,17 +75,19 @@ impl RemindsCallers for RunningNexus {
                 }
             };
             for reminder in due {
-                let Some(task_words) = retained.iter().find_map(|request| {
+                let Some((task_words, task_request_id)) = retained.iter().find_map(|request| {
                     if request.entry.logical_delivery_id != reminder.logical_delivery_id {
                         return None;
                     }
-                    let request = match &request.entry.message {
-                        Message::HardAbrupt(request)
-                        | Message::MiddleAbrupt(request)
-                        | Message::Soft(request) => request,
+                    let task_request = match &request.entry.message {
+                        Message::HardAbrupt(task_request)
+                        | Message::MiddleAbrupt(task_request)
+                        | Message::Soft(task_request) => task_request,
                     };
-                    match request {
-                        Request::Task(task) => Some(task.string.as_str()),
+                    match task_request {
+                        Request::Task(task) => {
+                            Some((task.string.as_str(), request.entry.request_id.clone()))
+                        }
                         _ => None,
                     }
                 }) else {
@@ -91,17 +96,20 @@ impl RemindsCallers for RunningNexus {
                 };
                 let (sent, next) = reminder.advanced(task_words, now);
                 // The last reminder's failure goes to the same sender, after
-                // it: a Notice from Flow, which no reminder follows.
+                // it: a Notice from Flow, which no reminder follows. Each is
+                // tied to its Task, so whatever closes the Task withdraws
+                // the ones still queued.
+                let of = ReminderOfTask {
+                    task: RemindedTask(reminder.logical_delivery_id.clone()),
+                    request_id: task_request_id,
+                };
                 let notices = std::iter::once(sent.notice.clone()).chain(sent.failure.clone());
                 for notice in notices {
                     let address = sent.address.clone();
-                    match self.store.accept_logical_delivery(
-                        &address,
-                        SentBy::Flow,
-                        flow_ethos::Delivery::Queue,
-                        Message::Soft(Request::Notice(notice)),
-                        None,
-                    ) {
+                    match self
+                        .store
+                        .accept_task_reminder_notice(&address, notice, of.clone())
+                    {
                         Ok(signal_flow::PrivateSendResponse::SendAccepted(_)) => {
                             if !reminded.contains(&address) {
                                 reminded.push(address);

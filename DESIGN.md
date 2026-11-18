@@ -252,6 +252,19 @@ request bound open; when its minutes lapse the Address is sent
 `Cancel` ends it before then and tells its asker; `CloseRequest` ends it
 and tells no one.
 
+A Task left with no Done reminds its sender by Soft Notices from Flow, each
+reminder and the failure that comes with the last, and each is tied to its
+Task in the commit that queues it (`store::task_reminder_notice`,
+`TaskReminderNotice.{ LogicalDeliveryId RemindedTask.LogicalDeliveryId
+RequestId }`, keyed by the Notice's logical delivery). Whatever closes the
+Task, a Done naming it or the archive a Cancel, a CloseRequest or an
+ArchiveRequest makes, is the event that ends its Notices: once that commit
+is made, each Notice tied to the Task that is still queued and that no
+hand-over holds leaves its queue unsent and ends Withdrawn, and every tie to
+the Task is retracted. A Notice already handed to its seat or delivered
+stays as it stands. Nothing is told of the withdrawal; a Cancel's own Notice
+is queued as before.
+
 On the meta socket one declaration is changed alone:
 `Configure.Permaflow.ConfigureMetaflow` (keyed by its Address),
 `Configure.Harness.HarnessProfile` (by its harness, within the declared

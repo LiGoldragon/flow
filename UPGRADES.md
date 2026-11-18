@@ -1,3 +1,32 @@
+# Flow 0.60.1: closing a Task withdraws its queued reminder
+
+Contracts unchanged: signal-flow 0.68.0 (319e3c3) and meta-signal-flow
+89.0.1 (313bc05). Built on 0.60.0 (8e609713). **The stored format changes;
+neither wire does.** Psyche hgvl, option a of 2ezk.
+
+- **A closed Task leaves no reminder behind.** A Task's reminder, and the
+  failure that comes with its last, is a Soft Notice from Flow queued for
+  the Task's sender; it is now tied to its Task by a record in the commit
+  that queues it. Whatever closes the Task, a Done naming it, a Cancel, a
+  CloseRequest or an ArchiveRequest, withdraws every such Notice that is
+  still queued and that no hand-over holds: it leaves its queue unsent and
+  ends Withdrawn, and no one is told. A Notice already handed to its seat or
+  delivered stays as it stands; a Cancel's own Notice is queued as before.
+  Before, the queued reminder stayed and reached the sender after its Task
+  was closed. A reminder queued by 0.60.0 carries no tie and is delivered
+  as it was.
+- **Memory: one new family, registered empty when absent**, the way
+  0.60.0's was: `flow_nexus_task_reminder_notices`
+  (`flow-nexus-task-reminder-notice-v1`), one `TaskReminderNotice.{
+  LogicalDeliveryId RemindedTask.LogicalDeliveryId RequestId }` per
+  reminder Notice, keyed by the Notice's logical delivery, retracted with
+  every other tie to its Task when the Task closes. No existing family
+  changes and no row is rewritten; a 0.60.0 store opens as it stands.
+  **A 0.60.0 daemon cannot read a 0.60.1 store** once the family exists (an
+  unrecognized catalog), and the family is registered at 0.60.1's first
+  open: rollback is the restore of the store copy taken before the deploy.
+- **Deployment.** The daemon alone changes; every peer greets as before.
+
 # Flow 0.60.0: CloseRequest closes a request with no answer and tells no one
 
 Contracts: signal-flow 0.68.0 (319e3c3) and meta-signal-flow 89.0.1

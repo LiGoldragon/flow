@@ -1047,3 +1047,15 @@ pub struct ClosedRequest {
     pub request_id: signal_flow::RequestId,
     pub closer: Closer,
 }
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct RemindedTask(pub signal_flow::LogicalDeliveryId);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct TaskReminderNotice {
+    pub logical_delivery_id: signal_flow::LogicalDeliveryId,
+    pub reminded_task: RemindedTask,
+    pub request_id: signal_flow::RequestId,
+}

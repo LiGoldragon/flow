@@ -652,3 +652,356 @@ fn hold_stands_the_clocks_and_resume_lets_them_run() {
         "the reminder is sent once the clock runs"
     );
 }
+
+#[test]
+fn permaflow_hold_queues_every_priority_and_release_drains_oldest_first_once() {
+    use crate::generated::overriding::HeedsOverrides;
+    let fixture = NexusFixture::new();
+    resting_seat(&fixture);
+    let at = address(Model::Sol);
+    let before = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap();
+    assert_eq!(
+        overridden(&fixture, meta::Input::HoldPermaflow(at.clone())),
+        meta::Output::PermaflowHeld(at.clone())
+    );
+    for message in [
+        Message::Soft(Request::Notice("first-held-notice".into())),
+        Message::MiddleAbrupt(Request::Order("second-held-order".into())),
+        Message::HardAbrupt(Request::Order("third-held-order".into())),
+    ] {
+        assert!(matches!(
+            fixture.nexus.store.accept_logical_delivery(
+                &at,
+                SentBy::Flow,
+                flow_ethos::Delivery::Wake,
+                message,
+                None
+            ),
+            Ok(PrivateSendResponse::SendAccepted(_))
+        ));
+        fixture.nexus.wake_due(at.clone());
+        fixture.nexus.drain_awake(&at);
+        assert_eq!(fixture.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
+    }
+    assert!(fixture.nexus.permaflow_held(at.clone()));
+    assert_eq!(fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap(), before);
+    assert!(fixture.typed().is_none());
+    let queued = stored(&fixture, Model::Sol).queue.0;
+    assert_eq!(queued.len(), 3);
+    assert!(
+        matches!(overridden(&fixture, meta::Input::Inspect(at.clone())),
+        meta::Output::Inspected(snapshot) if snapshot.permaflow_hold == meta::PermaflowHold::Held)
+    );
+    assert_eq!(
+        overridden(&fixture, meta::Input::ReleasePermaflow(at.clone())),
+        meta::Output::PermaflowReleased(at.clone())
+    );
+    let typed = fixture.typed().expect("release delivers held work");
+    let first = typed.find("first-held-notice").unwrap();
+    let second = typed.find("second-held-order").unwrap();
+    let third = typed.find("third-held-order").unwrap();
+    assert!(first < second && second < third, "{typed}");
+    assert_eq!(
+        overridden(&fixture, meta::Input::ReleasePermaflow(at.clone())),
+        meta::Output::PermaflowReleased(at)
+    );
+    assert_eq!(
+        fixture.typed().unwrap(),
+        typed,
+        "idempotent release repeats no delivery"
+    );
+    assert!(!fixture.nexus.permaflow_held(address(Model::Sol)));
+}
+
+#[test]
+fn permaflow_hold_survives_a_nexus_restart_with_its_queue_and_pane_unchanged() {
+    use crate::generated::overriding::HeedsOverrides;
+    let mut fixture = NexusFixture::new();
+    resting_seat(&fixture);
+    let at = address(Model::Sol);
+    overridden(&fixture, meta::Input::HoldPermaflow(at.clone()));
+    queue_order(&fixture, "retained-across-restart");
+    let before = stored(&fixture, Model::Sol);
+    fixture.restarted();
+    fixture.nexus.recover_wakes();
+    assert!(fixture.nexus.permaflow_held(at.clone()));
+    assert_eq!(stored(&fixture, Model::Sol), before);
+    assert!(fixture.typed().is_none());
+    assert_eq!(
+        overridden(&fixture, meta::Input::ReleasePermaflow(at.clone())),
+        meta::Output::PermaflowReleased(at)
+    );
+    assert!(fixture.typed().unwrap().contains("retained-across-restart"));
+}
+
+#[test]
+fn held_permaflow_refuses_direct_controls_without_touching_the_seat() {
+    use crate::generated::overriding::{AdmitsPermaflowControl, Subject};
+    let fixture = NexusFixture::new();
+    resting_seat(&fixture);
+    let at = address(Model::Sol);
+    overridden(&fixture, meta::Input::HoldPermaflow(at.clone()));
+    let before = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap();
+    for input in [
+        meta::Input::Close(seat_id()),
+        meta::Input::Renew(at.clone()),
+        meta::Input::Restart(seat_id()),
+        meta::Input::Deliver(at.clone()),
+    ] {
+        assert_eq!(
+            overridden(&fixture, input),
+            meta::Output::Refused(meta::Refused_Data::PermaflowHeld(at.clone()))
+        );
+    }
+    assert!(
+        matches!(fixture.nexus.ordinary_control(Subject::Named(seat_id())),
+        Err(signal_flow::Output::Refused(signal_flow::Refusal::PermaflowHeld(held))) if held == at)
+    );
+    assert_eq!(fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap(), before);
+    assert!(fixture.typed().is_none());
+}
+
+#[test]
+fn releasing_one_permaflow_while_global_hold_stands_keeps_its_work_queued() {
+    let fixture = NexusFixture::new();
+    resting_seat(&fixture);
+    let at = address(Model::Sol);
+    overridden(&fixture, meta::Input::HoldPermaflow(at.clone()));
+    queue_order(&fixture, "held-by-global-switch");
+    overridden(&fixture, meta::Input::Hold);
+    overridden(&fixture, meta::Input::ReleasePermaflow(at));
+    assert!(fixture.typed().is_none());
+    assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 1);
+    overridden(&fixture, meta::Input::Resume);
+    assert!(fixture.typed().unwrap().contains("held-by-global-switch"));
+}
+
+#[test]
+fn permaflow_hold_leaves_other_addresses_due_to_wake() {
+    let fixture = NexusFixture::new();
+    resting_seat(&fixture);
+    overridden(&fixture, meta::Input::HoldPermaflow(address(Model::Sol)));
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Model::Astra,
+        State::Asleep,
+        vec![],
+        vec![Request::Order("other-address-work".into())],
+    ));
+    assert!(fixture.nexus.wake_is_due(&stored(&fixture, Model::Astra)));
+    assert!(!fixture.nexus.wake_is_due(&stored(&fixture, Model::Sol)));
+}
+
+#[test]
+fn repeated_hold_keeps_the_same_queue_and_inspect_exposes_release() {
+    let fixture = NexusFixture::new();
+    resting_seat(&fixture);
+    let at = address(Model::Sol);
+    overridden(&fixture, meta::Input::HoldPermaflow(at.clone()));
+    queue_order(&fixture, "held-once");
+    let before = stored(&fixture, Model::Sol);
+    overridden(&fixture, meta::Input::HoldPermaflow(at.clone()));
+    assert_eq!(stored(&fixture, Model::Sol), before);
+    overridden(&fixture, meta::Input::ReleasePermaflow(at.clone()));
+    assert!(matches!(overridden(&fixture, meta::Input::Inspect(at)),
+        meta::Output::Inspected(snapshot) if snapshot.permaflow_hold == meta::PermaflowHold::Released));
+}
+
+#[test]
+fn sends_at_all_priorities_are_admitted_but_never_typed_while_permaflow_held() {
+    let fixture = NexusFixture::new();
+    resting_seat(&fixture);
+    let at = address(Model::Sol);
+    overridden(&fixture, meta::Input::HoldPermaflow(at.clone()));
+    for message in [
+        signal_flow::SendableMessage::Soft(signal_flow::SendableRequest::Notice("soft".into())),
+        signal_flow::SendableMessage::MiddleAbrupt(signal_flow::SendableRequest::Order(
+            "middle".into(),
+        )),
+        signal_flow::SendableMessage::HardAbrupt(signal_flow::SendableRequest::Order(
+            "hard".into(),
+        )),
+    ] {
+        let answer = fixture
+            .nexus
+            .dispatch(signal_flow::Input::Send(signal_flow::SendRequest {
+                address: at.clone(),
+                sendable_message: message,
+            }));
+        assert!(
+            matches!(answer, signal_flow::Output::SendAccepted(_)),
+            "{answer:?}"
+        );
+        assert!(fixture.typed().is_none());
+    }
+    assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 3);
+}
+
+#[test]
+fn hold_acknowledgment_waits_for_the_admitted_effect_to_end() {
+    use crate::generated::overriding::{
+        HeedsOverrides, SerializesPermaflowEffects, SerializesPermaflowHolds,
+    };
+    use crate::store::AnnouncesLaunchChanges;
+    let fixture = NexusFixture::new();
+    resting_seat(&fixture);
+    let at = address(Model::Sol);
+    let effect = fixture.nexus.waking.effect(at.clone());
+    let changes = fixture.nexus.store.launch_changes.clone();
+    let seen = changes.current();
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let result = fixture.nexus.establish_permaflow_hold(at.clone());
+            sent.send(result).unwrap();
+        });
+        let changed = changes.until(
+            seen,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        );
+        let held = fixture.nexus.permaflow_held(at.clone());
+        let waiting = matches!(
+            received.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        );
+        drop(effect);
+        let answer = received.recv_timeout(std::time::Duration::from_secs(5));
+        assert!(
+            changed && held && waiting,
+            "durable Hold precedes its acknowledgment"
+        );
+        assert!(matches!(answer, Ok(Ok(true))), "{answer:?}");
+    });
+}
+
+#[test]
+fn maintained_permaflow_without_a_flow_stays_down_until_release_even_after_restart() {
+    use crate::store::successor::{OwesSuccessors, SuccessionCause, SuccessorIntent};
+    let mut fixture = NexusFixture::new();
+    let _seat = ended_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    maintain(&fixture, at.clone());
+    fixture
+        .nexus
+        .store
+        .owe_successor(SuccessorIntent {
+            address: at.clone(),
+            predecessor: crate::generated::memory::Predecessor("abc123".into()),
+            launch_request_id: signal_flow::LaunchRequestId("held-exit-successor".into()),
+            succession_cause: SuccessionCause::Exit,
+        })
+        .unwrap();
+    let world = fixture.fresh_claude_world();
+    overridden(&fixture, meta::Input::HoldPermaflow(at.clone()));
+    fixture.nexus.wake_due(at.clone());
+    fixture.restarted();
+    fixture.nexus.recover_wakes();
+    assert_eq!(world.claude_starts(), 0, "{}", world.calls());
+    assert_eq!(stored(&fixture, Model::Sol).state, State::Asleep);
+    overridden(&fixture, meta::Input::ReleasePermaflow(at));
+    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+    assert!(matches!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(_)
+    ));
+}
+
+#[test]
+fn explicit_launch_is_parked_atomically_and_resumed_once_by_release() {
+    use crate::generated::overriding::ParksHeldLaunches;
+    use crate::launching::LaunchesFlows;
+    use crate::store::ReadsLaunchAttempt;
+    let mut fixture = NexusFixture::new();
+    let seat = ended_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let world = fixture.fresh_claude_world();
+    let mut profile = seat.profile;
+    profile.launch_request_id = signal_flow::LaunchRequestId("held-explicit-launch".into());
+    overridden(&fixture, meta::Input::HoldPermaflow(at.clone()));
+    let pending = fixture
+        .nexus
+        .start(profile.clone(), signal_flow::Origin::Unbound);
+    assert!(
+        matches!(pending, signal_flow::Output::LaunchPending(_)),
+        "{pending:?}"
+    );
+    let attempt = fixture
+        .nexus
+        .store
+        .launch_attempt(&profile.launch_request_id.0)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        attempt.launch_attempt_phase,
+        signal_flow::LaunchAttemptPhase::Reserved
+    );
+    assert!(attempt.native_launch_intent_option.is_none());
+    assert!(
+        fixture
+            .nexus
+            .store
+            .marked_held_launch(profile.launch_request_id.clone())
+            .unwrap()
+    );
+    assert_eq!(world.claude_starts(), 0, "{}", world.calls());
+    let replay = fixture
+        .nexus
+        .start(profile.clone(), signal_flow::Origin::Unbound);
+    assert!(matches!(replay, signal_flow::Output::LaunchPending(_)));
+    assert_eq!(fixture.nexus.store.held_launches().unwrap().len(), 1);
+    let mut conflicting = profile.clone();
+    conflicting.instruction_prompt.0.push_str(" changed");
+    assert_eq!(
+        fixture
+            .nexus
+            .start(conflicting, signal_flow::Origin::Unbound),
+        signal_flow::Output::StartRejected(signal_flow::StartRejection::LaunchRequestConflict)
+    );
+    fixture.restarted();
+    fixture.nexus.recover_wakes();
+    assert_eq!(world.claude_starts(), 0);
+    overridden(&fixture, meta::Input::ReleasePermaflow(at.clone()));
+    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+    assert!(
+        !fixture
+            .nexus
+            .store
+            .marked_held_launch(profile.launch_request_id)
+            .unwrap()
+    );
+    overridden(&fixture, meta::Input::ReleasePermaflow(at));
+    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+}
+
+#[test]
+fn held_refresh_records_the_order_without_replacing_the_resting_flow() {
+    use crate::generated::memory::RefreshCaller;
+    use crate::store::ordered_replacement::{OrdersReplacements, ReplacementOrder};
+    use crate::waking::RefreshesMetaflows;
+    let fixture = NexusFixture::new();
+    resting_seat(&fixture);
+    let at = address(Model::Sol);
+    overridden(&fixture, meta::Input::HoldPermaflow(at.clone()));
+    let caller = RefreshCaller::Elsewhere(signal_flow::Origin::Unbound);
+    let response = fixture.nexus.refresh(&at, &caller);
+    assert!(
+        matches!(response, signal_flow::Output::RefreshQueued(_)),
+        "{response:?}"
+    );
+    let order = fixture
+        .nexus
+        .store
+        .ordered_replacement(&at)
+        .unwrap()
+        .unwrap();
+    assert_eq!(order.replacement_order, ReplacementOrder::Refresh(caller));
+    assert_eq!(stored(&fixture, Model::Sol).state, State::Awake(seat_id()));
+    assert!(fixture.typed().is_none());
+}

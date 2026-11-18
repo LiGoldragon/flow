@@ -2086,6 +2086,7 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
             eprintln!("flow-nexus: resumed by the owner; the Nexus acts on its own again");
             nexus.record_every_seat()?;
         }
+        crate::launching::ReconcilesInterruptedLaunches::reconcile_interrupted_launches(nexus);
         nexus.recover_wakes();
         Ok(())
     }
@@ -2109,20 +2110,15 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         address: &signal_flow::Address,
     ) -> Result<signal_flow::Address, meta_signal_flow::Output> {
         use crate::generated::overriding::SerializesPermaflowHolds;
-        if self
-            .nexus
+        self.nexus
             .remove_permaflow_hold(address.clone())
             .map_err(|error| {
                 meta_signal_flow::Output::Refused(meta_signal_flow::Refused_Data::StoreRefused(
                     meta_signal_flow::StoreFailure(error.to_string()),
                 ))
-            })?
-        {
-            use crate::generated::overriding::ResumesHeldLaunches;
-            use crate::waking::SleepsAndWakesSeats;
-            self.nexus.resume_held_launches(address.clone());
-            self.nexus.wake_due(address.clone());
-        }
+            })?;
+        use crate::generated::overriding::ResumesPermaflowWork;
+        self.nexus.resume_permaflow(address.clone());
         Ok(address.clone())
     }
 }

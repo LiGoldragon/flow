@@ -183,6 +183,22 @@ pub trait ParksHeldLaunches {
     ) -> std::result::Result<bool, flow_nexus::store::StoreError>;
 }
 #[rustfmt::skip]
+pub trait RecoverableRestart {
+    fn record(&self) -> meta_signal_flow::generated::signal::RestartRecord;
+}
+#[rustfmt::skip]
+pub trait RecoversRecordedRestarts {
+    fn recover_restart<N: RecoverableRestart>(&self, input: N) -> bool;
+}
+#[rustfmt::skip]
+pub trait ResumesPermaflowWork {
+    fn resume_permaflow<N: Addressed>(&self, input: N) -> bool;
+}
+#[rustfmt::skip]
+pub trait ResumesPermaflowCleanup {
+    fn resume_permaflow_cleanup<N: Addressed>(&self, input: N) -> bool;
+}
+#[rustfmt::skip]
 pub trait ResumesHeldLaunches {
     fn resume_held_launches<N: Addressed>(&self, input: N) -> bool;
 }
@@ -227,6 +243,12 @@ const _: () = {
     let _ = assert_runningnexus_admitspermaflowcontrol::<flow_nexus::RunningNexus>;
     fn assert_runningnexus_resumesheldlaunches<T: ResumesHeldLaunches>() {}
     let _ = assert_runningnexus_resumesheldlaunches::<flow_nexus::RunningNexus>;
+    fn assert_runningnexus_resumespermaflowwork<T: ResumesPermaflowWork>() {}
+    let _ = assert_runningnexus_resumespermaflowwork::<flow_nexus::RunningNexus>;
+    fn assert_runningnexus_resumespermaflowcleanup<T: ResumesPermaflowCleanup>() {}
+    let _ = assert_runningnexus_resumespermaflowcleanup::<flow_nexus::RunningNexus>;
+    fn assert_runningnexus_recoversrecordedrestarts<T: RecoversRecordedRestarts>() {}
+    let _ = assert_runningnexus_recoversrecordedrestarts::<flow_nexus::RunningNexus>;
     fn assert_runningnexus_interruptsrunningturns<T: InterruptsRunningTurns>() {}
     let _ = assert_runningnexus_interruptsrunningturns::<flow_nexus::RunningNexus>;
 };
@@ -284,6 +306,13 @@ const _: () = {
     fn assert_launchreservation_parkedlaunch<T: ParkedLaunch>() {}
     let _ = assert_launchreservation_parkedlaunch::<
         flow_nexus::generated::operation::LaunchReservation,
+    >;
+};
+#[rustfmt::skip]
+const _: () = {
+    fn assert_restartrecord_recoverablerestart<T: RecoverableRestart>() {}
+    let _ = assert_restartrecord_recoverablerestart::<
+        meta_signal_flow::generated::signal::RestartRecord,
     >;
 };
 #[rustfmt::skip]

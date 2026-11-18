@@ -274,6 +274,12 @@ impl LaunchesFlows for RunningNexus {
                 return Output::StartRejected(StartRejection::LaunchPersistenceRefused);
             }
         };
+        if existing
+            .as_ref()
+            .is_some_and(|attempt| attempt.launch_profile != profile)
+        {
+            return Output::StartRejected(StartRejection::LaunchRequestConflict);
+        }
         let resumable = existing.as_ref().is_some_and(|attempt| {
             attempt.launch_attempt_phase == LaunchAttemptPhase::Reserved
                 && !self.permaflow_held(profile.address.clone())
@@ -913,120 +919,25 @@ pub trait ReconcilesInterruptedLaunches {
 
 impl ReconcilesInterruptedLaunches for RunningNexus {
     fn reconcile_interrupted_launches(&self) {
-        use crate::codex::{AccountsOpenedThread, SelectsCodexEndpoint};
-        use crate::send_tool::RefusesInterruptedCalls;
-        use crate::store::launch_cleanup::{
-            CleanupPart, CleanupStep, CompletesCleanup, KeepsLaunchCleanups,
-        };
-        let _turn = self
-            .dispatch_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let opened = match self.store.opened_threads() {
-            Ok(opened) => opened,
-            Err(error) => {
-                eprintln!("flow-nexus: opened launch threads unreadable: {error}");
-                return;
-            }
-        };
-        for opened in opened {
-            let launch_request_id = opened.launch_request_id.0;
-            let thread = opened.native_session_id.0;
-            let Ok(Some(attempt)) = self.store.launch_attempt(&launch_request_id) else {
-                continue;
-            };
-            use crate::generated::overriding::{HeedsOverrides, SerializesPermaflowEffects};
-            let _effect = self.waking.effect(attempt.launch_profile.address.clone());
-            if self.permaflow_held(attempt.launch_profile.address.clone()) {
-                continue;
-            }
-            let unsettled = self
-                .store
-                .launch_attempt_unsettled(&attempt)
-                .unwrap_or(false);
-            let interrupted = unsettled
-                && attempt
-                    .native_launch_intent_option
-                    .as_ref()
-                    .is_some_and(|intent| intent.harness_kind == HarnessKind::Codex)
-                && matches!(
-                    attempt.launch_attempt_phase,
-                    LaunchAttemptPhase::NativeLaunchIntentRecorded
-                        | LaunchAttemptPhase::NativeBound
-                );
-            let cleanup = if interrupted {
-                // The cleanup is durable before the launch is settled, so a
-                // settled launch never loses what is left to clean.
-                match self.store.begin_launch_cleanup(&launch_request_id, &thread) {
-                    Ok(cleanup) => cleanup,
-                    Err(error) => {
-                        eprintln!(
-                            "flow-nexus: launch {launch_request_id} interrupted after opening thread {thread} left as it is: its cleanup is not recorded: {error}"
-                        );
-                        continue;
-                    }
-                }
-            } else {
-                match self.store.launch_cleanup(&launch_request_id) {
-                    Ok(Some(cleanup)) if !cleanup.is_complete() => cleanup,
-                    _ => continue,
-                }
-            };
-            if unsettled {
-                self.settle(
-                    &launch_request_id,
-                    Output::StartRejected(StartRejection::NativeLaunchRefused(
-                        NativeLaunchRefusal {
-                            native_launch_stage: NativeLaunchStage::Spawn,
-                            native_launch_failure: NativeLaunchFailure::Unclassified,
-                        },
-                    )),
-                );
-            }
-            if cleanup.step(CleanupPart::Thread) == CleanupStep::Pending {
-                match self
-                    .codex_endpoints
-                    .current()
-                    .adapter_for(&attempt.launch_profile.model_name.0)
-                {
-                    Ok(adapter) => {
-                        let answered = self.refuse_interrupted_calls(&thread, &adapter);
-                        let account = adapter.account_opened_thread(&thread);
-                        eprintln!(
-                            "flow-nexus: launch {launch_request_id} interrupted after opening thread {thread}: {answered:?}, {account:?}"
-                        );
-                        if matches!(account.thread_archive, signal_flow::ThreadArchive::Archived)
-                            && let Err(error) = self
-                                .store
-                                .finish_cleanup_step(&launch_request_id, CleanupPart::Thread)
-                        {
-                            eprintln!(
-                                "flow-nexus: launch {launch_request_id}: archived thread {thread} not recorded: {error}"
-                            );
-                        }
-                    }
-                    Err(error) => eprintln!(
-                        "flow-nexus: launch {launch_request_id} thread {thread} left for the next start: no Codex endpoint: {error}"
-                    ),
-                }
-            }
-            if cleanup.step(CleanupPart::Pane) == CleanupStep::Pending {
-                match self.abandon_refused_launch(&launch_request_id, &HarnessKind::Codex, None) {
-                    LaunchTeardown::TakenDown => {
-                        if let Err(error) = self
-                            .store
-                            .finish_cleanup_step(&launch_request_id, CleanupPart::Pane)
-                        {
-                            eprintln!(
-                                "flow-nexus: launch {launch_request_id}: teardown not recorded: {error}"
-                            );
-                        }
-                    }
-                    kept => eprintln!(
-                        "flow-nexus: launch {launch_request_id} pane left for the next start: {kept:?}"
-                    ),
-                }
-            }
+        use crate::generated::overriding::{HeedsOverrides, ResumesPermaflowCleanup};
+        if self.held() {
+            return;
+        }
+        let addresses = self
+            .store
+            .opened_threads()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|opened| {
+                self.store
+                    .launch_attempt(&opened.launch_request_id.0)
+                    .ok()
+                    .flatten()
+            })
+            .map(|attempt| attempt.launch_profile.address)
+            .collect::<std::collections::HashSet<_>>();
+        for address in addresses {
+            self.resume_permaflow_cleanup(address);
         }
     }
 }
@@ -1302,7 +1213,7 @@ impl crate::generated::overriding::ResumesHeldLaunches for RunningNexus {
             .dispatch_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if self.permaflow_held(address.clone()) {
+        if self.held() || self.permaflow_held(address.clone()) {
             return false;
         }
         let Ok(markers) = self.store.held_launches() else {
@@ -1317,6 +1228,138 @@ impl crate::generated::overriding::ResumesHeldLaunches for RunningNexus {
             }
             let response = self.start(attempt.launch_profile, attempt.origin);
             let _ = self.settle(&marker.launch_request_id.0, response);
+        }
+        true
+    }
+}
+
+impl crate::generated::overriding::ResumesPermaflowCleanup for RunningNexus {
+    fn resume_permaflow_cleanup<N: crate::generated::overriding::Addressed>(
+        &self,
+        input: N,
+    ) -> bool {
+        use crate::generated::overriding::HeedsOverrides;
+        let address = input.address();
+        use crate::codex::{AccountsOpenedThread, SelectsCodexEndpoint};
+        use crate::send_tool::RefusesInterruptedCalls;
+        use crate::store::launch_cleanup::{
+            CleanupPart, CleanupStep, CompletesCleanup, KeepsLaunchCleanups,
+        };
+        let _turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.held() || self.permaflow_held(address.clone()) {
+            return false;
+        }
+        let opened = match self.store.opened_threads() {
+            Ok(opened) => opened,
+            Err(error) => {
+                eprintln!("flow-nexus: opened launch threads unreadable: {error}");
+                return false;
+            }
+        };
+        for opened in opened {
+            let launch_request_id = opened.launch_request_id.0;
+            let thread = opened.native_session_id.0;
+            let Ok(Some(attempt)) = self.store.launch_attempt(&launch_request_id) else {
+                continue;
+            };
+            if attempt.launch_profile.address != address {
+                continue;
+            }
+            use crate::generated::overriding::{HeedsOverrides, SerializesPermaflowEffects};
+            let _effect = self.waking.effect(attempt.launch_profile.address.clone());
+            if self.permaflow_held(attempt.launch_profile.address.clone()) {
+                continue;
+            }
+            let unsettled = self
+                .store
+                .launch_attempt_unsettled(&attempt)
+                .unwrap_or(false);
+            let interrupted = unsettled
+                && attempt
+                    .native_launch_intent_option
+                    .as_ref()
+                    .is_some_and(|intent| intent.harness_kind == HarnessKind::Codex)
+                && matches!(
+                    attempt.launch_attempt_phase,
+                    LaunchAttemptPhase::NativeLaunchIntentRecorded
+                        | LaunchAttemptPhase::NativeBound
+                );
+            let cleanup = if interrupted {
+                // The cleanup is durable before the launch is settled, so a
+                // settled launch never loses what is left to clean.
+                match self.store.begin_launch_cleanup(&launch_request_id, &thread) {
+                    Ok(cleanup) => cleanup,
+                    Err(error) => {
+                        eprintln!(
+                            "flow-nexus: launch {launch_request_id} interrupted after opening thread {thread} left as it is: its cleanup is not recorded: {error}"
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                match self.store.launch_cleanup(&launch_request_id) {
+                    Ok(Some(cleanup)) if !cleanup.is_complete() => cleanup,
+                    _ => continue,
+                }
+            };
+            if unsettled {
+                self.settle(
+                    &launch_request_id,
+                    Output::StartRejected(StartRejection::NativeLaunchRefused(
+                        NativeLaunchRefusal {
+                            native_launch_stage: NativeLaunchStage::Spawn,
+                            native_launch_failure: NativeLaunchFailure::Unclassified,
+                        },
+                    )),
+                );
+            }
+            if cleanup.step(CleanupPart::Thread) == CleanupStep::Pending {
+                match self
+                    .codex_endpoints
+                    .current()
+                    .adapter_for(&attempt.launch_profile.model_name.0)
+                {
+                    Ok(adapter) => {
+                        let answered = self.refuse_interrupted_calls(&thread, &adapter);
+                        let account = adapter.account_opened_thread(&thread);
+                        eprintln!(
+                            "flow-nexus: launch {launch_request_id} interrupted after opening thread {thread}: {answered:?}, {account:?}"
+                        );
+                        if matches!(account.thread_archive, signal_flow::ThreadArchive::Archived)
+                            && let Err(error) = self
+                                .store
+                                .finish_cleanup_step(&launch_request_id, CleanupPart::Thread)
+                        {
+                            eprintln!(
+                                "flow-nexus: launch {launch_request_id}: archived thread {thread} not recorded: {error}"
+                            );
+                        }
+                    }
+                    Err(error) => eprintln!(
+                        "flow-nexus: launch {launch_request_id} thread {thread} left for the next start: no Codex endpoint: {error}"
+                    ),
+                }
+            }
+            if cleanup.step(CleanupPart::Pane) == CleanupStep::Pending {
+                match self.abandon_refused_launch(&launch_request_id, &HarnessKind::Codex, None) {
+                    LaunchTeardown::TakenDown => {
+                        if let Err(error) = self
+                            .store
+                            .finish_cleanup_step(&launch_request_id, CleanupPart::Pane)
+                        {
+                            eprintln!(
+                                "flow-nexus: launch {launch_request_id}: teardown not recorded: {error}"
+                            );
+                        }
+                    }
+                    kept => eprintln!(
+                        "flow-nexus: launch {launch_request_id} pane left for the next start: {kept:?}"
+                    ),
+                }
+            }
         }
         true
     }

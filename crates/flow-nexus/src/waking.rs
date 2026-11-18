@@ -123,7 +123,7 @@ use crate::store::logical_delivery::{
     CorePresentationRoute, RecordsLogicalDeliveries, SimplifiedReplyBinding,
     SimplifiedReplyStanding,
 };
-use crate::store::metaflow::SleepsMetaflows;
+use crate::store::metaflow::{PreparesDeclaredMetaflow, SleepsMetaflows};
 use crate::store::ordered_replacement::{
     NamesOrderedLaunch, OrderedLaunch, OrderedReplacement, OrdersReplacements, ReplacementOrder,
     ShowsWaitingAttempt,
@@ -2625,7 +2625,9 @@ impl WaitsForRestToReplace for RunningNexus {
     }
 
     fn start_ordered(&self, order: OrderedReplacement, launch: OrderedLaunch) {
-        if self.permaflow_held(order.address.clone()) {
+        use crate::generated::overriding::SerializesPermaflowEffects;
+        let _effect = self.waking.effect(order.address.clone());
+        if self.held() || self.permaflow_held(order.address.clone()) {
             return;
         }
 
@@ -4119,6 +4121,11 @@ impl WakesInParts for RunningNexus {
 
     fn take_up_owed(&self, intent: SuccessorIntent) -> AtStop {
         let address = intent.address.clone();
+        use crate::generated::overriding::SerializesPermaflowEffects;
+        let _effect = self.waking.effect(address.clone());
+        if self.held() || self.permaflow_held(address.clone()) {
+            return AtStop::Idle;
+        }
         let Some(lock) = self.waking.hold(&address) else {
             return AtStop::Kept(KeptAtStop::Waking);
         };
@@ -4430,5 +4437,47 @@ impl WakesInParts for RunningNexus {
                 },
             },
         }
+    }
+}
+
+impl crate::generated::overriding::ResumesPermaflowWork for RunningNexus {
+    fn resume_permaflow<N: crate::generated::overriding::Addressed>(&self, input: N) -> bool {
+        use crate::generated::overriding::{
+            RecoversRecordedRestarts, ResumesHeldLaunches, ResumesPermaflowCleanup,
+            SerializesPermaflowEffects,
+        };
+        use crate::reaping::ReapsPredecessors;
+        use crate::store::restart::RecordsRestarts;
+        let address = input.address();
+        let _effect = self.waking.effect(address.clone());
+        if self.held() || self.permaflow_held(address.clone()) {
+            return false;
+        }
+        // Only this Address's deferred work is taken up by its release.
+        self.resume_permaflow_cleanup(address.clone());
+        self.resume_held_launches(address.clone());
+        for record in self.store.restart_records().unwrap_or_default() {
+            if record.address == address {
+                self.recover_restart(record);
+            }
+        }
+        if let Ok(Some(metaflow)) = self.store.metaflow(&address)
+            && let flow_ethos::State::Awake(flow_id) = metaflow.state
+        {
+            self.settle_stopped(&flow_id.0);
+        }
+        if let Ok(Some(intent)) = self.store.successor_intent(&address)
+            && matches!(self.store.metaflow(&address), Ok(Some(metaflow))
+                if metaflow.state == flow_ethos::State::Awake(FlowId(intent.predecessor.0.clone())))
+        {
+            self.take_up_owed(intent);
+        }
+        for row in self.store.pending_reaps().unwrap_or_default() {
+            if row.address == address {
+                self.rearm(&row.predecessor.0);
+            }
+        }
+        self.wake_due(address);
+        true
     }
 }

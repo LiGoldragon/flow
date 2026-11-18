@@ -49,7 +49,7 @@ Library
   :flow_nexus:generated:memory:[ Flow Transition Moment StoredHold StoredPermaflowHold StoredHeldLaunch ]
   :signal_flow:[ ComposedLaunch Origin LaunchAttempt LaunchAttemptReservation LaunchRequestId ]
   :signal_flow:OrdinaryOutput.Output
-  :meta_signal_flow:generated:signal:[ State MetaOutput.Output ]
+  :meta_signal_flow:generated:signal:[ State RestartRecord MetaOutput.Output ]
   :flow_nexus:codex:[ CodexAdapter CodexAdapterUnavailable ]
   :signal_flow:[ FlowId Address ] ]
 [ Subject.[ Named.FlowId                                    ; types: what an override names
@@ -96,6 +96,10 @@ Library
   ParksHeldLaunches.[ park_held_launch.{ [ ParkedLaunch ] [ Result<LaunchAttemptReservation StoreError> ] }
                      held_launches.[ Result<Vector<StoredHeldLaunch> StoreError> ]
                      marked_held_launch.{ [ HeldLaunch ] [ Result<Boolean StoreError> ] } ]
+  RecoverableRestart.[ record.[ RestartRecord ] ]
+  RecoversRecordedRestarts.[ recover_restart.{ [ RecoverableRestart ] [ Boolean ] } ]
+  ResumesPermaflowWork.[ resume_permaflow.{ [ Addressed ] [ Boolean ] } ]
+  ResumesPermaflowCleanup.[ resume_permaflow_cleanup.{ [ Addressed ] [ Boolean ] } ]
   ResumesHeldLaunches.[ resume_held_launches.{ [ Addressed ] [ Boolean ] } ]
   DescribesOverrideTable.[ descriptor:[ TableDescriptor<Self> ] ]
   EntersByOverride.[ overridden.[ Transition ] ]
@@ -106,6 +110,9 @@ Library
                  SerializesPermaflowHolds
                  AdmitsPermaflowControl
                  ResumesHeldLaunches
+                 ResumesPermaflowWork
+                 ResumesPermaflowCleanup
+                 RecoversRecordedRestarts
                  InterruptsRunningTurns ]
   WakingMetaflows.[ SerializesPermaflowEffects ]
   Address.[ Addressed ]
@@ -115,5 +122,6 @@ Library
   StoredPermaflowHold.[ DescribesOverrideTable ]
   StoredHeldLaunch.[ DescribesOverrideTable HeldLaunch ]
   LaunchReservation.[ ParkedLaunch ]
+  RestartRecord.[ RecoverableRestart ]
   LaunchRequestId.[ HeldLaunch ]
   State.[ EntersByOverride ] ]

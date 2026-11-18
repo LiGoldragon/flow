@@ -1637,6 +1637,7 @@ impl RestartsFlows for RunningNexus {
     }
 
     fn recover_restarts(&self) {
+        use crate::generated::overriding::RecoversRecordedRestarts;
         let records = {
             let _turn = self
                 .dispatch_gate
@@ -1645,79 +1646,7 @@ impl RestartsFlows for RunningNexus {
             self.store.restart_records().unwrap_or_default()
         };
         for record in records {
-            use crate::generated::overriding::{AdmitsPermaflowControl, Subject};
-            let _effect = match self.ordinary_control(Subject::Named(record.flow_id.clone())) {
-                Ok(effect) => effect,
-                Err(_) => continue,
-            };
-            let flow_id = record.flow_id.clone();
-            let response = match record.restart_phase.clone() {
-                // Composed before the old pane is touched again: refused,
-                // the record is Failed and the old harness runs on.
-                RestartPhase::Closing => {
-                    let closed = {
-                        let _turn = self
-                            .dispatch_gate
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        self.taken_up(record)
-                            .and_then(|prepared| self.closed_old(prepared))
-                    };
-                    match closed {
-                        Ok(closed) => self.resumed(closed),
-                        Err(response) => *response,
-                    }
-                }
-                RestartPhase::Closed => {
-                    let prepared = {
-                        let _turn = self
-                            .dispatch_gate
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        self.taken_up(record)
-                    };
-                    match prepared {
-                        Ok(prepared) => self.resumed(prepared),
-                        Err(response) => *response,
-                    }
-                }
-                // No pane was recorded: whether Herdr made one is unproven.
-                RestartPhase::Opening => {
-                    let _turn = self
-                        .dispatch_gate
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    self.interrupted(record, None)
-                }
-                // The pane was recorded: it binds only to what it shows.
-                RestartPhase::Spawning(pane) => {
-                    let verified = self
-                        .actual_model(&flow_id.0)
-                        .ok_or(RestartFailure::ResumeRefused("ModelUnknown".into()))
-                        .and_then(|model| self.verified_resume(&record, &pane, &model));
-                    let _turn = self
-                        .dispatch_gate
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    match verified {
-                        Ok(birth) => self.bound(&record, birth),
-                        Err(_) => self.interrupted(record, Some(pane)),
-                    }
-                }
-                // Reopened only under the bound, and only once the old
-                // seat's recorded harness is exited and nothing holds the
-                // session.
-                RestartPhase::Failed(_) => match self.reopened(record, None, Duration::ZERO) {
-                    Reopening::Reopened(prepared) => self.resumed(*prepared),
-                    Reopening::Kept => continue,
-                    Reopening::Refused(response) => *response,
-                },
-                RestartPhase::Interrupted(_) => continue,
-            };
-            eprintln!(
-                "flow-nexus: restart of flow {flow_id} taken up at start: {response:?}",
-                flow_id = flow_id.0
-            );
+            self.recover_restart(record);
         }
     }
 
@@ -1812,5 +1741,94 @@ impl FencesSeatEvents for RunningNexus {
             return false;
         }
         witness.is_none_or(|witness| self.seat_witness(flow_id).as_ref() == Some(witness))
+    }
+}
+
+impl crate::generated::overriding::RecoverableRestart for RestartRecord {
+    fn record(&self) -> RestartRecord {
+        self.clone()
+    }
+}
+
+impl crate::generated::overriding::RecoversRecordedRestarts for RunningNexus {
+    fn recover_restart<N: crate::generated::overriding::RecoverableRestart>(
+        &self,
+        input: N,
+    ) -> bool {
+        let record = input.record();
+        use crate::generated::overriding::{AdmitsPermaflowControl, Subject};
+        let _effect = match self.ordinary_control(Subject::Named(record.flow_id.clone())) {
+            Ok(effect) => effect,
+            Err(_) => return false,
+        };
+        let flow_id = record.flow_id.clone();
+        let response = match record.restart_phase.clone() {
+            // Composed before the old pane is touched again: refused,
+            // the record is Failed and the old harness runs on.
+            RestartPhase::Closing => {
+                let closed = {
+                    let _turn = self
+                        .dispatch_gate
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    self.taken_up(record)
+                        .and_then(|prepared| self.closed_old(prepared))
+                };
+                match closed {
+                    Ok(closed) => self.resumed(closed),
+                    Err(response) => *response,
+                }
+            }
+            RestartPhase::Closed => {
+                let prepared = {
+                    let _turn = self
+                        .dispatch_gate
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    self.taken_up(record)
+                };
+                match prepared {
+                    Ok(prepared) => self.resumed(prepared),
+                    Err(response) => *response,
+                }
+            }
+            // No pane was recorded: whether Herdr made one is unproven.
+            RestartPhase::Opening => {
+                let _turn = self
+                    .dispatch_gate
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                self.interrupted(record, None)
+            }
+            // The pane was recorded: it binds only to what it shows.
+            RestartPhase::Spawning(pane) => {
+                let verified = self
+                    .actual_model(&flow_id.0)
+                    .ok_or(RestartFailure::ResumeRefused("ModelUnknown".into()))
+                    .and_then(|model| self.verified_resume(&record, &pane, &model));
+                let _turn = self
+                    .dispatch_gate
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                match verified {
+                    Ok(birth) => self.bound(&record, birth),
+                    Err(_) => self.interrupted(record, Some(pane)),
+                }
+            }
+            // Reopened only under the bound, and only once the old
+            // seat's recorded harness is exited and nothing holds the
+            // session.
+            RestartPhase::Failed(_) => match self.reopened(record, None, Duration::ZERO) {
+                Reopening::Reopened(prepared) => self.resumed(*prepared),
+                Reopening::Kept => return false,
+                Reopening::Refused(response) => *response,
+            },
+            RestartPhase::Interrupted(_) => return false,
+        };
+        eprintln!(
+            "flow-nexus: restart of flow {flow_id} taken up at start: {response:?}",
+            flow_id = flow_id.0
+        );
+        true
     }
 }

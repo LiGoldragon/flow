@@ -407,10 +407,10 @@
             flow-request-id-immutable-contract-pins =
               pkgs.runCommand "flow-request-id-immutable-contract-pins" { nativeBuildInputs = [ pkgs.gnugrep ]; }
                 ''
-                  grep -F 'rev = "a536862f00704f0ea2a805484d2a61f9e5dd382a"' ${./Cargo.toml}
-                  grep -F 'rev = "be69365bc51bf4a6300aa963b60f8b88fbf90359"' ${./Cargo.toml}
-                  grep -F 'signal-flow?rev=a536862f00704f0ea2a805484d2a61f9e5dd382a#a536862f00704f0ea2a805484d2a61f9e5dd382a' ${./Cargo.lock}
-                  grep -F 'meta-signal-flow?rev=be69365bc51bf4a6300aa963b60f8b88fbf90359#be69365bc51bf4a6300aa963b60f8b88fbf90359' ${./Cargo.lock}
+                  grep -F 'rev = "163785f1cb8e8a0575162e8ffb290d4642e6f40b"' ${./Cargo.toml}
+                  grep -F 'rev = "e34d0442ff45fa89808c5ae3fa5643444535d755"' ${./Cargo.toml}
+                  grep -F 'signal-flow?rev=163785f1cb8e8a0575162e8ffb290d4642e6f40b#163785f1cb8e8a0575162e8ffb290d4642e6f40b' ${./Cargo.lock}
+                  grep -F 'meta-signal-flow?rev=e34d0442ff45fa89808c5ae3fa5643444535d755#e34d0442ff45fa89808c5ae3fa5643444535d755' ${./Cargo.lock}
                   touch "$out"
                 '';
 

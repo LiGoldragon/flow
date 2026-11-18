@@ -351,6 +351,51 @@ fn a_successor_is_given_its_predecessors_open_requests_and_answers_them_by_their
     assert_eq!(store.open_requests(&at).unwrap(), open[..1].to_vec());
 }
 
+/// A request closed by CloseRequest is no longer open: of two Orders
+/// delivered to abc123 and left open, the one closed is not carried over
+/// the refresh, and the successor's first prompt holds the other alone.
+#[test]
+fn a_closed_request_is_not_carried_to_the_successors_first_prompt() {
+    use crate::queue_operations::OperatesOnRequestsAndQueues;
+    let (fixture, world) = resting_seat();
+    let store = &fixture.nexus.store;
+    let at = address(Model::Sol);
+    let sender = psyche_core();
+
+    let kept = Request::Order("Land the Git server line.".into());
+    let open_order = store.admitted(&at, &sender, kept.clone());
+    store.delivered(&at, "abc123");
+    let closed = store.admitted(&at, &sender, Request::Order("Done long ago.".into()));
+    store.delivered(&at, "abc123");
+    assert_eq!(
+        fixture.nexus.close_request(&closed.request_id, None),
+        Output::RequestClosed(closed.request_id.clone())
+    );
+    let open = vec![entry(&open_order, &sender, kept)];
+    assert_eq!(store.open_requests(&at).unwrap(), open);
+
+    let refreshed = fixture.nexus.dispatch(Input::Refresh(at.clone()));
+    assert!(
+        matches!(&refreshed, Output::ReapPending(_)),
+        "{refreshed:?}; Herdr calls: {}",
+        world.calls()
+    );
+    let first = world
+        .user_turns(&fixture)
+        .into_iter()
+        .next()
+        .expect("the successor's first turn");
+    let line = FlowId("abc123".into()).open_requests_line();
+    assert!(
+        first.ends_with(&format!("{HANDOVER}\n\n{line}\n{}", open.prompt_text(&at))),
+        "the open Order alone follows the handover: {first}"
+    );
+    assert!(
+        !first.contains(&closed.request_id.0) && !first.contains("Done long ago."),
+        "the closed request is not carried: {first}"
+    );
+}
+
 /// Hands the oldest queued request of `address` to the Codex flow
 /// `flow_id` on `thread`, anchored on the thread's turns, records its
 /// receipt and settles it out of the queue: delivered, and open until its

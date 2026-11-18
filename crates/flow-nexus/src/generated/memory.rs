@@ -1035,3 +1035,15 @@ pub struct StoredHeldLaunch {
     pub launch_request_id: signal_flow::LaunchRequestId,
     pub held_launch_position: HeldLaunchPosition,
 }
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Closer(pub std::option::Option<signal_flow::Process>);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ClosedRequest {
+    pub logical_delivery_id: signal_flow::LogicalDeliveryId,
+    pub request_id: signal_flow::RequestId,
+    pub closer: Closer,
+}

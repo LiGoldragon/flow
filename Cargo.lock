@@ -261,7 +261,7 @@ checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 
 [[package]]
 name = "flow"
-version = "0.59.0"
+version = "0.60.0"
 dependencies = [
  "datom-codec",
  "ethos-zero 29.0.0",
@@ -271,14 +271,14 @@ dependencies = [
  "protos",
  "rkyv",
  "serde_json",
- "signal-flow 67.0.0",
+ "signal-flow 68.0.0",
  "tempfile",
  "translator",
 ]
 
 [[package]]
 name = "flow-defaults"
-version = "0.59.0"
+version = "0.60.0"
 
 [[package]]
 name = "flow-ethos"
@@ -300,31 +300,31 @@ dependencies = [
 
 [[package]]
 name = "flow-meta"
-version = "0.59.0"
+version = "0.60.0"
 dependencies = [
  "datom-codec",
  "ethos-zero 29.0.0",
  "flow-ethos",
  "flow-place",
- "meta-signal-flow 89.0.0",
+ "meta-signal-flow 89.0.1",
  "protos",
  "rkyv",
  "signal",
- "signal-flow 67.0.0",
+ "signal-flow 68.0.0",
  "tempfile",
  "translator",
 ]
 
 [[package]]
 name = "flow-native"
-version = "0.59.0"
+version = "0.60.0"
 dependencies = [
  "sha2",
 ]
 
 [[package]]
 name = "flow-nexus"
-version = "0.59.5"
+version = "0.60.0"
 dependencies = [
  "base64",
  "datom-codec",
@@ -338,7 +338,7 @@ dependencies = [
  "getrandom",
  "libc",
  "meta-signal-flow 77.0.0",
- "meta-signal-flow 89.0.0",
+ "meta-signal-flow 89.0.1",
  "meta-signal-flow-before-request-ids",
  "notify",
  "protos",
@@ -353,7 +353,7 @@ dependencies = [
  "signal",
  "signal-curriculum-nexus",
  "signal-flow 60.0.0",
- "signal-flow 67.0.0",
+ "signal-flow 68.0.0",
  "signal-flow-before-request-ids",
  "tempfile",
  "thiserror",
@@ -363,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "flow-place"
-version = "0.59.0"
+version = "0.60.0"
 dependencies = [
  "datom-codec",
  "flow-ethos",
@@ -565,8 +565,8 @@ dependencies = [
 
 [[package]]
 name = "meta-signal-flow"
-version = "89.0.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=be69365bc51bf4a6300aa963b60f8b88fbf90359#be69365bc51bf4a6300aa963b60f8b88fbf90359"
+version = "89.0.1"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=e34d0442ff45fa89808c5ae3fa5643444535d755#e34d0442ff45fa89808c5ae3fa5643444535d755"
 dependencies = [
  "datom-codec",
  "ethos-zero 29.0.0",
@@ -574,7 +574,7 @@ dependencies = [
  "protos",
  "rkyv",
  "signal",
- "signal-flow 67.0.0",
+ "signal-flow 68.0.0",
 ]
 
 [[package]]
@@ -1000,8 +1000,8 @@ dependencies = [
 
 [[package]]
 name = "signal-flow"
-version = "67.0.0"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=a536862f00704f0ea2a805484d2a61f9e5dd382a#a536862f00704f0ea2a805484d2a61f9e5dd382a"
+version = "68.0.0"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=163785f1cb8e8a0575162e8ffb290d4642e6f40b#163785f1cb8e8a0575162e8ffb290d4642e6f40b"
 dependencies = [
  "datom-codec",
  "ethos-zero 27.0.0",

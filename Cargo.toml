@@ -3,7 +3,7 @@ members = ["crates/flow-defaults", "crates/flow-native", "crates/flow-ethos", "c
 resolver = "3"
 
 [workspace.package]
-version = "0.59.0"
+version = "0.60.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
@@ -17,8 +17,8 @@ flow-ethos = { path = "crates/flow-ethos", default-features = false, features = 
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 serde_json = "1"
 thiserror = "2"
-signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "a536862f00704f0ea2a805484d2a61f9e5dd382a" }
-meta-signal-flow = { git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "be69365bc51bf4a6300aa963b60f8b88fbf90359" }
+signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "163785f1cb8e8a0575162e8ffb290d4642e6f40b" }
+meta-signal-flow = { git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "e34d0442ff45fa89808c5ae3fa5643444535d755" }
 
 # Signal and Meta-Signal also depend on flow-ethos by this Git source. Resolve
 # those workspace edges to this exact leaf package so every shared nominal

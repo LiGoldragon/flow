@@ -212,6 +212,14 @@ impl AdaptsFlowConnection for FlowConnectionAdapter<'_> {
                 };
                 return response.reply(Completion::NoPostReplyWork);
             }
+            // CloseRequest records the process that closed the request, as
+            // the connection showed it.
+            Input::CloseRequest(request_id) => {
+                use crate::queue_operations::OperatesOnRequestsAndQueues;
+                return nexus
+                    .close_request(&request_id, caller.process.as_ref())
+                    .reply(Completion::NoPostReplyWork);
+            }
             Input::BindSeat(request) => {
                 let address = request.address.clone();
                 let response = nexus.bind_seat(request);

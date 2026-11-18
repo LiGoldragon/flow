@@ -1,12 +1,16 @@
 //! A request, a reminder and a queue are each ended, emptied, forced or
 //! read by an operation of their own, asked by anyone on the ordinary
-//! socket: Cancel, Silence, Clear, ClearAll, Push, Queues and Hot; a
-//! reminder is asked for with Remind, and a kept answer read with Answer.
+//! socket: Cancel, CloseRequest, Silence, Clear, ClearAll, Push, Queues
+//! and Hot; a reminder is asked for with Remind, and a kept answer read
+//! with Answer.
 //!
 //! Each operation's name lives in the contract and in its one dispatch arm;
 //! the methods here are named for what they do.
 
 use crate::RunningNexus;
+use crate::store::closed_request::{
+    Closer, MarksEndedReminder, RecordsClosedRequests, RequestEnding,
+};
 use crate::store::logical_delivery::{
     HoldsOpenRequests, MintsRequestIds, RecordsLogicalDeliveries, RequestClosure,
 };
@@ -18,7 +22,7 @@ use crate::waking::{
     DrainsHeldSeats, HoldsWakingMetaflows, PushesAtPriority, RestsEndedAwake, SleepsAndWakesSeats,
 };
 use signal_flow::{
-    Address, AnswerRejection, ArchiveRejection, Message, Output, Priority, Queue, Refusal,
+    Address, AnswerRejection, ArchiveRejection, Message, Output, Priority, Process, Queue, Refusal,
     Remind_Data, Request, RequestId, RequestRejection, SentBy, Unknown_Data, Warmth,
 };
 
@@ -27,6 +31,11 @@ pub trait OperatesOnRequestsAndQueues {
     /// archived with its id and a Task's reminder, and its sender, and its
     /// recipient when it reached it, are told by a Soft Notice.
     fn cancel(&self, request_id: &RequestId) -> Output;
+    /// Closes an open request with no answer and tells no one: one still
+    /// queued leaves its queue, it is archived with its id and a Task's
+    /// reminder, a reminder not yet sent is retired, and `closer`, the
+    /// process the caller's connection showed, is recorded with it.
+    fn close_request(&self, request_id: &RequestId, closer: Option<&Process>) -> Output;
     /// Stops a Task's reminders; the Task stays open.
     fn silence(&self, request_id: &RequestId) -> Output;
     /// Everything queued for `address` leaves its queue.
@@ -105,109 +114,130 @@ impl EmptiesQueues for RunningNexus {
     }
 }
 
+/// The one way an open request is ended with no answer, which Cancel and
+/// CloseRequest share; what each does beyond it is its ending's.
+trait EndsRequests {
+    /// Ends the open request `request_id` as `ending` says, under the
+    /// dispatch gate the caller holds: a reminder not yet sent is retired
+    /// where it waits; any other request still queued that never reached
+    /// its seat leaves its queue, and it is archived with its id and a
+    /// Task's reminder. A closed request's closer is recorded in the same
+    /// commit. Answers the Addresses that knew of it: a reminder's asker;
+    /// otherwise its sender, and its recipient when it reached it.
+    fn end_request(
+        &self,
+        request_id: &RequestId,
+        ending: &RequestEnding,
+    ) -> Result<Vec<Address>, RequestRejection>;
+}
+
+impl EndsRequests for RunningNexus {
+    fn end_request(
+        &self,
+        request_id: &RequestId,
+        ending: &RequestEnding,
+    ) -> Result<Vec<Address>, RequestRejection> {
+        use crate::store::scheduled_reminder::{MarksScheduledReminder, SchedulesReminders};
+        let mut knew = Vec::new();
+        // A reminder not yet sent is ended where it waits; it reached no
+        // one, so only its asker knew of it.
+        match self.store.scheduled_reminder(request_id) {
+            Ok(Some(reminder)) => {
+                let commit =
+                    self.store
+                        .ending_commit(ending, &request_id.scheduled_marker(), request_id);
+                self.store
+                    .commit_retire_scheduled_reminder(
+                        &reminder,
+                        ending.reminder_marker(request_id),
+                        commit,
+                    )
+                    .map_err(|_| RequestRejection::StoreRefused)?;
+                if let SentBy::Sender(asker) = &reminder.sent_by {
+                    knew.push(asker.clone());
+                }
+                return Ok(knew);
+            }
+            Ok(None) => {}
+            Err(_) => return Err(RequestRejection::StoreRefused),
+        }
+        let binding = match self.store.request_binding(request_id) {
+            Ok(Some(binding)) => binding,
+            Ok(None) => return Err(RequestRejection::UnknownRequest),
+            Err(_) => return Err(RequestRejection::StoreRefused),
+        };
+        if binding.request_closure != RequestClosure::Open {
+            return Err(RequestRejection::Closed);
+        }
+        let retained = match self.store.retained_logical_requests() {
+            Ok(retained) => retained
+                .into_iter()
+                .find(|request| request.entry.logical_delivery_id == binding.logical_delivery_id),
+            Err(_) => return Err(RequestRejection::StoreRefused),
+        };
+        let Some(retained) = retained else {
+            return Err(RequestRejection::UnknownRequest);
+        };
+        let reached = self
+            .store
+            .delivered_to_be_answered(&binding.logical_delivery_id)
+            .map_err(|_| RequestRejection::StoreRefused)?;
+        let queued = match self.store.metaflow(&retained.address) {
+            Ok(metaflow) => metaflow.is_some_and(|metaflow| {
+                metaflow
+                    .queue
+                    .0
+                    .iter()
+                    .any(|entry| entry.logical_delivery_id == binding.logical_delivery_id)
+            }),
+            Err(_) => return Err(RequestRejection::StoreRefused),
+        };
+        // A request still queued that never reached its seat leaves the
+        // queue; one that reached it is closed where it stands.
+        if queued
+            && !reached
+            && self
+                .store
+                .withdraw_queued(&retained.address, &binding.logical_delivery_id.0)
+                .is_err()
+        {
+            return Err(RequestRejection::StoreRefused);
+        }
+        let commit = self
+            .store
+            .ending_commit(ending, &binding.logical_delivery_id, request_id);
+        match self.store.commit_archive_request(&request_id.0, commit) {
+            Ok(Ok(())) => {}
+            Ok(Err(ArchiveRejection::UnknownRequest)) => {
+                return Err(RequestRejection::UnknownRequest);
+            }
+            Ok(Err(ArchiveRejection::NotYet)) => return Err(RequestRejection::NotYet),
+            Ok(Err(ArchiveRejection::StoreRefused)) | Err(_) => {
+                return Err(RequestRejection::StoreRefused);
+            }
+        }
+        if let SentBy::Sender(sender) = &retained.entry.sent_by {
+            knew.push(sender.clone());
+        }
+        if reached && !knew.contains(&retained.address) {
+            knew.push(retained.address.clone());
+        }
+        Ok(knew)
+    }
+}
+
 impl OperatesOnRequestsAndQueues for RunningNexus {
     fn cancel(&self, request_id: &RequestId) -> Output {
-        use crate::store::scheduled_reminder::SchedulesReminders;
-        let refused = |rejection| Output::CancelRejected(rejection);
-        let mut told = Vec::new();
-        {
+        let told = {
             let _turn = self
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            // A reminder not yet sent is ended where it waits; it reached
-            // no one, so only its asker is told.
-            match self.store.scheduled_reminder(request_id) {
-                Ok(Some(reminder)) => {
-                    let cancelled =
-                        signal_flow::LogicalDeliveryId(format!("cancelled:{}", request_id.0));
-                    if self
-                        .store
-                        .retire_scheduled_reminder(&reminder, cancelled)
-                        .is_err()
-                    {
-                        return refused(RequestRejection::StoreRefused);
-                    }
-                    if let SentBy::Sender(asker) = &reminder.sent_by {
-                        let text = format!("Request {} was cancelled.", request_id.0);
-                        if let Err(error) = self.notify(asker, text) {
-                            eprintln!(
-                                "flow-nexus: a cancellation notice for {asker:?} was not queued: {error}"
-                            );
-                        }
-                        told.push(asker.clone());
-                    }
-                    drop(_turn);
-                    for address in told {
-                        self.wake_due(address);
-                    }
-                    return Output::Cancelled(request_id.clone());
-                }
-                Ok(None) => {}
-                Err(_) => return refused(RequestRejection::StoreRefused),
-            }
-            let binding = match self.store.request_binding(request_id) {
-                Ok(Some(binding)) => binding,
-                Ok(None) => return refused(RequestRejection::UnknownRequest),
-                Err(_) => return refused(RequestRejection::StoreRefused),
+            let told = match self.end_request(request_id, &RequestEnding::Cancelled) {
+                Ok(told) => told,
+                Err(rejection) => return Output::CancelRejected(rejection),
             };
-            if binding.request_closure != RequestClosure::Open {
-                return refused(RequestRejection::Closed);
-            }
-            let retained = match self.store.retained_logical_requests() {
-                Ok(retained) => retained.into_iter().find(|request| {
-                    request.entry.logical_delivery_id == binding.logical_delivery_id
-                }),
-                Err(_) => return refused(RequestRejection::StoreRefused),
-            };
-            let Some(retained) = retained else {
-                return refused(RequestRejection::UnknownRequest);
-            };
-            let reached = match self
-                .store
-                .delivered_to_be_answered(&binding.logical_delivery_id)
-            {
-                Ok(reached) => reached,
-                Err(_) => return refused(RequestRejection::StoreRefused),
-            };
-            let queued = match self.store.metaflow(&retained.address) {
-                Ok(metaflow) => metaflow.is_some_and(|metaflow| {
-                    metaflow
-                        .queue
-                        .0
-                        .iter()
-                        .any(|entry| entry.logical_delivery_id == binding.logical_delivery_id)
-                }),
-                Err(_) => return refused(RequestRejection::StoreRefused),
-            };
-            // A request still queued that never reached its seat leaves the
-            // queue; one that reached it is closed where it stands.
-            if queued
-                && !reached
-                && self
-                    .store
-                    .withdraw_queued(&retained.address, &binding.logical_delivery_id.0)
-                    .is_err()
-            {
-                return refused(RequestRejection::StoreRefused);
-            }
-            match self.store.archive_request(&request_id.0) {
-                Ok(Ok(())) => {}
-                Ok(Err(ArchiveRejection::UnknownRequest)) => {
-                    return refused(RequestRejection::UnknownRequest);
-                }
-                Ok(Err(ArchiveRejection::NotYet)) => return refused(RequestRejection::NotYet),
-                Ok(Err(ArchiveRejection::StoreRefused)) | Err(_) => {
-                    return refused(RequestRejection::StoreRefused);
-                }
-            }
             let text = format!("Request {} was cancelled.", request_id.0);
-            if let SentBy::Sender(sender) = &retained.entry.sent_by {
-                told.push(sender.clone());
-            }
-            if reached && !told.contains(&retained.address) {
-                told.push(retained.address.clone());
-            }
             for address in &told {
                 if let Err(error) = self.notify(address, text.clone()) {
                     eprintln!(
@@ -215,11 +245,23 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
                     );
                 }
             }
-        }
+            told
+        };
         for address in told {
             self.wake_due(address);
         }
         Output::Cancelled(request_id.clone())
+    }
+
+    fn close_request(&self, request_id: &RequestId, closer: Option<&Process>) -> Output {
+        let _turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match self.end_request(request_id, &RequestEnding::Closed(Closer(closer.cloned()))) {
+            Ok(_) => Output::RequestClosed(request_id.clone()),
+            Err(rejection) => Output::CloseRequestRejected(rejection),
+        }
     }
 
     fn silence(&self, request_id: &RequestId) -> Output {

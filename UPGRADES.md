@@ -1,3 +1,38 @@
+# Flow 0.60.0: CloseRequest closes a request with no answer and tells no one
+
+Contracts: signal-flow 68.0.0 (163785f) and meta-signal-flow 89.0.1
+(e34d044), on build-base `close-request-7b5174` (52bdd32), which registers
+both. Built on 0.59.5 (3c54a9d2). **The ordinary wire and the stored format
+change; the meta wire does not.** Psyche task vaol.
+
+- **CloseRequest.** `flow 'CloseRequest.<id>'` answers `RequestClosed.<id>`:
+  the open request is closed with no answer, as Cancel ends it, and no one
+  is told. One still queued that never reached its seat leaves its queue;
+  it is archived with its id and a Task's reminder, so no successor of its
+  recipient is given it among the open requests; a reminder not yet sent
+  is retired where it waits; and no Notice is queued for its sender or its
+  recipient. A Result or a Done naming it afterwards is refused
+  `Unresolved`. It is refused as Cancel is, `CloseRequestRejected.
+  [ UnknownRequest NotYet Closed StoreRefused ]`. Any caller closes any
+  request; the Nexus records the process the caller's connection showed,
+  None for a dispatch no connection stands behind. Cancel, Result and Done
+  keep their meaning: Cancel and CloseRequest share one ending
+  (`queue_operations::EndsRequests`), and only a Cancel notifies.
+- **Memory: one new family, registered empty when absent**, the way
+  0.57.0's were: `flow_nexus_closed_requests`
+  (`flow-nexus-closed-request-v1`), one `ClosedRequest.{ LogicalDeliveryId
+  RequestId Closer.Option<Process> }` per closed request, keyed by its
+  logical delivery, asserted in the commit that archives it. No existing
+  family changes and no row is rewritten; a 0.59.x store opens as it
+  stands. **A 0.59.x daemon refuses the store once the family exists** (an
+  unrecognized catalog), and the family is registered at 0.60.0's first
+  open: rollback is the restore of the store copy taken before the deploy.
+- **Deployment.** Every ordinary peer repins with the daemon in one switch:
+  signal-flow 68's digest refuses a 67 peer at its greeting (the `flow`
+  client and the hook of this package, and anything else speaking the
+  ordinary Signal). The meta digest is unchanged, so a meta client on 89.0.0
+  still greets; this package's `flow-meta` is rebuilt on 89.0.1.
+
 # Flow 0.59.5: an arrival in an ended turn leaves the seat at its rest
 
 A request's receipt settled after the rest of the turn that took it

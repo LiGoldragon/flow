@@ -222,6 +222,16 @@ A request, a reminder and a queue each have an operation of their own on the
 ordinary socket (`queue_operations`): `Cancel.RequestId` withdraws a request
 still queued, archives it with its id and a Task's reminder, and queues a
 Soft Notice for its sender, and for its recipient when it reached it;
+`CloseRequest.RequestId` closes an open request with no answer as Cancel
+ends it, answered `RequestClosed.RequestId`, and tells no one: no Notice is
+queued, so a done request leaves the open requests every successor of its
+recipient is given without anyone being woken. Cancel and CloseRequest share
+one ending (`queue_operations::EndsRequests`), told apart by their
+`store::closed_request::RequestEnding`: a Cancel notifies the Addresses the
+ending answers, a CloseRequest records the process the caller's connection
+showed, `ClosedRequest.{ LogicalDeliveryId RequestId Closer.Option<Process> }`
+keyed by the logical delivery (a request id is drawn again once archived),
+in the commit that archives it; whoever asks is served, as for a Cancel;
 `Silence.RequestId` closes a Task's reminder and leaves the Task open;
 `Clear.Address` and `ClearAll` withdraw everything queued, answering the ids;
 `Push.{ Address Priority }` delivers the whole queue of an Awake seat now as
@@ -232,13 +242,15 @@ queue that holds something, each message as it would land in the prompt,
 its sender and priority with it; `Hot` reads every live flow's Address with the
 minutes since its last turn ended, from a per-Address turn end kept beside
 each harness's (`store::turn_end`). `RequestRejection.[ UnknownRequest NotYet
-Closed NotTask StoreRefused ]` names why a Cancel or Silence changed nothing.
+Closed NotTask StoreRefused ]` names why a Cancel, a CloseRequest
+(`CloseRequestRejected`) or a Silence changed nothing.
 `Remind.{ Address Minutes String }` keeps a reminder for the Address it
 names (`store::scheduled_reminder`), answered `Reminded.RequestId`, its
 request bound open; when its minutes lapse the Address is sent
 `MiddleAbrupt.Reminder.{ RequestId String }` from whoever asked
 (`reminding`), and the request closes. Its Minutes meets a Task's rule;
-`Cancel` ends it before then and tells its asker.
+`Cancel` ends it before then and tells its asker; `CloseRequest` ends it
+and tells no one.
 
 On the meta socket one declaration is changed alone:
 `Configure.Permaflow.ConfigureMetaflow` (keyed by its Address),

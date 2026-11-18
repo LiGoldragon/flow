@@ -744,3 +744,370 @@ fn cancel_ends_a_reminder_and_remind_refuses_what_a_task_refuses() {
         ))
     );
 }
+
+/// The record CloseRequest left for the request bound to
+/// `logical_delivery_id`.
+fn closed_record(
+    fixture: &NexusFixture,
+    logical_delivery_id: &signal_flow::LogicalDeliveryId,
+) -> Option<crate::store::closed_request::ClosedRequest> {
+    use crate::store::closed_request::RecordsClosedRequests;
+    fixture
+        .nexus
+        .store
+        .closed_request(logical_delivery_id)
+        .expect("the closed requests read")
+}
+
+/// A delivered Order is closed by anyone with no answer: its id archived,
+/// no Notice queued for its sender or its recipient, and its closer
+/// recorded. A Result naming it afterwards is refused Unresolved, and a
+/// second CloseRequest names no request.
+#[test]
+fn close_request_closes_a_delivered_order_and_tells_no_one() {
+    let fixture = NexusFixture::new();
+    let sender = at("closeSender");
+    let recipient = at("closeRecipient");
+    let elsewhere = at("closeElsewhere");
+    for address in [&sender, &recipient, &elsewhere] {
+        asleep(&fixture, address);
+    }
+    let order = admitted(
+        &fixture,
+        &recipient,
+        SentBy::Sender(sender.clone()),
+        Request::Order("Review the drain fix.".into()),
+    );
+    delivered(&fixture, &recipient, &order);
+
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch(Input::CloseRequest(order.request_id.clone())),
+        Output::RequestClosed(order.request_id.clone())
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .request_binding(&order.request_id)
+            .unwrap(),
+        None,
+        "the request's id is closed"
+    );
+    assert!(
+        queued(&fixture, &sender).is_empty(),
+        "the sender is told nothing"
+    );
+    assert!(
+        queued(&fixture, &recipient).is_empty(),
+        "the recipient is told nothing"
+    );
+    assert_eq!(
+        closed_record(&fixture, &order.logical_delivery_id),
+        Some(crate::store::closed_request::ClosedRequest {
+            logical_delivery_id: order.logical_delivery_id.clone(),
+            request_id: order.request_id.clone(),
+            closer: crate::store::closed_request::Closer(None),
+        }),
+        "no calling process stands behind a dispatch"
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .send_request(answer_to(&elsewhere, &order.request_id), None)
+            .response,
+        Output::SendRefused(signal_flow::VisibleRefusal::Unresolved),
+        "a Result finds the request closed"
+    );
+    assert!(queued(&fixture, &sender).is_empty());
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch(Input::CloseRequest(order.request_id.clone())),
+        Output::CloseRequestRejected(RequestRejection::UnknownRequest)
+    );
+}
+
+/// A delivered Task is closed with its reminder, no one told; a Done
+/// naming it afterwards is refused Unresolved.
+#[test]
+fn close_request_closes_a_delivered_task_with_its_reminder() {
+    let fixture = NexusFixture::new();
+    let sender = at("closeTaskSender");
+    let recipient = at("closeTaskRecipient");
+    asleep(&fixture, &sender);
+    asleep(&fixture, &recipient);
+    let task = admitted(
+        &fixture,
+        &recipient,
+        SentBy::Sender(sender.clone()),
+        Request::Task(flow_ethos::AnswerableTask {
+            minutes: flow_ethos::Minutes(30),
+            string: "Land the line.".into(),
+        }),
+    );
+    delivered(&fixture, &recipient, &task);
+    assert!(
+        fixture
+            .nexus
+            .store
+            .reminder(&task.logical_delivery_id.0)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        fixture.nexus.close_request(&task.request_id, None),
+        Output::RequestClosed(task.request_id.clone())
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .reminder(&task.logical_delivery_id.0)
+            .unwrap(),
+        None,
+        "its reminder went with it"
+    );
+    assert!(queued(&fixture, &sender).is_empty());
+    assert!(queued(&fixture, &recipient).is_empty());
+    let done = SendRequest {
+        address: recipient.clone(),
+        sendable_message: signal_flow::SendableMessage::Soft(signal_flow::SendableRequest::Done(
+            signal_flow::SendableRequest_Done_Data {
+                request_id: task.request_id.clone(),
+                string: "Landed.".into(),
+            },
+        )),
+    };
+    assert_eq!(
+        fixture.nexus.send_request(done, None).response,
+        Output::SendRefused(signal_flow::VisibleRefusal::Unresolved),
+        "a Done finds the Task closed"
+    );
+}
+
+/// A Task still queued is closed: it leaves its queue with its reminder,
+/// and no one is told.
+#[test]
+fn close_request_takes_a_queued_task_out_and_tells_no_one() {
+    let fixture = NexusFixture::new();
+    let sender = at("closeQueuedSender");
+    let recipient = at("closeQueuedRecipient");
+    asleep(&fixture, &sender);
+    asleep(&fixture, &recipient);
+    let task = admitted(
+        &fixture,
+        &recipient,
+        SentBy::Sender(sender.clone()),
+        Request::Task(flow_ethos::AnswerableTask {
+            minutes: flow_ethos::Minutes(30),
+            string: "Land the line.".into(),
+        }),
+    );
+    assert_eq!(
+        fixture.nexus.close_request(&task.request_id, None),
+        Output::RequestClosed(task.request_id.clone())
+    );
+    assert!(queued(&fixture, &recipient).is_empty(), "it left the queue");
+    assert!(queued(&fixture, &sender).is_empty(), "no one is told");
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .reminder(&task.logical_delivery_id.0)
+            .unwrap(),
+        None
+    );
+}
+
+/// CloseRequest is refused as Cancel is: an id no request holds is
+/// UnknownRequest, a request already answered is Closed, and one whose
+/// delivery is still being settled is NotYet and stays open.
+#[test]
+fn close_request_is_refused_as_cancel_is() {
+    use crate::store::queue_delivery::{
+        AccountsQueueDelivery, NativeHistoryAnchor, NativeTranscriptCursor, PrepareQueueDelivery,
+    };
+    let fixture = NexusFixture::new();
+    let sender = at("refusedSender");
+    let recipient = at("refusedRecipient");
+    asleep(&fixture, &sender);
+    asleep(&fixture, &recipient);
+
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch(Input::CloseRequest(flow_ethos::RequestId("zzzz".into()))),
+        Output::CloseRequestRejected(RequestRejection::UnknownRequest)
+    );
+
+    let answered = admitted(
+        &fixture,
+        &recipient,
+        SentBy::Sender(sender.clone()),
+        Request::Order("Answered already.".into()),
+    );
+    delivered(&fixture, &recipient, &answered);
+    assert!(matches!(
+        fixture
+            .nexus
+            .send_request(answer_to(&sender, &answered.request_id), None)
+            .response,
+        Output::SendAccepted(_) | Output::Sent(_)
+    ));
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch(Input::CloseRequest(answered.request_id.clone())),
+        Output::CloseRequestRejected(RequestRejection::Closed)
+    );
+
+    // A seat Awake as unsettled-flow is handed a request whose receipt is
+    // not yet settled.
+    let seat = at("refusedSeat");
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: seat.clone(),
+        state: State::Awake(flow_ethos::FlowId("unsettled-flow".into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
+    });
+    let unsettled = admitted(
+        &fixture,
+        &seat,
+        SentBy::Sender(sender.clone()),
+        Request::Order("Still being handed over.".into()),
+    );
+    assert!(matches!(
+        fixture
+            .nexus
+            .store
+            .prepare_oldest_delivery(
+                &seat,
+                "unsettled-flow",
+                "unsettled-flow-session",
+                HarnessKind::Claude,
+                NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
+                    device: crate::generated::memory::Device(0),
+                    inode: crate::generated::memory::Inode(0),
+                    offset: crate::generated::memory::Offset(0),
+                }),
+            )
+            .expect("the oldest request prepares"),
+        PrepareQueueDelivery::Prepared(_)
+    ));
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch(Input::CloseRequest(unsettled.request_id.clone())),
+        Output::CloseRequestRejected(RequestRejection::NotYet)
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .request_binding(&unsettled.request_id)
+            .unwrap()
+            .is_some(),
+        "a refused close leaves the request open"
+    );
+    assert_eq!(
+        closed_record(&fixture, &unsettled.logical_delivery_id),
+        None
+    );
+}
+
+/// A reminder not yet sent is closed where it waits: it is never sent,
+/// its asker is told nothing, and its closer is recorded.
+#[test]
+fn close_request_ends_a_reminder_and_tells_its_asker_nothing() {
+    use crate::store::scheduled_reminder::{MarksScheduledReminder, SchedulesReminders};
+    let fixture = NexusFixture::new();
+    let reminded = at("closedReminder");
+    let asker = at("closingAsker");
+    asleep(&fixture, &reminded);
+    asleep(&fixture, &asker);
+    let Output::Reminded(request_id) = fixture.nexus.remind(
+        signal_flow::Remind_Data {
+            address: reminded.clone(),
+            minutes: flow_ethos::Minutes(5),
+            string: "Later.".into(),
+        },
+        SentBy::Sender(asker.clone()),
+    ) else {
+        panic!("a reminder is kept")
+    };
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch(Input::CloseRequest(request_id.clone())),
+        Output::RequestClosed(request_id.clone())
+    );
+    assert_eq!(
+        fixture.nexus.store.scheduled_reminder(&request_id).unwrap(),
+        None
+    );
+    assert!(
+        queued(&fixture, &asker).is_empty(),
+        "its asker is told nothing"
+    );
+    assert!(queued(&fixture, &reminded).is_empty());
+    assert!(closed_record(&fixture, &request_id.scheduled_marker()).is_some());
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch(Input::CloseRequest(request_id.clone())),
+        Output::CloseRequestRejected(RequestRejection::Closed)
+    );
+}
+
+/// The process that closed a request is recorded as the connection showed
+/// it: a CloseRequest over the ordinary socket from this test's process
+/// records this process.
+#[test]
+fn close_request_records_the_process_its_connection_showed() {
+    use super::GreetsOrdinarySocket;
+    use crate::{CarriesSignalFrames, Connection, ServesConnection};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+    let fixture = NexusFixture::new();
+    let sender = at("socketCloseSender");
+    let recipient = at("socketCloseRecipient");
+    asleep(&fixture, &sender);
+    asleep(&fixture, &recipient);
+    let order = admitted(
+        &fixture,
+        &recipient,
+        SentBy::Sender(sender.clone()),
+        Request::Order("Review the drain fix.".into()),
+    );
+    delivered(&fixture, &recipient, &order);
+    let (peer, mut client) = UnixStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            Connection::accepted(peer)
+                .unwrap()
+                .serve_ordinary(&fixture.nexus)
+        });
+        client.greet_ordinary();
+        client
+            .write_query(&Input::CloseRequest(order.request_id.clone()))
+            .unwrap();
+        assert_eq!(
+            client.read_response().unwrap(),
+            Output::RequestClosed(order.request_id.clone())
+        );
+        assert!(server.join().unwrap().is_ok());
+    });
+    let this_process =
+        FlowStore::process_identity_for_pid(std::process::id()).expect("this process is read");
+    assert_eq!(
+        closed_record(&fixture, &order.logical_delivery_id).map(|record| record.closer),
+        Some(crate::store::closed_request::Closer(Some(this_process)))
+    );
+    assert!(queued(&fixture, &sender).is_empty());
+    assert!(queued(&fixture, &recipient).is_empty());
+}

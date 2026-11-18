@@ -8,6 +8,7 @@ use crate::store::delivery::RegistersDeliveryTables;
 #[cfg(test)]
 use crate::test_faults;
 pub(crate) mod address_hold;
+pub(crate) mod closed_request;
 pub mod compaction;
 pub mod context;
 pub(crate) mod context_warnings;
@@ -216,6 +217,9 @@ const OPTIONAL_FLOW_TRANSITIONS_TABLE: &str = overriding::TRANSITIONS_TABLE;
 const OPTIONAL_HOLD_TABLE: &str = overriding::HOLD_TABLE;
 const OPTIONAL_PERMAFLOW_HOLD_TABLE: &str = overriding::PERMAFLOW_HOLD_TABLE;
 const OPTIONAL_HELD_LAUNCH_TABLE: &str = overriding::HELD_LAUNCH_TABLE;
+/// Added in 0.60.0 with CloseRequest: a store written before holds no
+/// closed request, and is opened with the family registered empty.
+const OPTIONAL_CLOSED_REQUEST_TABLE: &str = closed_request::CLOSED_REQUEST_TABLE;
 const META_TURN_RETENTION_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_turn_retention_configuration");
 const META_TURN_RETENTION_CONFIGURATION_FAMILY: &str =
@@ -331,6 +335,7 @@ const RUNNING_TABLES: &[&str] = &[
     OPTIONAL_HOLD_TABLE,
     OPTIONAL_PERMAFLOW_HOLD_TABLE,
     OPTIONAL_HELD_LAUNCH_TABLE,
+    OPTIONAL_CLOSED_REQUEST_TABLE,
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -1757,6 +1762,7 @@ pub struct FlowStore {
     hold: TableReference<crate::generated::memory::StoredHold>,
     permaflow_holds: TableReference<crate::generated::memory::StoredPermaflowHold>,
     held_launches: TableReference<crate::generated::memory::StoredHeldLaunch>,
+    closed_requests: TableReference<closed_request::ClosedRequest>,
     queue_delivery: QueueDeliveryTables,
     send_outcomes: SendOutcomeTables,
     logical_deliveries: LogicalDeliveryTables,
@@ -2863,6 +2869,9 @@ impl OpensFlowStore for FlowStore {
         let held_launches = engine.register_table(
             <crate::generated::memory::StoredHeldLaunch as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
         )?;
+        let closed_requests = engine.register_table(
+            <closed_request::ClosedRequest as closed_request::DescribesClosedRequestTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2905,6 +2914,7 @@ impl OpensFlowStore for FlowStore {
             hold,
             permaflow_holds,
             held_launches,
+            closed_requests,
             queue_delivery,
             send_outcomes,
             logical_deliveries,
@@ -3104,6 +3114,9 @@ impl OpensFlowStore for FlowStore {
         let held_launches = engine.register_table(
             <crate::generated::memory::StoredHeldLaunch as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
         )?;
+        let closed_requests = engine.register_table(
+            <closed_request::ClosedRequest as closed_request::DescribesClosedRequestTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -3146,6 +3159,7 @@ impl OpensFlowStore for FlowStore {
             hold,
             permaflow_holds,
             held_launches,
+            closed_requests,
             queue_delivery,
             send_outcomes,
             logical_deliveries,
@@ -3625,7 +3639,8 @@ impl AppliesFlowQuery for FlowStore {
             | Input::Queues
             | Input::Hot
             | Input::Remind(_)
-            | Input::Answer(_) => Ok(Output::Refused(signal_flow::Refusal::Store(
+            | Input::Answer(_)
+            | Input::CloseRequest(_) => Ok(Output::Refused(signal_flow::Refusal::Store(
                 "the Nexus answers this query, not its store alone".into(),
             ))),
             Input::Launch(_) => Ok(Output::StartRejected(
@@ -3709,7 +3724,8 @@ impl ReservesPendingStart for FlowStore {
             | Input::Queues
             | Input::Hot
             | Input::Remind(_)
-            | Input::Answer(_) => Ok(None),
+            | Input::Answer(_)
+            | Input::CloseRequest(_) => Ok(None),
         }
     }
 }
@@ -5612,6 +5628,10 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                 overriding::HELD_LAUNCH_FAMILY,
                 overriding::HELD_LAUNCH_SCHEMA,
             ),
+            "flow_nexus_closed_requests" => (
+                closed_request::CLOSED_REQUEST_FAMILY,
+                closed_request::CLOSED_REQUEST_SCHEMA,
+            ),
             "flow_nexus_meta_protected_address_configuration" => (
                 META_PROTECTED_ADDRESS_CONFIGURATION_FAMILY,
                 META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA,
@@ -5968,6 +5988,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                     || *name == OPTIONAL_HOLD_TABLE
                     || *name == OPTIONAL_PERMAFLOW_HOLD_TABLE
                     || *name == OPTIONAL_HELD_LAUNCH_TABLE
+                    || *name == OPTIONAL_CLOSED_REQUEST_TABLE
                     || *name == OPTIONAL_REQUEST_ID_TABLE
                     || *name == OPTIONAL_DELIVER_CALL_TABLE
                     || *name == OPTIONAL_STORE_IDENTITY_TABLE

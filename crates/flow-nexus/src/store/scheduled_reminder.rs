@@ -8,8 +8,8 @@ use super::logical_delivery::{MintsRequestIds, RequestClosure, RequestIdBinding}
 use super::{AnnouncesLaunchChanges, FlowStore, StoreError};
 pub(crate) use crate::generated::memory::ScheduledReminder;
 use sema_engine::{
-    EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan, RecordKey, SchemaHash,
-    TableDescriptor, TableName,
+    AtomicCommit, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan, RecordKey,
+    SchemaHash, TableDescriptor, TableName,
 };
 use signal_flow::{Address, Refusal, RequestId, SentBy};
 
@@ -87,6 +87,14 @@ pub(crate) trait SchedulesReminders {
         &self,
         reminder: &ScheduledReminder,
         closed_by: signal_flow::LogicalDeliveryId,
+    ) -> Result<(), StoreError>;
+    /// Retires the reminder as `retire_scheduled_reminder` does, within
+    /// `commit`, which carries whatever else the retirement records.
+    fn commit_retire_scheduled_reminder(
+        &self,
+        reminder: &ScheduledReminder,
+        closed_by: signal_flow::LogicalDeliveryId,
+        commit: AtomicCommit,
     ) -> Result<(), StoreError>;
     /// Moves a kept reminder's due time, as its minutes lapsing would.
     #[cfg(test)]
@@ -179,12 +187,25 @@ impl SchedulesReminders for FlowStore {
         reminder: &ScheduledReminder,
         closed_by: signal_flow::LogicalDeliveryId,
     ) -> Result<(), StoreError> {
+        self.commit_retire_scheduled_reminder(
+            reminder,
+            closed_by,
+            self.engine.begin_atomic_commit(),
+        )
+    }
+
+    fn commit_retire_scheduled_reminder(
+        &self,
+        reminder: &ScheduledReminder,
+        closed_by: signal_flow::LogicalDeliveryId,
+        commit: AtomicCommit,
+    ) -> Result<(), StoreError> {
         let _guard = self
             .logical_deliveries
             .write_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let commit = self.engine.begin_atomic_commit().retract(
+        let commit = commit.retract(
             self.scheduled_reminders,
             RecordKey::new(reminder.request_id.0.clone()),
         );

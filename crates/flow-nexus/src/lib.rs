@@ -1109,6 +1109,19 @@ impl signal_flow::Answering for OrdinaryCall<'_> {
             other => Err(other),
         }
     }
+
+    // No calling process stands behind it: the closer is recorded as None.
+    // A CloseRequest from a connection is answered with the process the
+    // connection showed (connection_adapter).
+    fn close_request(
+        &self,
+        request_id: &signal_flow::RequestId,
+    ) -> Result<signal_flow::RequestId, Output> {
+        match self.nexus.close_request(request_id, None) {
+            Output::RequestClosed(closed) => Ok(closed),
+            other => Err(other),
+        }
+    }
 }
 
 /// A running Nexus answering one meta input, from the meta peer as the
@@ -3096,8 +3109,8 @@ trait DispatchesSerially {
     /// Store transitions are read-modify-write; one dispatch runs at a time
     /// across both sockets while frames are read concurrently. A query
     /// that takes the gate for its own steps (a Refresh, a Replace, a
-    /// Restart, a bind, a delivery, a Cancel, a Clear, a Push) runs off it,
-    /// as a wake does.
+    /// Restart, a bind, a delivery, a Cancel, a CloseRequest, a Clear, a
+    /// Push) runs off it, as a wake does.
     fn dispatch_serially(&self, query: Input, origin: Origin) -> Output;
     /// A Refresh from the caller read off its connection, off the gate as
     /// any Refresh is dispatched.
@@ -3149,6 +3162,7 @@ impl DispatchesSerially for RunningNexus {
         | Input::Deliver(_)
         | Input::Release(_)
         | Input::Cancel(_)
+        | Input::CloseRequest(_)
         | Input::Remind(_)
         | Input::Clear(_)
         | Input::ClearAll

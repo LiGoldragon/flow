@@ -539,16 +539,16 @@ fn a_result_goes_to_the_requests_sender_whatever_address_it_names() {
     for address in [&asker, &answerer, &elsewhere] {
         asleep(&fixture, address);
     }
-    let order = admitted(
+    let question = admitted(
         &fixture,
         &answerer,
         SentBy::Sender(asker.clone()),
-        Request::Order("Review the drain fix.".into()),
+        Request::Question("Is the drain fix green?".into()),
     );
-    delivered(&fixture, &answerer, &order);
+    delivered(&fixture, &answerer, &question);
     let answer = fixture
         .nexus
-        .send_request(answer_to(&elsewhere, &order.request_id), None);
+        .send_request(answer_to(&elsewhere, &question.request_id), None);
     assert!(
         matches!(answer.response, Output::SendAccepted(_) | Output::Sent(_)),
         "{:?}",
@@ -560,12 +560,12 @@ fn a_result_goes_to_the_requests_sender_whatever_address_it_names() {
     assert!(matches!(
         &routed[0].message,
         Message::Soft(Request::Result(flow_ethos::ResultPayload::Answered(result)))
-            if result.request_id == order.request_id
+            if result.request_id == question.request_id
     ));
     assert_eq!(
         fixture
             .nexus
-            .dispatch(Input::Answer(order.request_id.clone())),
+            .dispatch(Input::Answer(question.request_id.clone())),
         Output::AnswerRejected(signal_flow::AnswerRejection::Routed)
     );
 }

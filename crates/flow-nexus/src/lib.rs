@@ -8190,12 +8190,12 @@ mod tests {
                 &recipient,
                 SentBy::Sender(sender.clone()),
                 flow_ethos::Delivery::Queue,
-                Message::Soft(flow_ethos::Request::Order("Review".into())),
+                Message::Soft(flow_ethos::Request::Question("Review".into())),
                 None,
             )
-            .expect("order admission")
+            .expect("question admission")
         else {
-            panic!("order accepted")
+            panic!("question accepted")
         };
         fixture
             .nexus
@@ -8204,7 +8204,7 @@ mod tests {
                 &accepted.logical_delivery_id,
                 signal_flow::DeliveryState::Uncertain,
             )
-            .expect("order reaches an answerable state");
+            .expect("question reaches an answerable state");
         let result = |request_id: String| {
             SendableMessage::Soft(SendableRequest::Result(
                 signal_flow::SendableRequest_Result_Data {
@@ -8248,8 +8248,8 @@ mod tests {
             topic: flow_ethos::Topic(topic.into()),
             model: Model::Sol,
         };
-        let sender = at("archiveOrderSender");
-        let recipient = at("archiveOrderRecipient");
+        let sender = at("archiveQuestionSender");
+        let recipient = at("archiveQuestionRecipient");
         for address in [&sender, &recipient] {
             fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
                 address: address.clone(),
@@ -8258,38 +8258,40 @@ mod tests {
                 queue: flow_ethos::Queue(vec![]),
             });
         }
-        let PrivateSendResponse::SendAccepted(order) = fixture
+        let PrivateSendResponse::SendAccepted(question) = fixture
             .nexus
             .store
             .accept_logical_delivery(
                 &recipient,
                 SentBy::Sender(sender.clone()),
                 flow_ethos::Delivery::Queue,
-                Message::Soft(flow_ethos::Request::Order("Review".into())),
+                Message::Soft(flow_ethos::Request::Question("Review".into())),
                 None,
             )
-            .expect("order admits")
+            .expect("question admits")
         else {
-            panic!("order accepted")
+            panic!("question accepted")
         };
         fixture
             .nexus
             .store
             .transition_logical_delivery(
-                &order.logical_delivery_id,
+                &question.logical_delivery_id,
                 signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
                     harness_kind: signal_flow::HarnessKind::Codex,
-                    native_session_id: signal_flow::NativeSessionId("archive-order-session".into()),
-                    native_prompt_id: signal_flow::NativePromptId("archive-order-prompt".into()),
+                    native_session_id: signal_flow::NativeSessionId(
+                        "archive-question-session".into(),
+                    ),
+                    native_prompt_id: signal_flow::NativePromptId("archive-question-prompt".into()),
                 }),
             )
-            .expect("order delivered");
+            .expect("question delivered");
         let resolved = fixture
             .nexus
             .store
             .resolve_sendable_message(SendableMessage::Soft(SendableRequest::Result(
                 signal_flow::SendableRequest_Result_Data {
-                    request_id: order.request_id.clone(),
+                    request_id: question.request_id.clone(),
                     string: "done".into(),
                 },
             )))
@@ -8317,7 +8319,7 @@ mod tests {
             fixture
                 .nexus
                 .store
-                .archive_request(&order.request_id.0)
+                .archive_request(&question.request_id.0)
                 .expect("archive checks answer"),
             Err(ArchiveRejection::NotYet)
         );
@@ -8347,8 +8349,8 @@ mod tests {
             fixture
                 .nexus
                 .store
-                .archive_request(&order.request_id.0)
-                .expect("order archives"),
+                .archive_request(&question.request_id.0)
+                .expect("question archives"),
             Ok(())
         );
     }

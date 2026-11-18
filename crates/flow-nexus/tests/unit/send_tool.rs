@@ -2914,3 +2914,100 @@ fn a_working_codex_seat_resolved_absent_waits_for_its_idle_event() {
     assert_eq!(fixture.typed_count(&first), 0);
     assert!(fixture.typed().is_none());
 }
+
+/// The dynamic tool resolves public Results against the same request kind,
+/// binding and delivery evidence as the ordinary CLI. Refusals are durable
+/// call outcomes and replay cannot turn a refused Order answer into work.
+#[test]
+fn dynamic_results_refuse_orders_and_only_answer_delivered_questions() {
+    for sent_by in [SentBy::Sender(sender_b()), SentBy::Unbound] {
+        for request in [
+            Request::Order("Act without an answer.".into()),
+            Request::Question("Which revision?".into()),
+            Request::Task(flow_ethos::AnswerableTask {
+                minutes: flow_ethos::Minutes(240),
+                string: "Build it.".into(),
+            }),
+        ] {
+            let fixture = NexusFixture::new();
+            fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
+            fixture.asleep_at(target());
+            fixture.asleep_at(sender_b());
+            let signal_flow::PrivateSendResponse::SendAccepted(admitted) = fixture
+                .nexus
+                .store
+                .accept_logical_delivery(
+                    &target(),
+                    sent_by.clone(),
+                    flow_ethos::Delivery::Queue,
+                    Message::Soft(request.clone()),
+                    None,
+                )
+                .unwrap()
+            else {
+                panic!("request admitted")
+            };
+            fixture
+                .nexus
+                .store
+                .transition_logical_delivery(
+                    &admitted.logical_delivery_id,
+                    signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                        harness_kind: signal_flow::HarnessKind::Codex,
+                        native_session_id: signal_flow::NativeSessionId("reply-session".into()),
+                        native_prompt_id: signal_flow::NativePromptId("reply-prompt".into()),
+                    }),
+                )
+                .unwrap();
+            let mut call = tool_call(THREAD_A, "answer-kind", "Reviewed.");
+            let mut arguments: serde_json::Value = serde_json::from_str(&call.arguments.0).unwrap();
+            arguments["kind"] = serde_json::json!("Result");
+            arguments["request"] = serde_json::json!(admitted.request_id.0);
+            call.arguments = crate::generated::send_tool::Arguments(arguments.to_string());
+            let outcome = fixture.nexus.handle_send_call(call.clone());
+            if matches!(request, Request::Question(_)) {
+                match &sent_by {
+                    SentBy::Unbound => {
+                        assert!(matches!(outcome, SendOutcome::Kept(_)), "{outcome:?}")
+                    }
+                    _ => assert!(
+                        matches!(&outcome, SendOutcome::Accepted(value) if value.target.0 == sender_b()),
+                        "{outcome:?}"
+                    ),
+                }
+                let mut duplicate = call.clone();
+                duplicate.tool_call_key.call_id.0.push_str("-duplicate");
+                assert_eq!(
+                    fixture.nexus.handle_send_call(duplicate),
+                    SendOutcome::Refused(SendRefusal::Unresolved)
+                );
+            } else {
+                assert_eq!(outcome, SendOutcome::Refused(SendRefusal::Unresolved));
+            }
+            assert_eq!(
+                fixture.nexus.handle_send_call(call),
+                outcome,
+                "exact replay keeps its result"
+            );
+        }
+    }
+}
+
+#[test]
+fn dynamic_result_with_an_unknown_request_is_unresolved_and_replayable() {
+    let fixture = NexusFixture::new();
+    fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
+    fixture.asleep_at(target());
+    let mut call = tool_call(THREAD_A, "unknown-answer", "Reviewed.");
+    let mut arguments: serde_json::Value = serde_json::from_str(&call.arguments.0).unwrap();
+    arguments["kind"] = serde_json::json!("Result");
+    arguments["request"] = serde_json::json!("zzzz");
+    call.arguments = crate::generated::send_tool::Arguments(arguments.to_string());
+    for _ in 0..2 {
+        assert_eq!(
+            fixture.nexus.handle_send_call(call.clone()),
+            SendOutcome::Refused(SendRefusal::Unresolved)
+        );
+    }
+    assert!(fixture.stored_at(&target()).queue.0.is_empty());
+}

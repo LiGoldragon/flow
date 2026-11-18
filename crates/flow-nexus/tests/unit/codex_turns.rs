@@ -805,7 +805,7 @@ fn codex_partial_cohorts_release_the_queued_refresh_preserving_terminal_bytes() 
                     &target,
                     SentBy::Sender(sender.clone()),
                     flow_ethos::Delivery::Queue,
-                    Message::Soft(Request::Order(format!("{cohort}-{member}"))),
+                    Message::Soft(Request::Question(format!("{cohort}-{member}"))),
                     None,
                 )
                 .unwrap();

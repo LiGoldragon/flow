@@ -110,17 +110,17 @@ fn current_socket_client_serves_request_operations() {
     {
         "sender" => {
             bind_socket(&socket, migration_sender());
-            let order = socket_query(
+            let question = socket_query(
                 &socket,
                 signal_flow::Input::Send(signal_flow::SendRequest {
                     address: migration_recipient(),
                     sendable_message: signal_flow::SendableMessage::Soft(
-                        signal_flow::SendableRequest::Order("socket order".into()),
+                        signal_flow::SendableRequest::Question("socket question".into()),
                     ),
                 }),
             );
-            let signal_flow::Output::SendAccepted(order) = order else {
-                panic!("socket Order is admitted: {order:?}")
+            let signal_flow::Output::SendAccepted(question) = question else {
+                panic!("socket Question is admitted: {question:?}")
             };
             let task = socket_query(
                 &socket,
@@ -149,13 +149,13 @@ fn current_socket_client_serves_request_operations() {
                 ),
                 signal_flow::Output::SendAccepted(_)
             ));
-            println!("SOCKET_ORDER={}", order.request_id.0);
+            println!("SOCKET_QUESTION={}", question.request_id.0);
             println!("SOCKET_TASK={}", task.request_id.0);
         }
         "recipient" => {
             bind_socket(&socket, migration_recipient());
-            let order: flow_ethos::RequestId =
-                flow_ethos::RequestId(std::env::var("FLOW_MIGRATION_ORDER").unwrap());
+            let question: flow_ethos::RequestId =
+                flow_ethos::RequestId(std::env::var("FLOW_MIGRATION_QUESTION").unwrap());
             let task: flow_ethos::RequestId =
                 flow_ethos::RequestId(std::env::var("FLOW_MIGRATION_TASK").unwrap());
             let result = socket_query(
@@ -165,7 +165,7 @@ fn current_socket_client_serves_request_operations() {
                     sendable_message: signal_flow::SendableMessage::Soft(
                         signal_flow::SendableRequest::Result(
                             signal_flow::SendableRequest_Result_Data {
-                                request_id: order,
+                                request_id: question,
                                 string: "socket result".into(),
                             },
                         ),
@@ -812,6 +812,17 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
     );
     let open_order = request_binding_for(&store, &ids["open_order"]);
     deliver_oldest_migrated(&store, &recipient, &ids["open_order"], "current-order");
+    assert_eq!(
+        store
+            .resolve_sendable_message(signal_flow::SendableMessage::Soft(
+                signal_flow::SendableRequest::Result(signal_flow::SendableRequest_Result_Data {
+                    request_id: open_order.request_id.clone(),
+                    string: "the migrated Order takes no answer".into(),
+                })
+            ))
+            .unwrap(),
+        Err(signal_flow::Refusal::Unresolved)
+    );
     let open_task = request_binding_for(&store, &ids["open_task"]);
     deliver_oldest_migrated(&store, &recipient, &ids["open_task"], "current-task");
     assert!(
@@ -847,6 +858,24 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         .read_logical_delivery_snapshots(&sender, Some(notice.delivery_cursor.0))
         .expect("cursor resume reads");
     assert!(after_acceptance.delivery_cursor >= notice.delivery_cursor);
+    let signal_flow::PrivateSendResponse::SendAccepted(question) = store
+        .accept_logical_delivery(
+            &recipient,
+            flow_ethos::SentBy::Sender(sender.clone()),
+            flow_ethos::Delivery::Queue,
+            flow_ethos::Message::Soft(flow_ethos::Request::Question("Which revision?".into())),
+            None,
+        )
+        .expect("current Question admits")
+    else {
+        panic!("Question accepted")
+    };
+    deliver_through_migrated(
+        &store,
+        &recipient,
+        &question.logical_delivery_id.0,
+        "current-question",
+    );
     drop(store);
 
     let post_operation_runtime = tempfile::tempdir().expect("post-operation runtime");
@@ -863,7 +892,7 @@ fn actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without
         &current_socket,
         "recipient",
         &[
-            ("FLOW_MIGRATION_ORDER", open_order.request_id.0.as_str()),
+            ("FLOW_MIGRATION_QUESTION", question.request_id.0.as_str()),
             ("FLOW_MIGRATION_TASK", open_task.request_id.0.as_str()),
         ],
     );

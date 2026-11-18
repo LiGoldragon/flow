@@ -429,12 +429,9 @@ pub(crate) trait MintsRequestIds {
         &self,
         id: &flow_ethos::RequestId,
     ) -> Result<Option<RequestIdBinding>, StoreError>;
-    /// Whether an answer addressed to `recipient` closes the open request
-    /// `binding` names, whoever sends it: a Result an Order or Question, a
-    /// Done a Task, the request delivered, and the answer addressed to the
-    /// request's sender when that sender is an Address.
-    /// Whether the request `binding` names is answerable: retained,
-    /// delivered, and an Order or Question (a Task for a Done).
+    /// Whether the retained request is answerable: a delivered Question
+    /// for a Result, or a delivered Task for a Done. Binding history alone
+    /// does not imply an outstanding answer obligation.
     fn answerable_by(&self, binding: &RequestIdBinding, task: bool) -> Result<bool, StoreError>;
     fn store_identity(&self) -> Result<signal_flow::StoreIdentity, StoreError>;
 }
@@ -487,7 +484,7 @@ impl MintsRequestIds for FlowStore {
         let correct_kind = if task {
             matches!(request, Request::Task(_))
         } else {
-            matches!(request, Request::Order(_) | Request::Question(_))
+            matches!(request, Request::Question(_))
         };
         let delivered = self.delivered_to_be_answered(&binding.logical_delivery_id)?;
         Ok(correct_kind && delivered)
@@ -534,7 +531,7 @@ impl MintsRequestIds for FlowStore {
 
 /// The requests a permaflow owes an answer. A request is open from its
 /// delivery until the Result or Done that answers it, and it is the
-/// permaflow's, not the flow's: an Order, Question or Task a sender's
+/// permaflow's, not the flow's: a Question or Task a sender's
 /// delivery reached any flow of the Address, its id still bound to it and
 /// open. Every fact read is Memory's (the retained request, its delivery's
 /// current state, its id's binding), so a refresh, a restart and an upgrade
@@ -569,10 +566,7 @@ impl HoldsOpenRequests for FlowStore {
             let (Message::HardAbrupt(request)
             | Message::MiddleAbrupt(request)
             | Message::Soft(request)) = &retained.entry.message;
-            if !matches!(
-                request,
-                Request::Order(_) | Request::Question(_) | Request::Task(_)
-            ) {
+            if !matches!(request, Request::Question(_) | Request::Task(_)) {
                 continue;
             }
             let bound_open = self

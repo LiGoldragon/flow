@@ -243,8 +243,8 @@ fn resting_seat() -> (NexusFixture, FreshWorld) {
     (fixture, world)
 }
 
-/// An Order and then a 240-minute Task delivered to abc123 and left open,
-/// and an Order it answered, are carried over a refresh: the successor's
+/// A Question and then a 240-minute Task delivered to abc123 and left open,
+/// and a Question it answered, are carried over a refresh: the successor's
 /// first prompt holds, after the handover, the two open ones, oldest first,
 /// under the ids they were delivered with. The successor's Done with the
 /// Task's id is admitted as abc123's would have been, a second is
@@ -256,8 +256,18 @@ fn a_successor_is_given_its_predecessors_open_requests_and_answers_them_by_their
     let at = address(Model::Sol);
     let sender = psyche_core();
 
-    let order = Request::Order("Land the Git server line.".into());
-    let open_order = store.admitted(&at, &sender, order.clone());
+    let closed_order = store.admitted(
+        &at,
+        &sender,
+        Request::Order("Act once, without a reply.".into()),
+    );
+    store.delivered(&at, "abc123");
+    assert_eq!(
+        store.answered(&at, &sender, result(&closed_order.request_id.0)),
+        Err(Refusal::Unresolved)
+    );
+    let question = Request::Question("Which Git server revision?".into());
+    let open_question = store.admitted(&at, &sender, question.clone());
     store.delivered(&at, "abc123");
     let task = Request::Task(AnswerableTask {
         minutes: flow_ethos::Minutes(240),
@@ -265,13 +275,13 @@ fn a_successor_is_given_its_predecessors_open_requests_and_answers_them_by_their
     });
     let open_task = store.admitted(&at, &sender, task.clone());
     store.delivered(&at, "abc123");
-    let answered = store.admitted(&at, &sender, Request::Order("Answered already.".into()));
+    let answered = store.admitted(&at, &sender, Request::Question("Answered already.".into()));
     store.delivered(&at, "abc123");
     store
         .answered(&at, &sender, result(&answered.request_id.0))
-        .expect("abc123 answers its Order");
+        .expect("abc123 answers its Question");
     let open = vec![
-        entry(&open_order, &sender, order),
+        entry(&open_question, &sender, question),
         entry(&open_task, &sender, task),
     ];
     assert_eq!(store.open_requests(&at).unwrap(), open);
@@ -306,15 +316,19 @@ fn a_successor_is_given_its_predecessors_open_requests_and_answers_them_by_their
         .next()
         .expect("the successor's first turn");
     // The delivered form: each request under its id, the Task with its
-    // minutes, the older Order first.
+    // minutes, the older Question first.
+    assert!(
+        !first.contains("Act once, without a reply."),
+        "closed Order is not carried: {first}"
+    );
     let delivered = open.prompt_text(&at);
-    let order_at = delivered.find("Soft.Order.{").expect("the Order");
+    let question_at = delivered.find("Soft.Question.{").expect("the Question");
     let task_at = delivered.find("Soft.Task.{").expect("the Task");
-    assert!(order_at < task_at, "oldest first: {delivered}");
+    assert!(question_at < task_at, "oldest first: {delivered}");
     assert!(
         delivered[task_at..].contains(&open_task.request_id.0)
             && delivered[task_at..].contains(" 240 ")
-            && delivered[order_at..task_at].contains(&open_order.request_id.0),
+            && delivered[question_at..task_at].contains(&open_question.request_id.0),
         "{delivered}"
     );
     // One line, naming the predecessor, directly precedes the block.
@@ -351,7 +365,7 @@ fn a_successor_is_given_its_predecessors_open_requests_and_answers_them_by_their
     assert_eq!(store.open_requests(&at).unwrap(), open[..1].to_vec());
 }
 
-/// A request closed by CloseRequest is no longer open: of two Orders
+/// A request closed by CloseRequest is no longer open: of two Questions
 /// delivered to abc123 and left open, the one closed is not carried over
 /// the refresh, and the successor's first prompt holds the other alone.
 #[test]
@@ -362,16 +376,16 @@ fn a_closed_request_is_not_carried_to_the_successors_first_prompt() {
     let at = address(Model::Sol);
     let sender = psyche_core();
 
-    let kept = Request::Order("Land the Git server line.".into());
-    let open_order = store.admitted(&at, &sender, kept.clone());
+    let kept = Request::Question("Which Git server revision?".into());
+    let open_question = store.admitted(&at, &sender, kept.clone());
     store.delivered(&at, "abc123");
-    let closed = store.admitted(&at, &sender, Request::Order("Done long ago.".into()));
+    let closed = store.admitted(&at, &sender, Request::Question("Done long ago.".into()));
     store.delivered(&at, "abc123");
     assert_eq!(
         fixture.nexus.close_request(&closed.request_id, None),
         Output::RequestClosed(closed.request_id.clone())
     );
-    let open = vec![entry(&open_order, &sender, kept)];
+    let open = vec![entry(&open_question, &sender, kept)];
     assert_eq!(store.open_requests(&at).unwrap(), open);
 
     let refreshed = fixture.nexus.dispatch(Input::Refresh(at.clone()));
@@ -388,7 +402,7 @@ fn a_closed_request_is_not_carried_to_the_successors_first_prompt() {
     let line = FlowId("abc123".into()).open_requests_line();
     assert!(
         first.ends_with(&format!("{HANDOVER}\n\n{line}\n{}", open.prompt_text(&at))),
-        "the open Order alone follows the handover: {first}"
+        "the open Question alone follows the handover: {first}"
     );
     assert!(
         !first.contains(&closed.request_id.0) && !first.contains("Done long ago."),
@@ -443,8 +457,8 @@ fn delivered_to_codex(store: &FlowStore, address: &Address, flow_id: &str, threa
 }
 
 /// Test 7 (Part A): a Codex refresh carries its open requests to its
-/// successor. An Order and a 240-minute Task delivered to the Maintained
-/// Codex flow abc123 and left open, and an Order it answered: a Refresh
+/// successor. A Question and a 240-minute Task delivered to the Maintained
+/// Codex flow abc123 and left open, and a Question it answered: a Refresh
 /// ordered while its turn runs is carried out at the thread's rest, and
 /// the successor's first prompt holds, after the handover, the one line
 /// naming abc123 and the two open requests, oldest first, under the ids
@@ -470,8 +484,18 @@ fn a_codex_refresh_carries_its_open_requests_to_its_successor() {
     let at = address(Model::Sol);
     let sender = psyche_core();
 
-    let order = Request::Order("Land the Git server line.".into());
-    let open_order = store.admitted(&at, &sender, order.clone());
+    let closed_order = store.admitted(
+        &at,
+        &sender,
+        Request::Order("Act once, without a reply.".into()),
+    );
+    delivered_to_codex(store, &at, "abc123", WORKING_CODEX_THREAD);
+    assert_eq!(
+        store.answered(&at, &sender, result(&closed_order.request_id.0)),
+        Err(Refusal::Unresolved)
+    );
+    let question = Request::Question("Which Git server revision?".into());
+    let open_question = store.admitted(&at, &sender, question.clone());
     delivered_to_codex(store, &at, "abc123", WORKING_CODEX_THREAD);
     let task = Request::Task(AnswerableTask {
         minutes: flow_ethos::Minutes(240),
@@ -479,13 +503,13 @@ fn a_codex_refresh_carries_its_open_requests_to_its_successor() {
     });
     let open_task = store.admitted(&at, &sender, task.clone());
     delivered_to_codex(store, &at, "abc123", WORKING_CODEX_THREAD);
-    let answered = store.admitted(&at, &sender, Request::Order("Answered already.".into()));
+    let answered = store.admitted(&at, &sender, Request::Question("Answered already.".into()));
     delivered_to_codex(store, &at, "abc123", WORKING_CODEX_THREAD);
     store
         .answered(&at, &sender, result(&answered.request_id.0))
-        .expect("abc123 answers its Order");
+        .expect("abc123 answers its Question");
     let open = vec![
-        entry(&open_order, &sender, order),
+        entry(&open_question, &sender, question),
         entry(&open_task, &sender, task),
     ];
     assert_eq!(store.open_requests(&at).unwrap(), open);
@@ -530,14 +554,18 @@ fn a_codex_refresh_carries_its_open_requests_to_its_successor() {
         .into_iter()
         .next()
         .expect("the successor's first turn");
+    assert!(
+        !first.contains("Act once, without a reply."),
+        "closed Order is not carried: {first}"
+    );
     let delivered = open.prompt_text(&at);
-    let order_at = delivered.find("Soft.Order.{").expect("the Order");
+    let question_at = delivered.find("Soft.Question.{").expect("the Question");
     let task_at = delivered.find("Soft.Task.{").expect("the Task");
-    assert!(order_at < task_at, "oldest first: {delivered}");
+    assert!(question_at < task_at, "oldest first: {delivered}");
     assert!(
         delivered[task_at..].contains(&open_task.request_id.0)
             && delivered[task_at..].contains(" 240 ")
-            && delivered[order_at..task_at].contains(&open_order.request_id.0),
+            && delivered[question_at..task_at].contains(&open_question.request_id.0),
         "{delivered}"
     );
     let line = FlowId("abc123".into()).open_requests_line();
@@ -604,13 +632,13 @@ fn a_successor_with_nothing_open_is_given_no_open_requests_line() {
     );
 }
 
-/// A flow that sends itself an Order and answers it: while the Order is
+/// A flow that sends itself a Question and answers it: while the Question is
 /// queued, never handed over, the Result is Unresolved; once its hand-over
 /// is uncertain, the Result proves it read, and its admission takes the
-/// Order out of the queue and queues the Result in the same commit, the
+/// Question out of the queue and queues the Result in the same commit, the
 /// Address's metaflow row written once. A second Result is Unresolved.
 #[test]
-fn a_flow_s_result_to_its_own_order_writes_its_metaflow_once() {
+fn a_flow_s_result_to_its_own_question_writes_its_metaflow_once() {
     let fixture = NexusFixture::new();
     let store = &fixture.nexus.store;
     let at = Address {
@@ -624,11 +652,11 @@ fn a_flow_s_result_to_its_own_order_writes_its_metaflow_once() {
         past: flow_ethos::Past(vec![]),
         queue: flow_ethos::Queue(vec![]),
     });
-    let order = store.admitted(&at, &at, Request::Order("Land the fix.".into()));
+    let question = store.admitted(&at, &at, Request::Question("Is the fix landed?".into()));
     assert_eq!(
-        store.answered(&at, &at, result(&order.request_id.0)),
+        store.answered(&at, &at, result(&question.request_id.0)),
         Err(Refusal::Unresolved),
-        "a queued Order is not yet answerable"
+        "a queued Question is not yet answerable"
     );
 
     let attempt = store.handed_over(&at, "a11ce5");
@@ -638,8 +666,8 @@ fn a_flow_s_result_to_its_own_order_writes_its_metaflow_once() {
             .unwrap()
     );
     let answer = store
-        .answered(&at, &at, result(&order.request_id.0))
-        .expect("the Result to its own uncertain Order is admitted");
+        .answered(&at, &at, result(&question.request_id.0))
+        .expect("the Result to its own uncertain Question is admitted");
     let queue = store.metaflow(&at).unwrap().expect("metaflow").queue;
     assert_eq!(
         queue
@@ -648,18 +676,104 @@ fn a_flow_s_result_to_its_own_order_writes_its_metaflow_once() {
             .map(|entry| entry.logical_delivery_id.clone())
             .collect::<Vec<_>>(),
         vec![answer.logical_delivery_id.clone()],
-        "the Order left the queue and the Result is queued"
+        "the Question left the queue and the Result is queued"
     );
     assert_eq!(
         store
-            .logical_delivery_snapshot(&order.logical_delivery_id)
+            .logical_delivery_snapshot(&question.logical_delivery_id)
             .unwrap()
-            .expect("the Order's delivery")
+            .expect("the Question's delivery")
             .delivery_state,
         DeliveryState::Read
     );
     assert_eq!(
-        store.answered(&at, &at, result(&order.request_id.0)),
+        store.answered(&at, &at, result(&question.request_id.0)),
         Err(Refusal::Unresolved)
     );
+}
+
+/// Reply obligations come from the request kind and existing delivery
+/// evidence, including rows written by an older release. Inspecting those
+/// rows writes nothing and never invents a read receipt for an Order.
+#[test]
+fn only_questions_and_tasks_owe_replies_across_delivery_states() {
+    use crate::store::logical_delivery::MintsRequestIds;
+    for state in ["queued", "uncertain", "delivered"] {
+        for request in [
+            Request::Order("Act without an answer.".into()),
+            Request::Question("Which revision?".into()),
+            Request::Task(AnswerableTask {
+                minutes: flow_ethos::Minutes(240),
+                string: "Build the revision.".into(),
+            }),
+            Request::Notice("The revision is ready.".into()),
+            Request::Living(flow_ethos::Living_Data {
+                context: flow_ethos::Context("the revision".into()),
+                verbatim: flow_ethos::Verbatim("Build it.".into()),
+            }),
+        ] {
+            let (fixture, _world) = resting_seat();
+            let store = &fixture.nexus.store;
+            let at = address(Model::Sol);
+            let sender = psyche_core();
+            let admitted = store.admitted(&at, &sender, request.clone());
+            match state {
+                "uncertain" => {
+                    let attempt = store.handed_over(&at, "abc123");
+                    assert!(
+                        store
+                            .mark_delivery_uncertain(&attempt.queue_attempt_id.0)
+                            .unwrap()
+                    );
+                }
+                "delivered" => store.delivered(&at, "abc123"),
+                _ => {}
+            }
+            let before = store
+                .logical_delivery_snapshot(&admitted.logical_delivery_id)
+                .unwrap();
+            let binding = store.request_binding(&admitted.request_id).unwrap();
+            let queue = store.metaflow(&at).unwrap();
+            let reminder = store.reminder(&admitted.logical_delivery_id.0).unwrap();
+            let open = store.open_requests(&at).unwrap();
+            let owes =
+                state != "queued" && matches!(request, Request::Question(_) | Request::Task(_));
+            assert_eq!(open.len(), usize::from(owes), "{state}: {request:?}");
+            for (answer, correct_kind) in [
+                (
+                    result(&admitted.request_id.0),
+                    matches!(request, Request::Question(_)),
+                ),
+                (
+                    done(&admitted.request_id.0),
+                    matches!(request, Request::Task(_)),
+                ),
+            ] {
+                let resolved = store.resolve_sendable_message(answer).unwrap();
+                assert_eq!(
+                    resolved.is_ok(),
+                    state != "queued" && correct_kind,
+                    "{state}: {request:?}"
+                );
+                if state == "queued" || !correct_kind {
+                    assert_eq!(resolved, Err(Refusal::Unresolved));
+                }
+            }
+            assert_eq!(
+                store
+                    .logical_delivery_snapshot(&admitted.logical_delivery_id)
+                    .unwrap(),
+                before
+            );
+            assert_eq!(
+                store.request_binding(&admitted.request_id).unwrap(),
+                binding
+            );
+            assert_eq!(store.metaflow(&at).unwrap(), queue);
+            assert_eq!(
+                store.reminder(&admitted.logical_delivery_id.0).unwrap(),
+                reminder
+            );
+        }
+    }
 }

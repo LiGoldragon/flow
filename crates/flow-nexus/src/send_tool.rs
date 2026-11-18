@@ -62,7 +62,9 @@ use crate::{HoldsStopRequest, RunningNexus, store::AnnouncesLaunchChanges};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
-use signal_flow::{Address, Aspect, HarnessKind, Message, Model, Request};
+use signal_flow::{
+    Address, Aspect, HarnessKind, Message, Model, Request, SendableMessage, SendableRequest,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, mpsc},
@@ -82,7 +84,7 @@ impl DeclaresSendTool for SendTool {
         serde_json::json!({
             "type": "function",
             "name": Self::tool_name().0,
-            "description": "Send one request from this flow to the flow at a metaflow Address. Priority determines interruption and whether an asleep recipient wakes. Result answers the request id supplied in request. The answer is a durable logical-delivery outcome or a typed refusal.",
+            "description": "Send one request from this flow to the flow at a metaflow Address. Priority determines interruption and whether an asleep recipient wakes. An Order takes no answer. Result answers a Question, naming its id in request. The answer is a durable logical-delivery outcome or a typed refusal.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -108,7 +110,7 @@ impl DeclaresSendTool for SendTool {
                     "kind": {
                         "type": "string",
                         "enum": ["Order", "Question", "Result", "Notice"],
-                        "description": "Order: work for the target. Question: a question it answers. Result: a result it awaits. Notice: an error or blocker affecting its work."
+                        "description": "Order: work for the target. Question: a question it answers. Result: answers a Question. Notice: an error or blocker affecting its work."
                     },
                     "body": { "type": "string", "minLength": 1 },
                     "request": {
@@ -326,40 +328,39 @@ impl ReadsSendArguments for ToolCall {
     }
 }
 
-/// The request a send call queues: its kind carrying its body.
+/// The public request a send call submits to the shared answer resolver.
 pub trait BecomesRequest {
-    fn request(&self) -> Request;
+    fn request(&self) -> SendableRequest;
 }
 
 impl BecomesRequest for SendArguments {
-    fn request(&self) -> Request {
+    fn request(&self) -> SendableRequest {
         let body = self.body.clone();
         match &self.send_kind {
-            SendKind::Order => Request::Order(body.0),
-            SendKind::Question => Request::Question(body.0),
-            SendKind::Result(request_id) => Request::Result(flow_ethos::ResultPayload::Answered(
-                flow_ethos::ResultPayload_Answered_Data {
-                    logical_delivery_id: flow_ethos::LogicalDeliveryId(String::new()),
+            SendKind::Order => SendableRequest::Order(body.0),
+            SendKind::Question => SendableRequest::Question(body.0),
+            SendKind::Result(request_id) => {
+                SendableRequest::Result(signal_flow::SendableRequest_Result_Data {
                     request_id: request_id.clone(),
                     string: body.0,
-                },
-            )),
-            SendKind::Notice => Request::Notice(body.0),
+                })
+            }
+            SendKind::Notice => SendableRequest::Notice(body.0),
         }
     }
 }
 
 trait BecomesMessage {
-    fn message(&self) -> Message;
+    fn message(&self) -> SendableMessage;
 }
 
 impl BecomesMessage for SendArguments {
-    fn message(&self) -> Message {
+    fn message(&self) -> SendableMessage {
         let request = self.request();
         match &self.send_priority {
-            SendPriority::HardAbrupt => Message::HardAbrupt(request),
-            SendPriority::MiddleAbrupt => Message::MiddleAbrupt(request),
-            SendPriority::Soft => Message::Soft(request),
+            SendPriority::HardAbrupt => SendableMessage::HardAbrupt(request),
+            SendPriority::MiddleAbrupt => SendableMessage::MiddleAbrupt(request),
+            SendPriority::Soft => SendableMessage::Soft(request),
         }
     }
 }
@@ -595,7 +596,14 @@ impl HandlesSendCall for RunningNexus {
             else {
                 return Self::refused(SendRefusal::Store);
             };
-            let message = arguments.message();
+            let message = match self.store.resolve_sendable_message(arguments.message()) {
+                Ok(Ok(message)) => message,
+                Ok(Err(signal_flow::Refusal::Unresolved)) => {
+                    return refused_kept(SendRefusal::Unresolved, content_sha256.0);
+                }
+                Ok(Err(_)) => return refused_kept(SendRefusal::Store, content_sha256.0),
+                Err(error) => return store_refused(error),
+            };
             if let Some(signal_flow::Refusal::Oversized(size)) = message.oversized_refusal(&sender)
             {
                 return refused_kept(SendRefusal::Oversized(size), content_sha256.0);

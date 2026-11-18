@@ -10937,19 +10937,19 @@ mod tests {
                 queue: flow_ethos::Queue(Vec::new()),
             });
         }
-        let PrivateSendResponse::SendAccepted(order) = store
+        let PrivateSendResponse::SendAccepted(question) = store
             .accept_logical_delivery(
                 &answerer,
                 SentBy::Sender(requester.clone()),
                 Delivery::Queue,
-                Message::Soft(Request::Order("Review".into())),
+                Message::Soft(Request::Question("Review".into())),
                 None,
             )
-            .expect("first Order admits")
+            .expect("first Question admits")
         else {
-            panic!("first Order accepted")
+            panic!("first Question accepted")
         };
-        assert_eq!(order.request_id, flow_ethos::RequestId("ord1".into()));
+        assert_eq!(question.request_id, flow_ethos::RequestId("ord1".into()));
         let result = |request_id: &str| {
             SendableMessage::Soft(SendableRequest::Result(
                 signal_flow::SendableRequest_Result_Data {
@@ -10967,20 +10967,20 @@ mod tests {
             (
                 answerer.clone(),
                 requester.clone(),
-                result(&order.request_id.0),
+                result(&question.request_id.0),
             ),
             (
                 stranger.clone(),
                 requester.clone(),
-                result(&order.request_id.0),
+                result(&question.request_id.0),
             ),
-            (answerer.clone(), stranger, result(&order.request_id.0)),
+            (answerer.clone(), stranger, result(&question.request_id.0)),
             (
                 answerer.clone(),
                 requester.clone(),
                 SendableMessage::Soft(SendableRequest::Done(
                     signal_flow::SendableRequest_Done_Data {
-                        request_id: order.request_id.clone(),
+                        request_id: question.request_id.clone(),
                         string: "done".into(),
                     },
                 )),
@@ -10995,7 +10995,7 @@ mod tests {
             );
         }
         assert_eq!(
-            MintsRequestIds::request_binding(&store, &order.request_id)
+            MintsRequestIds::request_binding(&store, &question.request_id)
                 .expect("refused answer leaves the binding readable")
                 .expect("refused answer leaves the request held")
                 .request_closure,
@@ -11004,24 +11004,26 @@ mod tests {
         );
         store
             .transition_logical_delivery(
-                &order.logical_delivery_id,
+                &question.logical_delivery_id,
                 DeliveryState::Delivered(NativeReceipt {
                     harness_kind: signal_flow::HarnessKind::Codex,
-                    native_session_id: signal_flow::NativeSessionId("first-order-session".into()),
-                    native_prompt_id: signal_flow::NativePromptId("first-order-turn".into()),
+                    native_session_id: signal_flow::NativeSessionId(
+                        "first-question-session".into(),
+                    ),
+                    native_prompt_id: signal_flow::NativePromptId("first-question-turn".into()),
                 }),
             )
-            .expect("first Order delivered");
+            .expect("first Question delivered");
 
         let resolved = store
-            .resolve_sendable_message(result(&order.request_id.0))
+            .resolve_sendable_message(result(&question.request_id.0))
             .expect("first Result resolution reads")
             .expect("first Result resolves");
         let Message::Soft(Request::Result(ResultPayload::Answered(answered))) = &resolved else {
             panic!("resolved Result keeps its typed answered payload")
         };
-        assert_eq!(answered.logical_delivery_id, order.logical_delivery_id);
-        assert_eq!(answered.request_id, order.request_id);
+        assert_eq!(answered.logical_delivery_id, question.logical_delivery_id);
+        assert_eq!(answered.request_id, question.request_id);
         let PrivateSendResponse::SendAccepted(answer) = store
             .accept_logical_delivery(
                 &requester,
@@ -11035,18 +11037,18 @@ mod tests {
             panic!("first Result accepted")
         };
         assert_eq!(answer.request_id, flow_ethos::RequestId("ans1".into()));
-        assert_ne!(answer.request_id, order.request_id);
+        assert_ne!(answer.request_id, question.request_id);
         assert_eq!(
-            MintsRequestIds::request_binding(&store, &order.request_id)
-                .expect("Order binding reads")
-                .expect("Order binding remains")
+            MintsRequestIds::request_binding(&store, &question.request_id)
+                .expect("Question binding reads")
+                .expect("Question binding remains")
                 .request_closure,
             RequestClosure::Answered(answer.logical_delivery_id.clone())
         );
         let debugged = store
-            .debug_delivery(&order.request_id)
-            .expect("Order debug reads")
-            .expect("Order remains held");
+            .debug_delivery(&question.request_id)
+            .expect("Question debug reads")
+            .expect("Question remains held");
         assert_eq!(
             debugged.receipt,
             meta_signal_flow::Receipt(None),
@@ -11066,18 +11068,18 @@ mod tests {
         );
         assert_eq!(
             store
-                .resolve_sendable_message(result(&order.request_id.0))
+                .resolve_sendable_message(result(&question.request_id.0))
                 .expect("duplicate first Result reads"),
             Err(Refusal::Unresolved),
-            "the first Order is already closed"
+            "the first Question is already closed"
         );
 
         drop(store);
         let mut store = fixture.store();
         assert_eq!(
-            MintsRequestIds::request_binding(&store, &order.request_id)
-                .expect("reopened Order binding reads")
-                .expect("reopened Order binding remains")
+            MintsRequestIds::request_binding(&store, &question.request_id)
+                .expect("reopened Question binding reads")
+                .expect("reopened Question binding remains")
                 .request_closure,
             RequestClosure::Answered(answer.logical_delivery_id.clone())
         );
@@ -11104,13 +11106,13 @@ mod tests {
         );
         assert_eq!(
             store
-                .archive_request(&order.request_id.0)
-                .expect("first Order archive reads"),
+                .archive_request(&question.request_id.0)
+                .expect("first Question archive reads"),
             Ok(())
         );
         assert_eq!(
             store
-                .debug_delivery(&order.request_id)
+                .debug_delivery(&question.request_id)
                 .expect("archived debug reads"),
             None,
             "an archived id is indistinguishable from an unknown id"
@@ -11125,31 +11127,33 @@ mod tests {
                 &answerer,
                 SentBy::Sender(requester.clone()),
                 Delivery::Queue,
-                Message::Soft(Request::Order("Review".into())),
+                Message::Soft(Request::Question("Review".into())),
                 None,
             )
-            .expect("reused-id Order admits")
+            .expect("reused-id Question admits")
         else {
-            panic!("reused-id Order accepted")
+            panic!("reused-id Question accepted")
         };
-        assert_eq!(reused.request_id, order.request_id);
-        assert_ne!(reused.logical_delivery_id, order.logical_delivery_id);
+        assert_eq!(reused.request_id, question.request_id);
+        assert_ne!(reused.logical_delivery_id, question.logical_delivery_id);
         assert!(reused.delivery_cursor > answer.delivery_cursor);
         store
             .transition_logical_delivery(
                 &reused.logical_delivery_id,
                 DeliveryState::Delivered(NativeReceipt {
                     harness_kind: signal_flow::HarnessKind::Codex,
-                    native_session_id: signal_flow::NativeSessionId("second-order-session".into()),
-                    native_prompt_id: signal_flow::NativePromptId("second-order-turn".into()),
+                    native_session_id: signal_flow::NativeSessionId(
+                        "second-question-session".into(),
+                    ),
+                    native_prompt_id: signal_flow::NativePromptId("second-question-turn".into()),
                 }),
             )
-            .expect("reused-id Order delivered");
+            .expect("reused-id Question delivered");
 
         let duplicate = store
             .resolve_sendable_message(result(&reused.request_id.0))
             .expect("delayed duplicate resolution reads")
-            .expect("the accepted reuse risk resolves to the current Order");
+            .expect("the accepted reuse risk resolves to the current Question");
         let PrivateSendResponse::SendAccepted(second_answer) = store
             .accept_logical_delivery(
                 &requester,
@@ -11184,7 +11188,7 @@ mod tests {
         let same_id = first_replay
             .delivery_snapshot_vector
             .iter()
-            .filter(|snapshot| snapshot.request_id == order.request_id)
+            .filter(|snapshot| snapshot.request_id == question.request_id)
             .collect::<Vec<_>>();
         assert!(
             same_id
@@ -11192,7 +11196,7 @@ mod tests {
                 .all(|pair| pair[0].delivery_cursor < pair[1].delivery_cursor)
         );
         assert!(same_id.iter().any(|snapshot| {
-            snapshot.logical_delivery_id == order.logical_delivery_id
+            snapshot.logical_delivery_id == question.logical_delivery_id
                 && snapshot.delivery_state == DeliveryState::Archived
         }));
         assert!(same_id.iter().any(|snapshot| {
@@ -11201,9 +11205,11 @@ mod tests {
                     == DeliveryState::Delivered(NativeReceipt {
                         harness_kind: signal_flow::HarnessKind::Codex,
                         native_session_id: signal_flow::NativeSessionId(
-                            "second-order-session".into(),
+                            "second-question-session".into(),
                         ),
-                        native_prompt_id: signal_flow::NativePromptId("second-order-turn".into()),
+                        native_prompt_id: signal_flow::NativePromptId(
+                            "second-question-turn".into(),
+                        ),
                     })
         }));
     }

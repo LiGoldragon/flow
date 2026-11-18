@@ -1,3 +1,30 @@
+# Flow 0.60.1: Orders take no answer
+
+Proposal 2 of Overrides.2 changes reply obligations without changing any
+request type, contract, generated type, or stored schema. A delivered Order
+is finished as an instruction; a Question awaits its Result and a Task its
+Done. Only Questions and Tasks enter a successor's open-request block.
+
+The retained request's kind and delivery evidence determine the obligation.
+The request-id binding preserves identity and answer history; its historical
+`Open` value alone does not mean that an answer is owed. Delivered Orders
+already in Memory therefore need no rewrite, synthetic answer, archive, or
+new closure variant. Their delivery history and IDs remain inspectable.
+An uncertain Order retains its delivery uncertainty, is never treated as an
+answer obligation, and a Result cannot turn that uncertainty into a read.
+Queued Orders retain their normal delivery path.
+
+The ordinary resolver admits a Result only for a delivered or uncertain
+Question. The native Codex send tool now submits public Results to that same
+resolver before routing or keeping an answer; it no longer constructs a
+private answer with an empty logical-delivery ID. The tool's declared kinds
+are unchanged. Task, Done and Living remain available through the ordinary
+client. Task deadlines, accepted-answer routing, cancellation, CloseRequest,
+archival and historical migration records keep their existing representations.
+
+This source candidate is not a gate or native capsule proof. Release metadata
+and immutable whole-gate evidence accompany the final release candidate.
+
 # Flow 0.60.0: CloseRequest closes a request with no answer and tells no one
 
 Contracts: signal-flow 0.68.0 (319e3c3) and meta-signal-flow 89.0.1

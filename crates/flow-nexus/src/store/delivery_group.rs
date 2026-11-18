@@ -38,6 +38,120 @@ impl DescribesDeliveryGroups for LogicalDeliveryGroup {
     }
 }
 
+/// Pure batch preflight. Callers hold the ordinary logical admission gate.
+pub(crate) trait ValidatesDeliveryGroups {
+    fn validate_delivery_group_capacity(
+        &self,
+        count: usize,
+    ) -> Result<Result<(), Refusal>, StoreError>;
+    fn validate_delivery_group(
+        &self,
+        address: &Address,
+        sender: &SentBy,
+        messages: &[AdmissionMessage],
+    ) -> Result<Result<(), Refusal>, StoreError>;
+}
+
+impl ValidatesDeliveryGroups for FlowStore {
+    fn validate_delivery_group_capacity(
+        &self,
+        count: usize,
+    ) -> Result<Result<(), Refusal>, StoreError> {
+        use super::logical_delivery::REQUEST_ID_SPACE;
+        let held = self
+            .engine
+            .match_records(QueryPlan::all(self.logical_deliveries.request_ids))?;
+        let capacity = REQUEST_ID_SPACE
+            .checked_sub(held.records().len())
+            .ok_or(StoreError::StateInvariant)?;
+        Ok(if count > capacity {
+            Err(Refusal::RequestIdSpaceFull)
+        } else {
+            Ok(())
+        })
+    }
+
+    fn validate_delivery_group(
+        &self,
+        address: &Address,
+        sender: &SentBy,
+        messages: &[AdmissionMessage],
+    ) -> Result<Result<(), Refusal>, StoreError> {
+        use super::logical_delivery::MintsRequestIds;
+        use super::reminder::{RecordsReminders, RulesMinutes};
+        use crate::composition::RendersQueuedWork;
+        use flow_ethos::{Message, Request};
+        // Projection hides private logical IDs. Fixed-width public request
+        // IDs give the final native size without drawing an ID.
+        let projected = messages
+            .iter()
+            .map(|message| QueueEntry {
+                logical_delivery_id: LogicalDeliveryId(String::new()),
+                request_id: flow_ethos::RequestId("0000".into()),
+                sent_by: sender.clone(),
+                delivery: message.delivery.clone(),
+                message: message.message.clone(),
+            })
+            .collect::<Vec<_>>();
+        let actual_bytes = projected.prompt_text(address).len();
+        if actual_bytes > crate::sending::MAX_SEND_PAYLOAD_BYTES {
+            return Ok(Err(Refusal::Oversized(signal_flow::SendPayloadSize {
+                actual_bytes: signal_flow::ActualBytes(
+                    i64::try_from(actual_bytes).unwrap_or(i64::MAX),
+                ),
+                maximum_bytes: signal_flow::MaximumBytes(
+                    crate::sending::MAX_SEND_PAYLOAD_BYTES as i64,
+                ),
+            })));
+        }
+        if let Err(refusal) = self.validate_delivery_group_capacity(messages.len())? {
+            return Ok(Err(refusal));
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+            .ok_or(StoreError::StateInvariant)?;
+        let mut answered = std::collections::HashSet::new();
+        for message in messages {
+            let (Message::HardAbrupt(request)
+            | Message::MiddleAbrupt(request)
+            | Message::Soft(request)) = &message.message;
+            match request {
+                Request::Task(task) => {
+                    if let Err(refusal) = task.minutes.0.ruled_interval(now) {
+                        return Ok(Err(Refusal::MinutesRefused(refusal)));
+                    }
+                }
+                Request::Done(flow_ethos::DonePayload::Answered(done)) => {
+                    if self.reminder(&done.logical_delivery_id.0)?.is_none() {
+                        return Ok(Err(Refusal::Unresolved));
+                    }
+                }
+                _ => {}
+            }
+            let answer_id = match request {
+                Request::Result(flow_ethos::ResultPayload::Answered(answer)) => {
+                    Some(&answer.request_id)
+                }
+                Request::Done(flow_ethos::DonePayload::Answered(answer)) => {
+                    Some(&answer.request_id)
+                }
+                _ => None,
+            };
+            if let Some(id) = answer_id {
+                if self.request_binding(id)?.is_none() {
+                    return Err(StoreError::StateInvariant);
+                }
+                if !answered.insert(id.clone()) {
+                    return Ok(Err(Refusal::Unresolved));
+                }
+            }
+        }
+        Ok(Ok(()))
+    }
+}
+
 pub(crate) trait AdmitsDeliveryGroups {
     fn admit_delivery_group(
         &self,
@@ -121,7 +235,7 @@ impl SelectsDeliveryGroups for FlowStore {
         let Some(group) = self.delivery_group(&first.logical_delivery_id)? else {
             return Ok(vec![first.clone()]);
         };
-        if group.address != *address || group.logical_delivery_id_vector.len() < 2 {
+        if group.address != *address || group.logical_delivery_id_vector.is_empty() {
             return Err(StoreError::StateInvariant);
         }
         let retained = self.retained_logical_requests()?;
@@ -191,6 +305,116 @@ impl SelectsDeliveryGroups for FlowStore {
         Ok(false)
     }
 }
+/// Refuses one complete, positively selected, never-submitted group.
+/// The caller holds the existing dispatch gate; no external work occurs here.
+pub(crate) trait RefusesDeliveryGroups {
+    fn refuse_delivery_group(
+        &self,
+        address: &Address,
+        selected: &[QueueEntry],
+        reason: Refusal,
+    ) -> Result<(), StoreError>;
+}
+
+impl RefusesDeliveryGroups for FlowStore {
+    fn refuse_delivery_group(
+        &self,
+        address: &Address,
+        selected: &[QueueEntry],
+        reason: Refusal,
+    ) -> Result<(), StoreError> {
+        use super::logical_delivery::{
+            AllocatesLogicalCursor, LogicalDeliveryCounter, LogicalDeliveryEvent, NextCursor,
+        };
+        use super::queue_delivery::RequestState;
+        let _guard = self
+            .logical_deliveries
+            .write_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(first) = selected.first() else {
+            return Err(StoreError::StateInvariant);
+        };
+        if self.delivery_group(&first.logical_delivery_id)?.is_none() {
+            return Err(StoreError::StateInvariant);
+        }
+        let mut stored = self
+            .stored_metaflow(address)?
+            .ok_or(StoreError::StateInvariant)?;
+        if self.oldest_delivery_group(address, &stored.metaflow.queue.0)? != selected
+            || self.outstanding_for(address)?.is_some()
+        {
+            return Err(StoreError::StateInvariant);
+        }
+        let allocation = self.allocate_logical_cursor()?;
+        let mut cursor = allocation.cursor;
+        let mut commit = self.engine.begin_atomic_commit();
+        for entry in selected {
+            let records = self.engine.match_records(QueryPlan::key(
+                self.logical_deliveries.current,
+                RecordKey::new(entry.logical_delivery_id.0.clone()),
+            ))?;
+            let [current] = records.records() else {
+                return Err(StoreError::StateInvariant);
+            };
+            if current.archived_cursor.0.is_some()
+                || !matches!(
+                    current.delivery_snapshot.delivery_state,
+                    DeliveryState::Queued | DeliveryState::Retryable(_)
+                )
+            {
+                return Err(StoreError::StateInvariant);
+            }
+            let mut failed = current.clone();
+            failed.delivery_snapshot.delivery_cursor = signal_flow::DeliveryCursor(cursor);
+            failed.delivery_snapshot.delivery_state = DeliveryState::Failed(reason.clone());
+            cursor = cursor.checked_add(1).ok_or(StoreError::StateInvariant)?;
+            commit = commit
+                .mutate(self.logical_deliveries.current, failed.clone())
+                .assert(
+                    self.logical_deliveries.events,
+                    LogicalDeliveryEvent {
+                        delivery_snapshot: failed.delivery_snapshot,
+                    },
+                );
+            let requests = self.engine.match_records(QueryPlan::key(
+                self.queue_delivery.requests,
+                RecordKey::new(entry.logical_delivery_id.0.clone()),
+            ))?;
+            commit = match requests.records() {
+                [] => commit,
+                [request]
+                    if request.address == *address
+                        && request.queue_evidence
+                            == meta_signal_flow::QueueEvidence::Logical(entry.clone())
+                        && matches!(
+                            request.request_state,
+                            RequestState::Queued | RequestState::Unsent
+                        ) =>
+                {
+                    let mut parked = request.clone();
+                    parked.request_state = RequestState::Parked;
+                    commit.mutate(self.queue_delivery.requests, parked)
+                }
+                _ => return Err(StoreError::StateInvariant),
+            };
+        }
+        stored.metaflow.queue.0.drain(..selected.len());
+        let counter = LogicalDeliveryCounter {
+            next_cursor: NextCursor(cursor),
+        };
+        commit = if allocation.existing {
+            commit.mutate(self.logical_deliveries.counter, counter)
+        } else {
+            commit.assert(self.logical_deliveries.counter, counter)
+        };
+        self.engine
+            .commit_atomic(commit.mutate(self.metaflows, stored))?;
+        self.launch_changes.announce();
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,15 +518,31 @@ mod tests {
             .expect("group admitted")
     }
 
+    fn admit_plain(store: &FlowStore, message: AdmissionMessage) -> Vec<SendAcceptance> {
+        let signal_flow::PrivateSendResponse::SendAccepted(accepted) = store
+            .accept_logical_delivery(
+                &address(),
+                SentBy::Sender(address()),
+                message.delivery,
+                message.message,
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("plain Send admitted");
+        };
+        vec![accepted]
+    }
+
     #[test]
     fn admission_keeps_order_unique_ids_group_selectors_and_reopen() {
         let (fixture, store) = Fixture::new();
-        let before = admit(&store, vec![order("ordinary before")]);
+        let before = admit_plain(&store, order("ordinary before"));
         let accepted = admit(
             &store,
             vec![order("first"), order("second"), order("third")],
         );
-        let after = admit(&store, vec![order("ordinary after")]);
+        let after = admit_plain(&store, order("ordinary after"));
         let queue = store.metaflow(&address()).unwrap().unwrap().queue.0;
         let members = queue[1..4].to_vec();
         assert_eq!(queue.len(), 5);
@@ -880,5 +1120,176 @@ mod tests {
             survivors
         );
         assert!(store.oldest_delivery_group(&address(), &survivors).is_err());
+    }
+    struct ForbiddenDraw;
+    impl DrawsRequestId for ForbiddenDraw {
+        fn draw_request_id(&self) -> Result<flow_ethos::RequestId, StoreError> {
+            panic!("a refused preflight must not draw an ID")
+        }
+    }
+
+    #[test]
+    fn singleton_batch_has_provenance_plain_send_and_empty_batch_do_not() {
+        let (fixture, store) = Fixture::new();
+        let plain = admit_plain(&store, order("plain"));
+        let singleton = admit(&store, vec![order("singleton batch")]);
+        assert!(
+            store
+                .delivery_group(&plain[0].logical_delivery_id)
+                .unwrap()
+                .is_none()
+        );
+        let group = store
+            .delivery_group(&singleton[0].logical_delivery_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            group.logical_delivery_id_vector,
+            vec![singleton[0].logical_delivery_id.clone()]
+        );
+        let digest = store.memory_digest().unwrap();
+        assert!(admit(&store, vec![]).is_empty());
+        assert_eq!(store.memory_digest().unwrap(), digest);
+        drop(store);
+        let store = fixture.reopen();
+        assert_eq!(
+            store
+                .delivery_group(&singleton[0].logical_delivery_id)
+                .unwrap(),
+            Some(group)
+        );
+        assert!(
+            store
+                .delivery_group(&plain[0].logical_delivery_id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn preflight_oversize_precedes_invalid_minutes_without_drawing() {
+        let (_fixture, mut store) = Fixture::new();
+        store.set_request_id_drawer_for_tests(Arc::new(ForbiddenDraw));
+        let digest = store.memory_digest().unwrap();
+        let result = store
+            .admit_delivery_group(
+                &address(),
+                SentBy::Unbound,
+                vec![
+                    task(0),
+                    order(&"x".repeat(crate::sending::MAX_SEND_PAYLOAD_BYTES)),
+                ],
+            )
+            .unwrap();
+        assert!(matches!(result, Err(Refusal::Oversized(_))));
+        assert_eq!(store.memory_digest().unwrap(), digest);
+    }
+
+    #[test]
+    fn preflight_late_invalid_minutes_never_draws_earlier_id() {
+        let (_fixture, mut store) = Fixture::new();
+        store.set_request_id_drawer_for_tests(Arc::new(ForbiddenDraw));
+        let digest = store.memory_digest().unwrap();
+        assert!(matches!(
+            store
+                .admit_delivery_group(
+                    &address(),
+                    SentBy::Unbound,
+                    vec![order("valid first"), task(0)]
+                )
+                .unwrap(),
+            Err(Refusal::MinutesRefused(_))
+        ));
+        assert_eq!(store.memory_digest().unwrap(), digest);
+    }
+
+    #[test]
+    fn whole_group_refusal_preserves_cancelled_history_and_later_liveness_on_reopen() {
+        let (fixture, store) = Fixture::new();
+        let accepted = admit(
+            &store,
+            vec![order("first"), order("cancelled"), order("last")],
+        );
+        let original = store.metaflow(&address()).unwrap().unwrap().queue.0;
+        let group = store
+            .delivery_group(&accepted[0].logical_delivery_id)
+            .unwrap();
+        withdraw_and_archive(&store, &original[1]);
+        let later = admit(&store, vec![order("later")]);
+        let queue = store.metaflow(&address()).unwrap().unwrap().queue.0;
+        let selected = store.oldest_delivery_group(&address(), &queue).unwrap();
+        let reason = Refusal::Unresolved;
+        store
+            .refuse_delivery_group(&address(), &selected, reason.clone())
+            .unwrap();
+        for member in &selected {
+            assert_eq!(
+                store
+                    .logical_delivery_snapshot(&member.logical_delivery_id)
+                    .unwrap()
+                    .unwrap()
+                    .delivery_state,
+                DeliveryState::Failed(reason.clone())
+            );
+        }
+        assert_eq!(
+            store
+                .logical_delivery_snapshot(&original[1].logical_delivery_id)
+                .unwrap()
+                .unwrap()
+                .delivery_state,
+            DeliveryState::Withdrawn
+        );
+        assert_eq!(
+            store
+                .delivery_group(&accepted[0].logical_delivery_id)
+                .unwrap(),
+            group
+        );
+        let queue = store.metaflow(&address()).unwrap().unwrap().queue.0;
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].request_id, later[0].request_id);
+        assert_eq!(
+            store.oldest_delivery_group(&address(), &queue).unwrap(),
+            queue
+        );
+        drop(store);
+        let store = fixture.reopen();
+        assert_eq!(store.metaflow(&address()).unwrap().unwrap().queue.0, queue);
+        assert_eq!(
+            store
+                .delivery_group(&accepted[0].logical_delivery_id)
+                .unwrap(),
+            group
+        );
+    }
+
+    #[test]
+    fn partial_group_refusal_rejects_without_mutation() {
+        let (_fixture, store) = Fixture::new();
+        admit(&store, vec![order("first"), order("second")]);
+        let queue = store.metaflow(&address()).unwrap().unwrap().queue.0;
+        let digest = store.memory_digest().unwrap();
+        assert!(
+            store
+                .refuse_delivery_group(&address(), &queue[..1], Refusal::Unresolved)
+                .is_err()
+        );
+        assert_eq!(store.memory_digest().unwrap(), digest);
+    }
+    #[test]
+    fn batch_capacity_check_refuses_without_draw_or_mutation() {
+        let (_fixture, mut store) = Fixture::new();
+        store.set_request_id_drawer_for_tests(Arc::new(ForbiddenDraw));
+        let digest = store.memory_digest().unwrap();
+        assert_eq!(
+            store
+                .validate_delivery_group_capacity(
+                    super::super::logical_delivery::REQUEST_ID_SPACE + 1
+                )
+                .unwrap(),
+            Err(Refusal::RequestIdSpaceFull)
+        );
+        assert_eq!(store.memory_digest().unwrap(), digest);
     }
 }

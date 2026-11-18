@@ -3,7 +3,7 @@
 //! a materialized view used for sender-filtered reconnect snapshots.
 
 use super::ManagesMetaflowState;
-use super::delivery_group::SelectsDeliveryGroups;
+use super::delivery_group::{SelectsDeliveryGroups, ValidatesDeliveryGroups};
 use super::handover::HoldsHandovers;
 use super::handover_reminders::SchedulesHandoverReminders;
 use super::metaflow::SleepsMetaflows;
@@ -29,6 +29,8 @@ use signal_flow::{
     Address, DeliverySnapshot, DeliveryState, Lock, LogicalDeliveryId, NativeReceipt, Refusal,
     Request, SendAcceptance, SendObservation, SentBy, Unknown_Data,
 };
+
+pub(super) const REQUEST_ID_SPACE: usize = 36usize.pow(4);
 
 const COUNTER_KEY: &str = "counter";
 const COUNTER_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_counter");
@@ -545,11 +547,10 @@ impl MintsRequestIds for FlowStore {
         held_count: usize,
         excluded: &std::collections::HashSet<flow_ethos::RequestId>,
     ) -> Result<Result<flow_ethos::RequestId, Refusal>, StoreError> {
-        const SPACE: usize = 36usize.pow(4);
-        if held_count == SPACE {
+        if held_count == REQUEST_ID_SPACE {
             return Ok(Err(Refusal::RequestIdSpaceFull));
         }
-        if held_count > SPACE {
+        if held_count > REQUEST_ID_SPACE {
             return Err(StoreError::StateInvariant);
         }
         let draws = self.request_id_draws()?;
@@ -2046,9 +2047,9 @@ impl RecordsLogicalDeliveries for FlowStore {
         held_lock: Option<VerifiedDeliveryLock>,
         transition: LogicalDeliveryTransition,
     ) -> Result<Result<Vec<SendAcceptance>, Refusal>, StoreError> {
-        let messages = match requested {
-            RequestedDeliveryAdmission::Send(message) => vec![message],
-            RequestedDeliveryAdmission::SendSeveral(messages) => messages,
+        let messages = match &requested {
+            RequestedDeliveryAdmission::Send(message) => std::slice::from_ref(message),
+            RequestedDeliveryAdmission::SendSeveral(messages) => messages.as_slice(),
         };
         let _guard = self
             .logical_deliveries
@@ -2143,6 +2144,11 @@ impl RecordsLogicalDeliveries for FlowStore {
         } else {
             None
         };
+        if let RequestedDeliveryAdmission::SendSeveral(_) = &requested {
+            if let Err(refusal) = self.validate_delivery_group(address, &sent_by, messages)? {
+                return Ok(Err(refusal));
+            }
+        }
         let allocation = self.allocate_logical_cursor()?;
         let mut next = allocation.cursor;
         let mut commit = self.engine.begin_atomic_commit();
@@ -2150,7 +2156,9 @@ impl RecordsLogicalDeliveries for FlowStore {
         let mut admitted_entries = Vec::new();
         let mut selected_ids = std::collections::HashSet::new();
         let mut answered_ids = std::collections::HashSet::new();
-        for crate::generated::operation::AdmissionMessage { delivery, message } in messages {
+        for crate::generated::operation::AdmissionMessage { delivery, message } in
+            messages.iter().cloned()
+        {
             let message = warning
                 .as_ref()
                 .map_or(message, |prepared| prepared.message.clone());
@@ -2378,7 +2386,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             .logical_delivery_id
             .0
             .clone();
-        let commit = if accepted.len() > 1 {
+        let commit = if matches!(&requested, RequestedDeliveryAdmission::SendSeveral(_)) {
             commit.assert(
                 self.logical_deliveries.groups,
                 crate::generated::memory::LogicalDeliveryGroup {

@@ -1076,3 +1076,74 @@ fn send_several_refuses_kept_and_different_answer_routes_without_closing_any_req
         assert_eq!(fixture.nexus.store.memory_digest().unwrap(), before);
     }
 }
+
+#[test]
+fn send_several_whole_size_precedes_unknown_answer_resolution_without_mutation() {
+    use super::NexusFixture;
+    use crate::sending::SendsSeveralRequests;
+    use crate::store::memory_digest::DigestsMemory;
+    use signal_flow::{Output, SendableMessage, SendableRequest};
+    let fixture = NexusFixture::new();
+    let before = fixture.nexus.store.memory_digest().unwrap();
+    let answer = fixture.nexus.send_several_requests(
+        signal_flow::SendSeveralRequest {
+            address: Address {
+                topic: flow_ethos::Topic("severalTarget".into()),
+                ..sender()
+            },
+            sendable_message_vector: vec![
+                SendableMessage::Soft(SendableRequest::Result(
+                    signal_flow::SendableRequest_Result_Data {
+                        request_id: flow_ethos::RequestId("zzzz".into()),
+                        string: "unresolved first".into(),
+                    },
+                )),
+                SendableMessage::Soft(SendableRequest::Order("x".repeat(MAX_SEND_PAYLOAD_BYTES))),
+            ],
+        },
+        None,
+    );
+    assert!(matches!(
+        answer,
+        Output::Refused(signal_flow::Refusal::Oversized(_))
+    ));
+    assert_eq!(fixture.nexus.store.memory_digest().unwrap(), before);
+    assert!(fixture.typed().unwrap_or_default().is_empty());
+}
+
+#[test]
+fn send_several_earlier_invalid_minutes_precedes_later_unresolved_answer() {
+    use super::NexusFixture;
+    use crate::sending::SendsSeveralRequests;
+    use crate::store::memory_digest::DigestsMemory;
+    use signal_flow::{Output, SendableMessage, SendableRequest};
+    let fixture = NexusFixture::new();
+    let before = fixture.nexus.store.memory_digest().unwrap();
+    let answer = fixture.nexus.send_several_requests(
+        signal_flow::SendSeveralRequest {
+            address: Address {
+                topic: flow_ethos::Topic("severalTarget".into()),
+                ..sender()
+            },
+            sendable_message_vector: vec![
+                SendableMessage::Soft(SendableRequest::Task(flow_ethos::AnswerableTask {
+                    minutes: flow_ethos::Minutes(0),
+                    string: "invalid first".into(),
+                })),
+                SendableMessage::Soft(SendableRequest::Result(
+                    signal_flow::SendableRequest_Result_Data {
+                        request_id: flow_ethos::RequestId("zzzz".into()),
+                        string: "unknown second".into(),
+                    },
+                )),
+            ],
+        },
+        None,
+    );
+    assert!(matches!(
+        answer,
+        Output::Refused(signal_flow::Refusal::MinutesRefused(_))
+    ));
+    assert_eq!(fixture.nexus.store.memory_digest().unwrap(), before);
+    assert!(fixture.typed().unwrap_or_default().is_empty());
+}

@@ -239,7 +239,8 @@ impl SendsSeveralRequests for RunningNexus {
     ) -> Output {
         use crate::generated::operation::AdmissionMessage;
         use crate::launching::NamesTopic;
-        use crate::store::delivery_group::AdmitsDeliveryGroups;
+        use crate::message_projection::ProjectsAdmittedMessage;
+        use crate::store::delivery_group::{AdmitsDeliveryGroups, ValidatesDeliveryGroups};
         use crate::store::kept_answer::{AnswerRoute, RoutesAnswers};
         if send.sendable_message_vector.is_empty() {
             return Output::SentSeveral(Vec::new());
@@ -256,10 +257,35 @@ impl SendsSeveralRequests for RunningNexus {
             .dispatch_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prompt = send
+            .sendable_message_vector
+            .iter()
+            .map(|message| message.admitted_input(&flow_ethos::RequestId("0000".into()), &sender))
+            .collect::<Vec<_>>()
+            .datomize(Vec::new())
+            .protosize()
+            .compact();
+        if prompt.len() > MAX_SEND_PAYLOAD_BYTES {
+            return Output::Refused(Refusal::Oversized(SendPayloadSize {
+                actual_bytes: signal_flow::ActualBytes(
+                    i64::try_from(prompt.len()).unwrap_or(i64::MAX),
+                ),
+                maximum_bytes: signal_flow::MaximumBytes(MAX_SEND_PAYLOAD_BYTES as i64),
+            }));
+        }
+        match self
+            .store
+            .validate_delivery_group_capacity(send.sendable_message_vector.len())
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(refusal)) => return Output::Refused(refusal),
+            Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
+        }
         if !send.address.topic.0.as_str().is_camel_case_topic() {
             return Output::Refused(Refusal::TopicRefused(send.address.topic));
         }
         let mut messages = Vec::with_capacity(send.sendable_message_vector.len());
+        let mut answered_ids = std::collections::HashSet::new();
         for sendable in send.sendable_message_vector {
             let message = match self.store.resolve_sendable_message(sendable) {
                 Ok(Ok(message)) => message,
@@ -274,6 +300,39 @@ impl SendsSeveralRequests for RunningNexus {
                 Ok(AnswerRoute::To(address)) if address == send.address => {}
                 Ok(_) => return Output::Refused(Refusal::Unresolved),
                 Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
+            }
+            let (Message::HardAbrupt(request)
+            | Message::MiddleAbrupt(request)
+            | Message::Soft(request)) = &message;
+            if let Request::Task(task) = request {
+                use crate::store::reminder::RulesMinutes;
+                let now = match std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+                {
+                    Some(now) => now,
+                    None => {
+                        return Output::Refused(Refusal::Store(
+                            "clock is outside the lease range".into(),
+                        ));
+                    }
+                };
+                if let Err(refusal) = task.minutes.0.ruled_interval(now) {
+                    return Output::Refused(Refusal::MinutesRefused(refusal));
+                }
+            }
+            let answered_id = match request {
+                Request::Result(flow_ethos::ResultPayload::Answered(value)) => {
+                    Some(&value.request_id)
+                }
+                Request::Done(flow_ethos::DonePayload::Answered(value)) => Some(&value.request_id),
+                _ => None,
+            };
+            if let Some(id) = answered_id
+                && !answered_ids.insert(id.clone())
+            {
+                return Output::Refused(Refusal::Unresolved);
             }
             let delivery = if matches!(message, Message::Soft(_)) {
                 flow_ethos::Delivery::Queue

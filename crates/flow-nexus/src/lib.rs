@@ -2039,6 +2039,7 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
             eprintln!("flow-nexus: resumed by the owner; the Nexus acts on its own again");
             nexus.record_every_seat()?;
         }
+        crate::launching::ReconcilesInterruptedLaunches::reconcile_interrupted_launches(nexus);
         nexus.recover_wakes();
         Ok(())
     }

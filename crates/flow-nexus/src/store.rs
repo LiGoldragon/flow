@@ -5461,6 +5461,13 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
 
     fn current_flow_family_identity(table_name: &str) -> Option<(&'static str, SchemaHash)> {
         let (family, version) = match table_name {
+            "flow_nexus_permaflow_holds" => (
+                "flow-nexus-permaflow-holds",
+                "flow-nexus-permaflow-holds-v1",
+            ),
+            "flow_nexus_held_launches" => {
+                ("flow-nexus-held-launches", "flow-nexus-held-launches-v1")
+            }
             context_warnings::POLICY_TABLE => (
                 context_warnings::POLICY_FAMILY,
                 context_warnings::POLICY_SCHEMA,
@@ -5884,6 +5891,8 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
         let is = |tables: &[&str]| {
             actual.iter().all(|name| {
                 tables.contains(&name.as_str())
+                    || name == "flow_nexus_permaflow_holds"
+                    || name == "flow_nexus_held_launches"
                     || name == context_warnings::POLICY_TABLE
                     || name == context_warnings::HOOK_TABLE
                     || name == context_warnings::PROGRESS_TABLE
@@ -10127,6 +10136,119 @@ mod tests {
     impl EngineRecord for CorruptOutcomeRow {
         fn record_key(&self) -> sema_engine::RecordKey {
             sema_engine::RecordKey::new(self.launch_request_id.clone())
+        }
+    }
+
+    /// The recovery reader accepts only the manual hold families' exact identities and
+    /// leaves its opaque payloads intact through both opens and newer writes.
+    #[test]
+    fn manual_hold_families_are_preserved_unread_while_latest_memory_advances() {
+        use crate::store::context::RecordsContextSize;
+        use redb::{ReadableDatabase as _, ReadableTableMetadata as _};
+        for running in [false, true] {
+            let fixture = StoreFixture::new();
+            fixture.configured();
+            if running {
+                drop(fixture.configured_store());
+            }
+            let families = [
+                ("flow_nexus_permaflow_holds", "flow-nexus-permaflow-holds"),
+                ("flow_nexus_held_launches", "flow-nexus-held-launches"),
+            ];
+            {
+                let mut engine = Engine::open(EngineOpen::new(
+                    fixture.path(),
+                    SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
+                ))
+                .unwrap();
+                for (table, family) in families {
+                    engine
+                        .register_table(TableDescriptor::<super::FlowRecord>::new(
+                            TableName::new(table),
+                            FamilyName::new(family),
+                            SchemaHash::for_label(format!("{family}-v1")),
+                        ))
+                        .unwrap();
+                }
+            }
+            // Invalid archive bytes witness that neither open decodes rows.
+            let payload = b"opaque newer manual hold row";
+            {
+                let database = redb::Database::open(fixture.path()).unwrap();
+                let write = database.begin_write().unwrap();
+                for (table, _) in families {
+                    write
+                        .open_table(redb::TableDefinition::<String, &[u8]>::new(table))
+                        .unwrap()
+                        .insert("latest".to_owned(), payload.as_slice())
+                        .unwrap();
+                }
+                write.commit().unwrap();
+            }
+            drop(ConfigurationOnlyStore::open(&fixture.path()).unwrap());
+            {
+                let store = fixture.configured_store();
+                store.record_context_size("post-migration", 173).unwrap();
+            }
+            {
+                let store = fixture.configured_store();
+                assert_eq!(store.context_size("post-migration").unwrap(), Some(173));
+            }
+            {
+                let database = redb::ReadOnlyDatabase::open(fixture.path()).unwrap();
+                let read = database.begin_read().unwrap();
+                for (table, _) in families {
+                    let rows = read
+                        .open_table(redb::TableDefinition::<String, &[u8]>::new(table))
+                        .unwrap();
+                    assert_eq!(rows.len().unwrap(), 1);
+                    assert_eq!(
+                        rows.get("latest".to_owned()).unwrap().unwrap().value(),
+                        payload
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn manual_hold_recovery_refuses_wrong_identities_without_changing_memory() {
+        for (table, family) in [
+            ("flow_nexus_permaflow_holds", "flow-nexus-permaflow-holds"),
+            ("flow_nexus_held_launches", "flow-nexus-held-launches"),
+        ] {
+            for wrong_schema in [false, true] {
+                let fixture = StoreFixture::new();
+                fixture.configured();
+                {
+                    let mut engine = Engine::open(EngineOpen::new(
+                        fixture.path(),
+                        SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
+                    ))
+                    .unwrap();
+                    engine
+                        .register_table(TableDescriptor::<super::FlowRecord>::new(
+                            TableName::new(table),
+                            FamilyName::new(if wrong_schema { family } else { "foreign" }),
+                            if wrong_schema {
+                                SchemaHash::for_label("future-v2")
+                            } else {
+                                SchemaHash::for_label(format!("{family}-v1"))
+                            },
+                        ))
+                        .unwrap();
+                }
+                let before = std::fs::read(fixture.path()).unwrap();
+                assert!(matches!(
+                    ConfigurationOnlyStore::open(&fixture.path()),
+                    Err(super::StoreError::UnrecognizedMemory { .. })
+                ));
+                assert!(matches!(
+                    FlowStore::open_configured(&fixture.path()),
+                    Err(super::StoreError::UnrecognizedMemory { .. })
+                ));
+                assert_eq!(std::fs::read(fixture.path()).unwrap(), before);
+            }
         }
     }
 

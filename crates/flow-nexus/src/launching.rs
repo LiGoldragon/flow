@@ -887,6 +887,11 @@ impl ReconcilesInterruptedLaunches for RunningNexus {
             .dispatch_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        use crate::generated::overriding::HeedsOverrides;
+        if self.held() {
+            return;
+        }
+
         let opened = match self.store.opened_threads() {
             Ok(opened) => opened,
             Err(error) => {

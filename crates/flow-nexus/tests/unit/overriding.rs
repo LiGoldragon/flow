@@ -1173,7 +1173,7 @@ fn refused_parked_launch_is_terminal_and_never_reexecuted_after_release_or_resta
     use crate::launching::LaunchesFlows;
     use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
     use crate::store::{NamesConfiguredModel, RecordsLaunchOutcome};
-    for change_model in [false, true] {
+    for (change_model, change_purpose) in [(false, false), (true, false), (false, true)] {
         let mut fixture = NexusFixture::new();
         let seat = ended_claude(&fixture);
         let at = address(Model::Sol);
@@ -1229,6 +1229,14 @@ fn refused_parked_launch_is_terminal_and_never_reexecuted_after_release_or_resta
                     },
                 ]))
                 .unwrap();
+        } else if change_purpose {
+            let mut declaration = original_declaration.clone();
+            declaration.purpose = meta::Purpose("Changed after the launch was parked.".into());
+            fixture
+                .nexus
+                .store
+                .configure_change(meta::ConfigurationChange::Metaflows(vec![declaration]))
+                .unwrap();
         } else {
             let mut declaration = original_declaration.clone();
             declaration.root_option = Some(meta::Root(
@@ -1252,7 +1260,7 @@ fn refused_parked_launch_is_terminal_and_never_reexecuted_after_release_or_resta
             .launch_outcome(&profile.launch_request_id.0)
             .unwrap()
             .expect("a resumed refusal settles the parked request");
-        if change_model {
+        if change_model || change_purpose {
             assert_eq!(
                 outcome,
                 crate::store::LaunchOutcome::StartRejected(

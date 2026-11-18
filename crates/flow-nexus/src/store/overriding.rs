@@ -187,6 +187,13 @@ impl RemembersOverrides for FlowStore {
                 },
             ),
         };
+        #[cfg(test)]
+        {
+            use crate::test_faults::{InjectsCrashes, RefusedWrite};
+            if self.faults.refused_now(RefusedWrite::OverrideTransition) {
+                return Err(StoreError::StateInvariant);
+            }
+        }
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
         Ok(true)

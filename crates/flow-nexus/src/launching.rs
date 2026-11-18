@@ -892,9 +892,11 @@ impl LaunchesFlows for RunningNexus {
 
 /// A Codex launch an earlier Nexus left between opening its thread and
 /// acknowledging its seat is never finished: nothing replays it. At the
-/// Nexus's start, before any socket or responder
-/// is served, each such launch (unsettled, Codex, its thread recorded, its
-/// phase NativeLaunchIntentRecorded or NativeBound) is reconciled.
+/// unheld Nexus start, before any socket or responder is served, each such
+/// launch (unsettled, Codex, its thread recorded, its phase
+/// NativeLaunchIntentRecorded or NativeBound) is reconciled. Global and
+/// permaflow holds defer cleanup until Resume or Release; responder selection
+/// excludes these interrupted threads meanwhile.
 ///
 /// Its outcome and its cleanup are apart. First its cleanup is begun, a
 /// durable record with every step Pending; then its outcome is settled
@@ -915,6 +917,30 @@ impl LaunchesFlows for RunningNexus {
 /// the Nexus's start's `recover_wakes`, or the next request queued for it.
 pub trait ReconcilesInterruptedLaunches {
     fn reconcile_interrupted_launches(&self);
+}
+
+impl crate::generated::overriding::LaunchAttemptCarrying for signal_flow::LaunchAttempt {
+    fn carried_launch_attempt(&self) -> signal_flow::LaunchAttempt {
+        self.clone()
+    }
+}
+
+impl crate::generated::overriding::RecognizesInterruptedLaunches for crate::store::FlowStore {
+    fn launch_is_interrupted<N: crate::generated::overriding::LaunchAttemptCarrying>(
+        &self,
+        input: N,
+    ) -> Result<bool, StoreError> {
+        let attempt = input.carried_launch_attempt();
+        Ok(self.launch_attempt_unsettled(&attempt)?
+            && attempt
+                .native_launch_intent_option
+                .as_ref()
+                .is_some_and(|intent| intent.harness_kind == HarnessKind::Codex)
+            && matches!(
+                attempt.launch_attempt_phase,
+                LaunchAttemptPhase::NativeLaunchIntentRecorded | LaunchAttemptPhase::NativeBound
+            ))
+    }
 }
 
 impl ReconcilesInterruptedLaunches for RunningNexus {
@@ -1238,7 +1264,7 @@ impl crate::generated::overriding::ResumesPermaflowCleanup for RunningNexus {
         &self,
         input: N,
     ) -> bool {
-        use crate::generated::overriding::HeedsOverrides;
+        use crate::generated::overriding::{HeedsOverrides, RecognizesInterruptedLaunches};
         let address = input.address();
         use crate::codex::{AccountsOpenedThread, SelectsCodexEndpoint};
         use crate::send_tool::RefusesInterruptedCalls;
@@ -1277,16 +1303,15 @@ impl crate::generated::overriding::ResumesPermaflowCleanup for RunningNexus {
                 .store
                 .launch_attempt_unsettled(&attempt)
                 .unwrap_or(false);
-            let interrupted = unsettled
-                && attempt
-                    .native_launch_intent_option
-                    .as_ref()
-                    .is_some_and(|intent| intent.harness_kind == HarnessKind::Codex)
-                && matches!(
-                    attempt.launch_attempt_phase,
-                    LaunchAttemptPhase::NativeLaunchIntentRecorded
-                        | LaunchAttemptPhase::NativeBound
-                );
+            let interrupted = match self.store.launch_is_interrupted(attempt.clone()) {
+                Ok(interrupted) => interrupted,
+                Err(error) => {
+                    eprintln!(
+                        "flow-nexus: launch {launch_request_id} interruption unreadable: {error}"
+                    );
+                    continue;
+                }
+            };
             let cleanup = if interrupted {
                 // The cleanup is durable before the launch is settled, so a
                 // settled launch never loses what is left to clean.

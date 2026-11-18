@@ -2075,6 +2075,7 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            nexus.record_every_seat()?;
             match nexus.perform(Operation::Record(Record_Data::Switched(Holding::Acting))) {
                 Outcome::Recorded => {}
                 refused => {
@@ -2084,7 +2085,6 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
                 }
             }
             eprintln!("flow-nexus: resumed by the owner; the Nexus acts on its own again");
-            nexus.record_every_seat()?;
         }
         crate::launching::ReconcilesInterruptedLaunches::reconcile_interrupted_launches(nexus);
         nexus.recover_wakes();

@@ -6054,6 +6054,172 @@ fn resumed_connection(state: &std::path::Path, record: &str) -> Vec<serde_json::
     messages
 }
 
+/// A persisted global Hold keeps startup reconciliation from settling or
+/// cleaning an interrupted native launch. Only the owner's Resume takes up
+/// that debt, using the same cleanup body as a normal unheld startup.
+#[test]
+fn persisted_global_hold_defers_interrupted_launch_cleanup_until_owner_resume() {
+    use crate::Dispatches;
+    use crate::generated::overriding::{Holding, RemembersOverrides};
+    use crate::launching::ReconcilesInterruptedLaunches;
+    use crate::send_tool::{KeepsSendToolResponders, SendToolResponders};
+    use crate::store::opened_thread::RecordsOpenedThreads;
+    use crate::store::{ReadsLaunchAttempt, RecordsCreatedLaunchPane, RecordsLaunchOutcome};
+    use crate::test_faults::{InjectsCrashes, RefusedWrite};
+    for registered in [false, true] {
+        use crate::store::launch_cleanup::{CompletesCleanup, KeepsLaunchCleanups};
+        let mut fixture = NexusFixture::new();
+        let setup = interrupted_launch(&mut fixture);
+        let state = setup.world.state.clone();
+        let launch = setup.sender.launch_request_id.clone();
+        let herdr = launch_pane_herdr(&fixture);
+        fs::write(
+            herdr.join("agents"),
+            serde_json::json!([launch_pane_agent(Some(FRESH_THREAD))]).to_string(),
+        )
+        .unwrap();
+        let pane = fixture
+            .nexus
+            .store
+            .request_harness_start(&launch.0)
+            .unwrap()
+            .unwrap();
+        if registered {
+            let binding = NativeLaunchBinding {
+                launch_request_id: launch.clone(),
+                flow_id: flow_ethos::FlowId("abc123".into()),
+                native_session_id: signal_flow::NativeSessionId(FRESH_THREAD.into()),
+                harness_kind: HarnessKind::Codex,
+                herdr_pane_binding: pane.clone(),
+            };
+            assert!(
+                fixture
+                    .nexus
+                    .store
+                    .record_native_launch_binding(binding.clone())
+                    .unwrap()
+            );
+            let mut node = fixture.node();
+            node.flow_id = binding.flow_id.clone();
+            node.session_id = signal_flow::SessionId(FRESH_THREAD.into());
+            node.flow_lifecycle = FlowLifecycle::Pending;
+            node.origin = Origin::Unbound;
+            node.endpoint_selection = EndpointSelection::Unavailable;
+            node.herdr_route_selection = HerdrRouteSelection::Available(HerdrRoute {
+                herdr_session_name: pane.herdr_session_name,
+                herdr_agent_name: pane.herdr_agent_name,
+                herdr_pane_id: pane.herdr_pane_id,
+                herdr_terminal_id: pane.herdr_terminal_id,
+            });
+            fixture
+                .nexus
+                .store
+                .register_flow_in_role(
+                    node,
+                    signal_flow::CallerIdentity {
+                        flow_id: binding.flow_id,
+                        aspect: setup.sender.address.aspect.clone(),
+                        model_name: setup.sender.model_name.clone(),
+                    },
+                )
+                .unwrap();
+        }
+        let acknowledged = fixture.staged_launch("acknowledged-live", None);
+        acknowledged.reserve(&fixture.nexus);
+        acknowledged.record_native_intent(&fixture.nexus);
+        acknowledged.bind(&fixture.nexus);
+        acknowledged.register_and_acknowledge(&fixture.nexus);
+        assert!(
+            fixture
+                .nexus
+                .store
+                .record_opened_thread(
+                    &acknowledged.profile.launch_request_id.0,
+                    &acknowledged.binding.native_session_id.0,
+                )
+                .unwrap()
+        );
+        let mut responders = SendToolResponders::default();
+        let wanted = responders.wanted(&fixture.nexus);
+        assert!(!wanted.contains_key(FRESH_THREAD));
+        assert!(wanted.contains_key(&acknowledged.binding.native_session_id.0));
+        assert_eq!(
+            fixture.nexus.dispatch_meta(meta_signal_flow::Input::Hold),
+            meta_signal_flow::Output::Held
+        );
+        let held = fixture.nexus.store.holding().unwrap();
+        assert!(matches!(held, Holding::Held(_)));
+        let attempt = fixture.nexus.store.launch_attempt(&launch.0).unwrap();
+        let calls = fs::read(herdr.join("calls")).unwrap_or_default();
+
+        fixture.restarted();
+        assert_eq!(fixture.nexus.store.holding().unwrap(), held);
+        let wanted = responders.wanted(&fixture.nexus);
+        assert!(!wanted.contains_key(FRESH_THREAD));
+        assert!(wanted.contains_key(&acknowledged.binding.native_session_id.0));
+        fixture.nexus.reconcile_interrupted_launches();
+        fixture.nexus.recover_wakes();
+        assert_eq!(fixture.nexus.store.holding().unwrap(), held);
+        assert_eq!(
+            fixture.nexus.store.launch_attempt(&launch.0).unwrap(),
+            attempt
+        );
+        assert_eq!(fixture.nexus.store.launch_outcome(&launch.0).unwrap(), None);
+        assert_eq!(fixture.nexus.store.launch_cleanup(&launch.0).unwrap(), None);
+        assert!(!state.join("restart-invocations").exists());
+        assert_eq!(fs::read(herdr.join("calls")).unwrap_or_default(), calls);
+
+        fixture
+            .nexus
+            .store
+            .faults
+            .refuse_next(RefusedWrite::OverrideTransition);
+        assert!(matches!(
+            fixture.nexus.dispatch_meta(meta_signal_flow::Input::Resume),
+            meta_signal_flow::Output::Refused(meta_signal_flow::Refused_Data::StoreRefused(_))
+        ));
+        assert_eq!(fixture.nexus.store.holding().unwrap(), held);
+        assert_eq!(fixture.nexus.store.launch_cleanup(&launch.0).unwrap(), None);
+        assert!(!state.join("restart-invocations").exists());
+        assert_eq!(
+            fixture.nexus.dispatch_meta(meta_signal_flow::Input::Resume),
+            meta_signal_flow::Output::Resumed
+        );
+        assert_eq!(fixture.nexus.store.holding().unwrap(), Holding::Acting);
+        assert!(!responders.wanted(&fixture.nexus).contains_key(FRESH_THREAD));
+        assert!(
+            fixture
+                .nexus
+                .store
+                .launch_outcome(&launch.0)
+                .unwrap()
+                .is_some()
+        );
+        let cleanup = fixture
+            .nexus
+            .store
+            .launch_cleanup(&launch.0)
+            .unwrap()
+            .unwrap();
+        assert!(cleanup.is_complete(), "{cleanup:?}");
+        let calls = fs::read_to_string(herdr.join("calls")).unwrap();
+        assert!(calls.contains("pane close"), "{calls}");
+        let native_calls = fs::read_to_string(state.join("restart-invocations")).unwrap();
+        assert_eq!(native_calls, "3");
+        let settled = fixture.nexus.store.launch_outcome(&launch.0).unwrap();
+        fixture.nexus.reconcile_interrupted_launches();
+        assert_eq!(
+            fixture.nexus.store.launch_outcome(&launch.0).unwrap(),
+            settled
+        );
+        assert_eq!(
+            fs::read_to_string(state.join("restart-invocations")).unwrap(),
+            native_calls
+        );
+        assert_eq!(fs::read_to_string(herdr.join("calls")).unwrap(), calls);
+    }
+}
+
 /// The calls an app-server replays on resume are all taken, however many:
 /// the Nexus resumes the thread a second time as the replay's end (the
 /// app-server answers each resume of a running thread only after the

@@ -1005,3 +1005,91 @@ fn held_refresh_records_the_order_without_replacing_the_resting_flow() {
     assert_eq!(stored(&fixture, Model::Sol).state, State::Awake(seat_id()));
     assert!(fixture.typed().is_none());
 }
+
+#[test]
+fn held_scheduled_reminder_queues_once_across_restart_and_release_delivers_it() {
+    use crate::store::scheduled_reminder::SchedulesReminders;
+    let mut fixture = NexusFixture::new();
+    resting_seat(&fixture);
+    let at = address(Model::Sol);
+    overridden(&fixture, meta::Input::HoldPermaflow(at.clone()));
+    let request = fixture
+        .nexus
+        .store
+        .schedule_reminder(at.clone(), SentBy::Flow, 0, "held-clock-request".into())
+        .unwrap()
+        .unwrap();
+    fixture.nexus.send_due_reminders();
+    assert!(fixture.typed().is_none());
+    assert_eq!(stored(&fixture, Model::Sol).state, State::Awake(seat_id()));
+    assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 1);
+    assert!(
+        fixture
+            .nexus
+            .store
+            .scheduled_reminder(&request)
+            .unwrap()
+            .is_none()
+    );
+    let queued = stored(&fixture, Model::Sol).queue;
+    fixture.restarted();
+    fixture.nexus.send_due_reminders();
+    fixture.nexus.recover_wakes();
+    assert!(fixture.typed().is_none());
+    assert_eq!(stored(&fixture, Model::Sol).queue, queued);
+    overridden(&fixture, meta::Input::ReleasePermaflow(at));
+    let typed = fixture
+        .typed()
+        .expect("release delivers the scheduled reminder");
+    assert!(typed.contains("held-clock-request"), "{typed}");
+    assert_eq!(typed.matches("held-clock-request").count(), 1, "{typed}");
+}
+
+#[test]
+fn held_task_sender_keeps_due_task_notice_queued_until_release() {
+    let fixture = NexusFixture::new();
+    resting_seat(&fixture);
+    let sender = address(Model::Sol);
+    let recipient = address(Model::Astra);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Astra, State::Asleep, vec![], vec![]));
+    let PrivateSendResponse::SendAccepted(accepted) = fixture
+        .nexus
+        .store
+        .accept_logical_delivery(
+            &recipient,
+            SentBy::Sender(sender.clone()),
+            flow_ethos::Delivery::Queue,
+            Message::Soft(Request::Task(flow_ethos::AnswerableTask {
+                minutes: flow_ethos::Minutes(10),
+                string: "held-task-reminder".into(),
+            })),
+            None,
+        )
+        .unwrap()
+    else {
+        panic!("the task is admitted")
+    };
+    let mut reminder = fixture
+        .nexus
+        .store
+        .reminder(&accepted.logical_delivery_id.0)
+        .unwrap()
+        .unwrap();
+    reminder.due_option = Some(crate::generated::memory::Due(0));
+    fixture.nexus.store.hold_reminder(reminder).unwrap();
+    overridden(&fixture, meta::Input::HoldPermaflow(sender.clone()));
+    fixture.nexus.send_due_reminders();
+    assert!(fixture.typed().is_none());
+    let queued = stored(&fixture, Model::Sol).queue;
+    assert_eq!(queued.0.len(), 1);
+    fixture.nexus.send_due_reminders();
+    assert_eq!(stored(&fixture, Model::Sol).queue, queued);
+    overridden(&fixture, meta::Input::ReleasePermaflow(sender));
+    let typed = fixture
+        .typed()
+        .expect("release delivers the due task notice");
+    assert!(typed.contains("held-task-reminder"), "{typed}");
+}

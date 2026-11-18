@@ -101,11 +101,17 @@ Library
   ResumesPermaflowWork.[ resume_permaflow.{ [ Addressed ] [ Boolean ] } ]
   ResumesPermaflowCleanup.[ resume_permaflow_cleanup.{ [ Addressed ] [ Boolean ] } ]
   ResumesHeldLaunches.[ resume_held_launches.{ [ Addressed ] [ Boolean ] } ]
+  ; An opened launch's pre-acknowledgement Codex intent is interrupted
+  ; only while its outcome remains unsettled. Cleanup and responder
+  ; selection ask this one classification.
+  LaunchAttemptCarrying.[ carried_launch_attempt.[ LaunchAttempt ] ]
+  RecognizesInterruptedLaunches.[ launch_is_interrupted.{ [ LaunchAttemptCarrying ] [ Result<Boolean StoreError> ] } ]
   DescribesOverrideTable.[ descriptor:[ TableDescriptor<Self> ] ]
   EntersByOverride.[ overridden.[ Transition ] ]
   InterruptsRunningTurns.[ interrupt_running_turn.{ [ Seat ] [ TurnInterruption ] } ]
   InterruptsCodexThreads.[ interrupt_thread.{ [ CodexThread ] [ Result<TurnInterruption CodexAdapterUnavailable> ] } ] ]
-[ FlowStore.[ RemembersOverrides ParksHeldLaunches ]         ; associations
+[ LaunchAttempt.[ LaunchAttemptCarrying ]
+  FlowStore.[ RemembersOverrides ParksHeldLaunches RecognizesInterruptedLaunches ]         ; associations
   RunningNexus.[ HeedsOverrides
                  SerializesPermaflowHolds
                  AdmitsPermaflowControl

@@ -41,6 +41,7 @@ impl ProjectsRefusal for signal_flow::Refusal {
             Refusal::RequestIdSpaceFull => VisibleRefusal::RequestIdSpaceFull,
             Refusal::RequestIdDrawsCollided => VisibleRefusal::RequestIdDrawsCollided,
             Refusal::MinutesRefused(value) => VisibleRefusal::MinutesRefused(value.clone()),
+            Refusal::PermaflowHeld(value) => VisibleRefusal::PermaflowHeld(value.clone()),
         }
     }
 }
@@ -528,6 +529,7 @@ impl ProjectsInspection for crate::store::repair::Inspection {
                 })
                 .collect(),
             restart_record_option: value.restart_record_option,
+            permaflow_hold: value.permaflow_hold,
         }
     }
 }

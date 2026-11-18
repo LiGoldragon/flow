@@ -214,6 +214,8 @@ const OPTIONAL_TURN_RETENTION_TABLE: &str = "flow_nexus_meta_turn_retention_conf
 /// empty.
 const OPTIONAL_FLOW_TRANSITIONS_TABLE: &str = overriding::TRANSITIONS_TABLE;
 const OPTIONAL_HOLD_TABLE: &str = overriding::HOLD_TABLE;
+const OPTIONAL_PERMAFLOW_HOLD_TABLE: &str = overriding::PERMAFLOW_HOLD_TABLE;
+const OPTIONAL_HELD_LAUNCH_TABLE: &str = overriding::HELD_LAUNCH_TABLE;
 const META_TURN_RETENTION_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_turn_retention_configuration");
 const META_TURN_RETENTION_CONFIGURATION_FAMILY: &str =
@@ -327,6 +329,8 @@ const RUNNING_TABLES: &[&str] = &[
     OPTIONAL_TURN_RETENTION_TABLE,
     OPTIONAL_FLOW_TRANSITIONS_TABLE,
     OPTIONAL_HOLD_TABLE,
+    OPTIONAL_PERMAFLOW_HOLD_TABLE,
+    OPTIONAL_HELD_LAUNCH_TABLE,
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -1751,6 +1755,8 @@ pub struct FlowStore {
     /// Taken by every write of a flow's transitions (`transitions`).
     transitions_gate: Mutex<()>,
     hold: TableReference<crate::generated::memory::StoredHold>,
+    permaflow_holds: TableReference<crate::generated::memory::StoredPermaflowHold>,
+    held_launches: TableReference<crate::generated::memory::StoredHeldLaunch>,
     queue_delivery: QueueDeliveryTables,
     send_outcomes: SendOutcomeTables,
     logical_deliveries: LogicalDeliveryTables,
@@ -2851,6 +2857,12 @@ impl OpensFlowStore for FlowStore {
         let hold = engine.register_table(
             <crate::generated::memory::StoredHold as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
         )?;
+        let permaflow_holds = engine.register_table(
+            <crate::generated::memory::StoredPermaflowHold as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
+        )?;
+        let held_launches = engine.register_table(
+            <crate::generated::memory::StoredHeldLaunch as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2891,6 +2903,8 @@ impl OpensFlowStore for FlowStore {
             flow_transitions,
             transitions_gate: Mutex::new(()),
             hold,
+            permaflow_holds,
+            held_launches,
             queue_delivery,
             send_outcomes,
             logical_deliveries,
@@ -3084,6 +3098,12 @@ impl OpensFlowStore for FlowStore {
         let hold = engine.register_table(
             <crate::generated::memory::StoredHold as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
         )?;
+        let permaflow_holds = engine.register_table(
+            <crate::generated::memory::StoredPermaflowHold as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
+        )?;
+        let held_launches = engine.register_table(
+            <crate::generated::memory::StoredHeldLaunch as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -3124,6 +3144,8 @@ impl OpensFlowStore for FlowStore {
             flow_transitions,
             transitions_gate: Mutex::new(()),
             hold,
+            permaflow_holds,
+            held_launches,
             queue_delivery,
             send_outcomes,
             logical_deliveries,
@@ -4142,18 +4164,12 @@ impl ReservesLaunchAttempt for FlowStore {
                 },
             );
         }
-        let attempt = LaunchAttempt {
-            launch_request_id,
-            launch_profile: launch.launch_profile.clone(),
-            prompt_sha256,
+        use crate::generated::overriding::ParkedLaunch;
+        let attempt = crate::generated::operation::LaunchReservation {
+            composed_launch: launch.clone(),
             origin,
-            launch_attempt_phase: LaunchAttemptPhase::Reserved,
-            native_launch_intent_option: None,
-            native_launch_binding_option: None,
-            registration_acknowledgement_option: None,
-            prompt_delivery_intent_option: None,
-            prompt_delivery_result_option: None,
-        };
+        }
+        .attempt();
         self.engine.assert(Assertion::new(
             self.launch_attempts,
             StoredLaunchAttempt {
@@ -4203,8 +4219,22 @@ impl RecordsNativeLaunchIntent for FlowStore {
             return Ok(false);
         }
         stored.launch_attempt.launch_attempt_phase = LaunchAttemptPhase::NativeLaunchIntentRecorded;
+        let request_key = RecordKey::new(intent.launch_request_id.0.clone());
         stored.launch_attempt.native_launch_intent_option = Some(intent);
-        self.mutate_launch_attempt(stored)?;
+        let mut commit = self
+            .engine
+            .begin_atomic_commit()
+            .mutate(self.launch_attempts, stored);
+        if !self
+            .engine
+            .match_records(QueryPlan::key(self.held_launches, request_key.clone()))?
+            .records()
+            .is_empty()
+        {
+            commit = commit.retract(self.held_launches, request_key);
+        }
+        self.engine.commit_atomic(commit)?;
+        self.launch_changes.announce();
         Ok(true)
     }
 }
@@ -5560,6 +5590,14 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                 overriding::TRANSITIONS_SCHEMA,
             ),
             "flow_nexus_hold" => (overriding::HOLD_FAMILY, overriding::HOLD_SCHEMA),
+            "flow_nexus_permaflow_holds" => (
+                overriding::PERMAFLOW_HOLD_FAMILY,
+                overriding::PERMAFLOW_HOLD_SCHEMA,
+            ),
+            "flow_nexus_held_launches" => (
+                overriding::HELD_LAUNCH_FAMILY,
+                overriding::HELD_LAUNCH_SCHEMA,
+            ),
             "flow_nexus_meta_protected_address_configuration" => (
                 META_PROTECTED_ADDRESS_CONFIGURATION_FAMILY,
                 META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA,
@@ -5914,6 +5952,8 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                     || *name == OPTIONAL_TURN_RETENTION_TABLE
                     || *name == OPTIONAL_FLOW_TRANSITIONS_TABLE
                     || *name == OPTIONAL_HOLD_TABLE
+                    || *name == OPTIONAL_PERMAFLOW_HOLD_TABLE
+                    || *name == OPTIONAL_HELD_LAUNCH_TABLE
                     || *name == OPTIONAL_REQUEST_ID_TABLE
                     || *name == OPTIONAL_DELIVER_CALL_TABLE
                     || *name == OPTIONAL_STORE_IDENTITY_TABLE

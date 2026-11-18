@@ -373,4 +373,9 @@ Memory
   Flow.{ FlowId Address Vector<Transition> }
   ; The override panel's switch, one row while the Nexus is held: the
   ; moment Hold was taken. No row: the Nexus acts on its own.
-  StoredHold.{ Moment } ]
+  StoredHold.{ Moment }
+  ; One nonexpiring manual hold per Address. Absent means released.
+  StoredPermaflowHold.{ Address }
+  ; Admission order belongs only to the parked marker, not the attempt.
+  HeldLaunchPosition.Integer
+  StoredHeldLaunch.{ LaunchRequestId HeldLaunchPosition } ]

@@ -860,6 +860,7 @@ pub(crate) enum PaneWatchEnd {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PaneWatchLapse {
     SessionUnknown,
+    PermaflowHeld,
     SubscriptionRefused(String),
     StreamClosedPanePresent,
     /// The worker acted and its row still stands: its write was refused.
@@ -1083,6 +1084,12 @@ impl<'scope> PassesPaneWatches<'scope> for ReapedPaneWatches<'scope> {
         // evidence of anything, as an unreadable store is not.
         let mut wanted: BTreeMap<String, PendingReap> = BTreeMap::new();
         for row in rows {
+            if crate::generated::overriding::HeedsOverrides::permaflow_held(
+                nexus,
+                row.address.clone(),
+            ) {
+                continue;
+            }
             if row.reap_standing.reap_step() != ReapStep::PaneClose {
                 continue;
             }
@@ -1361,6 +1368,16 @@ impl WatchesReapedPane for RunningNexus {
             // closed even when a person works in its plain shell (the
             // Bare-shell boundary), as every other close of a Flow's pane is.
             Ok(PaneOwnership::Owned | PaneOwnership::Bare) => {
+                use crate::generated::overriding::{HeedsOverrides, SerializesPermaflowEffects};
+                let row = match self.store.pending_reap(predecessor) {
+                    Ok(Some(row)) => row,
+                    Ok(None) => return PaneWatchEnd::Stale,
+                    Err(_) => return PaneWatchEnd::Lapsed(PaneWatchLapse::StoreUnreadable),
+                };
+                let _effect = self.waking.effect(row.address.clone());
+                if self.permaflow_held(row.address) {
+                    return PaneWatchEnd::Lapsed(PaneWatchLapse::PermaflowHeld);
+                }
                 match self.herdr.close_pane_until(&route, cancellation) {
                     Err(cause) => return PaneWatchEnd::Cancelled(cause),
                     Ok(PaneClose::Closed) => {

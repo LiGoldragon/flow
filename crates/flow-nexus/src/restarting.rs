@@ -1599,6 +1599,13 @@ impl RestartsInSteps for RunningNexus {
 
 impl RestartsFlows for RunningNexus {
     fn restart(&self, flow_id: &str) -> Output {
+        use crate::generated::overriding::{AdmitsPermaflowControl, Subject};
+        let _effect =
+            match self.ordinary_control(Subject::Named(signal_flow::FlowId(flow_id.to_owned()))) {
+                Ok(effect) => effect,
+                Err(answer) => return answer,
+            };
+
         let closed = {
             let _turn = self
                 .dispatch_gate
@@ -1611,6 +1618,13 @@ impl RestartsFlows for RunningNexus {
     }
 
     fn restart_at_idle_event(&self, flow_id: &str) -> Output {
+        use crate::generated::overriding::{AdmitsPermaflowControl, Subject};
+        let _effect =
+            match self.ordinary_control(Subject::Named(signal_flow::FlowId(flow_id.to_owned()))) {
+                Ok(effect) => effect,
+                Err(answer) => return answer,
+            };
+
         let closed = {
             let _turn = self
                 .dispatch_gate
@@ -1631,6 +1645,11 @@ impl RestartsFlows for RunningNexus {
             self.store.restart_records().unwrap_or_default()
         };
         for record in records {
+            use crate::generated::overriding::{AdmitsPermaflowControl, Subject};
+            let _effect = match self.ordinary_control(Subject::Named(record.flow_id.clone())) {
+                Ok(effect) => effect,
+                Err(_) => continue,
+            };
             let flow_id = record.flow_id.clone();
             let response = match record.restart_phase.clone() {
                 // Composed before the old pane is touched again: refused,

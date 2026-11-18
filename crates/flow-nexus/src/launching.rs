@@ -5,8 +5,8 @@
 
 use crate::delivery::lease::LeasesPanes;
 use crate::generated::operation::{
-    Failed_Data, Open_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Settled_Data,
-    Register_Data, Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
+    Failed_Data, LaunchReservation, Open_Data, Operation, Outcome, PaneLaunch, Record_Data,
+    Record_Data_Settled_Data, Register_Data, Reserved_Data, Submit_Data, Title_Data,
 };
 use crate::generated::starter::CarriesFlowId;
 use crate::harness_command::ParsesHarnessFlags;
@@ -248,6 +248,11 @@ impl NamesLaunchSession for RunningNexus {
 
 impl LaunchesFlows for RunningNexus {
     fn start(&self, mut profile: LaunchProfile, origin: Origin) -> Output {
+        use crate::generated::overriding::{
+            HeedsOverrides, ParksHeldLaunches, SerializesPermaflowEffects,
+        };
+        let _effect = self.waking.effect(profile.address.clone());
+
         profile.herdr_session_name = match self.launch_session() {
             Ok(session) => session,
             Err(_) => return Output::StartRejected(StartRejection::LaunchPersistenceRefused),
@@ -269,9 +274,20 @@ impl LaunchesFlows for RunningNexus {
                 return Output::StartRejected(StartRejection::LaunchPersistenceRefused);
             }
         };
-        if let Some(attempt) = existing {
+        let resumable = existing.as_ref().is_some_and(|attempt| {
+            attempt.launch_attempt_phase == LaunchAttemptPhase::Reserved
+                && !self.permaflow_held(profile.address.clone())
+                && self
+                    .store
+                    .marked_held_launch(attempt.launch_request_id.clone())
+                    .unwrap_or(false)
+        });
+        if let Some(attempt) = existing.filter(|_| !resumable) {
             if attempt.launch_profile != profile {
                 return Output::StartRejected(StartRejection::LaunchRequestConflict);
+            }
+            if self.permaflow_held(profile.address.clone()) {
+                return Output::LaunchPending(attempt);
             }
             if attempt.launch_attempt_phase == LaunchAttemptPhase::PromptObserved {
                 let Some(binding) = attempt.native_launch_binding_option else {
@@ -394,21 +410,40 @@ impl LaunchesFlows for RunningNexus {
             Outcome::Composed(launch) => launch,
             outcome => return Self::composition_refused(outcome),
         };
-        // A Claude launch's FlowId is claimed here, before its harness
-        // exists; the harness is spawned with it.
-        let reserved = match self.perform(Operation::Reserve(Reserve_Data {
+        let reservation = LaunchReservation {
             composed_launch: launch.clone(),
             origin: origin.clone(),
-        })) {
+        };
+        if self.permaflow_held(launch.launch_profile.address.clone()) {
+            return match self.perform(Operation::ParkLaunch(reservation)) {
+                Outcome::Reserved(Reserved_Data {
+                    launch_attempt_reservation:
+                        LaunchAttemptReservation::Reserved(attempt)
+                        | LaunchAttemptReservation::Existing(attempt),
+                    ..
+                }) => Output::LaunchPending(attempt),
+                Outcome::Reserved(Reserved_Data {
+                    launch_attempt_reservation: LaunchAttemptReservation::Conflict,
+                    ..
+                }) => Output::StartRejected(StartRejection::LaunchRequestConflict),
+                _ => persistence(),
+            };
+        }
+        // A Claude identity is claimed only when the parked launch executes.
+        let reserved = match self.perform(Operation::Reserve(reservation)) {
             Outcome::Reserved(Reserved_Data {
                 launch_attempt_reservation: LaunchAttemptReservation::Reserved(_),
                 flow_id_option,
             }) => flow_id_option,
             Outcome::Reserved(Reserved_Data {
                 launch_attempt_reservation: LaunchAttemptReservation::Existing(attempt),
-                ..
+                flow_id_option,
             }) => {
-                return Output::LaunchPending(attempt);
+                if resumable {
+                    flow_id_option
+                } else {
+                    return Output::LaunchPending(attempt);
+                }
             }
             Outcome::Reserved(Reserved_Data {
                 launch_attempt_reservation: LaunchAttemptReservation::Conflict,
@@ -900,6 +935,11 @@ impl ReconcilesInterruptedLaunches for RunningNexus {
             let Ok(Some(attempt)) = self.store.launch_attempt(&launch_request_id) else {
                 continue;
             };
+            use crate::generated::overriding::{HeedsOverrides, SerializesPermaflowEffects};
+            let _effect = self.waking.effect(attempt.launch_profile.address.clone());
+            if self.permaflow_held(attempt.launch_profile.address.clone()) {
+                continue;
+            }
             let unsettled = self
                 .store
                 .launch_attempt_unsettled(&attempt)
@@ -1251,5 +1291,33 @@ impl ObservesLaunch for RunningNexus {
             }
             changes.after_while(seen, &|| cancellation.cause().is_none());
         }
+    }
+}
+
+impl crate::generated::overriding::ResumesHeldLaunches for RunningNexus {
+    fn resume_held_launches<N: crate::generated::overriding::Addressed>(&self, input: N) -> bool {
+        use crate::generated::overriding::{HeedsOverrides, ParksHeldLaunches};
+        let address = input.address();
+        let _turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.permaflow_held(address.clone()) {
+            return false;
+        }
+        let Ok(markers) = self.store.held_launches() else {
+            return false;
+        };
+        for marker in markers {
+            let Ok(Some(attempt)) = self.store.launch_attempt(&marker.launch_request_id.0) else {
+                continue;
+            };
+            if attempt.launch_profile.address != address {
+                continue;
+            }
+            let response = self.start(attempt.launch_profile, attempt.origin);
+            let _ = self.settle(&marker.launch_request_id.0, response);
+        }
+        true
     }
 }

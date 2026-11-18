@@ -551,6 +551,11 @@ impl signal_flow::Answering for OrdinaryCall<'_> {
     }
 
     fn stop(&self, flow_id: &signal_flow::FlowId) -> Result<signal_flow::FlowId, Output> {
+        use crate::generated::overriding::{AdmitsPermaflowControl, Subject};
+        let _effect = self
+            .nexus
+            .ordinary_control(Subject::Named(flow_id.clone()))?;
+
         let nexus = self.nexus;
         let node = match nexus.store.flow_node(&flow_id.0) {
             Ok(Some(node)) => node,
@@ -1262,6 +1267,12 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         &self,
         flow_id: &signal_flow::FlowId,
     ) -> Result<signal_flow::FlowId, meta_signal_flow::Output> {
+        use crate::generated::overriding::AdmitsPermaflowControl;
+        let _effect = self
+            .nexus
+            .machine_control(crate::generated::overriding::Subject::Named(
+                flow_id.clone(),
+            ))?;
         use crate::restarting::RestartsFlows;
         match self.nexus.restart(&flow_id.0).into_meta() {
             meta_signal_flow::Output::Restarted(restarted) => Ok(restarted),
@@ -1273,6 +1284,12 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         &self,
         delivery_request: &meta_signal_flow::DeliveryRequest,
     ) -> Result<meta_signal_flow::VisibleDelivery, meta_signal_flow::Output> {
+        use crate::generated::overriding::AdmitsPermaflowControl;
+        let _effect = self
+            .nexus
+            .machine_control(crate::generated::overriding::Subject::Named(
+                delivery_request.flow_id.clone(),
+            ))?;
         match DeliversMessages::deliver(self.nexus, delivery_request.clone()) {
             meta_signal_flow::Output::MessageTyped(delivery) => Ok(delivery),
             other => Err(other),
@@ -1293,6 +1310,12 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         &self,
         command_request: &meta_signal_flow::CommandRequest,
     ) -> Result<meta_signal_flow::CommandOutcome, meta_signal_flow::Output> {
+        use crate::generated::overriding::AdmitsPermaflowControl;
+        let _effect = self
+            .nexus
+            .machine_control(crate::generated::overriding::Subject::Named(
+                command_request.flow_id.clone(),
+            ))?;
         match self.nexus.command(command_request.clone()) {
             meta_signal_flow::Output::Commanded(outcome) => Ok(outcome),
             other => Err(other),
@@ -1501,6 +1524,12 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         &self,
         flow_id: &signal_flow::FlowId,
     ) -> Result<signal_flow::FlowId, meta_signal_flow::Output> {
+        use crate::generated::overriding::AdmitsPermaflowControl;
+        let _effect = self
+            .nexus
+            .machine_control(crate::generated::overriding::Subject::Named(
+                flow_id.clone(),
+            ))?;
         use crate::generated::overriding::{
             EntersByOverride, HeedsOverrides, Subject, Transitioned,
         };
@@ -1596,6 +1625,12 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         &self,
         address: &signal_flow::Address,
     ) -> Result<signal_flow::FlowId, meta_signal_flow::Output> {
+        use crate::generated::overriding::AdmitsPermaflowControl;
+        let _effect =
+            self.nexus
+                .machine_control(crate::generated::overriding::Subject::Permaflow(
+                    address.clone(),
+                ))?;
         use crate::delivery::lease::LeasesPanes;
         use crate::generated::memory::RefreshCaller;
         use crate::generated::operation::{Operation, Record_Data};
@@ -1771,6 +1806,12 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         &self,
         flow_id: &signal_flow::FlowId,
     ) -> Result<signal_flow::FlowId, meta_signal_flow::Output> {
+        use crate::generated::overriding::AdmitsPermaflowControl;
+        let _effect = self
+            .nexus
+            .machine_control(crate::generated::overriding::Subject::Named(
+                flow_id.clone(),
+            ))?;
         use crate::delivery::lease::LeasesPanes;
         use crate::generated::operation::{Operation, Outcome, Record_Data};
         use crate::generated::overriding::{
@@ -1854,6 +1895,12 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         &self,
         address: &signal_flow::Address,
     ) -> Result<signal_flow::Address, meta_signal_flow::Output> {
+        use crate::generated::overriding::AdmitsPermaflowControl;
+        let _effect =
+            self.nexus
+                .machine_control(crate::generated::overriding::Subject::Permaflow(
+                    address.clone(),
+                ))?;
         use crate::generated::overriding::{HeedsOverrides, Subject};
         use crate::sending::SendsRequests;
         use meta_signal_flow::{Output, Refused_Data, StoreFailure};
@@ -2041,6 +2088,42 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         }
         nexus.recover_wakes();
         Ok(())
+    }
+    fn hold_permaflow(
+        &self,
+        address: &signal_flow::Address,
+    ) -> Result<signal_flow::Address, meta_signal_flow::Output> {
+        use crate::generated::overriding::SerializesPermaflowHolds;
+        self.nexus
+            .establish_permaflow_hold(address.clone())
+            .map_err(|error| {
+                meta_signal_flow::Output::Refused(meta_signal_flow::Refused_Data::StoreRefused(
+                    meta_signal_flow::StoreFailure(error.to_string()),
+                ))
+            })?;
+        Ok(address.clone())
+    }
+
+    fn release_permaflow(
+        &self,
+        address: &signal_flow::Address,
+    ) -> Result<signal_flow::Address, meta_signal_flow::Output> {
+        use crate::generated::overriding::SerializesPermaflowHolds;
+        if self
+            .nexus
+            .remove_permaflow_hold(address.clone())
+            .map_err(|error| {
+                meta_signal_flow::Output::Refused(meta_signal_flow::Refused_Data::StoreRefused(
+                    meta_signal_flow::StoreFailure(error.to_string()),
+                ))
+            })?
+        {
+            use crate::generated::overriding::ResumesHeldLaunches;
+            use crate::waking::SleepsAndWakesSeats;
+            self.nexus.resume_held_launches(address.clone());
+            self.nexus.wake_due(address.clone());
+        }
+        Ok(address.clone())
     }
 }
 
@@ -3122,7 +3205,9 @@ impl DispatchesSerially for RunningNexus {
         | meta_signal_flow::Input::Unlock(_)
         | meta_signal_flow::Input::Forget(_)
         | meta_signal_flow::Input::Hold
-        | meta_signal_flow::Input::Resume = &query
+        | meta_signal_flow::Input::Resume
+        | meta_signal_flow::Input::HoldPermaflow(_)
+        | meta_signal_flow::Input::ReleasePermaflow(_) = &query
         {
             let response = self.dispatch_meta_from(query, resolver);
             {

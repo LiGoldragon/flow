@@ -221,8 +221,8 @@ impl ReadsLeasedPane for RunningNexus {
 /// The privileged pane writes.
 pub trait DeliversMessages {
     fn deliver(&self, request: DeliveryRequest) -> Output;
-    fn deliver_while_waking(&self, request: DeliveryRequest, lease: &WakingLease<'_>) -> Output;
-    fn deliver_inner(&self, request: DeliveryRequest, lease: Option<&WakingLease<'_>>) -> Output;
+    fn deliver_while_waking(&self, request: DeliveryRequest, lease: &WakingLease) -> Output;
+    fn deliver_inner(&self, request: DeliveryRequest, lease: Option<&WakingLease>) -> Output;
     fn vet(&self, request: &DeliveryRequest) -> Output;
     fn command(&self, request: CommandRequest) -> Output;
 }
@@ -254,11 +254,11 @@ impl DeliversMessages for RunningNexus {
         self.deliver_inner(request, lease.as_ref())
     }
 
-    fn deliver_while_waking(&self, request: DeliveryRequest, lease: &WakingLease<'_>) -> Output {
+    fn deliver_while_waking(&self, request: DeliveryRequest, lease: &WakingLease) -> Output {
         self.deliver_inner(request, Some(lease))
     }
 
-    fn deliver_inner(&self, request: DeliveryRequest, lease: Option<&WakingLease<'_>>) -> Output {
+    fn deliver_inner(&self, request: DeliveryRequest, lease: Option<&WakingLease>) -> Output {
         match self.store.delivery(&request.delivery_id.0) {
             Ok(Some(delivery)) => {
                 return Output::MessageTyped(

@@ -4,7 +4,7 @@
 //! each registered empty, its switch Acting and no flow's transition held.
 
 use super::{FlowStore, ReadsFlowStore, StoreError};
-use crate::generated::memory::{Flow, StoredHold};
+use crate::generated::memory::{Flow, StoredHold, StoredPermaflowHold};
 use crate::generated::overriding::{
     DescribesOverrideTable, Holding, RemembersOverrides, Seat, Subject, Transitioned,
 };
@@ -21,6 +21,9 @@ pub(super) const TRANSITIONS_SCHEMA: &str = "flow-nexus-flow-transitions-v1";
 pub(super) const HOLD_TABLE: &str = "flow_nexus_hold";
 pub(super) const HOLD_FAMILY: &str = "flow-nexus-hold";
 pub(super) const HOLD_SCHEMA: &str = "flow-nexus-hold-v1";
+pub(super) const PERMAFLOW_HOLD_TABLE: &str = "flow_nexus_permaflow_holds";
+pub(super) const PERMAFLOW_HOLD_FAMILY: &str = "flow-nexus-permaflow-holds";
+pub(super) const PERMAFLOW_HOLD_SCHEMA: &str = "flow-nexus-permaflow-holds-v1";
 /// The switch is one row.
 const HOLD_KEY: &str = "hold";
 
@@ -76,7 +79,84 @@ impl DescribesOverrideTable for StoredHold {
     }
 }
 
+impl EngineRecord for StoredPermaflowHold {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key(&self.address))
+    }
+}
+
+impl MemoryDefinition for StoredPermaflowHold {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(PERMAFLOW_HOLD_SCHEMA)
+    }
+}
+
+impl DescribesOverrideTable for StoredPermaflowHold {
+    fn descriptor() -> TableDescriptor<StoredPermaflowHold> {
+        TableDescriptor::new(
+            TableName::new(PERMAFLOW_HOLD_TABLE),
+            FamilyName::new(PERMAFLOW_HOLD_FAMILY),
+            SchemaHash::for_label(PERMAFLOW_HOLD_SCHEMA),
+        )
+    }
+}
+
 impl RemembersOverrides for FlowStore {
+    fn permaflow_held<N: crate::generated::overriding::Addressed>(
+        &self,
+        input: N,
+    ) -> Result<bool, StoreError> {
+        let address = input.address();
+        Ok(!self
+            .engine
+            .match_records(QueryPlan::key(
+                self.permaflow_holds,
+                StoredPermaflowHold { address }.record_key(),
+            ))?
+            .records()
+            .is_empty())
+    }
+
+    fn hold_permaflow<N: crate::generated::overriding::Addressed>(
+        &self,
+        input: N,
+    ) -> Result<bool, StoreError> {
+        let address = input.address();
+        if self.permaflow_held(address.clone())? {
+            return Ok(false);
+        }
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .assert(self.permaflow_holds, StoredPermaflowHold { address });
+        self.engine.commit_atomic(commit)?;
+        self.launch_changes.announce();
+        Ok(true)
+    }
+
+    fn release_permaflow<N: crate::generated::overriding::Addressed>(
+        &self,
+        input: N,
+    ) -> Result<bool, StoreError> {
+        let address = input.address();
+        if !self.permaflow_held(address.clone())? {
+            return Ok(false);
+        }
+        let key = StoredPermaflowHold { address }.record_key();
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .retract(self.permaflow_holds, key);
+        self.engine.commit_atomic(commit)?;
+        self.launch_changes.announce();
+        self.reminder_changes.announce();
+        Ok(true)
+    }
+
     /// Appends the transition to its flow's record, the record naming the
     /// seat's Address, in one write.
     fn record_transition(&self, transitioned: Transitioned) -> Result<bool, StoreError> {
@@ -351,5 +431,98 @@ impl RemembersOverrides for FlowStore {
             }
         }
         Ok(seats)
+    }
+}
+
+pub(super) const HELD_LAUNCH_TABLE: &str = "flow_nexus_held_launches";
+pub(super) const HELD_LAUNCH_FAMILY: &str = "flow-nexus-held-launches";
+pub(super) const HELD_LAUNCH_SCHEMA: &str = "flow-nexus-held-launches-v1";
+
+impl EngineRecord for crate::generated::memory::StoredHeldLaunch {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.launch_request_id.0.clone())
+    }
+}
+impl MemoryDefinition for crate::generated::memory::StoredHeldLaunch {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(HELD_LAUNCH_SCHEMA)
+    }
+}
+impl DescribesOverrideTable for crate::generated::memory::StoredHeldLaunch {
+    fn descriptor() -> TableDescriptor<Self> {
+        TableDescriptor::new(
+            TableName::new(HELD_LAUNCH_TABLE),
+            FamilyName::new(HELD_LAUNCH_FAMILY),
+            SchemaHash::for_label(HELD_LAUNCH_SCHEMA),
+        )
+    }
+}
+impl crate::generated::overriding::ParksHeldLaunches for FlowStore {
+    fn held_launches(&self) -> Result<Vec<crate::generated::memory::StoredHeldLaunch>, StoreError> {
+        let mut rows = self
+            .engine
+            .match_records(QueryPlan::all(self.held_launches))?
+            .records()
+            .to_vec();
+        rows.sort_by_key(|row| row.held_launch_position.0);
+        Ok(rows)
+    }
+    fn marked_held_launch<N: crate::generated::overriding::HeldLaunch>(
+        &self,
+        input: N,
+    ) -> Result<bool, StoreError> {
+        Ok(!self
+            .engine
+            .match_records(QueryPlan::key(
+                self.held_launches,
+                RecordKey::new(input.request_id().0),
+            ))?
+            .records()
+            .is_empty())
+    }
+    fn park_held_launch<N: crate::generated::overriding::ParkedLaunch>(
+        &self,
+        input: N,
+    ) -> Result<signal_flow::LaunchAttemptReservation, StoreError> {
+        use crate::store::ReadsFlowStore;
+        let attempt = input.attempt();
+        if let Some(existing) = self.stored_launch_attempt(&attempt.launch_request_id.0)? {
+            return Ok(
+                if existing.launch_attempt.launch_profile == attempt.launch_profile
+                    && existing.launch_attempt.prompt_sha256 == attempt.prompt_sha256
+                    && existing.launch_attempt.origin == attempt.origin
+                {
+                    signal_flow::LaunchAttemptReservation::Existing(existing.launch_attempt)
+                } else {
+                    signal_flow::LaunchAttemptReservation::Conflict
+                },
+            );
+        }
+        let position = self
+            .held_launches()?
+            .last()
+            .map(|row| row.held_launch_position.0)
+            .map_or(Some(0), |position| position.checked_add(1))
+            .ok_or(StoreError::StateInvariant)?;
+        let marker = crate::generated::memory::StoredHeldLaunch {
+            launch_request_id: attempt.launch_request_id.clone(),
+            held_launch_position: crate::generated::memory::HeldLaunchPosition(position),
+        };
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .assert(
+                self.launch_attempts,
+                crate::generated::memory::StoredLaunchAttempt {
+                    launch_attempt: attempt.clone(),
+                },
+            )
+            .assert(self.held_launches, marker);
+        self.engine.commit_atomic(commit)?;
+        self.launch_changes.announce();
+        Ok(signal_flow::LaunchAttemptReservation::Reserved(attempt))
     }
 }

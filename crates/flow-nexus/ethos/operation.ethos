@@ -85,7 +85,8 @@ Operation
   meta_signal_flow:[ Root RestartRecord ]
   flow_nexus:[ LaunchOutcome Replacement SeatBirth PendingReap PendingHandover SupersededHandover LaunchedRecord ReplacedRecord Transitioned Holding Caused ] ]
 [ Compose.LaunchProfile
-  Reserve.{ ComposedLaunch Origin }
+  Reserve.LaunchReservation
+  ParkLaunch.LaunchReservation
   Record.[ Intent.NativeLaunchIntent
            Binding.NativeLaunchBinding
            Acknowledgement.RegistrationAcknowledgement
@@ -127,6 +128,9 @@ Operation
            Transitioned
            ; The override panel's switch set.
            Switched.Holding
+           ; The manual Address hold is independent of the global switch.
+           PermaflowHeld.Address
+           PermaflowReleased.Address
            ; One commit: a flow with no harness forgotten, its transition
            ; recorded.
            Forgotten.Transitioned
@@ -184,5 +188,6 @@ Operation
            SpawnRefused.HarnessSpawnRefusal
            LaunchRefused.NativeLaunchRefusal
            Restarting ] ]
-[ HarnessArguments.Vector<String>
+[ LaunchReservation.{ ComposedLaunch Origin }
+  HarnessArguments.Vector<String>
   PaneLaunch.{ ComposedLaunch Root HerdrPaneBinding Option<FlowId> Option<NativeSessionId> HarnessArguments } ]

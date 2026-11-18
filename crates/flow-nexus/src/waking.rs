@@ -142,8 +142,8 @@ use signal_flow::{
     Address, AgentState, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile,
     Metaflow, NativePrompt, Origin, Output, QueueEntry,
 };
-use std::collections::HashSet;
-use std::sync::Mutex;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Condvar, Mutex};
 
 /// The choices of rest and wake, each in one place.
 pub trait WakePolicy {
@@ -198,14 +198,18 @@ impl HoldsSoftForIdle for RunningNexus {
 
 /// The metaflows a wake is running for. Held for the whole wake and its
 /// drain; released under the dispatch gate once the queue is seen empty.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct WakingMetaflows {
-    waking: Mutex<HashSet<Address>>,
+    waking: Arc<Mutex<HashSet<Address>>>,
+    effects: Arc<Mutex<HashMap<Address, usize>>>,
+    released: Arc<Condvar>,
+    manual_control: Arc<Mutex<()>>,
 }
 
 /// One running wake's hold on its metaflow.
-pub struct WakingLease<'held> {
-    held: &'held WakingMetaflows,
+pub struct WakingLease {
+    held: WakingMetaflows,
+    purpose: crate::generated::overriding::AddressLease,
     address: Address,
     /// The priority a Push delivers the queue at, in place of the
     /// priority its own requests carry.
@@ -220,7 +224,7 @@ pub(crate) trait PushesAtPriority: Sized {
     fn pushed(&self) -> Option<&signal_flow::Priority>;
 }
 
-impl PushesAtPriority for WakingLease<'_> {
+impl PushesAtPriority for WakingLease {
     fn pushed_at(mut self, priority: signal_flow::Priority) -> Self {
         self.pushed = Some(priority);
         self
@@ -236,32 +240,33 @@ pub(crate) trait IdentifiesWakingLease {
     fn owned_by(&self, holder: &WakingMetaflows) -> bool;
 }
 
-impl IdentifiesWakingLease for WakingLease<'_> {
+impl IdentifiesWakingLease for WakingLease {
     fn address(&self) -> &Address {
         &self.address
     }
 
     fn owned_by(&self, holder: &WakingMetaflows) -> bool {
-        std::ptr::eq(self.held, holder)
+        Arc::ptr_eq(&self.held.effects, &holder.effects)
     }
 }
 
 pub trait HoldsWakingMetaflows {
     /// Holds the metaflow for a wake; None when a wake already holds it.
-    fn hold(&self, address: &Address) -> Option<WakingLease<'_>>;
+    fn hold(&self, address: &Address) -> Option<WakingLease>;
     fn is_waking(&self, address: &Address) -> bool;
 }
 
 impl HoldsWakingMetaflows for WakingMetaflows {
-    fn hold(&self, address: &Address) -> Option<WakingLease<'_>> {
+    fn hold(&self, address: &Address) -> Option<WakingLease> {
         let mut waking = self
             .waking
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        waking.insert(address.clone()).then(|| WakingLease {
-            held: self,
-            address: address.clone(),
-            pushed: None,
+        waking.insert(address.clone()).then(|| {
+            use crate::generated::overriding::{AddressLease, SerializesPermaflowEffects};
+            let mut lease = self.effect(address.clone());
+            lease.purpose = AddressLease::Wake;
+            lease
         })
     }
 
@@ -273,13 +278,119 @@ impl HoldsWakingMetaflows for WakingMetaflows {
     }
 }
 
-impl Drop for WakingLease<'_> {
+impl Drop for WakingLease {
     fn drop(&mut self) {
-        self.held
-            .waking
+        use crate::generated::overriding::AddressLease;
+        if self.purpose == AddressLease::Wake {
+            self.held
+                .waking
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&self.address);
+        }
+        let mut effects = self
+            .held
+            .effects
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&self.address);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(count) = effects.get_mut(&self.address) {
+            *count -= 1;
+            if *count == 0 {
+                effects.remove(&self.address);
+            }
+        }
+        self.held.released.notify_all();
+    }
+}
+
+impl crate::generated::overriding::SerializesPermaflowEffects for WakingMetaflows {
+    fn effect<N: crate::generated::overriding::Addressed>(&self, input: N) -> WakingLease {
+        let address = input.address();
+        let mut effects = self
+            .effects
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *effects.entry(address.clone()).or_default() += 1;
+        WakingLease {
+            held: self.clone(),
+            address,
+            purpose: crate::generated::overriding::AddressLease::Effect,
+            pushed: None,
+        }
+    }
+}
+
+impl crate::generated::overriding::SerializesPermaflowHolds for RunningNexus {
+    fn establish_permaflow_hold<N: crate::generated::overriding::Addressed>(
+        &self,
+        input: N,
+    ) -> Result<bool, crate::store::StoreError> {
+        use crate::generated::overriding::RemembersOverrides;
+        let address = input.address();
+        let _control = self
+            .waking
+            .manual_control
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut effects = self
+            .waking
+            .effects
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Materialize a declared, never-started permaflow for Inspect without
+        // creating a harness or an owed successor.
+        self.store.prepare_declared_metaflow(&address)?;
+        let moved = !self.store.permaflow_held(address.clone())?;
+        if self.perform(Operation::Record(Record_Data::PermaflowHeld(
+            address.clone(),
+        ))) != Outcome::Recorded
+        {
+            return Err(crate::store::StoreError::StateInvariant);
+        }
+        drop(turn);
+        // New leases observe the durable hold before their first effect.
+        // Existing leases finish before the acknowledgment leaves.
+        while effects.contains_key(&address) {
+            effects = self
+                .waking
+                .released
+                .wait(effects)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        Ok(moved)
+    }
+
+    fn remove_permaflow_hold<N: crate::generated::overriding::Addressed>(
+        &self,
+        input: N,
+    ) -> Result<bool, crate::store::StoreError> {
+        use crate::generated::overriding::RemembersOverrides;
+        let address = input.address();
+        let _control = self
+            .waking
+            .manual_control
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _effects = self
+            .waking
+            .effects
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let moved = self.store.permaflow_held(address.clone())?;
+        if self.perform(Operation::Record(Record_Data::PermaflowReleased(address)))
+            != Outcome::Recorded
+        {
+            return Err(crate::store::StoreError::StateInvariant);
+        }
+        Ok(moved)
     }
 }
 
@@ -688,7 +799,7 @@ pub trait SleepsAndWakesSeats {
     /// Types what arrived during a wake into the woken flow, oldest first,
     /// until the queue is seen empty under the gate; the hold is released
     /// there.
-    fn drain_woken(&self, address: &Address, lease: WakingLease<'_>);
+    fn drain_woken(&self, address: &Address, lease: WakingLease);
     /// Which way an Asleep metaflow is woken.
     fn wake_plan(&self, metaflow: &Metaflow) -> WakePlan;
     /// At the Nexus's start: wakes every metaflow due a wake, as a wake the
@@ -1516,6 +1627,19 @@ impl MarksUndecided for RunningNexus {
 
 impl SleepsAndWakesSeats for RunningNexus {
     fn settle_stopped(&self, flow_id: &str) -> AtStop {
+        use crate::generated::overriding::SerializesPermaflowEffects;
+        let _effect = match self.store.metaflow_awake_as(flow_id) {
+            Ok(Some(metaflow)) => {
+                let effect = self.waking.effect(metaflow.address.clone());
+                if self.permaflow_held(metaflow.address) {
+                    return AtStop::Idle;
+                }
+                Some(effect)
+            }
+            Ok(None) => None,
+            Err(_) => return AtStop::Idle,
+        };
+
         // A restart holds the Address: no drain, sleep or refresh of it.
         if !matches!(
             crate::store::restart::RecordsRestarts::restart_record(&*self.store, flow_id),
@@ -1578,6 +1702,12 @@ impl SleepsAndWakesSeats for RunningNexus {
     }
 
     fn drain_awake(&self, address: &Address) {
+        use crate::generated::overriding::SerializesPermaflowEffects;
+        let _effect = self.waking.effect(address.clone());
+        if self.permaflow_held(address.clone()) {
+            return;
+        }
+
         // A held Nexus delivers nothing on its own.
         if self.held() {
             return;
@@ -1630,6 +1760,12 @@ impl SleepsAndWakesSeats for RunningNexus {
     }
 
     fn wake_due(&self, address: Address) {
+        use crate::generated::overriding::SerializesPermaflowEffects;
+        let _effect = self.waking.effect(address.clone());
+        if self.permaflow_held(address.clone()) {
+            return;
+        }
+
         // A held Nexus delivers and launches nothing on its own.
         if self.held() {
             return;
@@ -1665,7 +1801,7 @@ impl SleepsAndWakesSeats for RunningNexus {
         self.settle_stops_at_confirmation();
     }
 
-    fn drain_woken(&self, address: &Address, lease: WakingLease<'_>) {
+    fn drain_woken(&self, address: &Address, lease: WakingLease) {
         loop {
             let _turn = self
                 .dispatch_gate
@@ -1727,6 +1863,10 @@ impl SleepsAndWakesSeats for RunningNexus {
     }
 
     fn wake_is_due(&self, metaflow: &Metaflow) -> bool {
+        if self.permaflow_held(metaflow.address.clone()) {
+            return false;
+        }
+
         metaflow.state == flow_ethos::State::Asleep
             && (metaflow
                 .queue
@@ -1747,6 +1887,25 @@ impl SleepsAndWakesSeats for RunningNexus {
             return;
         }
         self.recover_deliveries();
+        {
+            use crate::generated::overriding::{ParksHeldLaunches, ResumesHeldLaunches};
+            let addresses = self
+                .store
+                .held_launches()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|marker| {
+                    self.store
+                        .launch_attempt(&marker.launch_request_id.0)
+                        .ok()
+                        .flatten()
+                })
+                .map(|attempt| attempt.launch_profile.address)
+                .collect::<HashSet<_>>();
+            for address in addresses {
+                self.resume_held_launches(address);
+            }
+        }
         // A restart an earlier Nexus left is taken up first, so a seat it
         // binds is handed its queue below.
         crate::restarting::RestartsFlows::recover_restarts(self);
@@ -2017,7 +2176,7 @@ impl RefreshesMetaflows for RunningNexus {
         let node = self.herdr.refresh_route(node);
         // A refresh never closes a working flow, whoever asks: one that does
         // not rest now is refreshed at its idle event.
-        if !self.rests_for_closing(&flow_id.0) {
+        if self.permaflow_held(address.clone()) || !self.rests_for_closing(&flow_id.0) {
             return self.queue_refresh(address, &flow_id.0, caller);
         }
         self.refresh_held(address, metaflow, flow_id, node, caller, turn, lock)
@@ -2048,7 +2207,7 @@ impl RefreshesMetaflows for RunningNexus {
                     Ok(Some(metaflow)) if metaflow.state == flow_ethos::State::Awake(predecessor.clone())
                 )
                 && !self.launch_known(&profile.launch_request_id.0)
-                && !self.rests_for_closing(&predecessor.0)
+                && (self.permaflow_held(address.clone()) || !self.rests_for_closing(&predecessor.0))
             {
                 return self.queue_replacement(profile, origin, predecessor);
             }
@@ -2084,7 +2243,7 @@ pub(crate) trait WaitsForRestToReplace {
         node: FlowNode,
         caller: &RefreshCaller,
         turn: std::sync::MutexGuard<'_, ()>,
-        lock: WakingLease<'_>,
+        lock: WakingLease,
     ) -> Output;
     /// Records a Refresh of the working `flow_id` with its `caller`, under
     /// the gate, and answers RefreshQueued; a Refresh already waiting for it
@@ -2137,7 +2296,7 @@ impl WaitsForRestToReplace for RunningNexus {
         node: FlowNode,
         caller: &RefreshCaller,
         turn: std::sync::MutexGuard<'_, ()>,
-        lock: WakingLease<'_>,
+        lock: WakingLease,
     ) -> Output {
         use signal_flow::{RefreshRejection, Refreshed, Refusal};
         let continuity = match self.store.continuity(address) {
@@ -2466,6 +2625,10 @@ impl WaitsForRestToReplace for RunningNexus {
     }
 
     fn start_ordered(&self, order: OrderedReplacement, launch: OrderedLaunch) {
+        if self.permaflow_held(order.address.clone()) {
+            return;
+        }
+
         let mut profile = launch.launch_profile;
         profile.flow_id_option = None;
         let launch_request_id = profile.launch_request_id.clone();
@@ -2500,6 +2663,9 @@ impl WaitsForRestToReplace for RunningNexus {
             let mut resting = Vec::new();
             let mut orphans = Vec::new();
             for order in self.store.ordered_replacements().unwrap_or_default() {
+                if self.permaflow_held(order.address.clone()) {
+                    continue;
+                }
                 match self.store.metaflow(&order.address) {
                     Ok(Some(metaflow)) => match metaflow.state {
                         flow_ethos::State::Awake(current) if current.0 == order.predecessor.0 => {
@@ -2562,12 +2728,16 @@ impl PerformsWakeAndDrain for RunningNexus {
 }
 
 pub(crate) trait DrainsHeldSeats {
-    fn drain_held(&self, address: Address, lease: &WakingLease<'_>) -> Outcome;
-    fn drain_all_held(&self, address: Address, lease: &WakingLease<'_>) -> Outcome;
+    fn drain_held(&self, address: Address, lease: &WakingLease) -> Outcome;
+    fn drain_all_held(&self, address: Address, lease: &WakingLease) -> Outcome;
 }
 
 impl DrainsHeldSeats for RunningNexus {
-    fn drain_held(&self, address: Address, lease: &WakingLease<'_>) -> Outcome {
+    fn drain_held(&self, address: Address, lease: &WakingLease) -> Outcome {
+        if self.permaflow_held(address.clone()) {
+            return Outcome::Drained(Vec::new());
+        }
+
         let flow_id = match self.store.metaflow(&address) {
             Ok(Some(Metaflow {
                 state: flow_ethos::State::Awake(flow_id),
@@ -2850,7 +3020,11 @@ impl DrainsHeldSeats for RunningNexus {
         Outcome::Drained(drained)
     }
 
-    fn drain_all_held(&self, address: Address, lease: &WakingLease<'_>) -> Outcome {
+    fn drain_all_held(&self, address: Address, lease: &WakingLease) -> Outcome {
+        if self.permaflow_held(address.clone()) {
+            return Outcome::Drained(Vec::new());
+        }
+
         let queued = match self.store.metaflow(&address) {
             Ok(Some(metaflow)) => metaflow.queue,
             Ok(None) => return Outcome::Failed(Failed_Data::NotAwake),

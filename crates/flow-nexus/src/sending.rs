@@ -350,7 +350,10 @@ impl SendsRequests for RunningNexus {
             // to a seat in its turn is queued for the seat's idle event.
             // A held Nexus delivers nothing on its own: the request is
             // queued, and handed over once it resumes.
-            let direct_requested = !crate::generated::overriding::HeedsOverrides::held(self)
+            let direct_requested = !crate::generated::overriding::HeedsOverrides::permaflow_held(
+                self,
+                recipient.clone(),
+            ) && !crate::generated::overriding::HeedsOverrides::held(self)
                 && (abrupt
                     || self
                         .live_awake_flow(&recipient)
@@ -1185,12 +1188,12 @@ pub(crate) trait CompletesDirectSends {
     fn direct_send_lease(
         &self,
         address: &Address,
-    ) -> Result<Option<crate::waking::WakingLease<'_>>, Box<PrivateSendResponse>>;
+    ) -> Result<Option<crate::waking::WakingLease>, Box<PrivateSendResponse>>;
     fn complete_direct_send(
         &self,
         address: &Address,
         acceptance: signal_flow::SendAcceptance,
-        lease: &crate::waking::WakingLease<'_>,
+        lease: &crate::waking::WakingLease,
     ) -> SendAnswer;
     /// Whether the request `logical_id` still waits in the queue of the
     /// metaflow at `address`.
@@ -1240,13 +1243,16 @@ impl CompletesDirectSends for RunningNexus {
     fn direct_send_lease(
         &self,
         address: &Address,
-    ) -> Result<Option<crate::waking::WakingLease<'_>>, Box<PrivateSendResponse>> {
+    ) -> Result<Option<crate::waking::WakingLease>, Box<PrivateSendResponse>> {
         use signal_flow::{SendFailure, SendFailureReason};
         let failed =
             |reason| Box::new(PrivateSendResponse::Failed(SendFailure::Unadmitted(reason)));
         let Some(lease) = self.waking.hold(address) else {
             return Ok(None);
         };
+        if crate::generated::overriding::HeedsOverrides::permaflow_held(self, address.clone()) {
+            return Ok(None);
+        }
         // A refresh owns the Address until its predecessor has become the
         // same metaflow Asleep.  Work admitted after that hold releases
         // belongs to this existing metaflow even when starting its next flow
@@ -1338,7 +1344,7 @@ impl CompletesDirectSends for RunningNexus {
         &self,
         address: &Address,
         acceptance: signal_flow::SendAcceptance,
-        lease: &crate::waking::WakingLease<'_>,
+        lease: &crate::waking::WakingLease,
     ) -> SendAnswer {
         use crate::store::AnnouncesLaunchChanges;
         use signal_flow::{DeliveryState, SendFailure, SendFailureReason};

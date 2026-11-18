@@ -7,6 +7,13 @@
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct LaunchReservation {
+    pub composed_launch: signal_flow::ComposedLaunch,
+    pub origin: signal_flow::Origin,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct HarnessArguments(pub std::vec::Vec<String>);
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -18,13 +25,6 @@ pub struct PaneLaunch {
     pub flow_id_option: std::option::Option<signal_flow::FlowId>,
     pub native_session_id_option: std::option::Option<signal_flow::NativeSessionId>,
     pub harness_arguments: HarnessArguments,
-}
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct Reserve_Data {
-    pub composed_launch: signal_flow::ComposedLaunch,
-    pub origin: signal_flow::Origin,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -129,6 +129,8 @@ pub enum Record_Data {
     StartedHandedOver(flow_nexus::LaunchedRecord),
     Transitioned(flow_nexus::Transitioned),
     Switched(flow_nexus::Holding),
+    PermaflowHeld(signal_flow::Address),
+    PermaflowReleased(signal_flow::Address),
     Forgotten(flow_nexus::Transitioned),
     Caused(flow_nexus::Caused),
 }
@@ -172,7 +174,8 @@ pub struct Submit_Data {
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Operation {
     Compose(signal_flow::LaunchProfile),
-    Reserve(Reserve_Data),
+    Reserve(LaunchReservation),
+    ParkLaunch(LaunchReservation),
     Record(Record_Data),
     ContextWarning(ContextWarning_Data),
     Register(Register_Data),

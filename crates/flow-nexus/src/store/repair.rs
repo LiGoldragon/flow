@@ -11,6 +11,7 @@ use signal_flow::{Address, FlowId, HerdrRoute};
 pub(crate) struct Inspection {
     pub(crate) metaflow: Metaflow,
     pub(crate) binding: Binding,
+    pub(crate) permaflow_hold: meta_signal_flow::PermaflowHold,
     pub(crate) lock_vector: Vec<Lock>,
     pub(crate) attempt_vector: Vec<Attempt>,
     pub(crate) restart_record_option: Option<meta_signal_flow::RestartRecord>,
@@ -159,7 +160,13 @@ impl RepairsMetaflows for FlowStore {
             }
         }
         attempt_vector.extend(self.obligations_at(address)?);
+        use crate::generated::overriding::RemembersOverrides;
         Ok(Some(Inspection {
+            permaflow_hold: if self.permaflow_held(address.clone())? {
+                meta_signal_flow::PermaflowHold::Held
+            } else {
+                meta_signal_flow::PermaflowHold::Released
+            },
             binding: Binding {
                 flow_node_option,
                 process_option: self.bound_process(address)?,

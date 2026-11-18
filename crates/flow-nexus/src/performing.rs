@@ -10,9 +10,10 @@ use crate::codex::{
 };
 use crate::composition::{ComposesInRoot, HandoverRoot, HarnessedProfile};
 use crate::generated::operation::{
-    Failed_Data, Open_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Asleep_Data,
-    Record_Data_Awoken_Data, Record_Data_Context_Data, Record_Data_Harness_Data,
-    Record_Data_Settled_Data, Register_Data, Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
+    Failed_Data, LaunchReservation, Open_Data, Operation, Outcome, PaneLaunch, Record_Data,
+    Record_Data_Asleep_Data, Record_Data_Awoken_Data, Record_Data_Context_Data,
+    Record_Data_Harness_Data, Record_Data_Settled_Data, Register_Data, Reserved_Data, Submit_Data,
+    Title_Data,
 };
 use crate::generated::starter::DerivesHarness;
 use crate::herdr::launch::{
@@ -309,6 +310,16 @@ impl Performs for RunningNexus {
                 }
             }
             Operation::Reserve(reserve) => self.reserve(reserve),
+            Operation::ParkLaunch(reserve) => {
+                use crate::generated::overriding::ParksHeldLaunches;
+                match self.store.park_held_launch(reserve) {
+                    Ok(launch_attempt_reservation) => Outcome::Reserved(Reserved_Data {
+                        launch_attempt_reservation,
+                        flow_id_option: None,
+                    }),
+                    Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
+                }
+            }
             Operation::Record(record) => self.record(record),
             Operation::Register(Register_Data {
                 flow_node,
@@ -636,7 +647,7 @@ trait PerformsInParts {
     /// FlowId for the session Flow chose and holds the flow in Memory, so
     /// the id exists before any harness runs. An attempt that already
     /// existed reserves nothing again: it is not spawned again.
-    fn reserve(&self, reserve: Reserve_Data) -> Outcome;
+    fn reserve(&self, reserve: LaunchReservation) -> Outcome;
     fn record(&self, record: Record_Data) -> Outcome;
     /// Gives back what Reserve took for a launch that was then refused: the
     /// flow held in Memory, then the FlowId claim. Both are needed for
@@ -645,10 +656,10 @@ trait PerformsInParts {
 }
 
 impl PerformsInParts for RunningNexus {
-    fn reserve(&self, reserve: Reserve_Data) -> Outcome {
+    fn reserve(&self, reserve: LaunchReservation) -> Outcome {
         use crate::herdr::reservation::ReservesFlowIdentity;
         use crate::store::events::RecordsHarnessEvents;
-        let Reserve_Data {
+        let LaunchReservation {
             composed_launch,
             origin,
         } = reserve;
@@ -656,20 +667,31 @@ impl PerformsInParts for RunningNexus {
             Ok(reservation) => reservation,
             Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
         };
-        let flow_id_option = match &reservation {
-            LaunchAttemptReservation::Reserved(_) => {
-                match self.herdr.reserve_flow_identity(&composed_launch) {
-                    Ok(flow_id_option) => flow_id_option,
-                    Err(error) => {
-                        eprintln!(
-                            "flow-nexus: launch {} FlowId not claimed: {error}",
-                            composed_launch.launch_profile.launch_request_id.0
-                        );
-                        return Outcome::Failed(Failed_Data::ClaimRefused);
-                    }
+        use crate::generated::overriding::ParksHeldLaunches;
+        let claim = match &reservation {
+            LaunchAttemptReservation::Reserved(_) => true,
+            LaunchAttemptReservation::Existing(attempt) => {
+                attempt.launch_attempt_phase == signal_flow::LaunchAttemptPhase::Reserved
+                    && self
+                        .store
+                        .marked_held_launch(attempt.launch_request_id.clone())
+                        .unwrap_or(false)
+            }
+            LaunchAttemptReservation::Conflict => false,
+        };
+        let flow_id_option = if claim {
+            match self.herdr.reserve_flow_identity(&composed_launch) {
+                Ok(flow_id_option) => flow_id_option,
+                Err(error) => {
+                    eprintln!(
+                        "flow-nexus: launch {} FlowId not claimed: {error}",
+                        composed_launch.launch_profile.launch_request_id.0
+                    );
+                    return Outcome::Failed(Failed_Data::ClaimRefused);
                 }
             }
-            LaunchAttemptReservation::Existing(_) | LaunchAttemptReservation::Conflict => None,
+        } else {
+            None
         };
         if let Some(flow_id) = &flow_id_option
             && self.store.hold_reserved_flow(flow_id).is_err()
@@ -902,6 +924,20 @@ impl PerformsInParts for RunningNexus {
             Record_Data::Switched(holding) => {
                 use crate::generated::overriding::RemembersOverrides;
                 match self.store.switch(holding) {
+                    Ok(_) => Outcome::Recorded,
+                    Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
+                }
+            }
+            Record_Data::PermaflowHeld(address) => {
+                use crate::generated::overriding::RemembersOverrides;
+                match self.store.hold_permaflow(address) {
+                    Ok(_) => Outcome::Recorded,
+                    Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
+                }
+            }
+            Record_Data::PermaflowReleased(address) => {
+                use crate::generated::overriding::RemembersOverrides;
+                match self.store.release_permaflow(address) {
                     Ok(_) => Outcome::Recorded,
                     Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
                 }

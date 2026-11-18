@@ -47,6 +47,11 @@ impl HeedsOverrides for RunningNexus {
         matches!(self.store.holding(), Ok(Holding::Held(_)))
     }
 
+    fn permaflow_held<N: crate::generated::overriding::Addressed>(&self, input: N) -> bool {
+        // An unread hold is kept: no machine effect is admitted on uncertainty.
+        !matches!(self.store.permaflow_held(input), Ok(false))
+    }
+
     fn state_now(&self, seat: Seat) -> State {
         let live = matches!(
             self.store.flow_node(&seat.flow_id.0),
@@ -184,5 +189,95 @@ impl InterruptsRunningTurns for RunningNexus {
                     .unwrap_or_else(|error| TurnInterruption::AppServerRefused(error.to_string()))
             }
         }
+    }
+}
+
+impl crate::generated::overriding::Addressed for signal_flow::Address {
+    fn address(&self) -> signal_flow::Address {
+        self.clone()
+    }
+}
+
+impl crate::generated::overriding::AdmitsPermaflowControl for RunningNexus {
+    fn ordinary_control(
+        &self,
+        subject: Subject,
+    ) -> Result<Option<crate::waking::WakingLease>, signal_flow::Output> {
+        self.machine_control(subject)
+            .map_err(|answer| match answer {
+                Output::Refused(Refused_Data::PermaflowHeld(address)) => {
+                    signal_flow::Output::Refused(signal_flow::Refusal::PermaflowHeld(address))
+                }
+                Output::Refused(Refused_Data::StoreRefused(failure)) => {
+                    signal_flow::Output::Refused(signal_flow::Refusal::Store(failure.0))
+                }
+                _ => signal_flow::Output::Refused(signal_flow::Refusal::NotConfigured),
+            })
+    }
+
+    fn machine_control(
+        &self,
+        subject: Subject,
+    ) -> Result<Option<crate::waking::WakingLease>, Output> {
+        use crate::generated::overriding::SerializesPermaflowEffects;
+        let address = match subject {
+            Subject::Permaflow(address) => Some(address),
+            subject => self
+                .store
+                .seat(subject)
+                .map_err(|error| {
+                    Output::Refused(Refused_Data::StoreRefused(StoreFailure(error.to_string())))
+                })?
+                .map(|seat| seat.address),
+        };
+        let Some(address) = address else {
+            return Ok(None);
+        };
+        let effect = self.waking.effect(address.clone());
+        if self.permaflow_held(address.clone()) {
+            return Err(Output::Refused(Refused_Data::PermaflowHeld(address)));
+        }
+        Ok(Some(effect))
+    }
+}
+
+impl crate::generated::overriding::ParkedLaunch for crate::generated::operation::LaunchReservation {
+    fn launch(&self) -> signal_flow::ComposedLaunch {
+        self.composed_launch.clone()
+    }
+    fn origin(&self) -> signal_flow::Origin {
+        self.origin.clone()
+    }
+    fn attempt(&self) -> signal_flow::LaunchAttempt {
+        signal_flow::LaunchAttempt {
+            launch_request_id: self
+                .composed_launch
+                .launch_profile
+                .launch_request_id
+                .clone(),
+            launch_profile: self.composed_launch.launch_profile.clone(),
+            prompt_sha256: self
+                .composed_launch
+                .first_prompt_payload
+                .prompt_sha256
+                .clone(),
+            origin: self.origin.clone(),
+            launch_attempt_phase: signal_flow::LaunchAttemptPhase::Reserved,
+            native_launch_intent_option: None,
+            native_launch_binding_option: None,
+            registration_acknowledgement_option: None,
+            prompt_delivery_intent_option: None,
+            prompt_delivery_result_option: None,
+        }
+    }
+}
+impl crate::generated::overriding::HeldLaunch for signal_flow::LaunchRequestId {
+    fn request_id(&self) -> signal_flow::LaunchRequestId {
+        self.clone()
+    }
+}
+impl crate::generated::overriding::HeldLaunch for crate::generated::memory::StoredHeldLaunch {
+    fn request_id(&self) -> signal_flow::LaunchRequestId {
+        self.launch_request_id.clone()
     }
 }

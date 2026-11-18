@@ -44,7 +44,11 @@ Library
 [ :flow_nexus:store:[ FlowStore StoreError ]                ; imports
   :sema_engine:[ TableDescriptor ]
   :flow_nexus:[ RunningNexus ]
-  :flow_nexus:generated:memory:[ Flow Transition Moment StoredHold ]
+  :flow_nexus:waking:[ WakingMetaflows WakingLease ]
+  :flow_nexus:generated:operation:LaunchReservation
+  :flow_nexus:generated:memory:[ Flow Transition Moment StoredHold StoredPermaflowHold StoredHeldLaunch ]
+  :signal_flow:[ ComposedLaunch Origin LaunchAttempt LaunchAttemptReservation LaunchRequestId ]
+  :signal_flow:OrdinaryOutput.Output
   :meta_signal_flow:generated:signal:[ State MetaOutput.Output ]
   :flow_nexus:codex:[ CodexAdapter CodexAdapterUnavailable ]
   :signal_flow:[ FlowId Address ] ]
@@ -54,6 +58,7 @@ Library
   Transitioned.{ Seat Transition }                          ;   one transition of one seat
   Holding.[ Held.Moment                                     ;   the panel's switch
             Acting ]
+  AddressLease.[ Wake Effect ]                              ; runtime lease's purpose
   CodexThread.String                                        ;   a Codex thread, by its id
   TurnInterruption.[ Rested                                 ;   what became of a seat's running turn: none ran
                      Interrupted                            ;     its harness was told to stop it
@@ -61,27 +66,54 @@ Library
                      KeysRefused                            ;     Herdr refused the interrupt keys
                      AppServerRefused.String                ;     the Codex app-server was not reached, or refused, and why
                      StoreRefused.String ] ]                ;     Memory could not name the seat's harness, and why
-[ RemembersOverrides.[ record_transition.{ [ Transitioned ] [ Result<Boolean StoreError> ] } ; traits
+[ Addressed.[ address.[ Address ] ]
+  ParkedLaunch.[ launch.[ ComposedLaunch ]
+                 origin.[ Origin ]
+                 attempt.[ LaunchAttempt ] ]
+  HeldLaunch.[ request_id.[ LaunchRequestId ] ]
+  RemembersOverrides.[ record_transition.{ [ Transitioned ] [ Result<Boolean StoreError> ] } ; traits
                        transitions.[ Result<Vector<Flow> StoreError> ]
                        holding.[ Result<Holding StoreError> ]
                        switch.{ [ Holding ] [ Result<Boolean StoreError> ] }
+                       permaflow_held.{ [ Addressed ] [ Result<Boolean StoreError> ] }
+                       hold_permaflow.{ [ Addressed ] [ Result<Boolean StoreError> ] }
+                       release_permaflow.{ [ Addressed ] [ Result<Boolean StoreError> ] }
                        forget_flow.{ [ Transitioned ] [ Result<Boolean StoreError> ] }
                        seat.{ [ Subject ] [ Result<Option<Seat> StoreError> ] }
                        seats.[ Result<Vector<Seat> StoreError> ] ]
   HeedsOverrides.[ held.[ Boolean ]
+                   permaflow_held.{ [ Addressed ] [ Boolean ] }
                    state_now.{ [ Seat ] [ State ] }
                    seat_named.{ [ Subject ] [ Result<Seat MetaOutput> ] }
                    record_override.{ [ Transitioned ] [ Result<Boolean MetaOutput> ] }
                    record_named.{ [ Subject ] [ Result<Boolean MetaOutput> ] }
                    record_every_seat.[ Result<Boolean MetaOutput> ] ]
+  SerializesPermaflowEffects.[ effect.{ [ Addressed ] [ WakingLease ] } ]
+  SerializesPermaflowHolds.[ establish_permaflow_hold.{ [ Addressed ] [ Result<Boolean StoreError> ] }
+                            remove_permaflow_hold.{ [ Addressed ] [ Result<Boolean StoreError> ] } ]
+  AdmitsPermaflowControl.[ machine_control.{ [ Subject ] [ Result<Option<WakingLease> MetaOutput> ] }
+                          ordinary_control.{ [ Subject ] [ Result<Option<WakingLease> OrdinaryOutput> ] } ]
+  ParksHeldLaunches.[ park_held_launch.{ [ ParkedLaunch ] [ Result<LaunchAttemptReservation StoreError> ] }
+                     held_launches.[ Result<Vector<StoredHeldLaunch> StoreError> ]
+                     marked_held_launch.{ [ HeldLaunch ] [ Result<Boolean StoreError> ] } ]
+  ResumesHeldLaunches.[ resume_held_launches.{ [ Addressed ] [ Boolean ] } ]
   DescribesOverrideTable.[ descriptor:[ TableDescriptor<Self> ] ]
   EntersByOverride.[ overridden.[ Transition ] ]
   InterruptsRunningTurns.[ interrupt_running_turn.{ [ Seat ] [ TurnInterruption ] } ]
   InterruptsCodexThreads.[ interrupt_thread.{ [ CodexThread ] [ Result<TurnInterruption CodexAdapterUnavailable> ] } ] ]
-[ FlowStore.[ RemembersOverrides ]                          ; associations
+[ FlowStore.[ RemembersOverrides ParksHeldLaunches ]         ; associations
   RunningNexus.[ HeedsOverrides
+                 SerializesPermaflowHolds
+                 AdmitsPermaflowControl
+                 ResumesHeldLaunches
                  InterruptsRunningTurns ]
+  WakingMetaflows.[ SerializesPermaflowEffects ]
+  Address.[ Addressed ]
   CodexAdapter.[ InterruptsCodexThreads ]
   Flow.[ DescribesOverrideTable ]
   StoredHold.[ DescribesOverrideTable ]
+  StoredPermaflowHold.[ DescribesOverrideTable ]
+  StoredHeldLaunch.[ DescribesOverrideTable HeldLaunch ]
+  LaunchReservation.[ ParkedLaunch ]
+  LaunchRequestId.[ HeldLaunch ]
   State.[ EntersByOverride ] ]

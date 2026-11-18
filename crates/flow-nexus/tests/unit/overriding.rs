@@ -1093,3 +1093,76 @@ fn held_task_sender_keeps_due_task_notice_queued_until_release() {
         .expect("release delivers the due task notice");
     assert!(typed.contains("held-task-reminder"), "{typed}");
 }
+
+#[test]
+fn handover_warning_uses_the_held_queue_and_release_preserves_its_once_only_witness() {
+    use crate::handover_reminding::RemindsHandoverCallers;
+    use crate::store::SeedsRole;
+    use crate::store::context::RecordsContextSize;
+    use crate::store::handover::HoldsHandovers;
+    use crate::store::handover_reminders::SchedulesHandoverReminders;
+    let fixture = NexusFixture::new();
+    resting_seat(&fixture);
+    let at = address(Model::Sol);
+    fixture.nexus.store.seed_role(signal_flow::CallerIdentity {
+        flow_id: seat_id(),
+        aspect: signal_flow::Aspect::Mind,
+        model_name: signal_flow::ModelName("held-warning-model".into()),
+    });
+    fixture
+        .nexus
+        .store
+        .configure_change(meta::ConfigurationChange::Thresholds(vec![
+            meta::ConfigureThreshold {
+                model_name: signal_flow::ModelName("held-warning-model".into()),
+                refresh_threshold: meta::RefreshThreshold(101),
+            },
+        ]))
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .configure_change(meta::ConfigurationChange::HandoverPolicies(vec![
+            meta::HandoverPolicy {
+                model_name: signal_flow::ModelName("held-warning-model".into()),
+                warning_share_left: meta::WarningShareLeft(15),
+                reminder_text: meta::ReminderText("held-handover-warning".into()),
+                every_minutes: meta::EveryMinutes(5),
+            },
+        ]))
+        .unwrap();
+    let handover = fixture
+        .nexus
+        .store
+        .ensure_live_handover(&at, CLAUDE_SEAT)
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .record_context_size(CLAUDE_SEAT, 86)
+        .unwrap();
+    overridden(&fixture, meta::Input::HoldPermaflow(at.clone()));
+    fixture.nexus.send_due_handover_reminders(10);
+    assert!(fixture.typed().is_none());
+    let queued = stored(&fixture, Model::Sol).queue;
+    assert_eq!(queued.0.len(), 1);
+    fixture.nexus.send_due_handover_reminders(1210);
+    assert_eq!(stored(&fixture, Model::Sol).queue, queued);
+    overridden(&fixture, meta::Input::ReleasePermaflow(at.clone()));
+    let typed = fixture
+        .typed()
+        .expect("release delivers the handover warning");
+    assert!(typed.contains("held-handover-warning"), "{typed}");
+    fixture.nexus.send_due_handover_reminders(2410);
+    assert_eq!(fixture.typed().unwrap(), typed);
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .handover_reminder(&at, handover.handover_generation.0)
+            .unwrap()
+            .unwrap()
+            .sent,
+        crate::generated::memory::Sent(1)
+    );
+}

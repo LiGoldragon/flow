@@ -10143,6 +10143,8 @@ mod tests {
     /// leaves its opaque payloads intact through both opens and newer writes.
     #[test]
     fn manual_hold_families_are_preserved_unread_while_latest_memory_advances() {
+        use crate::generated::memory::{Moment, StoredHold};
+        use crate::generated::overriding::{DescribesOverrideTable, Holding, RemembersOverrides};
         use crate::store::context::RecordsContextSize;
         use redb::{ReadableDatabase as _, ReadableTableMetadata as _};
         for running in [false, true] {
@@ -10161,6 +10163,15 @@ mod tests {
                     SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
                 ))
                 .unwrap();
+                let hold = engine.register_table(StoredHold::descriptor()).unwrap();
+                engine
+                    .assert(sema_engine::Assertion::new(
+                        hold,
+                        StoredHold {
+                            moment: Moment(94721),
+                        },
+                    ))
+                    .unwrap();
                 for (table, family) in families {
                     engine
                         .register_table(TableDescriptor::<super::FlowRecord>::new(
@@ -10185,18 +10196,46 @@ mod tests {
                 }
                 write.commit().unwrap();
             }
+            let held_bytes = {
+                let database = redb::ReadOnlyDatabase::open(fixture.path()).unwrap();
+                let read = database.begin_read().unwrap();
+                let rows = read
+                    .open_table(redb::TableDefinition::<String, &[u8]>::new(
+                        super::overriding::HOLD_TABLE,
+                    ))
+                    .unwrap();
+                let bytes = rows
+                    .get("hold".to_owned())
+                    .unwrap()
+                    .unwrap()
+                    .value()
+                    .to_vec();
+                bytes
+            };
             drop(ConfigurationOnlyStore::open(&fixture.path()).unwrap());
             {
                 let store = fixture.configured_store();
+                assert_eq!(store.holding().unwrap(), Holding::Held(Moment(94721)));
                 store.record_context_size("post-migration", 173).unwrap();
             }
             {
                 let store = fixture.configured_store();
                 assert_eq!(store.context_size("post-migration").unwrap(), Some(173));
+                assert_eq!(store.holding().unwrap(), Holding::Held(Moment(94721)));
             }
             {
                 let database = redb::ReadOnlyDatabase::open(fixture.path()).unwrap();
                 let read = database.begin_read().unwrap();
+                let hold_rows = read
+                    .open_table(redb::TableDefinition::<String, &[u8]>::new(
+                        super::overriding::HOLD_TABLE,
+                    ))
+                    .unwrap();
+                assert_eq!(hold_rows.len().unwrap(), 1);
+                assert_eq!(
+                    hold_rows.get("hold".to_owned()).unwrap().unwrap().value(),
+                    held_bytes
+                );
                 for (table, _) in families {
                     let rows = read
                         .open_table(redb::TableDefinition::<String, &[u8]>::new(table))

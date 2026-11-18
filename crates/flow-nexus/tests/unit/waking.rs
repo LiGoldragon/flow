@@ -6054,6 +6054,90 @@ fn resumed_connection(state: &std::path::Path, record: &str) -> Vec<serde_json::
     messages
 }
 
+/// A persisted global Hold keeps startup reconciliation from settling or
+/// cleaning an interrupted native launch. Only the owner's Resume takes up
+/// that debt, using the same cleanup body as a normal unheld startup.
+#[test]
+fn persisted_global_hold_defers_interrupted_launch_cleanup_until_owner_resume() {
+    use crate::generated::overriding::{Holding, RemembersOverrides};
+    use crate::launching::ReconcilesInterruptedLaunches;
+    use crate::store::RecordsLaunchOutcome;
+    use crate::store::launch_cleanup::{CompletesCleanup, KeepsLaunchCleanups};
+    let mut fixture = NexusFixture::new();
+    let setup = interrupted_launch(&mut fixture);
+    let state = setup.world.state.clone();
+    let launch = setup.sender.launch_request_id.clone();
+    let herdr = launch_pane_herdr(&fixture);
+    fs::write(
+        herdr.join("agents"),
+        serde_json::json!([launch_pane_agent(Some(FRESH_THREAD))]).to_string(),
+    )
+    .unwrap();
+    fixture
+        .nexus
+        .store
+        .request_harness_start(&launch.0)
+        .unwrap();
+    assert_eq!(
+        fixture.nexus.dispatch_meta(meta_signal_flow::Input::Hold),
+        meta_signal_flow::Output::Held
+    );
+    let held = fixture.nexus.store.holding().unwrap();
+    assert!(matches!(held, Holding::Held(_)));
+    let attempt = fixture.nexus.store.launch_attempt(&launch.0).unwrap();
+    let calls = fs::read(herdr.join("calls")).unwrap_or_default();
+
+    fixture.restarted();
+    assert_eq!(fixture.nexus.store.holding().unwrap(), held);
+    fixture.nexus.reconcile_interrupted_launches();
+    fixture.nexus.recover_wakes();
+    assert_eq!(fixture.nexus.store.holding().unwrap(), held);
+    assert_eq!(
+        fixture.nexus.store.launch_attempt(&launch.0).unwrap(),
+        attempt
+    );
+    assert_eq!(fixture.nexus.store.launch_outcome(&launch.0).unwrap(), None);
+    assert_eq!(fixture.nexus.store.launch_cleanup(&launch.0).unwrap(), None);
+    assert!(!state.join("restart-invocations").exists());
+    assert_eq!(fs::read(herdr.join("calls")).unwrap_or_default(), calls);
+
+    assert_eq!(
+        fixture.nexus.dispatch_meta(meta_signal_flow::Input::Resume),
+        meta_signal_flow::Output::Resumed
+    );
+    assert_eq!(fixture.nexus.store.holding().unwrap(), Holding::Acting);
+    assert!(
+        fixture
+            .nexus
+            .store
+            .launch_outcome(&launch.0)
+            .unwrap()
+            .is_some()
+    );
+    let cleanup = fixture
+        .nexus
+        .store
+        .launch_cleanup(&launch.0)
+        .unwrap()
+        .unwrap();
+    assert!(cleanup.is_complete(), "{cleanup:?}");
+    let calls = fs::read_to_string(herdr.join("calls")).unwrap();
+    assert!(calls.contains("pane close"), "{calls}");
+    let native_calls = fs::read_to_string(state.join("restart-invocations")).unwrap();
+    assert_eq!(native_calls, "3");
+    let settled = fixture.nexus.store.launch_outcome(&launch.0).unwrap();
+    fixture.nexus.reconcile_interrupted_launches();
+    assert_eq!(
+        fixture.nexus.store.launch_outcome(&launch.0).unwrap(),
+        settled
+    );
+    assert_eq!(
+        fs::read_to_string(state.join("restart-invocations")).unwrap(),
+        native_calls
+    );
+    assert_eq!(fs::read_to_string(herdr.join("calls")).unwrap(), calls);
+}
+
 /// The calls an app-server replays on resume are all taken, however many:
 /// the Nexus resumes the thread a second time as the replay's end (the
 /// app-server answers each resume of a running thread only after the

@@ -9,7 +9,7 @@ use crate::generated::overriding::{
     DescribesOverrideTable, Holding, RemembersOverrides, Seat, Subject, Transitioned,
 };
 use crate::store::metaflow::SleepsMetaflows;
-use crate::store::{AnnouncesLaunchChanges, ManagesMetaflowState, ReadsFlowRows};
+use crate::store::{AnnouncesLaunchChanges, ManagesMetaflowState, ReadsFlowMemory, ReadsFlowRows};
 use sema_engine::{
     EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan, RecordKey, SchemaHash,
     TableDescriptor, TableName,

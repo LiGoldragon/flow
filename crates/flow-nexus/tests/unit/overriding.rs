@@ -1323,7 +1323,7 @@ fn refused_parked_launch_is_terminal_and_never_reexecuted_after_release_or_resta
 fn release_takes_up_an_orphaned_launch_order_once_without_a_nexus_restart() {
     use crate::generated::memory::{OrderedLaunch, OrderedReplacement, Predecessor, PromptSha256};
     use crate::store::ordered_replacement::{OrdersReplacements, ReplacementOrder};
-    let fixture = NexusFixture::new();
+    let mut fixture = NexusFixture::new();
     let seat = ended_claude(&fixture);
     let at = address(Model::Sol);
     fixture

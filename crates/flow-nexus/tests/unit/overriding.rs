@@ -1310,3 +1310,56 @@ fn refused_parked_launch_is_terminal_and_never_reexecuted_after_release_or_resta
         assert_eq!(world.claude_starts(), 0, "{}", world.calls());
     }
 }
+
+#[test]
+fn release_takes_up_an_orphaned_launch_order_once_without_a_nexus_restart() {
+    use crate::generated::memory::{OrderedLaunch, OrderedReplacement, Predecessor, PromptSha256};
+    use crate::store::ordered_replacement::{OrdersReplacements, ReplacementOrder};
+    let fixture = NexusFixture::new();
+    let seat = ended_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let world = fixture.fresh_claude_world();
+    let mut profile = seat.profile;
+    profile.launch_request_id = signal_flow::LaunchRequestId("held-orphaned-launch".into());
+    overridden(&fixture, meta::Input::HoldPermaflow(at.clone()));
+    let order = OrderedReplacement {
+        address: at.clone(),
+        predecessor: Predecessor("abc123".into()),
+        replacement_order: ReplacementOrder::Launch(Box::new(OrderedLaunch {
+            launch_profile: profile,
+            origin: signal_flow::Origin::Unbound,
+            prompt_sha256: PromptSha256(String::new()),
+        })),
+    };
+    fixture
+        .nexus
+        .store
+        .order_replacement(order.clone())
+        .unwrap();
+    fixture.nexus.recover_wakes();
+    assert_eq!(world.claude_starts(), 0, "{}", world.calls());
+    assert_eq!(
+        fixture.nexus.store.ordered_replacement(&at).unwrap(),
+        Some(order)
+    );
+    overridden(&fixture, meta::Input::ReleasePermaflow(at.clone()));
+    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+    assert!(matches!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(_)
+    ));
+    assert!(
+        fixture
+            .nexus
+            .store
+            .ordered_replacement(&at)
+            .unwrap()
+            .is_none()
+    );
+    overridden(&fixture, meta::Input::ReleasePermaflow(at));
+    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+}

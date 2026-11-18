@@ -1147,3 +1147,46 @@ fn send_several_earlier_invalid_minutes_precedes_later_unresolved_answer() {
     assert_eq!(fixture.nexus.store.memory_digest().unwrap(), before);
     assert!(fixture.typed().unwrap_or_default().is_empty());
 }
+
+#[test]
+fn send_several_unresolved_mode_admits_multiple_awaiting_then_ordinary_wake_is_unplaceable() {
+    use super::NexusFixture;
+    use crate::sending::SendsSeveralRequests;
+    use crate::store::metaflow::SeedsMetaflow;
+    use crate::waking::PerformsWakeAndDrain;
+    use signal_flow::{Output, SendableMessage, SendableRequest};
+    let fixture = NexusFixture::new();
+    let at = Address {
+        topic: flow_ethos::Topic("unresolvedSeveral".into()),
+        ..sender()
+    };
+    fixture.nexus.store.seed_metaflow(flow_ethos::Metaflow {
+        address: at.clone(),
+        state: flow_ethos::State::Asleep,
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
+    });
+    let Output::SentSeveral(ids) = fixture.nexus.send_several_requests(
+        signal_flow::SendSeveralRequest {
+            address: at.clone(),
+            sendable_message_vector: vec![
+                SendableMessage::Soft(SendableRequest::Order("one".into())),
+                SendableMessage::Soft(SendableRequest::Question("two".into())),
+            ],
+        },
+        None,
+    ) else {
+        panic!("unresolved mode must not refuse admission");
+    };
+    let queue = fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue;
+    assert_eq!(ids.len(), 2);
+    assert!(matches!(
+        fixture.nexus.wake(at.clone()),
+        crate::generated::operation::Outcome::Failed(_)
+    ));
+    assert_eq!(
+        fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue,
+        queue
+    );
+    assert!(fixture.typed().unwrap_or_default().is_empty());
+}

@@ -305,6 +305,72 @@ impl SelectsDeliveryGroups for FlowStore {
         Ok(false)
     }
 }
+/// Analyses the already-selected payload, including after its premark.
+/// It reads immutable origin only, never Queued/Retryable membership again.
+pub(crate) trait AnalysesSimplifiedDeliveries {
+    fn simplified_reply_input_from_frozen<'entry>(
+        &self,
+        address: &Address,
+        entries: &'entry [QueueEntry],
+    ) -> Result<Result<Option<&'entry QueueEntry>, Refusal>, StoreError>;
+}
+
+impl AnalysesSimplifiedDeliveries for FlowStore {
+    fn simplified_reply_input_from_frozen<'entry>(
+        &self,
+        address: &Address,
+        entries: &'entry [QueueEntry],
+    ) -> Result<Result<Option<&'entry QueueEntry>, Refusal>, StoreError> {
+        use flow_ethos::{Message, Request};
+        let Some(first) = entries.first() else {
+            return Ok(Ok(None));
+        };
+        let Some(group) = self.delivery_group(&first.logical_delivery_id)? else {
+            let (Message::HardAbrupt(request)
+            | Message::MiddleAbrupt(request)
+            | Message::Soft(request)) = &first.message;
+            return Ok(Ok(matches!(
+                request,
+                Request::Order(_) | Request::Question(_) | Request::Living(_) | Request::Task(_)
+            )
+            .then_some(first)));
+        };
+        if group.address != *address || group.logical_delivery_id_vector.is_empty() {
+            return Err(StoreError::StateInvariant);
+        }
+        let mut awaiting = None;
+        let mut previous = None;
+        for entry in entries {
+            let position = group
+                .logical_delivery_id_vector
+                .iter()
+                .position(|id| *id == entry.logical_delivery_id)
+                .ok_or(StoreError::StateInvariant)?;
+            if previous.is_some_and(|previous| previous >= position) {
+                return Err(StoreError::StateInvariant);
+            }
+            previous = Some(position);
+            let (Message::HardAbrupt(request)
+            | Message::MiddleAbrupt(request)
+            | Message::Soft(request)) = &entry.message;
+            if matches!(
+                request,
+                Request::Order(_) | Request::Question(_) | Request::Task(_)
+            ) {
+                if awaiting.is_some() {
+                    return Ok(Err(Refusal::SimplifiedAwaitingMemberConflict(
+                        signal_flow::SendSeveralMessagePosition(
+                            i64::try_from(position).map_err(|_| StoreError::StateInvariant)?,
+                        ),
+                    )));
+                }
+                awaiting = Some(entry);
+            }
+        }
+        Ok(Ok(awaiting))
+    }
+}
+
 /// Refuses one complete, positively selected, never-submitted group.
 /// The caller holds the existing dispatch gate; no external work occurs here.
 pub(crate) trait RefusesDeliveryGroups {
@@ -1291,5 +1357,185 @@ mod tests {
             Err(Refusal::RequestIdSpaceFull)
         );
         assert_eq!(store.memory_digest().unwrap(), digest);
+    }
+    fn notice(body: &str) -> AdmissionMessage {
+        AdmissionMessage {
+            delivery: Delivery::Queue,
+            message: Message::Soft(Request::Notice(body.into())),
+        }
+    }
+
+    fn living(body: &str) -> AdmissionMessage {
+        AdmissionMessage {
+            delivery: Delivery::Queue,
+            message: Message::Soft(Request::Living(flow_ethos::Living_Data {
+                context: "group context".into(),
+                verbatim: body.into(),
+            })),
+        }
+    }
+
+    #[test]
+    fn simplified_conflict_retains_original_position_after_context_cancel() {
+        let (_fixture, store) = Fixture::new();
+        admit(
+            &store,
+            vec![
+                notice("before"),
+                order("awaiting"),
+                living("context"),
+                task(1),
+            ],
+        );
+        let original = store.metaflow(&address()).unwrap().unwrap().queue.0;
+        withdraw_and_archive(&store, &original[0]);
+        let queue = store.metaflow(&address()).unwrap().unwrap().queue.0;
+        let survivors = store.oldest_delivery_group(&address(), &queue).unwrap();
+        assert_eq!(
+            store
+                .simplified_reply_input_from_frozen(&address(), &survivors)
+                .unwrap(),
+            Err(Refusal::SimplifiedAwaitingMemberConflict(
+                signal_flow::SendSeveralMessagePosition(3)
+            ))
+        );
+    }
+
+    #[test]
+    fn simplified_frozen_analysis_keeps_actual_awaiting_after_uncertain_premark() {
+        use crate::store::group_uncertainty::StagesUncertainCohorts;
+        let (fixture, store) = Fixture::new();
+        admit(
+            &store,
+            vec![
+                notice("before"),
+                order("cancel"),
+                living("context"),
+                task(1),
+            ],
+        );
+        let original = store.metaflow(&address()).unwrap().unwrap().queue.0;
+        withdraw_and_archive(&store, &original[1]);
+        let queue = store.metaflow(&address()).unwrap().unwrap().queue.0;
+        let survivors = store.oldest_delivery_group(&address(), &queue).unwrap();
+        store
+            .mark_startup_uncertain(&address(), &survivors)
+            .unwrap();
+        // The queued selector is deliberately no longer usable. Startup
+        // binding must analyse the frozen submitted entries instead.
+        assert!(store.oldest_delivery_group(&address(), &queue).is_err());
+        assert_eq!(
+            store
+                .simplified_reply_input_from_frozen(&address(), &survivors)
+                .unwrap()
+                .unwrap(),
+            Some(&original[3])
+        );
+        drop(store);
+        let store = fixture.reopen();
+        assert_eq!(
+            store
+                .simplified_reply_input_from_frozen(&address(), &survivors)
+                .unwrap()
+                .unwrap(),
+            Some(&original[3])
+        );
+    }
+
+    #[test]
+    fn singleton_living_batch_is_context_plain_living_keeps_response() {
+        let (_fixture, store) = Fixture::new();
+        admit_plain(&store, living("plain"));
+        admit(&store, vec![living("group")]);
+        let queue = store.metaflow(&address()).unwrap().unwrap().queue.0;
+        assert_eq!(
+            store
+                .simplified_reply_input_from_frozen(&address(), &queue[..1])
+                .unwrap()
+                .unwrap(),
+            Some(&queue[0])
+        );
+        assert_eq!(
+            store
+                .simplified_reply_input_from_frozen(&address(), &queue[1..])
+                .unwrap()
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn simplified_only_awaiting_member_can_be_first_middle_or_last() {
+        for position in 0..3 {
+            let (_fixture, store) = Fixture::new();
+            let mut members = vec![notice("context"), living("context")];
+            members.insert(
+                position,
+                AdmissionMessage {
+                    delivery: Delivery::Wake,
+                    message: Message::HardAbrupt(Request::Question("awaiting".into())),
+                },
+            );
+            admit(&store, members);
+            let queue = store.metaflow(&address()).unwrap().unwrap().queue.0;
+            assert_eq!(
+                store
+                    .simplified_reply_input_from_frozen(&address(), &queue)
+                    .unwrap()
+                    .unwrap(),
+                Some(&queue[position])
+            );
+        }
+    }
+
+    #[test]
+    fn frozen_analysis_rejects_reordered_member_evidence() {
+        let (_fixture, store) = Fixture::new();
+        admit(&store, vec![notice("first"), living("second")]);
+        let mut queue = store.metaflow(&address()).unwrap().unwrap().queue.0;
+        queue.reverse();
+        assert!(
+            store
+                .simplified_reply_input_from_frozen(&address(), &queue)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn conflict_failure_is_terminal_same_typed_refusal_for_every_survivor() {
+        let (fixture, store) = Fixture::new();
+        let accepted = admit(
+            &store,
+            vec![notice("before"), order("one"), living("context"), task(1)],
+        );
+        let queue = store.metaflow(&address()).unwrap().unwrap().queue.0;
+        let reason = store
+            .simplified_reply_input_from_frozen(&address(), &queue)
+            .unwrap()
+            .unwrap_err();
+        store
+            .refuse_delivery_group(&address(), &queue, reason.clone())
+            .unwrap();
+        assert!(
+            store
+                .metaflow(&address())
+                .unwrap()
+                .unwrap()
+                .queue
+                .0
+                .is_empty()
+        );
+        drop(store);
+        let store = fixture.reopen();
+        for member in accepted {
+            assert_eq!(
+                store
+                    .logical_delivery_snapshot(&member.logical_delivery_id)
+                    .unwrap()
+                    .unwrap()
+                    .delivery_state,
+                DeliveryState::Failed(reason.clone())
+            );
+        }
     }
 }

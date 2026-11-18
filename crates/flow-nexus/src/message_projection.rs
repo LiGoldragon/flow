@@ -41,6 +41,9 @@ impl ProjectsRefusal for signal_flow::Refusal {
             Refusal::RequestIdSpaceFull => VisibleRefusal::RequestIdSpaceFull,
             Refusal::RequestIdDrawsCollided => VisibleRefusal::RequestIdDrawsCollided,
             Refusal::MinutesRefused(value) => VisibleRefusal::MinutesRefused(value.clone()),
+            Refusal::SimplifiedAwaitingMemberConflict(position) => {
+                VisibleRefusal::SimplifiedAwaitingMemberConflict(position.clone())
+            }
         }
     }
 }
@@ -758,5 +761,22 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn failed_conflict_projection_retains_typed_original_position() {
+        use super::ProjectsDeliveryState;
+        let private = signal_flow::DeliveryState::Failed(
+            signal_flow::Refusal::SimplifiedAwaitingMemberConflict(
+                signal_flow::SendSeveralMessagePosition(3),
+            ),
+        );
+        assert_eq!(
+            private.visible_delivery_state(),
+            signal_flow::VisibleDeliveryState::Failed(
+                signal_flow::VisibleRefusal::SimplifiedAwaitingMemberConflict(
+                    signal_flow::SendSeveralMessagePosition(3)
+                )
+            )
+        );
     }
 }

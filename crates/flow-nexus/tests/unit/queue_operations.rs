@@ -432,8 +432,8 @@ fn hot_reads_each_live_flow_by_its_last_turn_end() {
 
 /// The owner at a terminal and a caller in no flow are served as a flow
 /// is: a Send from either is accepted as Unbound, a DeliverAll and an
-/// ObserveSends answer alike, and an Unbound request is open until it is
-/// answered, to whomever the answer names.
+/// ObserveSends answer alike. An unbound Question owes a Result; an Order
+/// does not, even after delivery.
 #[test]
 fn the_owner_and_an_unbound_caller_are_served_as_a_flow_is() {
     use crate::sending::IdentifiesSender;
@@ -487,8 +487,8 @@ fn the_owner_and_an_unbound_caller_are_served_as_a_flow_is() {
             >= 2
     );
 
-    // An Order from no Address is answered to whom the answer names, by
-    // whoever answers.
+    // A delivered unbound Order takes no Result. An unbound Question
+    // resolves for the kept-answer path, whoever answers.
     assert!(matches!(
         fixture.nexus.clear(&recipient),
         Output::Cleared(cleared) if cleared.len() == 2
@@ -500,13 +500,32 @@ fn the_owner_and_an_unbound_caller_are_served_as_a_flow_is() {
         Request::Order("Answer anyone.".into()),
     );
     delivered(&fixture, &recipient, &order);
-    assert!(matches!(
+    assert_eq!(
         fixture
             .nexus
             .store
             .resolve_sendable_message(signal_flow::SendableMessage::Soft(
                 signal_flow::SendableRequest::Result(signal_flow::SendableRequest_Result_Data {
                     request_id: order.request_id.clone(),
+                    string: "no answer owed".into(),
+                },)
+            ),),
+        Ok(Err(signal_flow::Refusal::Unresolved)),
+    );
+    let question = admitted(
+        &fixture,
+        &recipient,
+        SentBy::Unbound,
+        Request::Question("Answer the unbound question.".into()),
+    );
+    delivered(&fixture, &recipient, &question);
+    assert!(matches!(
+        fixture
+            .nexus
+            .store
+            .resolve_sendable_message(signal_flow::SendableMessage::Soft(
+                signal_flow::SendableRequest::Result(signal_flow::SendableRequest_Result_Data {
+                    request_id: question.request_id.clone(),
                     string: "done".into(),
                 },)
             ),),
@@ -946,7 +965,7 @@ fn close_request_is_refused_as_cancel_is() {
         &fixture,
         &recipient,
         SentBy::Sender(sender.clone()),
-        Request::Order("Answered already.".into()),
+        Request::Question("Answered already.".into()),
     );
     delivered(&fixture, &recipient, &answered);
     assert!(matches!(

@@ -2417,6 +2417,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         } else {
             commit
         };
+        use super::task_reminder_notice::RecordsNoticeOfTask;
         let commit = match task_reminder {
             Some(of) => commit.assert(
                 self.task_reminder_notices,

@@ -62,9 +62,13 @@ pub(crate) struct ReminderOfTask {
     pub(crate) request_id: RequestId,
 }
 
-impl ReminderOfTask {
+pub(super) trait RecordsNoticeOfTask {
     /// The record tying the Notice admitted as `notice` to its Task.
-    pub(super) fn notice(&self, notice: LogicalDeliveryId) -> TaskReminderNotice {
+    fn notice(&self, notice: LogicalDeliveryId) -> TaskReminderNotice;
+}
+
+impl RecordsNoticeOfTask for ReminderOfTask {
+    fn notice(&self, notice: LogicalDeliveryId) -> TaskReminderNotice {
         TaskReminderNotice {
             logical_delivery_id: notice,
             reminded_task: self.task.clone(),

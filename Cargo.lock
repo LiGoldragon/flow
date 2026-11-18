@@ -271,7 +271,7 @@ dependencies = [
  "protos",
  "rkyv",
  "serde_json",
- "signal-flow 68.0.0",
+ "signal-flow 0.68.0",
  "tempfile",
  "translator",
 ]
@@ -310,7 +310,7 @@ dependencies = [
  "protos",
  "rkyv",
  "signal",
- "signal-flow 68.0.0",
+ "signal-flow 0.68.0",
  "tempfile",
  "translator",
 ]
@@ -352,8 +352,8 @@ dependencies = [
  "sha2",
  "signal",
  "signal-curriculum-nexus",
+ "signal-flow 0.68.0",
  "signal-flow 60.0.0",
- "signal-flow 68.0.0",
  "signal-flow-before-request-ids",
  "tempfile",
  "thiserror",
@@ -566,7 +566,7 @@ dependencies = [
 [[package]]
 name = "meta-signal-flow"
 version = "89.0.1"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=e34d0442ff45fa89808c5ae3fa5643444535d755#e34d0442ff45fa89808c5ae3fa5643444535d755"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=313bc05b4363e15165c6761bfc2d4b2782e7687a#313bc05b4363e15165c6761bfc2d4b2782e7687a"
 dependencies = [
  "datom-codec",
  "ethos-zero 29.0.0",
@@ -574,7 +574,7 @@ dependencies = [
  "protos",
  "rkyv",
  "signal",
- "signal-flow 68.0.0",
+ "signal-flow 0.68.0",
 ]
 
 [[package]]
@@ -974,6 +974,19 @@ dependencies = [
 
 [[package]]
 name = "signal-flow"
+version = "0.68.0"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=319e3c3f8502e1c4356bd499bf8949905e6fd3c8#319e3c3f8502e1c4356bd499bf8949905e6fd3c8"
+dependencies = [
+ "datom-codec",
+ "ethos-zero 27.0.0",
+ "flow-ethos",
+ "protos",
+ "rkyv",
+ "signal",
+]
+
+[[package]]
+name = "signal-flow"
 version = "60.0.0"
 source = "git+https://github.com/LiGoldragon/signal-flow?rev=04a72fd#04a72fd35345f63a06352c17f46f997d7fdafaee"
 dependencies = [
@@ -992,19 +1005,6 @@ source = "git+https://github.com/LiGoldragon/signal-flow?rev=4871bb8#4871bb81c11
 dependencies = [
  "datom-codec",
  "ethos-zero 22.0.0",
- "flow-ethos",
- "protos",
- "rkyv",
- "signal",
-]
-
-[[package]]
-name = "signal-flow"
-version = "68.0.0"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=163785f1cb8e8a0575162e8ffb290d4642e6f40b#163785f1cb8e8a0575162e8ffb290d4642e6f40b"
-dependencies = [
- "datom-codec",
- "ethos-zero 27.0.0",
  "flow-ethos",
  "protos",
  "rkyv",

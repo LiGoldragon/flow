@@ -1,7 +1,7 @@
 # Flow 0.60.0: CloseRequest closes a request with no answer and tells no one
 
-Contracts: signal-flow 68.0.0 (163785f) and meta-signal-flow 89.0.1
-(e34d044), on build-base `close-request-7b5174` (52bdd32), which registers
+Contracts: signal-flow 0.68.0 (319e3c3) and meta-signal-flow 89.0.1
+(313bc05), on build-base `close-request-7b5174` (7fca4d5), which registers
 both. Built on 0.59.5 (3c54a9d2). **The ordinary wire and the stored format
 change; the meta wire does not.** Psyche task vaol.
 

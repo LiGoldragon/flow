@@ -4466,6 +4466,7 @@ impl crate::generated::overriding::ResumesPermaflowWork for RunningNexus {
         {
             self.settle_stopped(&flow_id.0);
         }
+        self.settle_orphaned_order(&address);
         if let Ok(Some(intent)) = self.store.successor_intent(&address)
             && matches!(self.store.metaflow(&address), Ok(Some(metaflow))
                 if metaflow.state == flow_ethos::State::Awake(FlowId(intent.predecessor.0.clone())))

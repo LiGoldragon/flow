@@ -1166,3 +1166,147 @@ fn handover_warning_uses_the_held_queue_and_release_preserves_its_once_only_witn
         crate::generated::memory::Sent(1)
     );
 }
+
+#[test]
+fn refused_parked_launch_is_terminal_and_never_reexecuted_after_release_or_restart() {
+    use crate::generated::overriding::ParksHeldLaunches;
+    use crate::launching::LaunchesFlows;
+    use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
+    use crate::store::{NamesConfiguredModel, RecordsLaunchOutcome};
+    for change_model in [false, true] {
+        let mut fixture = NexusFixture::new();
+        let seat = ended_claude(&fixture);
+        let at = address(Model::Sol);
+        fixture.nexus.store.seed_metaflow(metaflow(
+            Model::Sol,
+            State::Asleep,
+            vec!["abc123"],
+            vec![],
+        ));
+        let world = fixture.fresh_claude_world();
+        let mut profile = seat.profile;
+        profile.launch_request_id = signal_flow::LaunchRequestId("refused-parked-launch".into());
+        fixture
+            .nexus
+            .store
+            .configure_change(meta::ConfigurationChange::Metaflows(vec![
+                meta::ConfigureMetaflow {
+                    address: at.clone(),
+                    root_option: None,
+                    leave_outs: signal_flow::LeaveOuts(vec![]),
+                    system_modules: profile.system_modules.clone(),
+                    prompt_modules: profile.prompt_modules.clone(),
+                    flow_kind: profile.flow_kind.clone(),
+                    tool_set: profile.tool_set.clone(),
+                    continuity: meta::Continuity::OnDemand,
+                    purpose: meta::Purpose(String::new()),
+                    records: meta::Records(vec![]),
+                },
+            ]))
+            .unwrap();
+        overridden(&fixture, meta::Input::HoldPermaflow(at.clone()));
+        assert!(matches!(
+            fixture
+                .nexus
+                .start(profile.clone(), signal_flow::Origin::Unbound),
+            signal_flow::Output::LaunchPending(_)
+        ));
+        let original_model = fixture.nexus.store.configured_model(&at).unwrap().unwrap();
+        let original_declaration = fixture
+            .nexus
+            .store
+            .metaflow_declaration(&at)
+            .unwrap()
+            .unwrap();
+        if change_model {
+            fixture
+                .nexus
+                .store
+                .configure_change(meta::ConfigurationChange::Models(vec![
+                    meta::ConfigureModel {
+                        model: Model::Sol,
+                        native: meta::Native("changed-model".into()),
+                    },
+                ]))
+                .unwrap();
+        } else {
+            let mut declaration = original_declaration.clone();
+            declaration.root_option = Some(meta::Root(
+                fixture
+                    .directory
+                    .path()
+                    .join("absent-launch-root")
+                    .to_string_lossy()
+                    .into_owned(),
+            ));
+            fixture
+                .nexus
+                .store
+                .configure_change(meta::ConfigurationChange::Metaflows(vec![declaration]))
+                .unwrap();
+        }
+        overridden(&fixture, meta::Input::ReleasePermaflow(at.clone()));
+        let outcome = fixture
+            .nexus
+            .store
+            .launch_outcome(&profile.launch_request_id.0)
+            .unwrap()
+            .expect("a resumed refusal settles the parked request");
+        if change_model {
+            assert_eq!(
+                outcome,
+                crate::store::LaunchOutcome::StartRejected(
+                    signal_flow::StartRejection::LaunchRequestConflict
+                )
+            );
+        } else {
+            assert_eq!(
+                outcome,
+                crate::store::LaunchOutcome::StartRejected(
+                    signal_flow::StartRejection::CompositionRefused(
+                        signal_flow::CompositionRefusal::Unconfigured
+                    )
+                )
+            );
+        }
+        assert!(
+            !fixture
+                .nexus
+                .store
+                .marked_held_launch(profile.launch_request_id.clone())
+                .unwrap()
+        );
+        assert_eq!(world.claude_starts(), 0, "{}", world.calls());
+        // Restore a launchable configuration: a terminal request stays terminal.
+        fixture
+            .nexus
+            .store
+            .configure_change(meta::ConfigurationChange::Models(vec![
+                meta::ConfigureModel {
+                    model: Model::Sol,
+                    native: meta::Native(original_model),
+                },
+            ]))
+            .unwrap();
+        fixture
+            .nexus
+            .store
+            .configure_change(meta::ConfigurationChange::Metaflows(vec![
+                original_declaration,
+            ]))
+            .unwrap();
+        overridden(&fixture, meta::Input::ReleasePermaflow(at.clone()));
+        fixture.restarted();
+        fixture.nexus.recover_wakes();
+        overridden(&fixture, meta::Input::ReleasePermaflow(at));
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .launch_outcome(&profile.launch_request_id.0)
+                .unwrap(),
+            Some(outcome)
+        );
+        assert_eq!(world.claude_starts(), 0, "{}", world.calls());
+    }
+}

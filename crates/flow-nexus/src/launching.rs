@@ -280,6 +280,13 @@ impl LaunchesFlows for RunningNexus {
         {
             return Output::StartRejected(StartRejection::LaunchRequestConflict);
         }
+        let outcome = match self.store.launch_outcome(&launch_request_id.0) {
+            Ok(outcome) => outcome,
+            Err(_) => return Output::StartRejected(StartRejection::LaunchPersistenceRefused),
+        };
+        if let Some(outcome) = outcome {
+            return outcome.response(&self.store);
+        }
         let resumable = existing.as_ref().is_some_and(|attempt| {
             attempt.launch_attempt_phase == LaunchAttemptPhase::Reserved
                 && !self.permaflow_held(profile.address.clone())
@@ -1252,8 +1259,27 @@ impl crate::generated::overriding::ResumesHeldLaunches for RunningNexus {
             if attempt.launch_profile.address != address {
                 continue;
             }
+            match self.store.launch_outcome(&marker.launch_request_id.0) {
+                Ok(Some(outcome)) => {
+                    // A retained marker from an earlier settlement is removed
+                    // by the same atomic settlement, and never executed.
+                    let _ = self.perform(Self::settled_as(&marker.launch_request_id.0, outcome));
+                    continue;
+                }
+                Ok(None) => {}
+                Err(_) => continue,
+            }
             let response = self.start(attempt.launch_profile, attempt.origin);
-            let _ = self.settle(&marker.launch_request_id.0, response);
+            if response == Output::StartRejected(StartRejection::LaunchRequestConflict) {
+                // This is the stored parked profile, not a conflicting caller.
+                // Changed configuration refuses this request terminally.
+                let _ = self.perform(Self::settled_as(
+                    &marker.launch_request_id.0,
+                    LaunchOutcome::StartRejected(StartRejection::LaunchRequestConflict),
+                ));
+            } else {
+                let _ = self.settle(&marker.launch_request_id.0, response);
+            }
         }
         true
     }

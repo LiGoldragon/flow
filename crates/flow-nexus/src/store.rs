@@ -4588,6 +4588,15 @@ impl RecordsLaunchOutcome for FlowStore {
         } else {
             commit.assert(self.launch_outcomes, stored)
         };
+        let marker_key = RecordKey::new(launch_request_id);
+        if !self
+            .engine
+            .match_records(QueryPlan::key(self.held_launches, marker_key.clone()))?
+            .records()
+            .is_empty()
+        {
+            commit = commit.retract(self.held_launches, marker_key);
+        }
         if refused
             && let Some(binding) = self
                 .launch_attempt(launch_request_id)?

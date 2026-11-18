@@ -1371,3 +1371,69 @@ fn release_takes_up_an_orphaned_launch_order_once_without_a_nexus_restart() {
     overridden(&fixture, meta::Input::ReleasePermaflow(at));
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());
 }
+
+#[test]
+fn a_retained_settled_marker_is_removed_without_executing_its_launch() {
+    use crate::generated::operation::{LaunchReservation, Operation, Outcome};
+    use crate::generated::overriding::ParksHeldLaunches;
+    use crate::launching::LaunchesFlows;
+    use crate::performing::Performs;
+    use crate::store::{LaunchOutcome, RecordsLaunchOutcome};
+    let mut fixture = NexusFixture::new();
+    let seat = ended_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let world = fixture.fresh_claude_world();
+    let mut profile = seat.profile;
+    profile.launch_request_id = signal_flow::LaunchRequestId("settled-held-marker".into());
+    overridden(&fixture, meta::Input::HoldPermaflow(at.clone()));
+    let Outcome::Composed(launch) = fixture.nexus.perform(Operation::Compose(profile.clone()))
+    else {
+        panic!("the retained launch composes");
+    };
+    let outcome = LaunchOutcome::StartRejected(signal_flow::StartRejection::LaunchRequestConflict);
+    // Seed the state an older writer could leave: terminal outcome plus parked marker.
+    fixture
+        .nexus
+        .store
+        .record_launch_outcome(&profile.launch_request_id.0, outcome.clone())
+        .unwrap();
+    assert!(matches!(
+        fixture
+            .nexus
+            .store
+            .park_held_launch(LaunchReservation {
+                composed_launch: launch,
+                origin: signal_flow::Origin::Unbound,
+            })
+            .unwrap(),
+        signal_flow::LaunchAttemptReservation::Reserved(_)
+    ));
+    fixture.restarted();
+    overridden(&fixture, meta::Input::ReleasePermaflow(at.clone()));
+    assert_eq!(world.claude_starts(), 0, "{}", world.calls());
+    assert!(
+        !fixture
+            .nexus
+            .store
+            .marked_held_launch(profile.launch_request_id.clone())
+            .unwrap()
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .launch_outcome(&profile.launch_request_id.0)
+            .unwrap(),
+        Some(outcome)
+    );
+    assert_eq!(
+        fixture.nexus.start(profile, signal_flow::Origin::Unbound),
+        signal_flow::Output::StartRejected(signal_flow::StartRejection::LaunchRequestConflict)
+    );
+    overridden(&fixture, meta::Input::ReleasePermaflow(at));
+    assert_eq!(world.claude_starts(), 0, "{}", world.calls());
+}

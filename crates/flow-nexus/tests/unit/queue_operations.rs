@@ -111,11 +111,11 @@ fn notices(fixture: &NexusFixture, address: &Address) -> Vec<String> {
         .collect()
 }
 
-/// A delivered Order is cancelled by anyone: closed, its id archived, and
-/// its sender and its recipient each told by a Soft Notice from Flow. A
+/// A delivered Question is cancelled by anyone: closed, its id archived, and
+/// its recipient told by a Soft Notice from Flow. A
 /// second Cancel names no request.
 #[test]
-fn cancel_closes_a_delivered_order_and_tells_both_ends() {
+fn cancel_closes_a_delivered_question_and_tells_the_recipient() {
     let fixture = NexusFixture::new();
     let sender = at("cancelSender");
     let recipient = at("cancelRecipient");
@@ -125,7 +125,7 @@ fn cancel_closes_a_delivered_order_and_tells_both_ends() {
         &fixture,
         &recipient,
         SentBy::Sender(sender.clone()),
-        Request::Order("Review the drain fix.".into()),
+        Request::Question("Review the drain fix?".into()),
     );
     delivered(&fixture, &recipient, &order);
 
@@ -145,7 +145,7 @@ fn cancel_closes_a_delivered_order_and_tells_both_ends() {
         "the request's id is closed"
     );
     let told = format!("Request {} was cancelled.", order.request_id.0);
-    assert_eq!(notices(&fixture, &sender), vec![told.clone()]);
+    assert!(notices(&fixture, &sender).is_empty());
     assert_eq!(notices(&fixture, &recipient), vec![told]);
     assert_eq!(
         fixture
@@ -195,7 +195,7 @@ fn cancel_takes_a_queued_task_out_with_its_reminder() {
         None,
         "its reminder went with it"
     );
-    assert_eq!(notices(&fixture, &sender).len(), 1);
+    assert!(notices(&fixture, &sender).is_empty());
     assert!(notices(&fixture, &recipient).is_empty());
 }
 
@@ -743,10 +743,7 @@ fn cancel_ends_a_reminder_and_remind_refuses_what_a_task_refuses() {
         fixture.nexus.store.scheduled_reminder(&request_id).unwrap(),
         None
     );
-    assert_eq!(
-        notices(&fixture, &asker),
-        vec![format!("Request {} was cancelled.", request_id.0)]
-    );
+    assert!(notices(&fixture, &asker).is_empty());
     assert!(queued(&fixture, &reminded).is_empty());
     assert_eq!(
         fixture.nexus.remind(remind(0, &reminded), SentBy::Unbound),
@@ -1129,4 +1126,24 @@ fn close_request_records_the_process_its_connection_showed() {
     );
     assert!(queued(&fixture, &sender).is_empty());
     assert!(queued(&fixture, &recipient).is_empty());
+}
+
+#[test]
+fn cancellation_selects_roles_before_deduplicating_addresses() {
+    use crate::queue_operations::{CancellationRoles, SelectsCancellationNotices};
+    use meta_signal_flow::{CancelNotices, Recipient, Sender, Telling};
+    let sender = at("selectionSender");
+    let recipient = at("selectionRecipient");
+    for (sender_telling, recipient_telling, expected) in [
+        (Telling::Untold, Telling::Untold, 0),
+        (Telling::Told, Telling::Untold, 1),
+        (Telling::Untold, Telling::Told, 1),
+        (Telling::Told, Telling::Told, 2),
+    ] {
+        let settings = CancelNotices { sender: Sender(sender_telling), recipient: Recipient(recipient_telling) };
+        let roles = CancellationRoles { sender: Some(sender.clone()), recipient: Some(recipient.clone()) };
+        assert_eq!(roles.selected(&settings).len(), expected);
+        let same = CancellationRoles { sender: Some(sender.clone()), recipient: Some(sender.clone()) };
+        assert_eq!(same.selected(&settings).len(), usize::from(expected > 0));
+    }
 }

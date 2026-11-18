@@ -17,7 +17,7 @@ use crate::store::logical_delivery::{
 use crate::store::metaflow::{SleepsMetaflows, TakesLaunchAddress};
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::turn_end::RecordsTurnEnds;
-use crate::store::{ManagesMetaflowState, StoreError};
+use crate::store::{DefaultsCancelNotices, ManagesMetaflowState, StoreError};
 use crate::waking::{
     DrainsHeldSeats, HoldsWakingMetaflows, PushesAtPriority, RestsEndedAwake, SleepsAndWakesSeats,
 };
@@ -114,6 +114,30 @@ impl EmptiesQueues for RunningNexus {
     }
 }
 
+pub(crate) struct CancellationRoles {
+    pub(crate) sender: Option<Address>,
+    pub(crate) recipient: Option<Address>,
+}
+
+pub(crate) trait SelectsCancellationNotices {
+    fn selected(self, settings: &meta_signal_flow::CancelNotices) -> Vec<Address>;
+}
+
+impl SelectsCancellationNotices for CancellationRoles {
+    fn selected(self, settings: &meta_signal_flow::CancelNotices) -> Vec<Address> {
+        let mut selected = Vec::new();
+        if settings.sender.0 == meta_signal_flow::Telling::Told {
+            if let Some(sender) = self.sender { selected.push(sender); }
+        }
+        if settings.recipient.0 == meta_signal_flow::Telling::Told {
+            if let Some(recipient) = self.recipient {
+                if !selected.contains(&recipient) { selected.push(recipient); }
+            }
+        }
+        selected
+    }
+}
+
 /// The one way an open request is ended with no answer, which Cancel and
 /// CloseRequest share; what each does beyond it is its ending's.
 trait EndsRequests {
@@ -128,7 +152,7 @@ trait EndsRequests {
         &self,
         request_id: &RequestId,
         ending: &RequestEnding,
-    ) -> Result<Vec<Address>, RequestRejection>;
+    ) -> Result<CancellationRoles, RequestRejection>;
 }
 
 impl EndsRequests for RunningNexus {
@@ -136,9 +160,9 @@ impl EndsRequests for RunningNexus {
         &self,
         request_id: &RequestId,
         ending: &RequestEnding,
-    ) -> Result<Vec<Address>, RequestRejection> {
+    ) -> Result<CancellationRoles, RequestRejection> {
         use crate::store::scheduled_reminder::{MarksScheduledReminder, SchedulesReminders};
-        let mut knew = Vec::new();
+        let mut roles = CancellationRoles { sender: None, recipient: None };
         // A reminder not yet sent is ended where it waits; it reached no
         // one, so only its asker knew of it.
         match self.store.scheduled_reminder(request_id) {
@@ -154,9 +178,9 @@ impl EndsRequests for RunningNexus {
                     )
                     .map_err(|_| RequestRejection::StoreRefused)?;
                 if let SentBy::Sender(asker) = &reminder.sent_by {
-                    knew.push(asker.clone());
+                    roles.sender = Some(asker.clone());
                 }
-                return Ok(knew);
+                return Ok(roles);
             }
             Ok(None) => {}
             Err(_) => return Err(RequestRejection::StoreRefused),
@@ -182,6 +206,10 @@ impl EndsRequests for RunningNexus {
             .store
             .delivered_to_be_answered(&binding.logical_delivery_id)
             .map_err(|_| RequestRejection::StoreRefused)?;
+        let recipient_eligible = self.store.logical_delivery_snapshot(&binding.logical_delivery_id)
+            .map_err(|_| RequestRejection::StoreRefused)?
+            .is_some_and(|delivery| matches!(delivery.delivery_state,
+                signal_flow::DeliveryState::Delivered(_) | signal_flow::DeliveryState::Read | signal_flow::DeliveryState::Uncertain));
         let queued = match self.store.metaflow(&retained.address) {
             Ok(metaflow) => metaflow.is_some_and(|metaflow| {
                 metaflow
@@ -217,12 +245,12 @@ impl EndsRequests for RunningNexus {
             }
         }
         if let SentBy::Sender(sender) = &retained.entry.sent_by {
-            knew.push(sender.clone());
+            roles.sender = Some(sender.clone());
         }
-        if reached && !knew.contains(&retained.address) {
-            knew.push(retained.address.clone());
+        if recipient_eligible {
+            roles.recipient = Some(retained.address.clone());
         }
-        Ok(knew)
+        Ok(roles)
     }
 }
 
@@ -233,10 +261,16 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let told = match self.end_request(request_id, &RequestEnding::Cancelled) {
-                Ok(told) => told,
+            let settings = match self.store.configuration_snapshot() {
+                Ok(Some(snapshot)) => snapshot.configured_cancel_notices.0,
+                Ok(None) => meta_signal_flow::CancelNotices::default_cancel_notices(),
+                Err(_) => return Output::CancelRejected(RequestRejection::StoreRefused),
+            };
+            let roles = match self.end_request(request_id, &RequestEnding::Cancelled) {
+                Ok(roles) => roles,
                 Err(rejection) => return Output::CancelRejected(rejection),
             };
+            let told = roles.selected(&settings);
             let text = format!("Request {} was cancelled.", request_id.0);
             for address in &told {
                 if let Err(error) = self.notify(address, text.clone()) {

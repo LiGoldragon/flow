@@ -475,6 +475,7 @@ mod tests {
             ),
             configured_harness_hook_events: meta_signal_flow::ConfiguredHarnessHookEvents(vec![]),
             successor_recovery_text: meta_signal_flow::SuccessorRecoveryText(String::new()),
+            configured_cancel_notices: meta_signal_flow::ConfiguredCancelNotices(meta_signal_flow::CancelNotices { sender: meta_signal_flow::Sender(meta_signal_flow::Telling::Untold), recipient: meta_signal_flow::Recipient(meta_signal_flow::Telling::Told) }),
             configured_ended_turn_retention: meta_signal_flow::ConfiguredEndedTurnRetention(
                 meta_signal_flow::TurnRetentionBound(64),
             ),

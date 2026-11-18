@@ -68,7 +68,7 @@ pub(crate) use crate::generated::memory::{
 };
 pub(crate) use crate::generated::memory::{
     FlowStoreConfiguration, FlowStoreState, NextFlowNumber, StoredLaunchAttempt,
-    StoredMetaDefaultMinutesConfiguration, StoredMetaHarnessFlagsConfiguration,
+    StoredMetaCancelNoticesConfiguration, StoredMetaDefaultMinutesConfiguration, StoredMetaHarnessFlagsConfiguration,
     StoredMetaHarnessHookConfiguration, StoredMetaHeartbeatConfiguration,
     StoredMetaInvestigationConfiguration, StoredMetaModelConfiguration,
     StoredMetaProtectedAddressConfiguration, StoredMetaRequestPolicyConfiguration,
@@ -210,6 +210,11 @@ const META_HARNESS_HOOK_CONFIGURATION_SCHEMA: &str =
 /// Added with meta-signal-flow 83: a store written before it declares no
 /// ended-turn retention, and holds the seed.
 const OPTIONAL_TURN_RETENTION_TABLE: &str = "flow_nexus_meta_turn_retention_configuration";
+const OPTIONAL_CANCEL_NOTICES_TABLE: &str = "flow_nexus_meta_cancel_notices_configuration";
+const META_CANCEL_NOTICES_CONFIGURATION_TABLE_NAME: TableName =
+    TableName::new(OPTIONAL_CANCEL_NOTICES_TABLE);
+const META_CANCEL_NOTICES_CONFIGURATION_FAMILY: &str = "flow_nexus_meta_cancel_notices_configuration";
+const META_CANCEL_NOTICES_CONFIGURATION_SCHEMA: &str = "flow_nexus_meta_cancel_notices_configuration_v1";
 /// Added in 0.57.0 with the override panel: a store written before holds no
 /// flow's transitions and no switch, and is opened with each registered
 /// empty.
@@ -267,6 +272,7 @@ const CONFIGURATION_ONLY_TABLES: &[&str] = &[
     "flow_nexus_meta_handover_configuration",
     OPTIONAL_HARNESS_HOOK_TABLE,
     OPTIONAL_TURN_RETENTION_TABLE,
+    OPTIONAL_CANCEL_NOTICES_TABLE,
 ];
 /// The tables a running store holds, all of them.
 const RUNNING_TABLES: &[&str] = &[
@@ -331,6 +337,7 @@ const RUNNING_TABLES: &[&str] = &[
     OPTIONAL_PENDING_REAP_TABLE,
     OPTIONAL_PENDING_HANDOVER_TABLE,
     OPTIONAL_TURN_RETENTION_TABLE,
+    OPTIONAL_CANCEL_NOTICES_TABLE,
     OPTIONAL_FLOW_TRANSITIONS_TABLE,
     OPTIONAL_HOLD_TABLE,
     OPTIONAL_PERMAFLOW_HOLD_TABLE,
@@ -964,6 +971,42 @@ impl DescribesHarnessHookTable for StoredMetaHarnessHookConfiguration {
             FamilyName::new(META_HARNESS_HOOK_CONFIGURATION_FAMILY),
             SchemaHash::for_label(META_HARNESS_HOOK_CONFIGURATION_SCHEMA),
         )
+    }
+}
+
+impl EngineRecord for StoredMetaCancelNoticesConfiguration {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new("cancel_notices")
+    }
+}
+
+impl MemoryDefinition for StoredMetaCancelNoticesConfiguration {
+    fn memory_version() -> MemoryVersion { MemoryVersion::new(1) }
+    fn schema_hash() -> SchemaHash { SchemaHash::for_label(META_CANCEL_NOTICES_CONFIGURATION_SCHEMA) }
+}
+
+trait DescribesCancelNoticesTable {
+    fn descriptor() -> TableDescriptor<StoredMetaCancelNoticesConfiguration>;
+}
+
+impl DescribesCancelNoticesTable for StoredMetaCancelNoticesConfiguration {
+    fn descriptor() -> TableDescriptor<StoredMetaCancelNoticesConfiguration> {
+        TableDescriptor::new(
+            META_CANCEL_NOTICES_CONFIGURATION_TABLE_NAME,
+            FamilyName::new(META_CANCEL_NOTICES_CONFIGURATION_FAMILY),
+            SchemaHash::for_label(META_CANCEL_NOTICES_CONFIGURATION_SCHEMA),
+        )
+    }
+}
+
+pub(crate) trait DefaultsCancelNotices {
+    fn default_cancel_notices() -> meta_signal_flow::CancelNotices;
+}
+
+impl DefaultsCancelNotices for meta_signal_flow::CancelNotices {
+    fn default_cancel_notices() -> Self {
+        Self { sender: meta_signal_flow::Sender(meta_signal_flow::Telling::Untold),
+               recipient: meta_signal_flow::Recipient(meta_signal_flow::Telling::Told) }
     }
 }
 
@@ -1675,6 +1718,7 @@ pub(crate) struct MetaConfigurationTables {
     protected_addresses: TableReference<StoredMetaProtectedAddressConfiguration>,
     harness_hook: TableReference<StoredMetaHarnessHookConfiguration>,
     turn_retention: TableReference<StoredMetaTurnRetentionConfiguration>,
+    cancel_notices: TableReference<StoredMetaCancelNoticesConfiguration>,
 }
 
 trait RegistersMetaConfigurationTables: Sized {
@@ -1707,6 +1751,7 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
             harness_hook: engine.register_table(StoredMetaHarnessHookConfiguration::descriptor())?,
             turn_retention: engine
                 .register_table(StoredMetaTurnRetentionConfiguration::descriptor())?,
+            cancel_notices: engine.register_table(StoredMetaCancelNoticesConfiguration::descriptor())?,
             metaflows: engine.register_table(
                 <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor(),
             )?,
@@ -1935,6 +1980,7 @@ pub struct ConfiguredFamilies {
     pub request_id_draws: meta_signal_flow::DrawBound,
     pub announcement_tries: meta_signal_flow::TryBound,
     pub ended_turn_retention: meta_signal_flow::TurnRetentionBound,
+    pub cancel_notices: meta_signal_flow::CancelNotices,
 }
 
 pub trait CompletesSnapshot {
@@ -1988,6 +2034,7 @@ impl CompletesSnapshot for ConfiguredFamilies {
             configured_harness_hook_events: meta_signal_flow::ConfiguredHarnessHookEvents(
                 self.harness_hook_events,
             ),
+            configured_cancel_notices: meta_signal_flow::ConfiguredCancelNotices(self.cancel_notices),
             configured_ended_turn_retention: meta_signal_flow::ConfiguredEndedTurnRetention(
                 self.ended_turn_retention,
             ),
@@ -2064,6 +2111,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             StoredMetaProtectedAddressConfiguration::descriptor();
         let meta_harness_hook_descriptor = StoredMetaHarnessHookConfiguration::descriptor();
         let meta_turn_retention_descriptor = StoredMetaTurnRetentionConfiguration::descriptor();
+        let meta_cancel_notices_descriptor = StoredMetaCancelNoticesConfiguration::descriptor();
         let meta_send_servers_descriptor = <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor();
         let meta_metaflows_descriptor = <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor();
         // Family identities are part of the open request, so Engine validates
@@ -2087,6 +2135,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_protected_addresses_descriptor)
                 .with_family(&meta_harness_hook_descriptor)
                 .with_family(&meta_turn_retention_descriptor)
+                .with_family(&meta_cancel_notices_descriptor)
                 .with_family(&meta_metaflows_descriptor)
                 .with_family(&meta_handover_descriptor),
         )?;
@@ -2126,6 +2175,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             protected_addresses: engine.register_table(meta_protected_addresses_descriptor)?,
             harness_hook: engine.register_table(meta_harness_hook_descriptor)?,
             turn_retention: engine.register_table(meta_turn_retention_descriptor)?,
+            cancel_notices: engine.register_table(meta_cancel_notices_descriptor)?,
             metaflows: engine.register_table(meta_metaflows_descriptor)?,
         };
         if !recognized {
@@ -2677,6 +2727,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&StoredMetaDefaultMinutesConfiguration::descriptor())
                 .with_family(&StoredMetaHarnessFlagsConfiguration::descriptor())
                 .with_family(&StoredMetaHeartbeatConfiguration::descriptor())
+                .with_family(&StoredMetaCancelNoticesConfiguration::descriptor())
                 .with_family(&StoredMetaProtectedAddressConfiguration::descriptor())
                 .with_family(&meta_handover_descriptor)
                 .with_family(&compactions_descriptor)
@@ -5611,6 +5662,10 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                 META_HARNESS_HOOK_CONFIGURATION_FAMILY,
                 META_HARNESS_HOOK_CONFIGURATION_SCHEMA,
             ),
+            "flow_nexus_meta_cancel_notices_configuration" => (
+                META_CANCEL_NOTICES_CONFIGURATION_FAMILY,
+                META_CANCEL_NOTICES_CONFIGURATION_SCHEMA,
+            ),
             "flow_nexus_meta_turn_retention_configuration" => (
                 META_TURN_RETENTION_CONFIGURATION_FAMILY,
                 META_TURN_RETENTION_CONFIGURATION_SCHEMA,
@@ -5984,6 +6039,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                     || *name == OPTIONAL_PENDING_HANDOVER_TABLE
                     || *name == OPTIONAL_HARNESS_HOOK_TABLE
                     || *name == OPTIONAL_TURN_RETENTION_TABLE
+                    || *name == OPTIONAL_CANCEL_NOTICES_TABLE
                     || *name == OPTIONAL_FLOW_TRANSITIONS_TABLE
                     || *name == OPTIONAL_HOLD_TABLE
                     || *name == OPTIONAL_PERMAFLOW_HOLD_TABLE
@@ -6234,6 +6290,8 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
             engine.match_records(QueryPlan::all(tables.protected_addresses))?;
         let harness_hook_rows = engine.match_records(QueryPlan::all(tables.harness_hook))?;
         let turn_retention_rows = engine.match_records(QueryPlan::all(tables.turn_retention))?;
+        let cancel_notices_rows = engine.match_records(QueryPlan::all(tables.cancel_notices))?;
+        let cancel_notices_keyed = engine.match_records(QueryPlan::key(tables.cancel_notices, RecordKey::new("cancel_notices")))?;
         let handover = handover_rows
             .records()
             .first()
@@ -6252,6 +6310,8 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
             || protected_address_rows.database_marker() != marker
             || harness_hook_rows.database_marker() != marker
             || turn_retention_rows.database_marker() != marker
+            || cancel_notices_rows.database_marker() != marker
+            || cancel_notices_keyed.database_marker() != marker
             || policy_rows.database_marker() != marker
             || hook_event_rows.database_marker() != marker
             || engine.current_database_marker()? != marker
@@ -6282,6 +6342,11 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
         let ended_turn_retention = match turn_retention_rows.records() {
             [] => meta_signal_flow::TurnRetentionBound(SEEDED_ENDED_TURN_RETENTION),
             [stored] if stored.turn_retention_bound.0 >= 0 => stored.turn_retention_bound,
+            _ => return Err(StoreError::StateInvariant),
+        };
+        let cancel_notices = match (cancel_notices_rows.records(), cancel_notices_keyed.records()) {
+            ([], []) => meta_signal_flow::CancelNotices::default_cancel_notices(),
+            ([_], [stored]) => stored.cancel_notices.clone(),
             _ => return Err(StoreError::StateInvariant),
         };
         let harness_hook = match harness_hook_rows.records() {
@@ -6368,6 +6433,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
             request_id_draws: meta_signal_flow::DrawBound(request_id_draws),
             announcement_tries: meta_signal_flow::TryBound(announcement_tries),
             ended_turn_retention,
+            cancel_notices,
         }))
     }
 
@@ -7031,6 +7097,12 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                     engine,
                     tables.harness_hook,
                     vec![StoredMetaHarnessHookConfiguration { path: harness_hook }],
+                )
+            }
+            ConfigurationChange::CancelNotices(cancel_notices) => {
+                FlowStore::replace_configuration_family(
+                    engine, tables.cancel_notices,
+                    vec![StoredMetaCancelNoticesConfiguration { cancel_notices }],
                 )
             }
             ConfigurationChange::EndedTurnRetention(bound) => {

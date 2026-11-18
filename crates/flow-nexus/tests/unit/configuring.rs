@@ -661,6 +661,7 @@ fn each_family_is_its_last_declaration() {
             configured_harness_hook: meta_signal_flow::ConfiguredHarnessHook(
                 meta_signal_flow::HarnessHookConfiguration::Unconfigured
             ),
+            configured_cancel_notices: meta_signal_flow::ConfiguredCancelNotices(meta_signal_flow::CancelNotices { sender: meta_signal_flow::Sender(meta_signal_flow::Telling::Untold), recipient: meta_signal_flow::Recipient(meta_signal_flow::Telling::Told) }),
             configured_ended_turn_retention: meta_signal_flow::ConfiguredEndedTurnRetention(
                 meta_signal_flow::TurnRetentionBound(crate::store::SEEDED_ENDED_TURN_RETENTION)
             ),
@@ -2581,4 +2582,19 @@ fn one_live_store_value_reaches_both_composers_without_reconstructing_the_source
             }
         }
     }
+}
+
+#[test]
+fn cancel_notices_defaults_configures_and_survives_reopen() {
+    use meta_signal_flow::{CancelNotices, Recipient, Sender, Telling};
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let seeded = CancelNotices { sender: Sender(Telling::Untold), recipient: Recipient(Telling::Told) };
+    assert_eq!(snapshot(&nexus).configured_cancel_notices.0, seeded);
+    let configured = CancelNotices { sender: Sender(Telling::Told), recipient: Recipient(Telling::Untold) };
+    configures(&nexus, ConfigurationChange::CancelNotices(configured.clone()));
+    assert_eq!(snapshot(&nexus).configured_cancel_notices.0, configured);
+    drop(nexus);
+    let reopened = fixture.open();
+    assert_eq!(snapshot(&reopened).configured_cancel_notices.0, configured);
 }

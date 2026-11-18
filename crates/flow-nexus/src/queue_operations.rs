@@ -17,7 +17,7 @@ use crate::store::logical_delivery::{
 use crate::store::metaflow::{SleepsMetaflows, TakesLaunchAddress};
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::turn_end::RecordsTurnEnds;
-use crate::store::{DefaultsCancelNotices, ManagesMetaflowState, StoreError};
+use crate::store::{ManagesMetaflowState, ReadsCancelNotices, StoreError};
 use crate::waking::{
     DrainsHeldSeats, HoldsWakingMetaflows, PushesAtPriority, RestsEndedAwake, SleepsAndWakesSeats,
 };
@@ -120,6 +120,16 @@ pub(crate) struct CancellationRoles {
     pub(crate) settings: Option<meta_signal_flow::CancelNotices>,
 }
 
+pub(crate) trait EligibleForCancellationNotice {
+    fn eligible_for_cancellation_notice(&self) -> bool;
+}
+
+impl EligibleForCancellationNotice for signal_flow::DeliveryState {
+    fn eligible_for_cancellation_notice(&self) -> bool {
+        matches!(self, Self::Delivered(_) | Self::Read | Self::Uncertain)
+    }
+}
+
 pub(crate) trait SelectsCancellationNotices {
     fn selected(self, settings: &meta_signal_flow::CancelNotices) -> Vec<Address>;
 }
@@ -159,11 +169,7 @@ trait EndsRequests {
 
 impl EndsRequests for RunningNexus {
     fn cancellation_notice_settings(&self) -> Result<meta_signal_flow::CancelNotices, RequestRejection> {
-        match self.store.configuration_snapshot() {
-            Ok(Some(snapshot)) => Ok(snapshot.configured_cancel_notices.0),
-            Ok(None) => Ok(meta_signal_flow::CancelNotices::default_cancel_notices()),
-            Err(_) => Err(RequestRejection::StoreRefused),
-        }
+        self.store.cancel_notices().map_err(|_| RequestRejection::StoreRefused)
     }
 
     fn end_request(
@@ -225,8 +231,7 @@ impl EndsRequests for RunningNexus {
         let recipient_eligible = if matches!(ending, RequestEnding::Cancelled) {
             self.store.logical_delivery_snapshot(&binding.logical_delivery_id)
                 .map_err(|_| RequestRejection::StoreRefused)?
-                .is_some_and(|delivery| matches!(delivery.delivery_state,
-                    signal_flow::DeliveryState::Delivered(_) | signal_flow::DeliveryState::Read | signal_flow::DeliveryState::Uncertain))
+                .is_some_and(|delivery| delivery.delivery_state.eligible_for_cancellation_notice())
         } else {
             false
         };

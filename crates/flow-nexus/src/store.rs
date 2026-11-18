@@ -3358,6 +3358,26 @@ impl EchoesConfigurationEdit for ConfigurationEdit {
     }
 }
 
+pub(crate) trait ReadsCancelNotices {
+    fn cancel_notices(&self) -> Result<meta_signal_flow::CancelNotices, StoreError>;
+}
+
+impl ReadsCancelNotices for FlowStore {
+    fn cancel_notices(&self) -> Result<meta_signal_flow::CancelNotices, StoreError> {
+        let table = self.meta_configuration_tables.cancel_notices;
+        let all = self.engine.match_records(QueryPlan::all(table))?;
+        let keyed = self.engine.match_records(QueryPlan::key(table, RecordKey::new("cancel_notices")))?;
+        if all.database_marker() != keyed.database_marker() || self.engine.current_database_marker()? != all.database_marker() {
+            return Err(StoreError::ConfigurationReadViewChanged);
+        }
+        match (all.records(), keyed.records()) {
+            ([], []) => Ok(meta_signal_flow::CancelNotices::default_cancel_notices()),
+            ([_], [stored]) => Ok(stored.cancel_notices.clone()),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+}
+
 pub(crate) trait ManagesMetaflowState: Sized {
     fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError>;
     /// Replace one configuration family whole with its declaration, or
@@ -6318,6 +6338,11 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
         {
             return Err(StoreError::ConfigurationReadViewChanged);
         }
+        let cancel_notices = match (cancel_notices_rows.records(), cancel_notices_keyed.records()) {
+            ([], []) => meta_signal_flow::CancelNotices::default_cancel_notices(),
+            ([_], [stored]) => stored.cancel_notices.clone(),
+            _ => return Err(StoreError::StateInvariant),
+        };
         let Some(nexus) = nexus else {
             return Ok(None);
         };
@@ -6342,11 +6367,6 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
         let ended_turn_retention = match turn_retention_rows.records() {
             [] => meta_signal_flow::TurnRetentionBound(SEEDED_ENDED_TURN_RETENTION),
             [stored] if stored.turn_retention_bound.0 >= 0 => stored.turn_retention_bound,
-            _ => return Err(StoreError::StateInvariant),
-        };
-        let cancel_notices = match (cancel_notices_rows.records(), cancel_notices_keyed.records()) {
-            ([], []) => meta_signal_flow::CancelNotices::default_cancel_notices(),
-            ([_], [stored]) => stored.cancel_notices.clone(),
             _ => return Err(StoreError::StateInvariant),
         };
         let harness_hook = match harness_hook_rows.records() {
@@ -10586,6 +10606,102 @@ mod tests {
                 "{refused:?}"
             );
         }
+    }
+
+    #[test]
+    fn old_catalogs_register_cancel_notices_empty_and_reopen() {
+        use super::{ConfiguresOnlyStore, ManagesMetaflowState};
+        use meta_signal_flow::{Recipient, Sender, Telling};
+        let expected = meta_signal_flow::CancelNotices { sender: Sender(Telling::Untold), recipient: Recipient(Telling::Told) };
+        for running in [false, true] {
+            let fixture = StoreFixture::new();
+            fixture.configured();
+            if running { drop(fixture.configured_store()); }
+            let path = fixture.path();
+            {
+                let database = redb::Database::open(&path).unwrap();
+                let write = database.begin_write().unwrap();
+                {
+                    let mut catalog = write.open_table(super::SEMA_CATALOG_TABLE).unwrap();
+                    assert!(catalog.remove(super::OPTIONAL_CANCEL_NOTICES_TABLE).unwrap().is_some());
+                }
+                write.delete_table(redb::TableDefinition::<String, &[u8]>::new(super::OPTIONAL_CANCEL_NOTICES_TABLE)).unwrap();
+                write.commit().unwrap();
+            }
+            for _ in 0..2 {
+                let store = super::ConfigurationOnlyStore::open(&path).unwrap();
+                assert_eq!(store.configuration_snapshot().unwrap().unwrap().cancel_notices, expected);
+                drop(store);
+            }
+            let store = super::FlowStore::open_configured(&path).unwrap();
+            assert_eq!(store.configuration_snapshot().unwrap().unwrap().configured_cancel_notices.0, expected);
+        }
+    }
+
+    #[test]
+    fn cancel_notices_wrong_key_and_multiplicity_are_refused() {
+        use super::ConfiguresOnlyStore;
+        use redb::ReadableTable;
+        use meta_signal_flow::{CancelNotices, ConfigurationChange, Recipient, Sender, Telling};
+        for extra in [false, true] {
+            let fixture = StoreFixture::new();
+            fixture.configured();
+            let path = fixture.path();
+            let store = super::ConfigurationOnlyStore::open(&path).unwrap();
+            store.configure_change(ConfigurationChange::CancelNotices(CancelNotices {
+                sender: Sender(Telling::Told), recipient: Recipient(Telling::Untold),
+            })).unwrap();
+            drop(store);
+            {
+                let database = redb::Database::open(&path).unwrap();
+                let write = database.begin_write().unwrap();
+                {
+                    let mut table = write.open_table(redb::TableDefinition::<String, &[u8]>::new(super::OPTIONAL_CANCEL_NOTICES_TABLE)).unwrap();
+                    let value = table.get("cancel_notices".to_owned()).unwrap().unwrap().value().to_vec();
+                    table.insert("wrong".to_owned(), value.as_slice()).unwrap();
+                    if !extra { table.remove("cancel_notices".to_owned()).unwrap(); }
+                }
+                write.commit().unwrap();
+            }
+            let store = super::ConfigurationOnlyStore::open(&path).unwrap();
+            assert!(matches!(store.configuration_snapshot(), Err(super::StoreError::StateInvariant)));
+            drop(store);
+            let store = super::FlowStore::open_configured(&path).unwrap();
+            use super::ReadsCancelNotices;
+            assert!(matches!(store.cancel_notices(), Err(super::StoreError::StateInvariant)));
+        }
+    }
+
+    #[test]
+    fn cancel_notices_family_with_wrong_identity_is_refused() {
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        drop(fixture.configured_store());
+        let path = fixture.path();
+        {
+            let database = redb::Database::open(&path).unwrap();
+            let write = database.begin_write().unwrap();
+            {
+                let mut catalog = write.open_table(super::SEMA_CATALOG_TABLE).unwrap();
+                catalog.remove(super::OPTIONAL_CANCEL_NOTICES_TABLE).unwrap();
+            }
+            write.delete_table(redb::TableDefinition::<String, &[u8]>::new(super::OPTIONAL_CANCEL_NOTICES_TABLE)).unwrap();
+            write.commit().unwrap();
+        }
+        {
+            #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone)]
+            struct WrongCancelNotices { key: String }
+            impl EngineRecord for WrongCancelNotices {
+                fn record_key(&self) -> sema_engine::RecordKey { sema_engine::RecordKey::new(self.key.clone()) }
+            }
+            let mut engine = Engine::open(EngineOpen::new(&path, SchemaVersion::new(super::FLOW_SCHEMA_VERSION))).unwrap();
+            engine.register_table(TableDescriptor::<WrongCancelNotices>::new(
+                TableName::new(super::OPTIONAL_CANCEL_NOTICES_TABLE),
+                FamilyName::new("wrong-cancel-notices"), SchemaHash::for_label("wrong-cancel-notices"),
+            )).unwrap();
+        }
+        assert!(super::ConfigurationOnlyStore::open(&path).is_err());
+        assert!(super::FlowStore::open_configured(&path).is_err());
     }
 
     /// A store 0.53.0 wrote holds every running family but the one 0.53.1

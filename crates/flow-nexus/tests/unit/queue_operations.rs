@@ -1147,3 +1147,59 @@ fn cancellation_selects_roles_before_deduplicating_addresses() {
         assert_eq!(same.selected(&settings).len(), usize::from(expected > 0));
     }
 }
+
+#[test]
+fn cancellation_dispatch_applies_each_setting_and_equal_address() {
+    use crate::store::ManagesMetaflowState;
+    use meta_signal_flow::{CancelNotices, ConfigurationChange, Recipient, Sender, Telling};
+    for sender_telling in [Telling::Untold, Telling::Told] {
+        for recipient_telling in [Telling::Untold, Telling::Told] {
+            for equal in [false, true] {
+                let fixture = NexusFixture::new();
+                let sender = at("roleSender");
+                let recipient = if equal { sender.clone() } else { at("roleRecipient") };
+                asleep(&fixture, &sender);
+                if !equal { asleep(&fixture, &recipient); }
+                fixture.nexus.store.configure_change(ConfigurationChange::CancelNotices(CancelNotices {
+                    sender: Sender(sender_telling), recipient: Recipient(recipient_telling),
+                })).unwrap();
+                let request = admitted(&fixture, &recipient, SentBy::Sender(sender.clone()), Request::Question("Ready?".into()));
+                delivered(&fixture, &recipient, &request);
+                assert_eq!(fixture.nexus.cancel(&request.request_id), Output::Cancelled(request.request_id));
+                if equal {
+                    assert_eq!(notices(&fixture, &sender).len(), usize::from(sender_telling == Telling::Told || recipient_telling == Telling::Told));
+                } else {
+                    assert_eq!(notices(&fixture, &sender).len(), usize::from(sender_telling == Telling::Told));
+                    assert_eq!(notices(&fixture, &recipient).len(), usize::from(recipient_telling == Telling::Told));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn cancelling_an_open_uncertain_question_tells_its_recipient() {
+    let fixture = NexusFixture::new();
+    let recipient = at("uncertainRecipient");
+    asleep(&fixture, &recipient);
+    let request = admitted(&fixture, &recipient, SentBy::Unbound, Request::Question("Ready?".into()));
+    fixture.nexus.store.transition_logical_delivery(&request.logical_delivery_id, DeliveryState::Uncertain).unwrap();
+    assert_eq!(fixture.nexus.cancel(&request.request_id), Output::Cancelled(request.request_id));
+    assert_eq!(notices(&fixture, &recipient).len(), 1);
+}
+
+#[test]
+fn cancellation_delivery_eligibility_is_the_durable_state() {
+    use crate::queue_operations::EligibleForCancellationNotice;
+    let receipt = NativeReceipt { harness_kind: HarnessKind::Codex,
+        native_session_id: signal_flow::NativeSessionId("session".into()),
+        native_prompt_id: signal_flow::NativePromptId("prompt".into()) };
+    for state in [DeliveryState::Delivered(receipt), DeliveryState::Read, DeliveryState::Uncertain] {
+        assert!(state.eligible_for_cancellation_notice());
+    }
+    for state in [DeliveryState::Queued, DeliveryState::Attempting,
+        DeliveryState::Retryable(signal_flow::RetryCause::HistoryAbsent),
+        DeliveryState::Failed(signal_flow::Refusal::Direct("failed".into())), DeliveryState::Withdrawn] {
+        assert!(!state.eligible_for_cancellation_notice());
+    }
+}

@@ -2598,3 +2598,34 @@ fn cancel_notices_defaults_configures_and_survives_reopen() {
     let reopened = fixture.open();
     assert_eq!(snapshot(&reopened).configured_cancel_notices.0, configured);
 }
+
+#[test]
+fn cancel_notices_observation_and_replay_preserve_other_configuration() {
+    use crate::observe_configuration::ObservesConfiguration;
+    use crate::store::AnnouncesLaunchChanges;
+    use meta_signal_flow::{CancelNotices, Recipient, Sender, Telling};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let before = snapshot(&nexus);
+    let configured = CancelNotices { sender: Sender(Telling::Told), recipient: Recipient(Telling::Untold) };
+    let disconnected = AtomicBool::new(false);
+    let (frames, received) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let observer = scope.spawn(|| nexus.observe_configuration(&disconnected, &mut |response| {
+            frames.send(response.clone()).map_err(|error| error.to_string())
+        }));
+        assert!(matches!(received.recv_timeout(Duration::from_secs(10)).unwrap(), MetaResponse::Configuration(_)));
+        configures(&nexus, ConfigurationChange::CancelNotices(configured.clone()));
+        let MetaResponse::Configuration(observed) = received.recv_timeout(Duration::from_secs(10)).unwrap() else { panic!("snapshot expected") };
+        assert_eq!(observed.configured_cancel_notices.0, configured);
+        let mut normalized = observed.clone();
+        normalized.configured_cancel_notices = before.configured_cancel_notices.clone();
+        assert_eq!(normalized, before);
+        configures(&nexus, ConfigurationChange::CancelNotices(observed.configured_cancel_notices.0));
+        disconnected.store(true, Ordering::Release);
+        nexus.configuration_changes.announce();
+        assert!(observer.join().unwrap().is_err());
+    });
+}

@@ -10163,15 +10163,17 @@ mod tests {
                     SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
                 ))
                 .unwrap();
-                let hold = engine.register_table(StoredHold::descriptor()).unwrap();
-                engine
-                    .assert(sema_engine::Assertion::new(
-                        hold,
-                        StoredHold {
-                            moment: Moment(94721),
-                        },
-                    ))
-                    .unwrap();
+                if running {
+                    let hold = engine.register_table(StoredHold::descriptor()).unwrap();
+                    engine
+                        .assert(sema_engine::Assertion::new(
+                            hold,
+                            StoredHold {
+                                moment: Moment(94721),
+                            },
+                        ))
+                        .unwrap();
+                }
                 for (table, family) in families {
                     engine
                         .register_table(TableDescriptor::<super::FlowRecord>::new(
@@ -10196,7 +10198,7 @@ mod tests {
                 }
                 write.commit().unwrap();
             }
-            let held_bytes = {
+            let held_bytes = if running {
                 let database = redb::ReadOnlyDatabase::open(fixture.path()).unwrap();
                 let read = database.begin_read().unwrap();
                 let rows = read
@@ -10210,32 +10212,50 @@ mod tests {
                     .unwrap()
                     .value()
                     .to_vec();
-                bytes
+                Some(bytes)
+            } else {
+                None
             };
             drop(ConfigurationOnlyStore::open(&fixture.path()).unwrap());
             {
                 let store = fixture.configured_store();
-                assert_eq!(store.holding().unwrap(), Holding::Held(Moment(94721)));
+                assert_eq!(
+                    store.holding().unwrap(),
+                    if running {
+                        Holding::Held(Moment(94721))
+                    } else {
+                        Holding::Acting
+                    }
+                );
                 store.record_context_size("post-migration", 173).unwrap();
             }
             {
                 let store = fixture.configured_store();
                 assert_eq!(store.context_size("post-migration").unwrap(), Some(173));
-                assert_eq!(store.holding().unwrap(), Holding::Held(Moment(94721)));
+                assert_eq!(
+                    store.holding().unwrap(),
+                    if running {
+                        Holding::Held(Moment(94721))
+                    } else {
+                        Holding::Acting
+                    }
+                );
             }
             {
                 let database = redb::ReadOnlyDatabase::open(fixture.path()).unwrap();
                 let read = database.begin_read().unwrap();
-                let hold_rows = read
-                    .open_table(redb::TableDefinition::<String, &[u8]>::new(
-                        super::overriding::HOLD_TABLE,
-                    ))
-                    .unwrap();
-                assert_eq!(hold_rows.len().unwrap(), 1);
-                assert_eq!(
-                    hold_rows.get("hold".to_owned()).unwrap().unwrap().value(),
-                    held_bytes
-                );
+                if let Some(held_bytes) = held_bytes {
+                    let hold_rows = read
+                        .open_table(redb::TableDefinition::<String, &[u8]>::new(
+                            super::overriding::HOLD_TABLE,
+                        ))
+                        .unwrap();
+                    assert_eq!(hold_rows.len().unwrap(), 1);
+                    assert_eq!(
+                        hold_rows.get("hold".to_owned()).unwrap().unwrap().value(),
+                        held_bytes
+                    );
+                }
                 for (table, _) in families {
                     let rows = read
                         .open_table(redb::TableDefinition::<String, &[u8]>::new(table))

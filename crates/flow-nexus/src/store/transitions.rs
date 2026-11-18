@@ -92,13 +92,22 @@ impl FoldsIntoTransition for Arrival {
     }
 }
 
-impl FlowStore {
+/// The store's one fold of causes into their flows' transitions, which
+/// `record_caused` and `arrivals` share.
+trait FoldsTransitions {
     /// One write per flow, each cause appended in order to what the flow's
     /// record holds, or to what an earlier cause of the same call wrote. A
     /// cause that leads to no state writes nothing.
-    fn fold(
+    fn fold<Folded: FoldsIntoTransition>(
         &self,
-        causes: Vec<impl FoldsIntoTransition>,
+        causes: Vec<Folded>,
+    ) -> Result<Vec<TransitionWrite>, StoreError>;
+}
+
+impl FoldsTransitions for FlowStore {
+    fn fold<Folded: FoldsIntoTransition>(
+        &self,
+        causes: Vec<Folded>,
     ) -> Result<Vec<TransitionWrite>, StoreError> {
         let mut writes: Vec<TransitionWrite> = Vec::new();
         for folded in causes {

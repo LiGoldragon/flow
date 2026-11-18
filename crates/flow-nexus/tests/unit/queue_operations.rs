@@ -500,7 +500,7 @@ fn the_owner_and_an_unbound_caller_are_served_as_a_flow_is() {
         Request::Order("Answer anyone.".into()),
     );
     delivered(&fixture, &recipient, &order);
-    assert_eq!(
+    assert!(matches!(
         fixture
             .nexus
             .store
@@ -511,7 +511,7 @@ fn the_owner_and_an_unbound_caller_are_served_as_a_flow_is() {
                 },)
             ),),
         Ok(Err(signal_flow::Refusal::Unresolved)),
-    );
+    ));
     let question = admitted(
         &fixture,
         &recipient,

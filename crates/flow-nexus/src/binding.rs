@@ -5,10 +5,7 @@ use crate::{
     RunningNexus,
     store::{NamesConfiguredModel, ReadsFlowRows},
 };
-use meta_signal_flow::{
-    FlowBinding, FlowBindingRefusalReason, FlowBindingResult, FlowContainer, ProcessIdentity,
-    RefusedFlowBinding,
-};
+use meta_signal_flow::{FlowBinding, FlowBindingRefusalReason, FlowContainer, ProcessIdentity};
 use signal_flow::{
     Address, EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection, Origin,
 };
@@ -188,20 +185,6 @@ impl VerifiesAdoptedSeat for RunningNexus {
             }),
             origin,
             flow_lifecycle: FlowLifecycle::Active,
-        })
-    }
-}
-
-/// A refusal reason refuses the binding of one flow.
-pub trait RefusesBinding {
-    fn refusal_of(self, flow_id: String) -> FlowBindingResult;
-}
-
-impl RefusesBinding for FlowBindingRefusalReason {
-    fn refusal_of(self, flow_id: String) -> FlowBindingResult {
-        FlowBindingResult::Refused(RefusedFlowBinding {
-            flow_id: signal_flow::FlowId(flow_id),
-            flow_binding_refusal_reason: self,
         })
     }
 }

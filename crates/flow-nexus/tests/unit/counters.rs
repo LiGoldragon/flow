@@ -3,7 +3,7 @@
 //! that has allocated nothing reads `{ 1 3 1 }`. A Counters is taken only
 //! while the store has recorded no logical delivery, no queue attempt and
 //! no send outcome, and never below a counter as it stands; the
-//! Configuration snapshot ends with the counters, so an operator reads an
+//! Configuration snapshot carries the counters, so an operator reads an
 //! old store's before carrying them to a new one. Read and written as
 //! datom text, as flow-meta does.
 
@@ -85,21 +85,31 @@ fn configured() -> NexusFixture {
 }
 
 fn counters(fixture: &NexusFixture) -> String {
-    let snapshot = ask(fixture, "Configuration");
-    let open = snapshot
-        .rfind(" { ")
-        .expect("the snapshot ends with a struct");
-    // The counters and the two request bounds; the HarnessHook, the
-    // warning lane's two empty families, the seeded recovery text and the
-    // ended-turn retention follow.
-    use crate::store::handover_configuration::SeedsSuccessorRecoveryText;
-    let tail = format!(
-        " Unconfigured [] [] «{}» 64",
-        meta_signal_flow::SuccessorRecoveryText::initial().0
-    );
-    snapshot[open + 1..snapshot.len() - 2]
-        .trim_end_matches(tail.as_str())
-        .to_owned()
+    use datom_codec::{Actualizing, Budget, Potential};
+    use protos::ReaderBudget;
+    let text = ask(fixture, "Configuration");
+    let mut budget = Budget {
+        remaining: 65536,
+        reader: ReaderBudget::try_from(65536).unwrap(),
+        depth: 0,
+        maximum_depth: 1024,
+    };
+    let meta_signal_flow::Output::Configuration(snapshot) =
+        Potential::<meta_signal_flow::Output>::from(text)
+            .actualize(&mut budget)
+            .unwrap()
+    else {
+        panic!("configuration expected")
+    };
+    let counters = snapshot.configured_counters.0;
+    format!(
+        "{{ {} {} {} }} {} {}",
+        counters.logical_delivery.0,
+        counters.queue_attempt.0,
+        counters.send_outcome.0,
+        snapshot.configured_request_id_draws.0.0,
+        snapshot.configured_announcement_tries.0.0
+    )
 }
 
 /// On a store that has recorded nothing, a Counters at or above each

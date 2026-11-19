@@ -1,3 +1,17 @@
+# Flow 0.60.2: configurable launch effort
+
+The meta contract adds `Effort.[ Default High Medium Low ]`,
+`Configure.ModelEffort.{ Model Effort }`, and the permaflow `Effort` change.
+Configuration reads both model values and each permaflow's value.
+Permaflow Default inherits its model; model Default leaves effort to the harness.
+
+The permaflow family advances from v7 to v8, preserving every old field and
+adding Default. The v6 leave-out fold remains supported. The new model-effort
+family initially preserves Medium for seven models and Low for Terra; later
+configuration survives reopening. A store copy is required before activation.
+Launch, wake, successor and restart all read the stored values. The ordinary
+launch wire is unchanged: empty native effort text denotes harness Default.
+
 # Flow 0.60.1: Orders take no answer
 
 Proposal 2 of Overrides.2 changes reply obligations without changing any

@@ -10393,6 +10393,7 @@ mod tests {
                 .iter()
                 .chain(
                     [
+                        super::effort_configuration::TABLE,
                         super::context_warnings::POLICY_TABLE,
                         super::context_warnings::HOOK_TABLE,
                         super::context_warnings::PROGRESS_TABLE,

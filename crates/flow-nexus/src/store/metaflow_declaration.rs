@@ -3,7 +3,8 @@
 //! its workspace, its leave-outs, the belief modules an ordinary Launch of
 //! that Address composes into the system prompt and into the first user
 //! message, its kind, tool set, continuity, purpose and records. v7 (0.55.0)
-//! carries the leave-outs; v6 is upgraded on open (`leave_out_upgrade`).
+//! carries the leave-outs; v8 adds effort. Earlier declarations upgrade on
+//! open through `leave_out_upgrade` and `effort_upgrade`.
 
 use super::{FlowStore, ReadsFlowMemory, StoreError};
 pub(crate) use crate::generated::memory::StoredMetaMetaflowConfiguration;

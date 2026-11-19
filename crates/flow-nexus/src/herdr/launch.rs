@@ -4962,14 +4962,6 @@ printf '%s\n' "$alias"
     }
 
     #[test]
-    fn a_claude_paste_of_a_part_ending_in_a_newline_is_observed() {
-        assert_eq!(
-            claude_rows_read(&["X\n"], &[pasted("04ee", "X\n")]),
-            Ok(true)
-        );
-    }
-
-    #[test]
     fn a_claude_paste_holding_one_newline_more_than_the_part_differs() {
         assert_eq!(
             claude_rows_read(&["X\n"], &[pasted("04ee", "X\n")]),

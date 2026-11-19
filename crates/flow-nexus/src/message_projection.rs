@@ -326,6 +326,66 @@ impl ProjectsAdmittedMessage for signal_flow::SendableMessage {
     }
 }
 
+/// Measures the public group encoding before its request IDs are minted.
+/// The structural projection omits each future ID field; its fixed width
+/// and field separator are counted without constructing an identity.
+pub(crate) trait MeasuresAdmittedMessages {
+    fn admitted_prompt_bytes(&self, sent_by: &SentBy) -> usize;
+}
+
+impl MeasuresAdmittedMessages for [signal_flow::SendableMessage] {
+    fn admitted_prompt_bytes(&self, sent_by: &SentBy) -> usize {
+        use datom_codec::{Datom, Datomizable, Form};
+        use flow_ethos::FixedWidth;
+        use protos::{Compactable, Protosizable};
+        use signal_flow::{SendableMessage, SendableRequest};
+        let mut omitted_bytes = 0;
+        let inputs = self
+            .iter()
+            .map(|message| {
+                let (SendableMessage::HardAbrupt(request)
+                | SendableMessage::MiddleAbrupt(request)
+                | SendableMessage::Soft(request)) = message;
+                let mut message_datom = message.datomize(Vec::new());
+                if !matches!(
+                    request,
+                    SendableRequest::Result(_) | SendableRequest::Done(_)
+                ) {
+                    let Form::Variant(_, priority_body) = &mut message_datom.form else {
+                        unreachable!("a sendable message is a priority variant");
+                    };
+                    let Form::Variant(_, request_body) = &mut priority_body.form else {
+                        unreachable!("a sendable message carries a request variant");
+                    };
+                    if !matches!(
+                        request,
+                        SendableRequest::Living(_) | SendableRequest::Task(_)
+                    ) {
+                        let payload = request_body.as_ref().clone();
+                        request_body.form = Form::Struct(vec![payload]);
+                    }
+                    omitted_bytes += flow_ethos::RequestId::WIDTH as usize + 1;
+                }
+                Datom {
+                    path: Vec::new(),
+                    form: Form::Struct(vec![
+                        sent_by.visible_sender().datomize(Vec::new()),
+                        message_datom,
+                    ]),
+                }
+            })
+            .collect();
+        Datom {
+            path: Vec::new(),
+            form: Form::Vector(inputs),
+        }
+        .protosize()
+        .compact()
+        .len()
+            + omitted_bytes
+    }
+}
+
 pub(crate) trait ProjectsQueueEntry {
     fn visible_input(&self, recipient: &flow_ethos::Address) -> VisibleNativeInput;
 }
@@ -778,5 +838,82 @@ mod tests {
                 )
             )
         );
+    }
+    #[test]
+    fn group_sizing_matches_encoded_projection_for_every_variant_priority_sender_and_count() {
+        use super::{MeasuresAdmittedMessages, ProjectsAdmittedMessage};
+        use datom_codec::Datomizable;
+        use flow_ethos::{FixedWidth, RequestId, SentBy};
+        use protos::{Compactable, Protosizable};
+        use signal_flow::{SendableMessage, SendableRequest};
+        let minted_id = RequestId("a1b2".into());
+        let answered_id = RequestId("z9y8".into());
+        assert_eq!(minted_id.0.len(), RequestId::WIDTH as usize);
+        let address = signal_flow::Address {
+            aspect: signal_flow::Aspect::Mind,
+            topic: flow_ethos::Topic("sizingFixture".into()),
+            model: signal_flow::Model::Sol,
+        };
+        let senders = [
+            SentBy::Sender(address),
+            SentBy::Unbound,
+            SentBy::Flow,
+            SentBy::Unknown,
+        ];
+        let requests = vec![
+            SendableRequest::Order("order «quoted»\n\tλ".into()),
+            SendableRequest::Question(String::new()),
+            SendableRequest::Living(signal_flow::SendableRequest_Living_Data {
+                context: "context «nested»".into(),
+                verbatim: "living\nwords".into(),
+            }),
+            SendableRequest::Notice("notice".into()),
+            SendableRequest::Task(flow_ethos::AnswerableTask {
+                minutes: flow_ethos::Minutes(17),
+                string: "task".into(),
+            }),
+            SendableRequest::Result(signal_flow::SendableRequest_Result_Data {
+                request_id: answered_id.clone(),
+                string: "result".into(),
+            }),
+            SendableRequest::Done(signal_flow::SendableRequest_Done_Data {
+                request_id: answered_id,
+                string: "done".into(),
+            }),
+        ];
+        let mut mixed = Vec::new();
+        for request in requests {
+            let messages = [
+                SendableMessage::HardAbrupt(request.clone()),
+                SendableMessage::MiddleAbrupt(request.clone()),
+                SendableMessage::Soft(request),
+            ];
+            for message in messages {
+                for sender in &senders {
+                    for count in [0, 1, 2, 5] {
+                        let group = vec![message.clone(); count];
+                        let encoded = group
+                            .iter()
+                            .map(|member| member.admitted_input(&minted_id, sender))
+                            .collect::<Vec<_>>()
+                            .datomize(Vec::new())
+                            .protosize()
+                            .compact();
+                        assert_eq!(group.admitted_prompt_bytes(sender), encoded.len());
+                    }
+                }
+                mixed.push(message);
+            }
+        }
+        for sender in &senders {
+            let encoded = mixed
+                .iter()
+                .map(|member| member.admitted_input(&minted_id, sender))
+                .collect::<Vec<_>>()
+                .datomize(Vec::new())
+                .protosize()
+                .compact();
+            assert_eq!(mixed.admitted_prompt_bytes(sender), encoded.len());
+        }
     }
 }

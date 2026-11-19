@@ -1,5 +1,6 @@
 pub mod generated;
 pub mod place;
+pub mod request_id;
 
 pub use generated::delivery::*;
 pub use generated::library::*;

@@ -629,7 +629,7 @@ impl Performs for RunningNexus {
                 match self.store.admit_delivery_group(
                     &admission.address,
                     admission.sent_by,
-                    admission.admission_message_vector,
+                    admission.sendable_message_vector,
                 ) {
                     Ok(Ok(accepted)) => Outcome::DeliveryGroupAdmitted(accepted),
                     Ok(Err(refusal)) => Outcome::DeliveryGroupRefused(refusal),

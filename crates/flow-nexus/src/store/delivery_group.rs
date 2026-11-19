@@ -45,21 +45,34 @@ impl DescribesDeliveryGroups for LogicalDeliveryGroup {
     }
 }
 
-/// Pure batch preflight. Callers hold the ordinary logical admission gate.
-pub(crate) trait ValidatesDeliveryGroups {
+/// Facts established for one member before admission allocates anything.
+pub(crate) struct PreparedDeliveryGroupMember {
+    pub(crate) admission_message: AdmissionMessage,
+    pub(crate) task_due: Option<i64>,
+    pub(crate) answered_binding: Option<super::logical_delivery::RequestIdBinding>,
+    pub(crate) answered_current: Option<super::logical_delivery::CurrentLogicalDelivery>,
+}
+
+/// One successful preflight, consumed while its admission gates stay held.
+pub(crate) struct PreparedDeliveryGroup {
+    pub(crate) stored: StoredMetaflow,
+    pub(crate) members: Vec<PreparedDeliveryGroupMember>,
+}
+
+pub(crate) trait PreparesDeliveryGroups {
     fn validate_delivery_group_capacity(
         &self,
         count: usize,
     ) -> Result<Result<(), Refusal>, StoreError>;
-    fn validate_delivery_group(
+    fn prepare_delivery_group(
         &self,
         address: &Address,
         sender: &SentBy,
-        messages: &[AdmissionMessage],
-    ) -> Result<Result<(), Refusal>, StoreError>;
+        messages: Vec<signal_flow::SendableMessage>,
+    ) -> Result<Result<PreparedDeliveryGroup, Refusal>, StoreError>;
 }
 
-impl ValidatesDeliveryGroups for FlowStore {
+impl PreparesDeliveryGroups for FlowStore {
     fn validate_delivery_group_capacity(
         &self,
         count: usize,
@@ -78,29 +91,19 @@ impl ValidatesDeliveryGroups for FlowStore {
         })
     }
 
-    fn validate_delivery_group(
+    fn prepare_delivery_group(
         &self,
         address: &Address,
         sender: &SentBy,
-        messages: &[AdmissionMessage],
-    ) -> Result<Result<(), Refusal>, StoreError> {
+        messages: Vec<signal_flow::SendableMessage>,
+    ) -> Result<Result<PreparedDeliveryGroup, Refusal>, StoreError> {
+        use super::kept_answer::{AnswerRoute, RoutesAnswers};
         use super::logical_delivery::MintsRequestIds;
         use super::reminder::{RecordsReminders, RulesMinutes};
-        use crate::composition::RendersQueuedWork;
+        use crate::launching::NamesTopic;
+        use crate::message_projection::MeasuresAdmittedMessages;
         use flow_ethos::{Message, Request};
-        // Projection hides private logical IDs. Fixed-width public request
-        // IDs give the final native size without drawing an ID.
-        let projected = messages
-            .iter()
-            .map(|message| QueueEntry {
-                logical_delivery_id: LogicalDeliveryId(String::new()),
-                request_id: flow_ethos::RequestId("0000".into()),
-                sent_by: sender.clone(),
-                delivery: message.delivery.clone(),
-                message: message.message.clone(),
-            })
-            .collect::<Vec<_>>();
-        let actual_bytes = projected.prompt_text(address).len();
+        let actual_bytes = messages.admitted_prompt_bytes(sender);
         if actual_bytes > crate::sending::MAX_SEND_PAYLOAD_BYTES {
             return Ok(Err(Refusal::Oversized(signal_flow::SendPayloadSize {
                 actual_bytes: signal_flow::ActualBytes(
@@ -114,28 +117,77 @@ impl ValidatesDeliveryGroups for FlowStore {
         if let Err(refusal) = self.validate_delivery_group_capacity(messages.len())? {
             return Ok(Err(refusal));
         }
+        if !address.topic.0.as_str().is_camel_case_topic() {
+            return Ok(Err(Refusal::TopicRefused(address.topic.clone())));
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .ok()
             .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
             .ok_or(StoreError::StateInvariant)?;
+        let mut members = Vec::with_capacity(messages.len());
         let mut answered = std::collections::HashSet::new();
-        for message in messages {
+        for sendable in messages {
+            let message = match self.resolve_sendable_message(sendable)? {
+                Ok(message) => message,
+                Err(refusal) => return Ok(Err(refusal)),
+            };
+            match self.answer_route(&message)? {
+                AnswerRoute::Unanswering => {}
+                AnswerRoute::To(route) if route == *address => {}
+                _ => return Ok(Err(Refusal::Unresolved)),
+            }
             let (Message::HardAbrupt(request)
             | Message::MiddleAbrupt(request)
-            | Message::Soft(request)) = &message.message;
-            match request {
-                Request::Task(task) => {
-                    if let Err(refusal) = task.minutes.0.ruled_interval(now) {
-                        return Ok(Err(Refusal::MinutesRefused(refusal)));
-                    }
+            | Message::Soft(request)) = &message;
+            let task_due = match request {
+                Request::Task(task) => match task.minutes.0.ruled_interval(now) {
+                    Ok(interval) => Some(now + interval),
+                    Err(refusal) => return Ok(Err(Refusal::MinutesRefused(refusal))),
+                },
+                _ => None,
+            };
+            let answer_id = match request {
+                Request::Result(flow_ethos::ResultPayload::Answered(answer)) => {
+                    Some(&answer.request_id)
                 }
-                Request::Done(flow_ethos::DonePayload::Answered(done)) => {
-                    if self.reminder(&done.logical_delivery_id.0)?.is_none() {
-                        return Ok(Err(Refusal::Unresolved));
-                    }
+                Request::Done(flow_ethos::DonePayload::Answered(answer)) => {
+                    Some(&answer.request_id)
                 }
-                _ => {}
+                _ => None,
+            };
+            if let Some(id) = answer_id
+                && !answered.insert(id.clone())
+            {
+                return Ok(Err(Refusal::Unresolved));
+            }
+            let delivery = if matches!(message, Message::Soft(_)) {
+                flow_ethos::Delivery::Queue
+            } else {
+                flow_ethos::Delivery::Wake
+            };
+            members.push(PreparedDeliveryGroupMember {
+                admission_message: AdmissionMessage { delivery, message },
+                task_due,
+                answered_binding: None,
+                answered_current: None,
+            });
+        }
+        // The Signal-side checks above keep their original precedence over
+        // recipient lookup. Store-side facts follow it, still in one preflight.
+        let Some(stored) = self.stored_metaflow(address)? else {
+            return Ok(Err(Refusal::Unknown(signal_flow::Unknown_Data::Address(
+                address.clone(),
+            ))));
+        };
+        for member in &mut members {
+            let (Message::HardAbrupt(request)
+            | Message::MiddleAbrupt(request)
+            | Message::Soft(request)) = &member.admission_message.message;
+            if let Request::Done(flow_ethos::DonePayload::Answered(done)) = request
+                && self.reminder(&done.logical_delivery_id.0)?.is_none()
+            {
+                return Ok(Err(Refusal::Unresolved));
             }
             let answer_id = match request {
                 Request::Result(flow_ethos::ResultPayload::Answered(answer)) => {
@@ -147,15 +199,24 @@ impl ValidatesDeliveryGroups for FlowStore {
                 _ => None,
             };
             if let Some(id) = answer_id {
-                if self.request_binding(id)?.is_none() {
+                let binding = self
+                    .request_binding(id)?
+                    .ok_or(StoreError::StateInvariant)?;
+                let rows = self.engine.match_records(QueryPlan::key(
+                    self.logical_deliveries.current,
+                    RecordKey::new(binding.logical_delivery_id.0.clone()),
+                ))?;
+                let [current] = rows.records() else {
+                    return Err(StoreError::StateInvariant);
+                };
+                if current.archived_cursor.0.is_some() {
                     return Err(StoreError::StateInvariant);
                 }
-                if !answered.insert(id.clone()) {
-                    return Ok(Err(Refusal::Unresolved));
-                }
+                member.answered_binding = Some(binding);
+                member.answered_current = Some(current.clone());
             }
         }
-        Ok(Ok(()))
+        Ok(Ok(PreparedDeliveryGroup { stored, members }))
     }
 }
 
@@ -164,7 +225,7 @@ pub(crate) trait AdmitsDeliveryGroups {
         &self,
         address: &Address,
         sender: SentBy,
-        messages: Vec<AdmissionMessage>,
+        messages: Vec<signal_flow::SendableMessage>,
     ) -> Result<Result<Vec<SendAcceptance>, Refusal>, StoreError>;
 }
 
@@ -173,15 +234,28 @@ impl AdmitsDeliveryGroups for FlowStore {
         &self,
         address: &Address,
         sender: SentBy,
-        messages: Vec<AdmissionMessage>,
+        messages: Vec<signal_flow::SendableMessage>,
     ) -> Result<Result<Vec<SendAcceptance>, Refusal>, StoreError> {
         if messages.is_empty() {
             return Ok(Ok(Vec::new()));
         }
+        let _guard = self
+            .logical_deliveries
+            .write_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _handover_guard = self
+            .handover_write_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prepared = match self.prepare_delivery_group(address, &sender, messages)? {
+            Ok(prepared) => prepared,
+            Err(refusal) => return Ok(Err(refusal)),
+        };
         self.accept_requested_delivery_admission(
             address,
             sender,
-            RequestedDeliveryAdmission::SendSeveral(messages),
+            RequestedDeliveryAdmission::SendSeveral(prepared),
             None,
             LogicalDeliveryTransition {
                 purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
@@ -505,7 +579,7 @@ mod tests {
     fn address() -> Address {
         Address {
             aspect: signal_flow::Aspect::Mind,
-            topic: flow_ethos::Topic("delivery-group-fixture".into()),
+            topic: flow_ethos::Topic("deliveryGroupFixture".into()),
             model: signal_flow::Model::Sol,
         }
     }
@@ -584,9 +658,70 @@ mod tests {
         }
     }
 
+    /// Existing private-message fixture builders enter the public group API.
+    trait AdmitsFixtureDeliveryGroups {
+        fn admit_fixture_delivery_group(
+            &self,
+            address: &Address,
+            sender: SentBy,
+            messages: Vec<AdmissionMessage>,
+        ) -> Result<Result<Vec<SendAcceptance>, Refusal>, StoreError>;
+    }
+
+    impl AdmitsFixtureDeliveryGroups for FlowStore {
+        fn admit_fixture_delivery_group(
+            &self,
+            address: &Address,
+            sender: SentBy,
+            messages: Vec<AdmissionMessage>,
+        ) -> Result<Result<Vec<SendAcceptance>, Refusal>, StoreError> {
+            use signal_flow::{SendableMessage, SendableRequest};
+            let requests = messages
+                .into_iter()
+                .map(|member| {
+                    let convert = |request| match request {
+                        Request::Order(value) => SendableRequest::Order(value),
+                        Request::Question(value) => SendableRequest::Question(value),
+                        Request::Living(value) => {
+                            SendableRequest::Living(signal_flow::SendableRequest_Living_Data {
+                                context: value.context,
+                                verbatim: value.verbatim,
+                            })
+                        }
+                        Request::Notice(value) => SendableRequest::Notice(value),
+                        Request::Task(value) => SendableRequest::Task(value),
+                        Request::Result(flow_ethos::ResultPayload::Answered(value)) => {
+                            SendableRequest::Result(signal_flow::SendableRequest_Result_Data {
+                                request_id: value.request_id,
+                                string: value.string,
+                            })
+                        }
+                        Request::Done(flow_ethos::DonePayload::Answered(value)) => {
+                            SendableRequest::Done(signal_flow::SendableRequest_Done_Data {
+                                request_id: value.request_id,
+                                string: value.string,
+                            })
+                        }
+                        _ => panic!("the group fixture uses public sendable requests"),
+                    };
+                    match member.message {
+                        Message::HardAbrupt(request) => {
+                            SendableMessage::HardAbrupt(convert(request))
+                        }
+                        Message::MiddleAbrupt(request) => {
+                            SendableMessage::MiddleAbrupt(convert(request))
+                        }
+                        Message::Soft(request) => SendableMessage::Soft(convert(request)),
+                    }
+                })
+                .collect();
+            self.admit_delivery_group(address, sender, requests)
+        }
+    }
+
     fn admit(store: &FlowStore, messages: Vec<AdmissionMessage>) -> Vec<SendAcceptance> {
         store
-            .admit_delivery_group(&address(), SentBy::Sender(address()), messages)
+            .admit_fixture_delivery_group(&address(), SentBy::Sender(address()), messages)
             .expect("admission reads store")
             .expect("group admitted")
     }
@@ -722,7 +857,7 @@ mod tests {
         let (_fixture, store) = Fixture::new();
         let before = store.memory_digest().unwrap();
         let result = store
-            .admit_delivery_group(
+            .admit_fixture_delivery_group(
                 &address(),
                 SentBy::Sender(address()),
                 vec![task(1), order("middle"), task(0)],
@@ -738,7 +873,7 @@ mod tests {
         let before = store.memory_digest().unwrap();
         let body = "x".repeat(crate::sending::MAX_SEND_PAYLOAD_BYTES / 2 + 1);
         let result = store
-            .admit_delivery_group(
+            .admit_fixture_delivery_group(
                 &address(),
                 SentBy::Sender(address()),
                 vec![order(&body), order(&body)],
@@ -754,7 +889,7 @@ mod tests {
         store.set_request_id_drawer_for_tests(Arc::new(RepeatedId));
         let before = store.memory_digest().unwrap();
         let result = store
-            .admit_delivery_group(
+            .admit_fixture_delivery_group(
                 &address(),
                 SentBy::Sender(address()),
                 vec![order("first"), order("second")],
@@ -1245,7 +1380,7 @@ mod tests {
         store.set_request_id_drawer_for_tests(Arc::new(ForbiddenDraw));
         let digest = store.memory_digest().unwrap();
         let result = store
-            .admit_delivery_group(
+            .admit_fixture_delivery_group(
                 &address(),
                 SentBy::Unbound,
                 vec![
@@ -1265,7 +1400,7 @@ mod tests {
         let digest = store.memory_digest().unwrap();
         assert!(matches!(
             store
-                .admit_delivery_group(
+                .admit_fixture_delivery_group(
                     &address(),
                     SentBy::Unbound,
                     vec![order("valid first"), task(0)]

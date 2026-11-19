@@ -74,7 +74,7 @@
 ; types (memory.ethos), named through the Nexus crate.
 
 Operation
-[ signal_flow:[ FlowId LaunchRequestId FlowNode CallerIdentity LaunchProfile ComposedLaunch Origin LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event Address Request QueueEntry LogicalDeliveryId ContextRefusal CompositionRefusal LeaveOutRefusal NativeSessionId HarnessSpawnRefusal NativeLaunchRefusal ReapStanding HandoverCloseRefusal SentBy SendAcceptance Refusal ]
+[ signal_flow:[ FlowId LaunchRequestId FlowNode CallerIdentity LaunchProfile ComposedLaunch Origin LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event Address Request QueueEntry LogicalDeliveryId ContextRefusal CompositionRefusal LeaveOutRefusal NativeSessionId HarnessSpawnRefusal NativeLaunchRefusal ReapStanding HandoverCloseRefusal SentBy SendAcceptance Refusal SendableMessage ]
   flow_ethos:[ Delivery Message ]
   meta_signal_flow:[ Root RestartRecord ]
   flow_nexus:[ LaunchOutcome Replacement SeatBirth PendingReap PendingHandover SupersededHandover LaunchedRecord ReplacedRecord ] ]
@@ -131,7 +131,7 @@ Operation
   Close.FlowNode
   Discard.HerdrPaneBinding
   Release.FlowId
-  AdmitDeliveryGroup.{ Address SentBy Vector<AdmissionMessage> }
+  AdmitDeliveryGroup.{ Address SentBy Vector<SendableMessage> }
   Wake.Address
   Drain.Address ]
 [ Composed.ComposedLaunch

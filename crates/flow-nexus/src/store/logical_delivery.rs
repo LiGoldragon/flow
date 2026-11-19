@@ -3,7 +3,7 @@
 //! a materialized view used for sender-filtered reconnect snapshots.
 
 use super::ManagesMetaflowState;
-use super::delivery_group::{SelectsDeliveryGroups, ValidatesDeliveryGroups};
+use super::delivery_group::{PreparedDeliveryGroup, SelectsDeliveryGroups};
 use super::handover::HoldsHandovers;
 use super::handover_reminders::SchedulesHandoverReminders;
 use super::metaflow::SleepsMetaflows;
@@ -22,7 +22,7 @@ use crate::generated::send_tool::{
     Target, ToolCallKey,
 };
 use datom_codec::Datomizable;
-use flow_ethos::{Delivery, Message, QueueEntry};
+use flow_ethos::{Delivery, FixedWidth, Message, QueueEntry};
 use protos::{Compactable, Protosizable};
 use sema_engine::AtomicCommit;
 use signal_flow::{
@@ -30,7 +30,7 @@ use signal_flow::{
     Request, SendAcceptance, SendObservation, SentBy, Unknown_Data,
 };
 
-pub(super) const REQUEST_ID_SPACE: usize = 36usize.pow(4);
+pub(super) const REQUEST_ID_SPACE: usize = 36usize.pow(flow_ethos::RequestId::WIDTH as u32);
 
 const COUNTER_KEY: &str = "counter";
 const COUNTER_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_counter");
@@ -58,8 +58,8 @@ impl DrawsRequestId for SystemRequestIdDrawer {
         const ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
         // 252 is the greatest multiple of 36 representable by one byte.  The
         // rejection keeps every base36 character equiprobable.
-        let mut id = String::with_capacity(4);
-        while id.len() < 4 {
+        let mut id = String::with_capacity(flow_ethos::RequestId::WIDTH as usize);
+        while id.len() < flow_ethos::RequestId::WIDTH as usize {
             let mut byte = [0_u8; 1];
             getrandom::fill(&mut byte).map_err(|_| StoreError::StateInvariant)?;
             if byte[0] < 252 {
@@ -423,7 +423,7 @@ pub(crate) struct LogicalDeliveryTransition {
 /// This abstraction does not yet change persisted grouping behavior.
 pub(crate) enum RequestedDeliveryAdmission {
     Send(crate::generated::operation::AdmissionMessage),
-    SendSeveral(Vec<crate::generated::operation::AdmissionMessage>),
+    SendSeveral(PreparedDeliveryGroup),
 }
 
 #[derive(Clone)]
@@ -2047,22 +2047,35 @@ impl RecordsLogicalDeliveries for FlowStore {
         held_lock: Option<VerifiedDeliveryLock>,
         transition: LogicalDeliveryTransition,
     ) -> Result<Result<Vec<SendAcceptance>, Refusal>, StoreError> {
+        let group_messages;
         let messages = match &requested {
             RequestedDeliveryAdmission::Send(message) => std::slice::from_ref(message),
-            RequestedDeliveryAdmission::SendSeveral(messages) => messages.as_slice(),
+            RequestedDeliveryAdmission::SendSeveral(prepared) => {
+                group_messages = prepared
+                    .members
+                    .iter()
+                    .map(|member| member.admission_message.clone())
+                    .collect::<Vec<_>>();
+                group_messages.as_slice()
+            }
         };
-        let _guard = self
-            .logical_deliveries
-            .write_gate
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        // A prepared group keeps both gates from its sole preflight through
+        // this commit; plain Send takes its existing gates here.
+        let _guard = matches!(&requested, RequestedDeliveryAdmission::Send(_)).then(|| {
+            self.logical_deliveries
+                .write_gate
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+        });
         // Reminder admission follows the global order logical -> handover.
         // Keep/Drop takes only the handover gate, so its mutation cannot race
         // the green check and the atomic Notice/state commit below.
-        let _handover_guard = self
-            .handover_write_gate
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _handover_guard =
+            matches!(&requested, RequestedDeliveryAdmission::Send(_)).then(|| {
+                self.handover_write_gate
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+            });
         let LogicalDeliveryTransition {
             purpose,
             handover_reminder,
@@ -2112,10 +2125,16 @@ impl RecordsLogicalDeliveries for FlowStore {
                 return Ok(stale());
             }
         }
-        let Some(mut stored) = self.stored_metaflow(address)? else {
-            return Ok(Err(Refusal::Unknown(Unknown_Data::Address(
-                address.clone(),
-            ))));
+        let mut stored = match &requested {
+            RequestedDeliveryAdmission::SendSeveral(prepared) => prepared.stored.clone(),
+            RequestedDeliveryAdmission::Send(_) => {
+                let Some(stored) = self.stored_metaflow(address)? else {
+                    return Ok(Err(Refusal::Unknown(Unknown_Data::Address(
+                        address.clone(),
+                    ))));
+                };
+                stored
+            }
         };
         // Dispatch is held by the observation caller. These store gates then
         // keep the live policy/progress judgment and admission one transition.
@@ -2144,21 +2163,24 @@ impl RecordsLogicalDeliveries for FlowStore {
         } else {
             None
         };
-        if let RequestedDeliveryAdmission::SendSeveral(_) = &requested {
-            if let Err(refusal) = self.validate_delivery_group(address, &sent_by, messages)? {
-                return Ok(Err(refusal));
-            }
-        }
         let allocation = self.allocate_logical_cursor()?;
         let mut next = allocation.cursor;
         let mut commit = self.engine.begin_atomic_commit();
         let mut accepted = Vec::new();
-        let mut admitted_entries = Vec::new();
         let mut selected_ids = std::collections::HashSet::new();
         let mut answered_ids = std::collections::HashSet::new();
-        for crate::generated::operation::AdmissionMessage { delivery, message } in
-            messages.iter().cloned()
+        for (position, crate::generated::operation::AdmissionMessage { delivery, message }) in
+            messages.iter().cloned().enumerate()
         {
+            let prepared_member = match &requested {
+                RequestedDeliveryAdmission::Send(_) => None,
+                RequestedDeliveryAdmission::SendSeveral(prepared) => Some(
+                    prepared
+                        .members
+                        .get(position)
+                        .ok_or(StoreError::StateInvariant)?,
+                ),
+            };
             let message = warning
                 .as_ref()
                 .map_or(message, |prepared| prepared.message.clone());
@@ -2167,29 +2189,34 @@ impl RecordsLogicalDeliveries for FlowStore {
                 | Message::MiddleAbrupt(request)
                 | Message::Soft(request) => request.clone(),
             };
-            if let Request::Done(flow_ethos::DonePayload::Answered(done)) = &request
-                && self.reminder(&done.logical_delivery_id.0)?.is_none()
-            {
-                return Ok(Err(Refusal::Unresolved));
-            }
-            // Flow owns the Minutes rule at admission: above zero, and every
-            // deadline its reminders reach, computed with checked arithmetic,
-            // inside the clock. No policy maximum exists.
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_secs() as i64)
-                .unwrap_or(0);
-            let task_due = match &request {
-                Request::Task(task) => {
-                    use super::reminder::RulesMinutes;
-                    match task.minutes.0.ruled_interval(now) {
-                        Ok(interval) => Some(now + interval),
-                        Err(refusal) => {
-                            return Ok(Err(Refusal::MinutesRefused(refusal)));
+            let task_due = match prepared_member {
+                Some(prepared) => prepared.task_due,
+                None => {
+                    if let Request::Done(flow_ethos::DonePayload::Answered(done)) = &request
+                        && self.reminder(&done.logical_delivery_id.0)?.is_none()
+                    {
+                        return Ok(Err(Refusal::Unresolved));
+                    }
+                    // Flow owns the Minutes rule at admission: above zero, and every
+                    // deadline its reminders reach, computed with checked arithmetic,
+                    // inside the clock. No policy maximum exists.
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|elapsed| elapsed.as_secs() as i64)
+                        .unwrap_or(0);
+                    match &request {
+                        Request::Task(task) => {
+                            use super::reminder::RulesMinutes;
+                            match task.minutes.0.ruled_interval(now) {
+                                Ok(interval) => Some(now + interval),
+                                Err(refusal) => {
+                                    return Ok(Err(Refusal::MinutesRefused(refusal)));
+                                }
+                            }
                         }
+                        _ => None,
                     }
                 }
-                _ => None,
             };
             let task_sender = sent_by.clone();
             let request_id = match self.mint_request_id_excluding(&selected_ids)? {
@@ -2197,27 +2224,40 @@ impl RecordsLogicalDeliveries for FlowStore {
                 Err(refusal) => return Ok(Err(refusal)),
             };
             selected_ids.insert(request_id.clone());
-            let answered_binding = match &request {
-                Request::Result(flow_ethos::ResultPayload::Answered(answered)) => Some(
-                    self.request_binding(&answered.request_id)?
-                        .ok_or(StoreError::StateInvariant)?,
-                ),
-                Request::Done(flow_ethos::DonePayload::Answered(answered)) => Some(
-                    self.request_binding(&answered.request_id)?
-                        .ok_or(StoreError::StateInvariant)?,
-                ),
-                _ => None,
+            let answered_binding = match prepared_member {
+                Some(prepared) => prepared.answered_binding.clone(),
+                None => {
+                    let binding = match &request {
+                        Request::Result(flow_ethos::ResultPayload::Answered(answered)) => Some(
+                            self.request_binding(&answered.request_id)?
+                                .ok_or(StoreError::StateInvariant)?,
+                        ),
+                        Request::Done(flow_ethos::DonePayload::Answered(answered)) => Some(
+                            self.request_binding(&answered.request_id)?
+                                .ok_or(StoreError::StateInvariant)?,
+                        ),
+                        _ => None,
+                    };
+                    if let Some(binding) = &binding
+                        && !answered_ids.insert(binding.request_id.clone())
+                    {
+                        return Ok(Err(Refusal::Unresolved));
+                    }
+                    binding
+                }
             };
-            if let Some(binding) = &answered_binding
-                && !answered_ids.insert(binding.request_id.clone())
-            {
-                return Ok(Err(Refusal::Unresolved));
-            }
-            let answered_uncertain = match &answered_binding {
-                Some(binding) => self
-                    .logical_delivery_snapshot(&binding.logical_delivery_id)?
-                    .is_some_and(|snapshot| snapshot.delivery_state == DeliveryState::Uncertain),
-                None => false,
+            let answered_uncertain = match prepared_member {
+                Some(prepared) => prepared.answered_current.as_ref().is_some_and(|current| {
+                    current.delivery_snapshot.delivery_state == DeliveryState::Uncertain
+                }),
+                None => match &answered_binding {
+                    Some(binding) => self
+                        .logical_delivery_snapshot(&binding.logical_delivery_id)?
+                        .is_some_and(|snapshot| {
+                            snapshot.delivery_state == DeliveryState::Uncertain
+                        }),
+                    None => false,
+                },
             };
             let id = format!("logical-delivery-{next:020}");
             let entry = QueueEntry {
@@ -2228,7 +2268,6 @@ impl RecordsLogicalDeliveries for FlowStore {
                 message,
             };
             stored.metaflow.queue.0.push(entry.clone());
-            admitted_entries.push(entry.clone());
             let snapshot = DeliverySnapshot {
                 delivery_cursor: signal_flow::DeliveryCursor(next),
                 logical_delivery_id: signal_flow::LogicalDeliveryId(id.clone()),
@@ -2288,16 +2327,26 @@ impl RecordsLogicalDeliveries for FlowStore {
             };
             commit = self.assert_logical_request(address, entry, commit);
             commit = if let Some(mut binding) = answered_binding {
-                let rows = self.engine.match_records(QueryPlan::key(
-                    self.logical_deliveries.current,
-                    RecordKey::new(binding.logical_delivery_id.clone().0),
-                ))?;
-                let [current] = rows.records() else {
-                    return Err(StoreError::StateInvariant);
+                let rows;
+                let current = match prepared_member {
+                    Some(prepared) => prepared
+                        .answered_current
+                        .as_ref()
+                        .ok_or(StoreError::StateInvariant)?,
+                    None => {
+                        rows = self.engine.match_records(QueryPlan::key(
+                            self.logical_deliveries.current,
+                            RecordKey::new(binding.logical_delivery_id.clone().0),
+                        ))?;
+                        let [current] = rows.records() else {
+                            return Err(StoreError::StateInvariant);
+                        };
+                        if current.archived_cursor.0.is_some() {
+                            return Err(StoreError::StateInvariant);
+                        }
+                        current
+                    }
                 };
-                if current.archived_cursor.0.is_some() {
-                    return Err(StoreError::StateInvariant);
-                }
                 let answered_logical_id = binding.logical_delivery_id.clone();
                 binding.request_closure =
                     RequestClosure::Answered(signal_flow::LogicalDeliveryId(id.clone()));
@@ -2356,20 +2405,6 @@ impl RecordsLogicalDeliveries for FlowStore {
             next = next
                 .checked_add(if answered_uncertain { 2 } else { 1 })
                 .ok_or(StoreError::StateInvariant)?;
-        }
-        if accepted.len() > 1 {
-            use crate::composition::RendersQueuedWork;
-            let actual_bytes = admitted_entries.prompt_text(address).len();
-            if actual_bytes > crate::sending::MAX_SEND_PAYLOAD_BYTES {
-                return Ok(Err(Refusal::Oversized(signal_flow::SendPayloadSize {
-                    actual_bytes: signal_flow::ActualBytes(
-                        i64::try_from(actual_bytes).unwrap_or(i64::MAX),
-                    ),
-                    maximum_bytes: signal_flow::MaximumBytes(
-                        crate::sending::MAX_SEND_PAYLOAD_BYTES as i64,
-                    ),
-                })));
-            }
         }
         let next_counter = LogicalDeliveryCounter {
             next_cursor: NextCursor(next),

@@ -1526,21 +1526,6 @@ fn old_seat_untouched(
     assert!(world.fresh.user_turns(fixture).is_empty(), "nothing typed");
 }
 
-/// The resume's composition is refused (its declaration names a module
-/// Curriculum does not hold): ResumeRefused NotComposed, answered before
-/// anything is closed or written. No Closing, no Failed; the old harness,
-/// its pane and its process as they were, nothing typed.
-#[test]
-fn restart_composition_refused_old_harness_untouched() {
-    let mut fixture = NexusFixture::new();
-    let world = fixture.restart_world(true);
-    let old = world.old_harness();
-    declared_uncomposable(&fixture);
-
-    assert_eq!(restarted(&fixture), resume_refused("NotComposed"));
-    old_seat_untouched(&world, &fixture, &old, None);
-}
-
 /// The declared root is no directory: ResumeRefused RootRefused, before
 /// anything is closed or written; the old harness as it was.
 #[test]

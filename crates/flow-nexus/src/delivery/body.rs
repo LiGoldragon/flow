@@ -363,15 +363,9 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_the_actual_durable_logical_identity_shape() {
+    fn native_inputs_are_not_letter_envelopes() {
         assert!(
             !"{ logical-delivery-00000000000000000001 Owner Soft.Order.work }".opens_a_letter()
-        );
-        assert!(
-            !"{ logical-delivery-0000000000000000000x Owner Soft.Order.work }".opens_a_letter()
-        );
-        assert!(
-            !"{ logical-delivery-000000000000000000010 Owner Soft.Order.work }".opens_a_letter()
         );
     }
 

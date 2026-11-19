@@ -120,11 +120,12 @@ impl PreparesDeliveryGroups for FlowStore {
         if !address.topic.0.as_str().is_camel_case_topic() {
             return Ok(Err(Refusal::TopicRefused(address.topic.clone())));
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
-            .ok_or(StoreError::StateInvariant)?;
+        let clock = std::sync::LazyLock::new(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+        });
         let mut members = Vec::with_capacity(messages.len());
         let mut answered = std::collections::HashSet::new();
         for sendable in messages {
@@ -141,10 +142,17 @@ impl PreparesDeliveryGroups for FlowStore {
             | Message::MiddleAbrupt(request)
             | Message::Soft(request)) = &message;
             let task_due = match request {
-                Request::Task(task) => match task.minutes.0.ruled_interval(now) {
-                    Ok(interval) => Some(now + interval),
-                    Err(refusal) => return Ok(Err(Refusal::MinutesRefused(refusal))),
-                },
+                Request::Task(task) => {
+                    let Some(now) = *clock else {
+                        return Ok(Err(Refusal::Store(
+                            "clock is outside the lease range".into(),
+                        )));
+                    };
+                    match task.minutes.0.ruled_interval(now) {
+                        Ok(interval) => Some(now + interval),
+                        Err(refusal) => return Ok(Err(Refusal::MinutesRefused(refusal))),
+                    }
+                }
                 _ => None,
             };
             let answer_id = match request {
@@ -180,6 +188,7 @@ impl PreparesDeliveryGroups for FlowStore {
                 address.clone(),
             ))));
         };
+        (*clock).ok_or(StoreError::StateInvariant)?;
         for member in &mut members {
             let (Message::HardAbrupt(request)
             | Message::MiddleAbrupt(request)

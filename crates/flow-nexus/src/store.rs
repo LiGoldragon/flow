@@ -213,7 +213,7 @@ const OPTIONAL_TURN_RETENTION_TABLE: &str = "flow_nexus_meta_turn_retention_conf
 const OPTIONAL_CANCEL_NOTICES_TABLE: &str = "flow_nexus_meta_cancel_notices_configuration";
 const META_CANCEL_NOTICES_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new(OPTIONAL_CANCEL_NOTICES_TABLE);
-const META_CANCEL_NOTICES_CONFIGURATION_FAMILY: &str = "flow_nexus_meta_cancel_notices_configuration";
+const META_CANCEL_NOTICES_CONFIGURATION_FAMILY: &str = OPTIONAL_CANCEL_NOTICES_TABLE;
 const META_CANCEL_NOTICES_CONFIGURATION_SCHEMA: &str = "flow_nexus_meta_cancel_notices_configuration_v1";
 /// Added in 0.57.0 with the override panel: a store written before holds no
 /// flow's transitions and no switch, and is opened with each registered
@@ -5682,7 +5682,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                 META_HARNESS_HOOK_CONFIGURATION_FAMILY,
                 META_HARNESS_HOOK_CONFIGURATION_SCHEMA,
             ),
-            "flow_nexus_meta_cancel_notices_configuration" => (
+            OPTIONAL_CANCEL_NOTICES_TABLE => (
                 META_CANCEL_NOTICES_CONFIGURATION_FAMILY,
                 META_CANCEL_NOTICES_CONFIGURATION_SCHEMA,
             ),

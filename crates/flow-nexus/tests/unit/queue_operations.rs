@@ -146,17 +146,57 @@ fn cancel_closes_a_delivered_question_and_tells_the_recipient() {
     );
     let told = format!("Request {} was cancelled.", order.request_id.0);
     assert!(notices(&fixture, &sender).is_empty());
-    assert_eq!(notices(&fixture, &recipient), vec![told]);
+    assert_eq!(notices(&fixture, &recipient), vec![told.clone()]);
     assert_eq!(
         fixture
             .nexus
             .dispatch(Input::Cancel(order.request_id.clone())),
         Output::CancelRejected(RequestRejection::UnknownRequest)
     );
+    assert_eq!(
+        notices(&fixture, &recipient),
+        vec![told],
+        "a rejected repeat emits no new flow text"
+    );
+}
+
+#[test]
+fn cancelling_a_delivered_task_uses_the_default_recipient_notice() {
+    let fixture = NexusFixture::new();
+    let sender = at("defaultTaskSender");
+    let recipient = at("defaultTaskRecipient");
+    asleep(&fixture, &sender);
+    asleep(&fixture, &recipient);
+    let task = admitted(
+        &fixture,
+        &recipient,
+        SentBy::Sender(sender.clone()),
+        Request::Task(flow_ethos::AnswerableTask {
+            minutes: flow_ethos::Minutes(30),
+            string: "Keep working.".into(),
+        }),
+    );
+    delivered(&fixture, &recipient, &task);
+
+    assert_eq!(
+        fixture.nexus.cancel(&task.request_id),
+        Output::Cancelled(task.request_id.clone())
+    );
+    let text = format!("Request {} was cancelled.", task.request_id.0);
+    assert!(
+        notices(&fixture, &sender).is_empty(),
+        "the default sender setting is off"
+    );
+    assert_eq!(
+        notices(&fixture, &recipient),
+        vec![text],
+        "a reached Task still has work underway"
+    );
 }
 
 /// A Task still queued is cancelled: it leaves its queue, its reminder goes
-/// with it, and only its sender is told, the recipient never having had it.
+/// with it, and no recipient notice is queued because it never reached the
+/// recipient. The default sender notice setting is off.
 #[test]
 fn cancel_takes_a_queued_task_out_with_its_reminder() {
     let fixture = NexusFixture::new();
@@ -781,6 +821,8 @@ fn closed_record(
 /// second CloseRequest names no request.
 #[test]
 fn close_request_closes_a_delivered_order_and_tells_no_one() {
+    use crate::store::ManagesMetaflowState;
+    use meta_signal_flow::{CancelNotices, ConfigurationChange, Recipient, Sender, Telling};
     let fixture = NexusFixture::new();
     let sender = at("closeSender");
     let recipient = at("closeRecipient");
@@ -788,6 +830,14 @@ fn close_request_closes_a_delivered_order_and_tells_no_one() {
     for address in [&sender, &recipient, &elsewhere] {
         asleep(&fixture, address);
     }
+    fixture
+        .nexus
+        .store
+        .configure_change(ConfigurationChange::CancelNotices(CancelNotices {
+            sender: Sender(Telling::Told),
+            recipient: Recipient(Telling::Told),
+        }))
+        .unwrap();
     let order = admitted(
         &fixture,
         &recipient,
@@ -836,7 +886,13 @@ fn close_request_closes_a_delivered_order_and_tells_no_one() {
         Output::SendRefused(signal_flow::VisibleRefusal::Unresolved),
         "a Result finds the request closed"
     );
+    assert_eq!(
+        fixture.nexus.cancel(&order.request_id),
+        Output::CancelRejected(RequestRejection::UnknownRequest),
+        "a closed Order gives Cancel no sender or recipient notice"
+    );
     assert!(queued(&fixture, &sender).is_empty());
+    assert!(queued(&fixture, &recipient).is_empty());
     assert_eq!(
         fixture
             .nexus
@@ -849,11 +905,21 @@ fn close_request_closes_a_delivered_order_and_tells_no_one() {
 /// naming it afterwards is refused Unresolved.
 #[test]
 fn close_request_closes_a_delivered_task_with_its_reminder() {
+    use crate::store::ManagesMetaflowState;
+    use meta_signal_flow::{CancelNotices, ConfigurationChange, Recipient, Sender, Telling};
     let fixture = NexusFixture::new();
     let sender = at("closeTaskSender");
     let recipient = at("closeTaskRecipient");
     asleep(&fixture, &sender);
     asleep(&fixture, &recipient);
+    fixture
+        .nexus
+        .store
+        .configure_change(ConfigurationChange::CancelNotices(CancelNotices {
+            sender: Sender(Telling::Told),
+            recipient: Recipient(Telling::Told),
+        }))
+        .unwrap();
     let task = admitted(
         &fixture,
         &recipient,
@@ -1140,10 +1206,21 @@ fn cancellation_selects_roles_before_deduplicating_addresses() {
         (Telling::Untold, Telling::Told, 1),
         (Telling::Told, Telling::Told, 2),
     ] {
-        let settings = CancelNotices { sender: Sender(sender_telling), recipient: Recipient(recipient_telling) };
-        let roles = CancellationRoles { sender: Some(sender.clone()), recipient: Some(recipient.clone()), settings: None };
+        let settings = CancelNotices {
+            sender: Sender(sender_telling),
+            recipient: Recipient(recipient_telling),
+        };
+        let roles = CancellationRoles {
+            sender: Some(sender.clone()),
+            recipient: Some(recipient.clone()),
+            settings: None,
+        };
         assert_eq!(roles.selected(&settings).len(), expected);
-        let same = CancellationRoles { sender: Some(sender.clone()), recipient: Some(sender.clone()), settings: None };
+        let same = CancellationRoles {
+            sender: Some(sender.clone()),
+            recipient: Some(sender.clone()),
+            settings: None,
+        };
         assert_eq!(same.selected(&settings).len(), usize::from(expected > 0));
     }
 }
@@ -1152,25 +1229,68 @@ fn cancellation_selects_roles_before_deduplicating_addresses() {
 fn cancellation_dispatch_applies_each_setting_and_equal_address() {
     use crate::store::ManagesMetaflowState;
     use meta_signal_flow::{CancelNotices, ConfigurationChange, Recipient, Sender, Telling};
-    for sender_telling in [Telling::Untold, Telling::Told] {
-        for recipient_telling in [Telling::Untold, Telling::Told] {
-            for equal in [false, true] {
-                let fixture = NexusFixture::new();
-                let sender = at("roleSender");
-                let recipient = if equal { sender.clone() } else { at("roleRecipient") };
-                asleep(&fixture, &sender);
-                if !equal { asleep(&fixture, &recipient); }
-                fixture.nexus.store.configure_change(ConfigurationChange::CancelNotices(CancelNotices {
-                    sender: Sender(sender_telling), recipient: Recipient(recipient_telling),
-                })).unwrap();
-                let request = admitted(&fixture, &recipient, SentBy::Sender(sender.clone()), Request::Question("Ready?".into()));
-                delivered(&fixture, &recipient, &request);
-                assert_eq!(fixture.nexus.cancel(&request.request_id), Output::Cancelled(request.request_id));
-                if equal {
-                    assert_eq!(notices(&fixture, &sender).len(), usize::from(sender_telling == Telling::Told || recipient_telling == Telling::Told));
-                } else {
-                    assert_eq!(notices(&fixture, &sender).len(), usize::from(sender_telling == Telling::Told));
-                    assert_eq!(notices(&fixture, &recipient).len(), usize::from(recipient_telling == Telling::Told));
+    for request_is_task in [false, true] {
+        for sender_telling in [Telling::Untold, Telling::Told] {
+            for recipient_telling in [Telling::Untold, Telling::Told] {
+                for equal in [false, true] {
+                    let fixture = NexusFixture::new();
+                    let sender = at("roleSender");
+                    let recipient = if equal {
+                        sender.clone()
+                    } else {
+                        at("roleRecipient")
+                    };
+                    asleep(&fixture, &sender);
+                    if !equal {
+                        asleep(&fixture, &recipient);
+                    }
+                    fixture
+                        .nexus
+                        .store
+                        .configure_change(ConfigurationChange::CancelNotices(CancelNotices {
+                            sender: Sender(sender_telling),
+                            recipient: Recipient(recipient_telling),
+                        }))
+                        .unwrap();
+                    let body = if request_is_task {
+                        Request::Task(flow_ethos::AnswerableTask {
+                            minutes: flow_ethos::Minutes(30),
+                            string: "Land the line.".into(),
+                        })
+                    } else {
+                        Request::Question("Ready?".into())
+                    };
+                    let request =
+                        admitted(&fixture, &recipient, SentBy::Sender(sender.clone()), body);
+                    delivered(&fixture, &recipient, &request);
+                    assert_eq!(
+                        fixture.nexus.cancel(&request.request_id),
+                        Output::Cancelled(request.request_id.clone())
+                    );
+                    let text = format!("Request {} was cancelled.", request.request_id.0);
+                    if equal {
+                        let expected = if sender_telling == Telling::Told
+                            || recipient_telling == Telling::Told
+                        {
+                            vec![text]
+                        } else {
+                            Vec::new()
+                        };
+                        assert_eq!(notices(&fixture, &sender), expected);
+                    } else {
+                        let expected_sender = if sender_telling == Telling::Told {
+                            vec![text.clone()]
+                        } else {
+                            Vec::new()
+                        };
+                        let expected_recipient = if recipient_telling == Telling::Told {
+                            vec![text]
+                        } else {
+                            Vec::new()
+                        };
+                        assert_eq!(notices(&fixture, &sender), expected_sender);
+                        assert_eq!(notices(&fixture, &recipient), expected_recipient);
+                    }
                 }
             }
         }
@@ -1178,28 +1298,193 @@ fn cancellation_dispatch_applies_each_setting_and_equal_address() {
 }
 
 #[test]
+fn cancelling_an_order_emits_no_flow_text_for_either_role_in_any_notice_setting() {
+    use crate::store::ManagesMetaflowState;
+    use meta_signal_flow::{CancelNotices, ConfigurationChange, Recipient, Sender, Telling};
+    for sender_telling in [Telling::Untold, Telling::Told] {
+        for recipient_telling in [Telling::Untold, Telling::Told] {
+            for delivered_order in [false, true] {
+                for same_address in [false, true] {
+                    let fixture = NexusFixture::new();
+                    let sender = at("orderNoticeSender");
+                    let recipient = if same_address {
+                        sender.clone()
+                    } else {
+                        at("orderNoticeRecipient")
+                    };
+                    asleep(&fixture, &sender);
+                    if !same_address {
+                        asleep(&fixture, &recipient);
+                    }
+                    fixture
+                        .nexus
+                        .store
+                        .configure_change(ConfigurationChange::CancelNotices(CancelNotices {
+                            sender: Sender(sender_telling),
+                            recipient: Recipient(recipient_telling),
+                        }))
+                        .unwrap();
+                    let order = admitted(
+                        &fixture,
+                        &recipient,
+                        SentBy::Sender(sender.clone()),
+                        Request::Order("Read this once.".into()),
+                    );
+                    assert!(notices(&fixture, &sender).is_empty());
+                    if delivered_order {
+                        delivered(&fixture, &recipient, &order);
+                        assert!(
+                            notices(&fixture, &sender).is_empty(),
+                            "delivery emits no sender notice"
+                        );
+                    }
+                    assert_eq!(
+                        fixture.nexus.cancel(&order.request_id),
+                        Output::Cancelled(order.request_id.clone())
+                    );
+                    assert!(
+                        notices(&fixture, &sender).is_empty(),
+                        "Order sender stays silent"
+                    );
+                    assert!(
+                        notices(&fixture, &recipient).is_empty(),
+                        "Order recipient is closed for cancellation notices"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn cancelling_an_undelivered_task_tells_only_its_configured_sender() {
+    use crate::store::ManagesMetaflowState;
+    use meta_signal_flow::{CancelNotices, ConfigurationChange, Recipient, Sender, Telling};
+    let fixture = NexusFixture::new();
+    let sender = at("queuedTaskSender");
+    let recipient = at("queuedTaskRecipient");
+    asleep(&fixture, &sender);
+    asleep(&fixture, &recipient);
+    fixture
+        .nexus
+        .store
+        .configure_change(ConfigurationChange::CancelNotices(CancelNotices {
+            sender: Sender(Telling::Told),
+            recipient: Recipient(Telling::Told),
+        }))
+        .unwrap();
+    let task = admitted(
+        &fixture,
+        &recipient,
+        SentBy::Sender(sender.clone()),
+        Request::Task(flow_ethos::AnswerableTask {
+            minutes: flow_ethos::Minutes(30),
+            string: "Land the line.".into(),
+        }),
+    );
+    assert_eq!(
+        fixture.nexus.cancel(&task.request_id),
+        Output::Cancelled(task.request_id.clone())
+    );
+    assert_eq!(
+        notices(&fixture, &sender),
+        vec![format!("Request {} was cancelled.", task.request_id.0)]
+    );
+    assert!(
+        notices(&fixture, &recipient).is_empty(),
+        "the recipient never received the Task"
+    );
+}
+
+#[test]
+fn cancelling_an_answered_question_is_rejected_without_flow_text() {
+    use crate::store::ManagesMetaflowState;
+    use meta_signal_flow::{CancelNotices, ConfigurationChange, Recipient, Sender, Telling};
+    let fixture = NexusFixture::new();
+    let sender = at("answeredQuestionSender");
+    let recipient = at("answeredQuestionRecipient");
+    let elsewhere = at("answeredQuestionAnswerer");
+    for address in [&sender, &recipient, &elsewhere] {
+        asleep(&fixture, address);
+    }
+    fixture
+        .nexus
+        .store
+        .configure_change(ConfigurationChange::CancelNotices(CancelNotices {
+            sender: Sender(Telling::Told),
+            recipient: Recipient(Telling::Told),
+        }))
+        .unwrap();
+    let question = admitted(
+        &fixture,
+        &recipient,
+        SentBy::Sender(sender.clone()),
+        Request::Question("Ready?".into()),
+    );
+    delivered(&fixture, &recipient, &question);
+    assert!(matches!(
+        fixture
+            .nexus
+            .send_request(answer_to(&elsewhere, &question.request_id), None)
+            .response,
+        Output::SendAccepted(_) | Output::Sent(_),
+    ));
+    assert_eq!(
+        fixture.nexus.cancel(&question.request_id),
+        Output::CancelRejected(RequestRejection::Closed)
+    );
+    assert!(notices(&fixture, &sender).is_empty());
+    assert!(notices(&fixture, &recipient).is_empty());
+}
+
+#[test]
 fn cancelling_an_open_uncertain_question_tells_its_recipient() {
     let fixture = NexusFixture::new();
     let recipient = at("uncertainRecipient");
     asleep(&fixture, &recipient);
-    let request = admitted(&fixture, &recipient, SentBy::Unbound, Request::Question("Ready?".into()));
-    fixture.nexus.store.transition_logical_delivery(&request.logical_delivery_id, DeliveryState::Uncertain).unwrap();
-    assert_eq!(fixture.nexus.cancel(&request.request_id), Output::Cancelled(request.request_id));
-    assert_eq!(notices(&fixture, &recipient).len(), 1);
+    let request = admitted(
+        &fixture,
+        &recipient,
+        SentBy::Unbound,
+        Request::Question("Ready?".into()),
+    );
+    fixture
+        .nexus
+        .store
+        .transition_logical_delivery(&request.logical_delivery_id, DeliveryState::Uncertain)
+        .unwrap();
+    assert_eq!(
+        fixture.nexus.cancel(&request.request_id),
+        Output::Cancelled(request.request_id.clone())
+    );
+    assert_eq!(
+        notices(&fixture, &recipient),
+        vec![format!("Request {} was cancelled.", request.request_id.0)]
+    );
 }
 
 #[test]
 fn cancellation_delivery_eligibility_is_the_durable_state() {
     use crate::queue_operations::EligibleForCancellationNotice;
-    let receipt = NativeReceipt { harness_kind: HarnessKind::Codex,
+    let receipt = NativeReceipt {
+        harness_kind: HarnessKind::Codex,
         native_session_id: signal_flow::NativeSessionId("session".into()),
-        native_prompt_id: signal_flow::NativePromptId("prompt".into()) };
-    for state in [DeliveryState::Delivered(receipt), DeliveryState::Read, DeliveryState::Uncertain] {
+        native_prompt_id: signal_flow::NativePromptId("prompt".into()),
+    };
+    for state in [
+        DeliveryState::Delivered(receipt),
+        DeliveryState::Read,
+        DeliveryState::Uncertain,
+    ] {
         assert!(state.eligible_for_cancellation_notice());
     }
-    for state in [DeliveryState::Queued, DeliveryState::Attempting,
+    for state in [
+        DeliveryState::Queued,
+        DeliveryState::Attempting,
         DeliveryState::Retryable(signal_flow::RetryCause::HistoryAbsent),
-        DeliveryState::Failed(signal_flow::Refusal::Direct("failed".into())), DeliveryState::Withdrawn] {
+        DeliveryState::Failed(signal_flow::Refusal::Direct("failed".into())),
+        DeliveryState::Withdrawn,
+    ] {
         assert!(!state.eligible_for_cancellation_notice());
     }
 }

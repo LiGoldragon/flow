@@ -28,8 +28,8 @@ use signal_flow::{
 
 pub trait OperatesOnRequestsAndQueues {
     /// Closes an open request: one still queued leaves its queue, it is
-    /// archived with its id and a Task's reminder, and its sender, and its
-    /// recipient when it reached it, are told by a Soft Notice.
+    /// archived with its id and a Task's reminder. Cancel may queue the
+    /// configured Soft Notices for eligible roles; Orders are silent.
     fn cancel(&self, request_id: &RequestId) -> Output;
     /// Closes an open request with no answer and tells no one: one still
     /// queued leaves its queue, it is archived with its id and a Task's
@@ -130,6 +130,15 @@ impl EligibleForCancellationNotice for signal_flow::DeliveryState {
     }
 }
 
+fn is_order_request(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::HardAbrupt(Request::Order(_))
+            | Message::MiddleAbrupt(Request::Order(_))
+            | Message::Soft(Request::Order(_))
+    )
+}
+
 pub(crate) trait SelectsCancellationNotices {
     fn selected(self, settings: &meta_signal_flow::CancelNotices) -> Vec<Address>;
 }
@@ -138,11 +147,15 @@ impl SelectsCancellationNotices for CancellationRoles {
     fn selected(self, settings: &meta_signal_flow::CancelNotices) -> Vec<Address> {
         let mut selected = Vec::new();
         if settings.sender.0 == meta_signal_flow::Telling::Told {
-            if let Some(sender) = self.sender { selected.push(sender); }
+            if let Some(sender) = self.sender {
+                selected.push(sender);
+            }
         }
         if settings.recipient.0 == meta_signal_flow::Telling::Told {
             if let Some(recipient) = self.recipient {
-                if !selected.contains(&recipient) { selected.push(recipient); }
+                if !selected.contains(&recipient) {
+                    selected.push(recipient);
+                }
             }
         }
         selected
@@ -157,9 +170,11 @@ trait EndsRequests {
     /// where it waits; any other request still queued that never reached
     /// its seat leaves its queue, and it is archived with its id and a
     /// Task's reminder. A closed request's closer is recorded in the same
-    /// commit. Answers the Addresses that knew of it: a reminder's asker;
-    /// otherwise its sender, and its recipient when it reached it.
-    fn cancellation_notice_settings(&self) -> Result<meta_signal_flow::CancelNotices, RequestRejection>;
+    /// commit. Collects notice candidates for Cancel: a reminder's asker;
+    /// otherwise a non-Order sender and an eligible reached recipient.
+    fn cancellation_notice_settings(
+        &self,
+    ) -> Result<meta_signal_flow::CancelNotices, RequestRejection>;
     fn end_request(
         &self,
         request_id: &RequestId,
@@ -168,8 +183,12 @@ trait EndsRequests {
 }
 
 impl EndsRequests for RunningNexus {
-    fn cancellation_notice_settings(&self) -> Result<meta_signal_flow::CancelNotices, RequestRejection> {
-        self.store.cancel_notices().map_err(|_| RequestRejection::StoreRefused)
+    fn cancellation_notice_settings(
+        &self,
+    ) -> Result<meta_signal_flow::CancelNotices, RequestRejection> {
+        self.store
+            .cancel_notices()
+            .map_err(|_| RequestRejection::StoreRefused)
     }
 
     fn end_request(
@@ -178,7 +197,11 @@ impl EndsRequests for RunningNexus {
         ending: &RequestEnding,
     ) -> Result<CancellationRoles, RequestRejection> {
         use crate::store::scheduled_reminder::{MarksScheduledReminder, SchedulesReminders};
-        let mut roles = CancellationRoles { sender: None, recipient: None, settings: None };
+        let mut roles = CancellationRoles {
+            sender: None,
+            recipient: None,
+            settings: None,
+        };
         // A reminder not yet sent is ended where it waits; it reached no
         // one, so only its asker knew of it.
         match self.store.scheduled_reminder(request_id) {
@@ -221,6 +244,7 @@ impl EndsRequests for RunningNexus {
         let Some(retained) = retained else {
             return Err(RequestRejection::UnknownRequest);
         };
+        let is_order = is_order_request(&retained.entry.message);
         if matches!(ending, RequestEnding::Cancelled) {
             roles.settings = Some(self.cancellation_notice_settings()?);
         }
@@ -228,8 +252,9 @@ impl EndsRequests for RunningNexus {
             .store
             .delivered_to_be_answered(&binding.logical_delivery_id)
             .map_err(|_| RequestRejection::StoreRefused)?;
-        let recipient_eligible = if matches!(ending, RequestEnding::Cancelled) {
-            self.store.logical_delivery_snapshot(&binding.logical_delivery_id)
+        let recipient_eligible = if matches!(ending, RequestEnding::Cancelled) && !is_order {
+            self.store
+                .logical_delivery_snapshot(&binding.logical_delivery_id)
                 .map_err(|_| RequestRejection::StoreRefused)?
                 .is_some_and(|delivery| delivery.delivery_state.eligible_for_cancellation_notice())
         } else {
@@ -269,11 +294,13 @@ impl EndsRequests for RunningNexus {
                 return Err(RequestRejection::StoreRefused);
             }
         }
-        if let SentBy::Sender(sender) = &retained.entry.sent_by {
-            roles.sender = Some(sender.clone());
-        }
-        if recipient_eligible {
-            roles.recipient = Some(retained.address.clone());
+        if !is_order {
+            if let SentBy::Sender(sender) = &retained.entry.sent_by {
+                roles.sender = Some(sender.clone());
+            }
+            if recipient_eligible {
+                roles.recipient = Some(retained.address.clone());
+            }
         }
         Ok(roles)
     }
@@ -290,7 +317,10 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
                 Ok(roles) => roles,
                 Err(rejection) => return Output::CancelRejected(rejection),
             };
-            let settings = roles.settings.clone().expect("Cancel reads its settings before ending");
+            let settings = roles
+                .settings
+                .clone()
+                .expect("Cancel reads its settings before ending");
             let told = roles.selected(&settings);
             let text = format!("Request {} was cancelled.", request_id.0);
             for address in &told {

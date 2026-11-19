@@ -215,6 +215,12 @@ pub struct StoredMetaTurnRetentionConfiguration {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct StoredMetaCancelNoticesConfiguration {
+    pub cancel_notices: meta_signal_flow::CancelNotices,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct StoredMetaProtectedAddressConfiguration {
     pub address: signal_flow::Address,
 }

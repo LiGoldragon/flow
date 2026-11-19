@@ -468,13 +468,7 @@ fn restart_awake_resting_claude_resumes_same_session() {
         "{resume}"
     );
     assert!(resume.contains("--model claude-fixture"), "{resume}");
-    assert!(
-        resume.contains(&format!(
-            "--effort {}",
-            <crate::RunningNexus as crate::sending::ChoosesEffort>::effort_of(&address(Model::Sol))
-        )),
-        "{resume}"
-    );
+    assert!(resume.contains("--effort medium"), "{resume}");
     assert!(
         world.calls_naming("agent prompt").is_empty(),
         "nothing is submitted: {}",
@@ -3702,9 +3696,7 @@ fn restart_composition_against_curriculum_socket() {
             remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(0)),
             address: address.clone(),
             model_name: flow_ethos::ModelName(native.to_owned()),
-            effort: signal_flow::Effort(
-                <crate::RunningNexus as crate::sending::ChoosesEffort>::effort_of(&address).into(),
-            ),
+            effort: signal_flow::Effort("medium".into()),
             flow_id_option: None,
             herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
             leave_outs_option: None,

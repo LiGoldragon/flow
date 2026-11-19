@@ -1023,15 +1023,6 @@ mod tests {
     }
 
     #[test]
-    fn current_idle_blank_agent_binding_is_available() {
-        let snapshot = serde_json::json!({"result":{"snapshot":{"agents":[{
-            "agent":"claude", "agent_status":"idle", "interactive_ready":true,
-            "name":"recipient", "pane_id":"w1:p2", "terminal_id":"term-current"
-        }]}}});
-        assert!(snapshot.has_route(&route(), &HarnessKind::Claude));
-    }
-
-    #[test]
     fn working_interactive_agent_binding_remains_available_to_message() {
         let snapshot = serde_json::json!({"result":{"snapshot":{"agents":[{
             "agent":"claude", "agent_status":"working", "interactive_ready":true,

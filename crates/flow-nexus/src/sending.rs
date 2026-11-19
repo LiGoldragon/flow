@@ -26,6 +26,7 @@ use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::herdr::launch::ConstructsHarnessCommand;
 use crate::launching::ReadsHarnessArguments;
 use crate::model::RunsModel;
+use crate::store::effort_configuration::ReadsEffort;
 use crate::performing::Performs;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
@@ -514,15 +515,6 @@ impl SendsRequests for RunningNexus {
     }
 }
 
-/// The effort a seat of one Address runs at: its model's.
-pub trait ChoosesEffort {
-    fn effort_of(address: &Address) -> &'static str {
-        address.model.effort()
-    }
-}
-
-impl ChoosesEffort for RunningNexus {}
-
 pub trait LaunchesDeclared {
     /// The Start a Launch names, or, when the metaflow is Awake as a live
     /// flow, whoever asks, the Replace of that flow; Err with the refusal
@@ -600,7 +592,7 @@ impl LaunchesDeclared for RunningNexus {
             prompt_modules: declaration.prompt_modules,
             address: address.clone(),
             model_name: signal_flow::ModelName(model_name),
-            effort: signal_flow::Effort(Self::effort_of(&address).to_owned()),
+            effort: signal_flow::Effort(self.store.configured_effort(&address).map_err(store_refused)?),
             flow_id_option: predecessor.clone().map(flow_ethos::FlowId),
             remembering: launch.remembering,
             herdr_session_name: signal_flow::HerdrSessionName(herdr_session_name),

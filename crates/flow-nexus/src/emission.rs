@@ -294,9 +294,10 @@ impl SpeaksHarness for HarnessCommandLine {
                 words.extend([
                     "--model".into(),
                     claude.model_name.0.clone(),
-                    "--effort".into(),
-                    claude.effort.0.clone(),
                 ]);
+                if !claude.effort.0.is_empty() {
+                    words.extend(["--effort".into(), claude.effort.0.clone()]);
+                }
                 words.extend(claude.lean_start.arguments());
                 words.extend(claude.configured_harness_arguments.0.iter().cloned());
                 words
@@ -308,14 +309,15 @@ impl SpeaksHarness for HarnessCommandLine {
                     "--model".into(),
                     codex.model_name.0.clone(),
                     "-c".into(),
-                    format!("model_reasoning_effort={}", codex.effort.0),
-                    "-c".into(),
                     // The Codex TUI's terminal title items: the thread title
                     // alone. The items codex-tui 0.161.0-alpha.2 accepts in
                     // `[tui].terminal_title` include `project-name`,
                     // `current-dir`, `run-state` and `thread-title`.
                     "tui.terminal_title=[\"thread-title\"]".into(),
                 ];
+                if !codex.effort.0.is_empty() {
+                    words.extend(["-c".into(), format!("model_reasoning_effort={}", codex.effort.0)]);
+                }
                 words.extend(codex.lean_start.arguments());
                 words.extend(codex.configured_harness_arguments.0.iter().cloned());
                 if let Some(thread) = &codex.native_session_id_option {

@@ -70,6 +70,7 @@ fn declare(fixture: &NexusFixture, at: Address) {
         .nexus
         .store
         .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+            effort: meta_signal_flow::Effort::Default,
             leave_outs: signal_flow::LeaveOuts(Vec::new()),
             root_option: None,
             address: at,

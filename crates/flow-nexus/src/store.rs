@@ -23,6 +23,9 @@ pub(crate) mod handover_reminders;
 pub(crate) mod kept_answer;
 pub(crate) mod launch_cleanup;
 pub(crate) mod leave_out_upgrade;
+pub(crate) mod effort_configuration;
+pub(crate) mod effort_upgrade;
+use effort_configuration::{RegistersModelEfforts, StoredModelEffort};
 pub(crate) mod living_upgrade;
 pub(crate) mod logical_delivery;
 #[cfg(test)]
@@ -1613,6 +1616,8 @@ pub enum StoreError {
     EventUpgrade(String),
     #[error("0.54.6 launch-outcome Memory upgrade refused: {0}")]
     ReapUpgrade(String),
+    #[error("effort upgrade: {0}")]
+    EffortUpgrade(String),
     #[error("0.54.7 permaflow and leave-out Memory upgrade refused: {0}")]
     LeaveOutUpgrade(String),
     #[error("heartbeat period must be positive")]
@@ -1664,6 +1669,7 @@ pub(crate) struct MetaConfigurationTables {
     handover: TableReference<handover_configuration::StoredHandoverConfiguration>,
     nexus: TableReference<StoredMetaNexusConfiguration>,
     models: TableReference<StoredMetaModelConfiguration>,
+    model_efforts: TableReference<StoredModelEffort>,
     thresholds: TableReference<StoredMetaThresholdConfiguration>,
     pub(crate) send_servers: TableReference<send_server::StoredMetaSendServerConfiguration>,
     pub(crate) metaflows: TableReference<metaflow_declaration::StoredMetaMetaflowConfiguration>,
@@ -1689,6 +1695,7 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
             handover: <handover_configuration::StoredHandoverConfiguration as handover_configuration::UpgradesHandoverConfiguration>::upgrade_or_register(engine).map_err(StoreError::HandoverConfigurationUpgrade)?,
             nexus,
             models: engine.register_table(StoredMetaModelConfiguration::descriptor())?,
+            model_efforts: StoredModelEffort::register(engine)?,
             thresholds: engine.register_table(StoredMetaThresholdConfiguration::descriptor())?,
             send_servers: engine.register_table(
                 <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor(),
@@ -1916,6 +1923,7 @@ impl SetsRequestIdDrawerForTests for FlowStore {
 pub struct ConfiguredFamilies {
     pub nexus: ConfigureNexus,
     pub models: Vec<ConfigureModel>,
+    pub model_efforts: Vec<meta_signal_flow::ModelEffort>,
     pub thresholds: Vec<ConfigureThreshold>,
     pub send_servers: Vec<ConfigureSendServer>,
     pub metaflows: Vec<ConfigureMetaflow>,
@@ -1948,6 +1956,7 @@ impl CompletesSnapshot for ConfiguredFamilies {
             successor_recovery_text: self.successor_recovery_text,
             configured_nexus: meta_signal_flow::ConfiguredNexus(self.nexus),
             configured_models: meta_signal_flow::ConfiguredModels(self.models),
+            configured_model_efforts: meta_signal_flow::ConfiguredModelEfforts(self.model_efforts),
             configured_thresholds: meta_signal_flow::ConfiguredThresholds(self.thresholds),
             configured_send_servers: meta_signal_flow::ConfiguredSendServers(self.send_servers),
             configured_metaflows: meta_signal_flow::ConfiguredMetaflows(self.metaflows),
@@ -2105,6 +2114,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             )?
             .announce();
         }
+        <FlowStore as effort_upgrade::UpgradesEffort>::upgrade_effort(&mut engine)?;
         let state = engine.register_table(state_descriptor)?;
         let configuration = engine.register_table(configuration_descriptor)?;
         let runtime_configuration = engine.register_table(runtime_configuration_descriptor)?;
@@ -2116,6 +2126,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .map_err(StoreError::HandoverConfigurationUpgrade)?,
             nexus,
             models: engine.register_table(meta_models_descriptor)?,
+            model_efforts: StoredModelEffort::register(&mut engine)?,
             thresholds: engine.register_table(meta_thresholds_descriptor)?,
             send_servers: engine.register_table(meta_send_servers_descriptor)?,
             investigation: engine.register_table(meta_investigation_descriptor)?,
@@ -2782,6 +2793,7 @@ impl OpensFlowStore for FlowStore {
             )?
             .announce();
         }
+        <FlowStore as effort_upgrade::UpgradesEffort>::upgrade_effort(&mut engine)?;
         // This release's step: the launch outcomes 0.54.7 to 0.56.x wrote
         // (v10) take signal-flow 64's wider rejection, and the successor
         // intents (v3) the emergency cause, before anything is registered.
@@ -5521,6 +5533,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
 
     fn current_flow_family_identity(table_name: &str) -> Option<(&'static str, SchemaHash)> {
         let (family, version) = match table_name {
+            effort_configuration::TABLE => (effort_configuration::FAMILY, effort_configuration::SCHEMA),
             context_warnings::POLICY_TABLE => (
                 context_warnings::POLICY_FAMILY,
                 context_warnings::POLICY_SCHEMA,
@@ -5928,7 +5941,12 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                     == SchemaHash::for_label(
                         refresh_caller_upgrade::ORDERED_REPLACEMENT_SCHEMA_V1,
                     ));
-        before_refresh_callers
+        let before_effort = table_key == "flow_nexus_meta_metaflow_configuration"
+            && identity.table_name() == table_key
+            && identity.family().as_str() == metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY
+            && identity.schema_hash() == SchemaHash::for_label(effort_upgrade::SCHEMA_V7);
+        before_effort
+            || before_refresh_callers
             || before_recovery_cause
             || before_recovery_refusals
             || before_living
@@ -5955,7 +5973,8 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
     fn has_expected_flow_catalog(actual: &std::collections::BTreeSet<String>) -> bool {
         let is = |tables: &[&str]| {
             actual.iter().all(|name| {
-                tables.contains(&name.as_str())
+                name == effort_configuration::TABLE
+                    || tables.contains(&name.as_str())
                     || name == context_warnings::POLICY_TABLE
                     || name == context_warnings::HOOK_TABLE
                     || name == context_warnings::PROGRESS_TABLE
@@ -6223,6 +6242,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
             _ => return Err(StoreError::StateInvariant),
         };
         let models_rows = engine.match_records(QueryPlan::all(tables.models))?;
+        let effort_rows = engine.match_records(QueryPlan::all(tables.model_efforts))?;
         let thresholds_rows = engine.match_records(QueryPlan::all(tables.thresholds))?;
         let send_server_rows = engine.match_records(QueryPlan::all(tables.send_servers))?;
         let investigation_rows = engine.match_records(QueryPlan::all(tables.investigation))?;
@@ -6240,7 +6260,8 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
             .cloned()
             .unwrap_or_else(<handover_configuration::StoredHandoverConfiguration as handover_configuration::DefaultsToUnconfigured>::unconfigured);
         let metaflow_rows = engine.match_records(QueryPlan::all(tables.metaflows))?;
-        if models_rows.database_marker() != marker
+        if effort_rows.database_marker() != marker
+            || models_rows.database_marker() != marker
             || metaflow_rows.database_marker() != marker
             || thresholds_rows.database_marker() != marker
             || send_server_rows.database_marker() != marker
@@ -6346,9 +6367,12 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
             [row] => row.0.clone(),
             _ => return Err(StoreError::StateInvariant),
         };
+        let mut model_efforts = effort_rows.records().iter().map(|row| row.model_effort.clone()).collect::<Vec<_>>();
+        model_efforts.sort_by_key(|entry| FlowStore::model_record_key(&entry.model));
         Ok(Some(ConfiguredFamilies {
             nexus,
             models,
+            model_efforts,
             thresholds,
             send_servers,
             investigation,
@@ -6672,6 +6696,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
             Change::Purpose(purpose) => metaflow.purpose = purpose,
             Change::Kind(flow_kind) => metaflow.flow_kind = flow_kind,
             Change::Continuity(continuity) => metaflow.continuity = continuity,
+            Change::Effort(effort) => metaflow.effort = effort,
             Change::Add(Element::SystemModule(identity)) => {
                 if !metaflow.system_modules.0.contains(&identity) {
                     resolved(&identity)?;
@@ -6913,6 +6938,9 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                     }],
                 )
             }
+            ConfigurationChange::ModelEffort(model_effort) => FlowStore::declare_configuration_entry(
+                engine, tables.model_efforts, StoredModelEffort { model_effort },
+            ),
             ConfigurationChange::Models(models) => FlowStore::replace_configuration_family(
                 engine,
                 tables.models,

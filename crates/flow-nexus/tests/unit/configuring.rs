@@ -377,6 +377,7 @@ pub(crate) fn permaflow(
     leave_outs: Vec<signal_flow::LeaveOut>,
 ) -> ConfigureMetaflow {
     ConfigureMetaflow {
+            effort: meta_signal_flow::Effort::Default,
         address,
         root_option: None,
         leave_outs: signal_flow::LeaveOuts(leave_outs),
@@ -614,6 +615,7 @@ fn each_family_is_its_last_declaration() {
     assert_eq!(
         snapshot(&reopened),
         ConfigurationSnapshot {
+            configured_model_efforts: snapshot(&reopened).configured_model_efforts,
             successor_recovery_text: meta_signal_flow::SuccessorRecoveryText(
                 APPROVED_RECOVERY_TEXT.into()
             ),
@@ -2581,4 +2583,36 @@ fn one_live_store_value_reaches_both_composers_without_reconstructing_the_source
             }
         }
     }
+}
+
+#[test]
+fn effort_precedence_readback_and_reopen_preserve_each_configuration_layer() {
+    use crate::store::effort_configuration::ReadsEffort;
+    use meta_signal_flow::{Change, Effort, ModelEffort};
+    let (fixture, nexus, alpha, beta) = amend_world();
+    let before = snapshot(&nexus);
+    assert_eq!(before.configured_model_efforts.0.len(), 8);
+    for entry in &before.configured_model_efforts.0 {
+        assert_eq!(entry.effort, if entry.model == Model::Terra { Effort::Low } else { Effort::Medium });
+    }
+    for (model_effort, model_text) in [(Effort::Default, ""), (Effort::High, "high"), (Effort::Medium, "medium"), (Effort::Low, "low")] {
+        let mut expected = snapshot(&nexus);
+        expected.configured_model_efforts.0.iter_mut().find(|entry| entry.model == alpha.address.model).unwrap().effort = model_effort.clone();
+        configures(&nexus, ConfigurationChange::ModelEffort(ModelEffort { model: alpha.address.model.clone(), effort: model_effort }));
+        assert_eq!(snapshot(&nexus), expected);
+        for (effort, text) in [(Effort::Default, model_text), (Effort::High, "high"), (Effort::Medium, "medium"), (Effort::Low, "low")] {
+            let mut changed = alpha.clone();
+            changed.effort = effort.clone();
+            let expected = with_permaflow(&snapshot(&nexus), &changed);
+            configures(&nexus, amend(&alpha.address, Change::Effort(effort)));
+            assert_eq!(snapshot(&nexus), expected);
+            assert_eq!(nexus.store.configured_effort(&alpha.address).unwrap(), text);
+            assert_eq!(nexus.store.configured_effort(&beta.address).unwrap(), "medium");
+        }
+    }
+    let expected = snapshot(&nexus);
+    drop(nexus);
+    let reopened = fixture.open();
+    assert_eq!(snapshot(&reopened), expected);
+    assert_eq!(reopened.store.configured_effort(&alpha.address).unwrap(), "low");
 }

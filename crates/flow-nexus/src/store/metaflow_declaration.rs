@@ -19,7 +19,7 @@ pub(super) const META_METAFLOW_CONFIGURATION_TABLE_NAME: TableName =
 pub(super) const META_METAFLOW_CONFIGURATION_FAMILY: &str =
     "flow-nexus-meta-metaflow-configuration";
 pub(super) const META_METAFLOW_CONFIGURATION_SCHEMA: &str =
-    "flow-nexus-meta-metaflow-configuration-v7";
+    "flow-nexus-meta-metaflow-configuration-v8";
 
 impl EngineRecord for StoredMetaMetaflowConfiguration {
     fn record_key(&self) -> RecordKey {
@@ -31,7 +31,7 @@ impl EngineRecord for StoredMetaMetaflowConfiguration {
 
 impl MemoryDefinition for StoredMetaMetaflowConfiguration {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(7)
+        MemoryVersion::new(8)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -51,6 +51,7 @@ impl DescribesMetaflowDeclarationTable for StoredMetaMetaflowConfiguration {
             SchemaHash::for_label(META_METAFLOW_CONFIGURATION_SCHEMA),
         )
         .with_predecessor::<super::leave_out_upgrade::StoredMetaMetaflowConfigurationV6>()
+        .with_predecessor::<super::effort_upgrade::StoredMetaMetaflowConfigurationV7>()
     }
 }
 

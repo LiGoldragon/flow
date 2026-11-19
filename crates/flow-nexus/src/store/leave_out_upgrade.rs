@@ -190,6 +190,7 @@ impl TakesLeaveOuts for ConfigureMetaflowV6 {
             continuity: self.continuity,
             purpose: self.purpose,
             records: self.records,
+            effort: meta_signal_flow::Effort::Default,
         }
     }
 }

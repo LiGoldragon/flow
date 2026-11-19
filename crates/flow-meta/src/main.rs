@@ -384,6 +384,7 @@ mod tests {
         };
         let rows: Vec<_> = (0..31)
             .map(|index| ConfigureMetaflow {
+            effort: meta_signal_flow::Effort::Default,
                 root_option: None,
                 leave_outs: signal_flow::LeaveOuts(match index % 2 {
                     0 => vec![],
@@ -410,6 +411,7 @@ mod tests {
             })
             .collect();
         let snapshot = ConfigurationSnapshot {
+            configured_model_efforts: meta_signal_flow::ConfiguredModelEfforts(vec![]),
             configured_nexus: meta_signal_flow::ConfiguredNexus(ConfigureNexus {
                 source_root: flow_ethos::SourceRoot("/source".into()),
                 first_codex_endpoint: endpoint(),

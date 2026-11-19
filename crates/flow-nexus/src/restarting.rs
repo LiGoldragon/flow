@@ -72,6 +72,7 @@
 //! no harness, is recorded and acts on nothing. An event names where it came
 //! from in its own data; the caller is not read.
 
+use crate::store::effort_configuration::ReadsEffort;
 use crate::RunningNexus;
 use crate::generated::memory::SeatBirth;
 use crate::generated::operation::{Failed_Data, Open_Data, Operation, Outcome, PaneLaunch};
@@ -1250,7 +1251,7 @@ impl RestartsInSteps for RunningNexus {
             address: record.address.clone(),
             model_name: signal_flow::ModelName(model_name),
             effort: signal_flow::Effort(
-                <Self as crate::sending::ChoosesEffort>::effort_of(&record.address).into(),
+                self.store.configured_effort(&record.address).map_err(|_| refused("StoreRefused"))?,
             ),
             flow_id_option: None,
             herdr_session_name: signal_flow::HerdrSessionName(herdr_session_name),

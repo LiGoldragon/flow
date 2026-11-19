@@ -915,9 +915,8 @@ impl OpensBoundCodexSession for CodexAdapter {
     ) -> Option<serde_json::Value> {
         let index = usize::try_from(intent.parts_submitted.0.checked_sub(1)?).ok()?;
         let part = launch.first_prompt_payload.prompt_part_vector.get(index)?;
-        Some(serde_json::json!({
+        let mut params = serde_json::json!({
             "threadId": intent.native_session_id.0,
-            "effort": intent.effort.0,
             "model": intent.model_name.0,
             "input": [{
                 "type": "text",
@@ -925,7 +924,11 @@ impl OpensBoundCodexSession for CodexAdapter {
                 "text_elements": []
             }],
             "turnTrigger": "flow-nexus"
-        }))
+        });
+        if !intent.effort.0.is_empty() {
+            params["effort"] = serde_json::json!(intent.effort.0);
+        }
+        Some(params)
     }
 
     fn exclusion_config(launch: &ComposedLaunch) -> serde_json::Map<String, serde_json::Value> {
@@ -966,10 +969,12 @@ impl OpensBoundCodexSession for CodexAdapter {
             };
             config.insert(key.into(), value);
         }
-        config.insert(
-            "model_reasoning_effort".into(),
-            serde_json::json!(launch.launch_profile.effort.0),
-        );
+        if !launch.launch_profile.effort.0.is_empty() {
+            config.insert(
+                "model_reasoning_effort".into(),
+                serde_json::json!(launch.launch_profile.effort.0),
+            );
+        }
         config
     }
 
@@ -1006,10 +1011,10 @@ impl OpensBoundCodexSession for CodexAdapter {
         }
         if response.get("model").and_then(serde_json::Value::as_str)
             != Some(launch.launch_profile.model_name.0.as_str())
-            || response
+            || (!launch.launch_profile.effort.0.is_empty() && response
                 .get("reasoningEffort")
                 .and_then(serde_json::Value::as_str)
-                != Some(launch.launch_profile.effort.0.as_str())
+                != Some(launch.launch_profile.effort.0.as_str()))
         {
             return Err(CodexAdapterUnavailable::Protocol(format!(
                 "{method} readback differs from the launch's model or effort"

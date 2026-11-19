@@ -1,6 +1,6 @@
 [package]
 name = "flow-nexus"
-version = "0.60.1"
+version = "0.60.2"
 build = "build.rs"
 edition.workspace = true
 [[bin]]

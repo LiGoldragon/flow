@@ -604,7 +604,7 @@ impl ValidatesLaunchProfile for LaunchProfile {
                 CompositionRefusal::InvalidModelName,
             ));
         }
-        if profile.effort.0.is_empty() || profile.effort.0.contains(['\r', '\n']) {
+        if profile.effort.0.contains(['\r', '\n']) {
             return Err(CompositionError::InvalidProfileField(
                 CompositionRefusal::InvalidEffort,
             ));

@@ -220,6 +220,7 @@ fn production_rehearse_success_and_refusal_create_nothing() {
         model: Model::Sol,
     };
     let declaration = meta_signal_flow::ConfigureMetaflow {
+            effort: meta_signal_flow::Effort::Default,
         address: address.clone(),
         leave_outs: signal_flow::LeaveOuts(Vec::new()),
         root_option: None,
@@ -333,4 +334,25 @@ fn production_rehearse_success_and_refusal_create_nothing() {
     );
     assert_eq!(fixture.nexus.store.flow_nodes().unwrap(), before_flows);
     assert!(!call_log.exists(), "refusal made no Herdr/native call");
+}
+
+#[test]
+fn all_efforts_are_rendered_once_and_harness_default_is_omitted() {
+    use crate::store::effort_configuration::NativeEffort;
+    use meta_signal_flow::Effort;
+    let herdr = HerdrCli::default();
+    for harness in [HarnessKind::Claude, HarnessKind::Codex] {
+        for effort in [Effort::Default, Effort::High, Effort::Medium, Effort::Low] {
+            let mut launch = Fixture::launch(harness.clone());
+            launch.launch_profile.effort = signal_flow::Effort(effort.native_effort().into());
+            let command = herdr.harness_command(&launch, HarnessCommandResources::rehearsal(&harness), &Vec::new()).unwrap();
+            let words = herdr.command_line(&command);
+            let settings: Vec<_> = words.iter().enumerate().filter_map(|(index, word)| {
+                if word == "--effort" { Some(words[index + 1].as_str()) }
+                else { word.strip_prefix("model_reasoning_effort=") }
+            }).collect();
+            let expected: Vec<_> = if effort == Effort::Default { vec![] } else { vec![effort.native_effort()] };
+            assert_eq!(settings, expected);
+        }
+    }
 }

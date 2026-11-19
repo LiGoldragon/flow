@@ -446,6 +446,222 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
     }
 }
 
+/// An ordinary Send of an Order reaches its recipient without creating text
+/// for its sender. The delivered Order remains silent when it is then closed
+/// or cancelled, including when the sender and recipient are the same flow.
+#[test]
+fn an_ordinary_order_send_reaches_only_its_recipient_even_when_both_notices_are_enabled() {
+    use super::waking::{
+        CLAUDE_SEAT, CLAUDE_SESSION, append_main_rows, claude_agent, claude_seat,
+        claude_transcript, end_turn,
+    };
+    use super::{
+        ControlsHerdrSnapshot, MarkedProcess, NexusFixture, PromptFixture, bind_existing_caller,
+        codex_agent_in,
+    };
+    use crate::Dispatches;
+    use crate::queue_operations::OperatesOnRequestsAndQueues;
+    use crate::sending::{IdentifiesSender, SendsRequests};
+    use crate::store::FlowStore;
+    use crate::store::ManagesMetaflowState;
+    use crate::store::logical_delivery::RecordsLogicalDeliveries;
+    use crate::store::metaflow::SeedsMetaflow;
+    use meta_signal_flow::{CancelNotices, ConfigurationChange, Recipient, Sender, Telling};
+    use signal_flow::{Message, Metaflow, Output, SendRequest, SentBy};
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+
+    for same_address in [false, true] {
+        for close_request in [false, true] {
+            let fixture = NexusFixture::new();
+            let sender = Address {
+                aspect: Aspect::Mind,
+                topic: flow_ethos::Topic("core".into()),
+                model: Model::Sol,
+            };
+            let recipient = if same_address {
+                sender.clone()
+            } else {
+                Address {
+                    topic: flow_ethos::Topic("flow".into()),
+                    ..sender.clone()
+                }
+            };
+
+            if same_address {
+                claude_seat(&fixture, 40_000);
+                fixture.accept_pane_operations(
+                    vec![claude_agent(&fixture)],
+                    PromptFixture::PromptedUnrecorded("w1:p3"),
+                );
+            } else {
+                bind_existing_caller(&fixture, "a001", "pane-1");
+                claude_seat(&fixture, 40_000);
+                fixture.accept_pane_operations(
+                    vec![
+                        codex_agent_in("pane-1", "terminal-pane-1"),
+                        claude_agent(&fixture),
+                    ],
+                    PromptFixture::PromptedUnrecorded("w1:p3"),
+                );
+                fixture.nexus.store.seed_metaflow(Metaflow {
+                    address: sender.clone(),
+                    state: flow_ethos::State::Awake(flow_ethos::FlowId("a001".into())),
+                    past: flow_ethos::Past(vec![]),
+                    queue: flow_ethos::Queue(vec![]),
+                });
+            }
+            fixture.nexus.store.seed_metaflow(Metaflow {
+                address: recipient.clone(),
+                state: flow_ethos::State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+                past: flow_ethos::Past(vec![]),
+                queue: flow_ethos::Queue(vec![]),
+            });
+            fixture
+                .nexus
+                .store
+                .configure_change(ConfigurationChange::CancelNotices(CancelNotices {
+                    sender: Sender(Telling::Told),
+                    recipient: Recipient(Telling::Told),
+                }))
+                .expect("both cancellation notice settings are enabled");
+
+            append_main_rows(&fixture, &[end_turn("ordinary-order-before")]);
+            let caller_pane = if same_address { "w1:p3" } else { "pane-1" };
+            let caller = MarkedProcess::spawn("sleep", &["30"], caller_pane);
+            let peer = FlowStore::process_identity_for_pid(caller.0.id()).unwrap();
+            assert!(matches!(
+                fixture.nexus.sender_of(&peer),
+                Ok(SentBy::Sender(address)) if address == sender
+            ));
+
+            let body = format!(
+                "ordinary order {} {}",
+                if same_address { "self" } else { "to recipient" },
+                if close_request { "closed" } else { "cancelled" }
+            );
+            let transcript = claude_transcript(&fixture);
+            let typed = fixture.directory.path().join("pane-typed.txt");
+            let watched_typed = typed.clone();
+            let received_body = body.clone();
+            let writer = std::thread::spawn(move || {
+                use crate::event_wait::AwaitsDirectory;
+                let deadline = Instant::now() + Duration::from_secs(12);
+                let directory = watched_typed
+                    .parent()
+                    .expect("the typed file's directory")
+                    .to_owned();
+                assert!(
+                    directory.until_holds(deadline, &mut || {
+                        std::fs::read_to_string(&watched_typed)
+                            .unwrap_or_default()
+                            .contains(&received_body)
+                    }),
+                    "ordinary Order never reached the recipient pane"
+                );
+                let typed_text = std::fs::read_to_string(&watched_typed).unwrap();
+                let row = serde_json::json!({
+                    "type":"user",
+                    "sessionId":CLAUDE_SESSION,
+                    "uuid":format!("ordinary-order-receipt-{same_address}-{close_request}"),
+                    "message":{"content":typed_text}
+                });
+                writeln!(
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(transcript)
+                        .unwrap(),
+                    "{row}"
+                )
+                .unwrap();
+            });
+
+            let answer = fixture.nexus.send_request(
+                SendRequest {
+                    address: recipient.clone(),
+                    sendable_message: super::sendable_message(Message::MiddleAbrupt(
+                        Request::Order(body.clone()),
+                    )),
+                },
+                Some(&peer),
+            );
+            assert!(answer.pending.is_none());
+            let Output::Sent(receipt) = answer.response else {
+                panic!(
+                    "the ordinary Order has a native receipt: {:?}",
+                    answer.response
+                )
+            };
+            writer.join().unwrap();
+
+            let actual_text = fixture
+                .typed()
+                .expect("the recipient pane received Flow text");
+            assert!(actual_text.contains(&body), "{actual_text}");
+            let binding = fixture
+                .nexus
+                .store
+                .request_binding(&receipt.0)
+                .unwrap()
+                .expect("the delivered Order remains bound");
+            let snapshot = fixture
+                .nexus
+                .store
+                .logical_delivery_snapshot(&binding.logical_delivery_id)
+                .unwrap()
+                .expect("the delivery remains observable");
+            assert!(matches!(
+                snapshot.delivery_state,
+                signal_flow::DeliveryState::Delivered(_)
+            ));
+            for address in [&sender, &recipient] {
+                assert!(
+                    fixture
+                        .nexus
+                        .store
+                        .metaflow(address)
+                        .unwrap()
+                        .unwrap()
+                        .queue
+                        .0
+                        .is_empty(),
+                    "ordinary delivery queues no Flow Notice at {address:?}"
+                );
+            }
+
+            let ended = if close_request {
+                fixture
+                    .nexus
+                    .dispatch(signal_flow::Input::CloseRequest(receipt.0.clone()))
+            } else {
+                fixture.nexus.cancel(&receipt.0)
+            };
+            assert_eq!(
+                ended,
+                if close_request {
+                    Output::RequestClosed(receipt.0.clone())
+                } else {
+                    Output::Cancelled(receipt.0.clone())
+                }
+            );
+            for address in [&sender, &recipient] {
+                assert!(
+                    fixture
+                        .nexus
+                        .store
+                        .metaflow(address)
+                        .unwrap()
+                        .unwrap()
+                        .queue
+                        .0
+                        .is_empty(),
+                    "delivered Order closure or cancellation queues no Flow text at {address:?}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn direct_start_preflight_materializes_only_configured_working_state() {
     use super::NexusFixture;

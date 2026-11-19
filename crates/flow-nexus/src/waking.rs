@@ -92,7 +92,6 @@
 //! [`WakingMetaflows`], so a second request starts no second wake and a
 //! turn end does not drain the waking seat.
 
-use crate::store::effort_configuration::ReadsEffort;
 use crate::RunningNexus;
 use crate::claude::{
     ClaudeQueuedHistory, ClaudeTranscriptCursor, LocatesClaudeTranscript, ReadsClaudeTurns,
@@ -119,6 +118,7 @@ use crate::send_tool::ServesLaunchCalls;
 use crate::store::NamesConfiguredModel;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
+use crate::store::effort_configuration::ReadsEffort;
 use crate::store::events::RecordedHarnessEvent;
 use crate::store::events::RecordsHarnessEvents;
 use crate::store::events::{IdentifiesNativeStop, RecordedStop};
@@ -3912,7 +3912,10 @@ impl WakesInParts for RunningNexus {
             address: address.clone(),
             launch_request_id: launch_request_id.clone(),
             model_name: model,
-            effort: self.store.configured_effort(address).map_err(|_| FreshRefusal::Failed(Failed_Data::StoreRefused))?,
+            effort: self
+                .store
+                .configured_effort(address)
+                .map_err(|_| FreshRefusal::Failed(Failed_Data::StoreRefused))?,
             herdr_session_name: fresh.herdr_session_name.0,
             system_modules: fresh.system_modules,
             prompt_modules: fresh.prompt_modules,

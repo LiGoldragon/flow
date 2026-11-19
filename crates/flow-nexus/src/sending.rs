@@ -25,10 +25,9 @@ use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::herdr::launch::ConstructsHarnessCommand;
 use crate::launching::ReadsHarnessArguments;
-use crate::model::RunsModel;
-use crate::store::effort_configuration::ReadsEffort;
 use crate::performing::Performs;
 use crate::store::address_hold::HoldsLaunchAddress;
+use crate::store::effort_configuration::ReadsEffort;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::{PreparesDeclaredMetaflow, SleepsMetaflows, TakesLaunchAddress};
 use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
@@ -592,7 +591,11 @@ impl LaunchesDeclared for RunningNexus {
             prompt_modules: declaration.prompt_modules,
             address: address.clone(),
             model_name: signal_flow::ModelName(model_name),
-            effort: signal_flow::Effort(self.store.configured_effort(&address).map_err(store_refused)?),
+            effort: signal_flow::Effort(
+                self.store
+                    .configured_effort(&address)
+                    .map_err(store_refused)?,
+            ),
             flow_id_option: predecessor.clone().map(flow_ethos::FlowId),
             remembering: launch.remembering,
             herdr_session_name: signal_flow::HerdrSessionName(herdr_session_name),

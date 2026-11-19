@@ -135,7 +135,7 @@ pub(super) fn maintain(fixture: &NexusFixture, address: Address) {
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
             meta_signal_flow::ConfigureMetaflow {
-            effort: meta_signal_flow::Effort::Default,
+                effort: meta_signal_flow::Effort::Default,
                 leave_outs: signal_flow::LeaveOuts(Vec::new()),
                 root_option: None,
                 address,
@@ -5420,7 +5420,7 @@ fn a_missing_module_wake_keeps_its_identity_in_the_caller_outcome_and_queue_stat
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
             meta_signal_flow::ConfigureMetaflow {
-            effort: meta_signal_flow::Effort::Default,
+                effort: meta_signal_flow::Effort::Default,
                 leave_outs: signal_flow::LeaveOuts(Vec::new()),
                 root_option: None,
                 address: at.clone(),
@@ -7193,7 +7193,7 @@ fn a_start_starts_no_other_models_seat_first() {
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
             meta_signal_flow::ConfigureMetaflow {
-            effort: meta_signal_flow::Effort::Default,
+                effort: meta_signal_flow::Effort::Default,
                 leave_outs: signal_flow::LeaveOuts(Vec::new()),
                 root_option: None,
                 address: address(Model::Sol),

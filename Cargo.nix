@@ -1107,7 +1107,7 @@ rec {
           }
           {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow 89.0.1";
+            packageId = "meta-signal-flow 0.90.0";
             features = [ "datom" ];
           }
           {
@@ -1168,7 +1168,7 @@ rec {
       };
       "flow-nexus" = rec {
         crateName = "flow-nexus";
-        version = "0.60.1";
+        version = "0.60.2";
         edition = "2024";
         crateBin = [
           {
@@ -1235,7 +1235,7 @@ rec {
           }
           {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow 89.0.1";
+            packageId = "meta-signal-flow 0.90.0";
             features = [ "datom" ];
           }
           {
@@ -1895,6 +1895,60 @@ rec {
         };
         resolvedDefaultFeatures = [ "default" ];
       };
+      "meta-signal-flow 0.90.0" = rec {
+        crateName = "meta-signal-flow";
+        version = "0.90.0";
+        edition = "2024";
+        workspace_member = null;
+        src = pkgs.fetchgit {
+          url = "https://github.com/LiGoldragon/meta-signal-flow";
+          rev = "acf51d14e38f4056c0961a0fbd4a81e9f9e3ca72";
+          sha256 = "1ycmwcx4jwz0bfjcb49ph0j9gz2j1qfv3lxjv8n344agg8waslhh";
+        };
+        libName = "meta_signal_flow";
+        dependencies = [
+          {
+            name = "datom-codec";
+            packageId = "datom-codec";
+            optional = true;
+          }
+          {
+            name = "flow-ethos";
+            packageId = "flow-ethos";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "protos";
+            packageId = "protos";
+            optional = true;
+          }
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+          {
+            name = "signal";
+            packageId = "signal";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "signal-flow";
+            packageId = "signal-flow 0.68.0";
+          }
+        ];
+        buildDependencies = [
+          {
+            name = "ethos-zero";
+            packageId = "ethos-zero 29.0.0";
+          }
+        ];
+        features = {
+          "datom" = [ "dep:datom-codec" "dep:protos" "flow-ethos/datom" "signal-flow/datom" "signal/datom" ];
+        };
+        resolvedDefaultFeatures = [ "datom" "default" ];
+      };
       "meta-signal-flow 77.0.0" = rec {
         crateName = "meta-signal-flow";
         version = "77.0.0";
@@ -1942,60 +1996,6 @@ rec {
           {
             name = "ethos-zero";
             packageId = "ethos-zero 22.0.0";
-          }
-        ];
-        features = {
-          "datom" = [ "dep:datom-codec" "dep:protos" "flow-ethos/datom" "signal-flow/datom" "signal/datom" ];
-        };
-        resolvedDefaultFeatures = [ "datom" "default" ];
-      };
-      "meta-signal-flow 89.0.1" = rec {
-        crateName = "meta-signal-flow";
-        version = "89.0.1";
-        edition = "2024";
-        workspace_member = null;
-        src = pkgs.fetchgit {
-          url = "https://github.com/LiGoldragon/meta-signal-flow";
-          rev = "313bc05b4363e15165c6761bfc2d4b2782e7687a";
-          sha256 = "0vwvxy5svr8b9w11i2mwnyglykignb85kma4l6d5v91ywhy5hapk";
-        };
-        libName = "meta_signal_flow";
-        dependencies = [
-          {
-            name = "datom-codec";
-            packageId = "datom-codec";
-            optional = true;
-          }
-          {
-            name = "flow-ethos";
-            packageId = "flow-ethos";
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "protos";
-            packageId = "protos";
-            optional = true;
-          }
-          {
-            name = "rkyv";
-            packageId = "rkyv";
-            usesDefaultFeatures = false;
-            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
-          }
-          {
-            name = "signal";
-            packageId = "signal";
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "signal-flow";
-            packageId = "signal-flow 0.68.0";
-          }
-        ];
-        buildDependencies = [
-          {
-            name = "ethos-zero";
-            packageId = "ethos-zero 29.0.0";
           }
         ];
         features = {

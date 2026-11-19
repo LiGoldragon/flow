@@ -1191,7 +1191,7 @@ fn refused_parked_launch_is_terminal_and_never_reexecuted_after_release_or_resta
             .store
             .configure_change(meta::ConfigurationChange::Metaflows(vec![
                 meta::ConfigureMetaflow {
-            effort: meta_signal_flow::Effort::Default,
+                    effort: meta_signal_flow::Effort::Default,
                     address: at.clone(),
                     root_option: None,
                     leave_outs: signal_flow::LeaveOuts(vec![]),

@@ -15,6 +15,8 @@ pub(crate) mod context_warnings;
 pub(crate) mod counters;
 mod created_pane;
 pub mod delivery;
+pub(crate) mod effort_configuration;
+pub(crate) mod effort_upgrade;
 mod event_upgrade;
 pub mod events;
 pub(crate) mod handover;
@@ -23,8 +25,6 @@ pub(crate) mod handover_reminders;
 pub(crate) mod kept_answer;
 pub(crate) mod launch_cleanup;
 pub(crate) mod leave_out_upgrade;
-pub(crate) mod effort_configuration;
-pub(crate) mod effort_upgrade;
 use effort_configuration::{RegistersModelEfforts, StoredModelEffort};
 pub(crate) mod living_upgrade;
 pub(crate) mod logical_delivery;
@@ -5533,7 +5533,9 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
 
     fn current_flow_family_identity(table_name: &str) -> Option<(&'static str, SchemaHash)> {
         let (family, version) = match table_name {
-            effort_configuration::TABLE => (effort_configuration::FAMILY, effort_configuration::SCHEMA),
+            effort_configuration::TABLE => {
+                (effort_configuration::FAMILY, effort_configuration::SCHEMA)
+            }
             context_warnings::POLICY_TABLE => (
                 context_warnings::POLICY_FAMILY,
                 context_warnings::POLICY_SCHEMA,
@@ -5943,7 +5945,8 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                     ));
         let before_effort = table_key == "flow_nexus_meta_metaflow_configuration"
             && identity.table_name() == table_key
-            && identity.family().as_str() == metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY
+            && identity.family().as_str()
+                == metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY
             && identity.schema_hash() == SchemaHash::for_label(effort_upgrade::SCHEMA_V7);
         before_effort
             || before_refresh_callers
@@ -6367,7 +6370,11 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
             [row] => row.0.clone(),
             _ => return Err(StoreError::StateInvariant),
         };
-        let mut model_efforts = effort_rows.records().iter().map(|row| row.model_effort.clone()).collect::<Vec<_>>();
+        let mut model_efforts = effort_rows
+            .records()
+            .iter()
+            .map(|row| row.model_effort.clone())
+            .collect::<Vec<_>>();
         model_efforts.sort_by_key(|entry| FlowStore::model_record_key(&entry.model));
         Ok(Some(ConfiguredFamilies {
             nexus,
@@ -6938,9 +6945,13 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                     }],
                 )
             }
-            ConfigurationChange::ModelEffort(model_effort) => FlowStore::declare_configuration_entry(
-                engine, tables.model_efforts, StoredModelEffort { model_effort },
-            ),
+            ConfigurationChange::ModelEffort(model_effort) => {
+                FlowStore::declare_configuration_entry(
+                    engine,
+                    tables.model_efforts,
+                    StoredModelEffort { model_effort },
+                )
+            }
             ConfigurationChange::Models(models) => FlowStore::replace_configuration_family(
                 engine,
                 tables.models,
@@ -9467,6 +9478,101 @@ mod tests {
                 meta_signal_flow::Duration(60_000)
             );
             drop(store);
+        }
+    }
+
+    #[test]
+    fn effort_upgrade_admits_exact_v7_and_preserves_values_after_reopen() {
+        use super::effort_upgrade::{ConfigureMetaflowV7, StoredMetaMetaflowConfigurationV7};
+        use super::metaflow_declaration::{
+            META_METAFLOW_CONFIGURATION_FAMILY, META_METAFLOW_CONFIGURATION_TABLE_NAME,
+        };
+        use sema_engine::{FamilyIdentity, FamilyName, MemoryDefinition, TableRegistration};
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        let address = signal_flow::Address {
+            aspect: signal_flow::Aspect::Psyche,
+            topic: flow_ethos::Topic("effortUpgrade".into()),
+            model: signal_flow::Model::Fable,
+        };
+        let previous = StoredMetaMetaflowConfigurationV7 {
+            configure_metaflow: ConfigureMetaflowV7 {
+                address: address.clone(),
+                root_option: Some(meta_signal_flow::Root("/kept/workspace".into())),
+                leave_outs: signal_flow::LeaveOuts(vec![signal_flow::LeaveOut::ClaudeMd]),
+                system_modules: signal_flow::SystemModules(vec![]),
+                prompt_modules: signal_flow::PromptModules(vec![]),
+                flow_kind: signal_flow::FlowKind::Regular,
+                tool_set: signal_flow::ToolSet::Default,
+                continuity: meta_signal_flow::Continuity::Maintained,
+                purpose: meta_signal_flow::Purpose("kept purpose".into()),
+                records: meta_signal_flow::Records(vec![]),
+            },
+        };
+        let table_name = META_METAFLOW_CONFIGURATION_TABLE_NAME.as_str();
+        let registration = TableRegistration::new(FamilyIdentity::new(
+            FamilyName::new(META_METAFLOW_CONFIGURATION_FAMILY),
+            StoredMetaMetaflowConfigurationV7::schema_hash(),
+            META_METAFLOW_CONFIGURATION_TABLE_NAME,
+        ));
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&previous).unwrap();
+        let registration_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&registration).unwrap();
+        let database = redb::Database::open(fixture.path()).unwrap();
+        let write = database.begin_write().unwrap();
+        {
+            let mut catalog = write.open_table(super::SEMA_CATALOG_TABLE).unwrap();
+            catalog
+                .insert(table_name, registration_bytes.as_slice())
+                .unwrap();
+            catalog.remove(super::effort_configuration::TABLE).unwrap();
+            let mut rows = write
+                .open_table(redb::TableDefinition::<String, &[u8]>::new(table_name))
+                .unwrap();
+            rows.insert(FlowStore::address_record_key(&address), bytes.as_slice())
+                .unwrap();
+        }
+        write
+            .delete_table(redb::TableDefinition::<String, &[u8]>::new(
+                super::effort_configuration::TABLE,
+            ))
+            .unwrap();
+        write.commit().unwrap();
+        drop(database);
+        let upgraded = ConfigurationOnlyStore::open(&fixture.path()).unwrap();
+        let snapshot = upgraded.configuration_snapshot().unwrap().unwrap();
+        let row = snapshot
+            .metaflows
+            .iter()
+            .find(|row| row.address == address)
+            .unwrap();
+        assert_eq!(row.effort, meta_signal_flow::Effort::Default);
+        assert_eq!(row.purpose, previous.configure_metaflow.purpose);
+        assert_eq!(row.root_option, previous.configure_metaflow.root_option);
+        assert_eq!(row.leave_outs, previous.configure_metaflow.leave_outs);
+        assert_eq!(snapshot.model_efforts.len(), 8);
+        for entry in snapshot.model_efforts {
+            assert_eq!(
+                entry.effort,
+                if entry.model == signal_flow::Model::Terra {
+                    meta_signal_flow::Effort::Low
+                } else {
+                    meta_signal_flow::Effort::Medium
+                }
+            );
+        }
+        upgraded
+            .configure_change(meta_signal_flow::ConfigurationChange::ModelEffort(
+                meta_signal_flow::ModelEffort {
+                    model: signal_flow::Model::Fable,
+                    effort: meta_signal_flow::Effort::High,
+                },
+            ))
+            .unwrap();
+        drop(upgraded);
+        for _ in 0..2 {
+            use super::effort_configuration::ReadsEffort;
+            let running = FlowStore::open_configured(&fixture.path()).unwrap();
+            assert_eq!(running.configured_effort(&address).unwrap(), "high");
         }
     }
 

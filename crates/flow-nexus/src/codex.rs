@@ -1011,10 +1011,11 @@ impl OpensBoundCodexSession for CodexAdapter {
         }
         if response.get("model").and_then(serde_json::Value::as_str)
             != Some(launch.launch_profile.model_name.0.as_str())
-            || (!launch.launch_profile.effort.0.is_empty() && response
-                .get("reasoningEffort")
-                .and_then(serde_json::Value::as_str)
-                != Some(launch.launch_profile.effort.0.as_str()))
+            || (!launch.launch_profile.effort.0.is_empty()
+                && response
+                    .get("reasoningEffort")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(launch.launch_profile.effort.0.as_str()))
         {
             return Err(CodexAdapterUnavailable::Protocol(format!(
                 "{method} readback differs from the launch's model or effort"

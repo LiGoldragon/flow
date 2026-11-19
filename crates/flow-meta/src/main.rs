@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn a_family_declaration_is_one_inline_datom_carrying_the_whole_family() {
         let client = FlowMetaClient;
-        let datom = "Configure.Metaflows.[ { { Field core Astra } None [ CodexAgentsMd CodexSkillListing ] [ spirit:core:0 ] [] Regular Default OnDemand «» [] } { { Psyche flow Opus } None [ SkillTool WorkflowTool ClaudeMd ] [ spirit:core:0 ] [] Regular Default OnDemand «» [] } ]";
+        let datom = "Configure.Metaflows.[ { { Field core Astra } None [ CodexAgentsMd CodexSkillListing ] [ spirit:core:0 ] [] Regular Default OnDemand «» [] Default } { { Psyche flow Opus } None [ SkillTool WorkflowTool ClaudeMd ] [ spirit:core:0 ] [] Regular Default OnDemand «» [] Default } ]";
         let query = client
             .parse_query([datom.to_owned()].into_iter())
             .expect("Metaflows declaration parses");
@@ -384,7 +384,7 @@ mod tests {
         };
         let rows: Vec<_> = (0..31)
             .map(|index| ConfigureMetaflow {
-            effort: meta_signal_flow::Effort::Default,
+                effort: meta_signal_flow::Effort::Default,
                 root_option: None,
                 leave_outs: signal_flow::LeaveOuts(match index % 2 {
                     0 => vec![],

@@ -291,10 +291,7 @@ impl SpeaksHarness for HarnessCommandLine {
                     claude.system_prompt_file.0.clone(),
                 ];
                 words.extend(claude.claude_session_start.harness_words());
-                words.extend([
-                    "--model".into(),
-                    claude.model_name.0.clone(),
-                ]);
+                words.extend(["--model".into(), claude.model_name.0.clone()]);
                 if !claude.effort.0.is_empty() {
                     words.extend(["--effort".into(), claude.effort.0.clone()]);
                 }
@@ -316,7 +313,10 @@ impl SpeaksHarness for HarnessCommandLine {
                     "tui.terminal_title=[\"thread-title\"]".into(),
                 ];
                 if !codex.effort.0.is_empty() {
-                    words.extend(["-c".into(), format!("model_reasoning_effort={}", codex.effort.0)]);
+                    words.extend([
+                        "-c".into(),
+                        format!("model_reasoning_effort={}", codex.effort.0),
+                    ]);
                 }
                 words.extend(codex.lean_start.arguments());
                 words.extend(codex.configured_harness_arguments.0.iter().cloned());

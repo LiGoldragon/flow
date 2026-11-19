@@ -7086,7 +7086,7 @@ mod tests {
         fs::create_dir(&own_root).unwrap();
         let declaration =
             |profile: &LaunchProfile, root_option| meta_signal_flow::ConfigureMetaflow {
-            effort: meta_signal_flow::Effort::Default,
+                effort: meta_signal_flow::Effort::Default,
                 address: profile.address.clone(),
                 root_option,
                 leave_outs: signal_flow::LeaveOuts(Vec::new()),
@@ -7140,7 +7140,7 @@ mod tests {
             .store
             .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
                 meta_signal_flow::ConfigureMetaflow {
-            effort: meta_signal_flow::Effort::Default,
+                    effort: meta_signal_flow::Effort::Default,
                     address: staged.profile.address.clone(),
                     leave_outs: signal_flow::LeaveOuts(Vec::new()),
                     root_option: Some(meta_signal_flow::Root(
@@ -8479,7 +8479,7 @@ mod tests {
                 .nexus
                 .dispatch_meta(meta_signal_flow::Input::Configure(
                     ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
-            effort: meta_signal_flow::Effort::Default,
+                        effort: meta_signal_flow::Effort::Default,
                         leave_outs: signal_flow::LeaveOuts(Vec::new()),
                         root_option: None,
                         address: declared.clone(),

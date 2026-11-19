@@ -72,7 +72,6 @@
 //! no harness, is recorded and acts on nothing. An event names where it came
 //! from in its own data; the caller is not read.
 
-use crate::store::effort_configuration::ReadsEffort;
 use crate::RunningNexus;
 use crate::generated::memory::SeatBirth;
 use crate::generated::operation::{Failed_Data, Open_Data, Operation, Outcome, PaneLaunch};
@@ -80,6 +79,7 @@ use crate::herdr::launch::{HoldsSystemPrompt, WaitsForPaneRest};
 use crate::herdr::pane::{PaneAgent, WritesPane};
 use crate::herdr::{HerdrCli, PaneOwnership, PanePresence, ReadsHerdrPanes};
 use crate::performing::Performs;
+use crate::store::effort_configuration::ReadsEffort;
 use crate::store::restart::RecordsRestarts;
 use crate::store::{FlowStore, NamesLiveFlow, ReadsFlowMemory, ReadsFlowRows, StoreError};
 use meta_signal_flow::{
@@ -1251,7 +1251,9 @@ impl RestartsInSteps for RunningNexus {
             address: record.address.clone(),
             model_name: signal_flow::ModelName(model_name),
             effort: signal_flow::Effort(
-                self.store.configured_effort(&record.address).map_err(|_| refused("StoreRefused"))?,
+                self.store
+                    .configured_effort(&record.address)
+                    .map_err(|_| refused("StoreRefused"))?,
             ),
             flow_id_option: None,
             herdr_session_name: signal_flow::HerdrSessionName(herdr_session_name),

@@ -122,7 +122,7 @@ fn declare_secondary(fixture: &NexusFixture, continuity: meta_signal_flow::Conti
         .store
         .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
             meta_signal_flow::ConfigureMetaflow {
-            effort: meta_signal_flow::Effort::Default,
+                effort: meta_signal_flow::Effort::Default,
                 leave_outs: signal_flow::LeaveOuts(Vec::new()),
                 root_option: None,
                 address: address(Model::Sol),

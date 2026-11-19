@@ -220,7 +220,7 @@ fn production_rehearse_success_and_refusal_create_nothing() {
         model: Model::Sol,
     };
     let declaration = meta_signal_flow::ConfigureMetaflow {
-            effort: meta_signal_flow::Effort::Default,
+        effort: meta_signal_flow::Effort::Default,
         address: address.clone(),
         leave_outs: signal_flow::LeaveOuts(Vec::new()),
         root_option: None,
@@ -345,13 +345,30 @@ fn all_efforts_are_rendered_once_and_harness_default_is_omitted() {
         for effort in [Effort::Default, Effort::High, Effort::Medium, Effort::Low] {
             let mut launch = Fixture::launch(harness.clone());
             launch.launch_profile.effort = signal_flow::Effort(effort.native_effort().into());
-            let command = herdr.harness_command(&launch, HarnessCommandResources::rehearsal(&harness), &Vec::new()).unwrap();
+            let command = herdr
+                .harness_command(
+                    &launch,
+                    HarnessCommandResources::rehearsal(&harness),
+                    &Vec::new(),
+                )
+                .unwrap();
             let words = herdr.command_line(&command);
-            let settings: Vec<_> = words.iter().enumerate().filter_map(|(index, word)| {
-                if word == "--effort" { Some(words[index + 1].as_str()) }
-                else { word.strip_prefix("model_reasoning_effort=") }
-            }).collect();
-            let expected: Vec<_> = if effort == Effort::Default { vec![] } else { vec![effort.native_effort()] };
+            let settings: Vec<_> = words
+                .iter()
+                .enumerate()
+                .filter_map(|(index, word)| {
+                    if word == "--effort" {
+                        Some(words[index + 1].as_str())
+                    } else {
+                        word.strip_prefix("model_reasoning_effort=")
+                    }
+                })
+                .collect();
+            let expected: Vec<_> = if effort == Effort::Default {
+                vec![]
+            } else {
+                vec![effort.native_effort()]
+            };
             assert_eq!(settings, expected);
         }
     }

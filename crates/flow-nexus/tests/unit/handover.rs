@@ -848,7 +848,7 @@ fn an_on_demand_seat_whose_successor_is_refused_its_handover_is_not_closed() {
                 .nexus
                 .store
                 .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
-            effort: meta_signal_flow::Effort::Default,
+                    effort: meta_signal_flow::Effort::Default,
                     leave_outs: signal_flow::LeaveOuts(Vec::new()),
                     root_option: Some(meta_signal_flow::Root(root)),
                     address: address(Model::Sol),

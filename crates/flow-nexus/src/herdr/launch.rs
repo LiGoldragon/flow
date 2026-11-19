@@ -1383,7 +1383,9 @@ impl ReadsTranscriptRow for serde_json::Value {
     }
 
     fn claude_effort_matches(&self, effort: &str) -> bool {
-        if effort.is_empty() { return true; }
+        if effort.is_empty() {
+            return true;
+        }
         let row = self;
         ["effort", "perTurnEffort"]
             .iter()
@@ -2814,8 +2816,9 @@ impl ReadsStartupRecord for StartupReading {
                     let payload = payload.ok_or(NativeLaunchFailure::TranscriptUnreadable)?;
                     if payload.get("model").and_then(serde_json::Value::as_str)
                         != Some(intent.model_name.0.as_str())
-                        || (!intent.effort.0.is_empty() && payload.get("effort").and_then(serde_json::Value::as_str)
-                            != Some(intent.effort.0.as_str()))
+                        || (!intent.effort.0.is_empty()
+                            && payload.get("effort").and_then(serde_json::Value::as_str)
+                                != Some(intent.effort.0.as_str()))
                     {
                         return Err(NativeLaunchFailure::ModelOrEffortDiffers);
                     }

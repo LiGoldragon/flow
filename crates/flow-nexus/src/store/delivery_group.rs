@@ -20,19 +20,26 @@ impl MemoryDefinition for LogicalDeliveryGroup {
         MemoryVersion::new(1)
     }
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-logical-delivery-group-v1")
+        SchemaHash::for_label(Self::SCHEMA_LABEL)
     }
 }
 
 pub(super) trait DescribesDeliveryGroups {
+    const TABLE_NAME: &'static str;
+    const FAMILY_NAME: &'static str;
+    const SCHEMA_LABEL: &'static str;
     fn descriptor() -> TableDescriptor<LogicalDeliveryGroup>;
 }
 
 impl DescribesDeliveryGroups for LogicalDeliveryGroup {
+    const TABLE_NAME: &'static str = "flow_nexus_logical_delivery_groups";
+    const FAMILY_NAME: &'static str = "flow-nexus-logical-delivery-groups";
+    const SCHEMA_LABEL: &'static str = "flow-nexus-logical-delivery-group-v1";
+
     fn descriptor() -> TableDescriptor<LogicalDeliveryGroup> {
         TableDescriptor::new(
-            TableName::new("flow_nexus_logical_delivery_groups"),
-            FamilyName::new("flow-nexus-logical-delivery-groups"),
+            TableName::new(Self::TABLE_NAME),
+            FamilyName::new(Self::FAMILY_NAME),
             Self::schema_hash(),
         )
     }

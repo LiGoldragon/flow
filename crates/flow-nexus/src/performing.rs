@@ -624,6 +624,20 @@ impl Performs for RunningNexus {
                     _ => Outcome::Failed(Failed_Data::StoreRefused),
                 }
             }
+            Operation::AdmitDeliveryGroup(admission) => {
+                use crate::store::delivery_group::AdmitsDeliveryGroups;
+                match self.store.admit_delivery_group(
+                    &admission.address,
+                    admission.sent_by,
+                    admission.admission_message_vector,
+                ) {
+                    Ok(Ok(accepted)) => Outcome::DeliveryGroupAdmitted(accepted),
+                    Ok(Err(refusal)) => Outcome::DeliveryGroupRefused(refusal),
+                    Err(error) => Outcome::DeliveryGroupRefused(signal_flow::Refusal::Store(
+                        error.to_string(),
+                    )),
+                }
+            }
             Operation::Wake(address) => self.wake(address),
             Operation::Drain(address) => self.drain(address),
         }

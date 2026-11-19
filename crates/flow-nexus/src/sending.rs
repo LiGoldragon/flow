@@ -240,7 +240,7 @@ impl SendsSeveralRequests for RunningNexus {
         use crate::generated::operation::AdmissionMessage;
         use crate::launching::NamesTopic;
         use crate::message_projection::ProjectsAdmittedMessage;
-        use crate::store::delivery_group::{AdmitsDeliveryGroups, ValidatesDeliveryGroups};
+        use crate::store::delivery_group::ValidatesDeliveryGroups;
         use crate::store::kept_answer::{AnswerRoute, RoutesAnswers};
         if send.sendable_message_vector.is_empty() {
             return Output::SentSeveral(Vec::new());
@@ -341,15 +341,18 @@ impl SendsSeveralRequests for RunningNexus {
             };
             messages.push(AdmissionMessage { delivery, message });
         }
-        match self
-            .store
-            .admit_delivery_group(&send.address, sender, messages)
-        {
-            Ok(Ok(accepted)) => {
+        match self.perform(Operation::AdmitDeliveryGroup(
+            crate::generated::operation::AdmitDeliveryGroup_Data {
+                address: send.address,
+                sent_by: sender,
+                admission_message_vector: messages,
+            },
+        )) {
+            Outcome::DeliveryGroupAdmitted(accepted) => {
                 Output::SentSeveral(accepted.into_iter().map(|value| value.request_id).collect())
             }
-            Ok(Err(refusal)) => Output::Refused(refusal),
-            Err(error) => Output::Refused(Refusal::Store(error.to_string())),
+            Outcome::DeliveryGroupRefused(refusal) => Output::Refused(refusal),
+            _ => unreachable!("delivery group admission has one typed outcome"),
         }
     }
 }

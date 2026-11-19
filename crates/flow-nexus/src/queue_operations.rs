@@ -130,15 +130,6 @@ impl EligibleForCancellationNotice for signal_flow::DeliveryState {
     }
 }
 
-fn is_order_request(message: &Message) -> bool {
-    matches!(
-        message,
-        Message::HardAbrupt(Request::Order(_))
-            | Message::MiddleAbrupt(Request::Order(_))
-            | Message::Soft(Request::Order(_))
-    )
-}
-
 pub(crate) trait SelectsCancellationNotices {
     fn selected(self, settings: &meta_signal_flow::CancelNotices) -> Vec<Address>;
 }
@@ -244,7 +235,12 @@ impl EndsRequests for RunningNexus {
         let Some(retained) = retained else {
             return Err(RequestRejection::UnknownRequest);
         };
-        let is_order = is_order_request(&retained.entry.message);
+        let is_order = matches!(
+            &retained.entry.message,
+            Message::HardAbrupt(Request::Order(_))
+                | Message::MiddleAbrupt(Request::Order(_))
+                | Message::Soft(Request::Order(_))
+        );
         if matches!(ending, RequestEnding::Cancelled) {
             roles.settings = Some(self.cancellation_notice_settings()?);
         }

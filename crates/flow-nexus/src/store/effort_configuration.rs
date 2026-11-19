@@ -57,7 +57,13 @@ impl RegistersModelEfforts for StoredModelEffort {
             {
                 let effort = match model {
                     Model::Terra => Effort::Low,
-                    _ => Effort::Medium,
+                    Model::Fable
+                    | Model::Opus
+                    | Model::Sonnet
+                    | Model::Haiku
+                    | Model::Astra
+                    | Model::Sol
+                    | Model::Luna => Effort::Medium,
                 };
                 engine.assert(Assertion::new(
                     table,

@@ -2,6 +2,8 @@
 
 The meta contract adds `Effort.[ Default High Medium Low ]`,
 `Configure.ModelEffort.{ Model Effort }`, and the permaflow `Effort` change.
+Every Configure.Metaflows row now requires a trailing Effort field; append
+Default to existing textual configurations and configuration producers.
 Configuration reads both model values and each permaflow's value.
 Permaflow Default inherits its model; model Default leaves effort to the harness.
 

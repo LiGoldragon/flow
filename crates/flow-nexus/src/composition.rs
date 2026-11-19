@@ -453,7 +453,11 @@ impl RendersLaunchSection for LaunchProfile {
         let mut section = format!(
             "Metaflow: {address}\nModel: {}\nEffort: {}\nFlow ID: {}\nNative binding: pending\n",
             self.model_name.0,
-            self.effort.0,
+            if self.effort.0.is_empty() {
+                "Default"
+            } else {
+                &self.effort.0
+            },
             flow_id.unwrap_or("pending"),
         );
         if let Some(predecessor) = &self.flow_id_option {
@@ -1416,6 +1420,14 @@ pub(crate) mod tests {
             body.0
         );
         assert!(!body.0.contains("Skill tool") && !body.0.contains("/knowledge:main-flow:0"));
+    }
+
+    #[test]
+    fn native_default_effort_is_named_in_the_launch_section() {
+        use super::RendersLaunchSection;
+        let mut profile = fixture_profile();
+        profile.effort.0.clear();
+        assert!(profile.launch_section(None).contains("\nEffort: Default\n"));
     }
 
     #[test]

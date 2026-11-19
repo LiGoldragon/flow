@@ -2691,6 +2691,35 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn configured_effort_controls_thread_and_turn_settings() {
+        for effort in ["", "high", "medium", "low"] {
+            let mut launch = lean_codex_launch();
+            launch.launch_profile.effort = signal_flow::Effort(effort.into());
+            let config = CodexAdapter::exclusion_config(&launch);
+            assert_eq!(
+                config
+                    .get("model_reasoning_effort")
+                    .and_then(serde_json::Value::as_str),
+                if effort.is_empty() {
+                    None
+                } else {
+                    Some(effort)
+                }
+            );
+            let intent = attached_intent(&launch, 1);
+            let params = CodexAdapter::bound_turn_params(&launch, &intent).unwrap();
+            assert_eq!(
+                params.get("effort").and_then(serde_json::Value::as_str),
+                if effort.is_empty() {
+                    None
+                } else {
+                    Some(effort)
+                }
+            );
+        }
+    }
+
     fn lean_adapter_at(executable: PathBuf, launch: &ComposedLaunch) -> CodexAdapter {
         CodexAdapter {
             model: launch.launch_profile.model_name.clone().0,

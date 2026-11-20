@@ -8,6 +8,7 @@
 //! the methods here are named for what they do.
 
 use crate::RunningNexus;
+use crate::caller::ResolvesEndedCaller;
 use crate::store::closed_request::{
     Closer, MarksEndedReminder, RecordsClosedRequests, RequestEnding,
 };
@@ -22,8 +23,8 @@ use crate::waking::{
     DrainsHeldSeats, HoldsWakingMetaflows, PushesAtPriority, RestsEndedAwake, SleepsAndWakesSeats,
 };
 use signal_flow::{
-    Address, AnswerRejection, ArchiveRejection, Message, Output, Priority, Process, Queue, Refusal,
-    Remind_Data, Request, RequestId, RequestRejection, SentBy, Unknown_Data, Warmth,
+    Address, AnswerRejection, ArchiveRejection, Message, Origin, Output, Priority, Process, Queue,
+    Refusal, Remind_Data, Request, RequestId, RequestRejection, SentBy, Unknown_Data, Warmth,
 };
 
 pub trait OperatesOnRequestsAndQueues {
@@ -56,6 +57,11 @@ pub trait OperatesOnRequestsAndQueues {
     fn remind(&self, remind: Remind_Data, sent_by: SentBy) -> Output;
     /// The answer kept with the request `request_id`.
     fn answer(&self, request_id: &RequestId) -> Output;
+}
+
+/// A cancellation with the connection's authenticated caller identity.
+pub(crate) trait RequestCancellationByCaller {
+    fn cancel_as(&self, request_id: &RequestId, caller: &Origin) -> Output;
 }
 
 /// The steps the operations share.
@@ -228,29 +234,7 @@ impl EndsRequests for RunningNexus {
 
 impl OperatesOnRequestsAndQueues for RunningNexus {
     fn cancel(&self, request_id: &RequestId) -> Output {
-        let told = {
-            let _turn = self
-                .dispatch_gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let told = match self.end_request(request_id, &RequestEnding::Cancelled) {
-                Ok(told) => told,
-                Err(rejection) => return Output::CancelRejected(rejection),
-            };
-            let text = format!("Request {} was cancelled.", request_id.0);
-            for address in &told {
-                if let Err(error) = self.notify(address, text.clone()) {
-                    eprintln!(
-                        "flow-nexus: a cancellation notice for {address:?} was not queued: {error}"
-                    );
-                }
-            }
-            told
-        };
-        for address in told {
-            self.wake_due(address);
-        }
-        Output::Cancelled(request_id.clone())
+        self.cancel_as(request_id, &Origin::Unbound)
     }
 
     fn close_request(&self, request_id: &RequestId, closer: Option<&Process>) -> Output {
@@ -497,5 +481,40 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
             Ok(None) => refused(AnswerRejection::UnknownRequest),
             Err(_) => refused(AnswerRejection::StoreRefused),
         }
+    }
+}
+
+impl RequestCancellationByCaller for RunningNexus {
+    fn cancel_as(&self, request_id: &RequestId, caller: &Origin) -> Output {
+        let notified = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let told = match self.end_request(request_id, &RequestEnding::Cancelled) {
+                Ok(told) => told,
+                Err(rejection) => return Output::CancelRejected(rejection),
+            };
+            let notified = told
+                .into_iter()
+                .filter(|address| match caller {
+                    Origin::Flow(flow) => !self.flow_of_address(&flow.flow_id, address),
+                    Origin::Unbound => true,
+                })
+                .collect::<Vec<_>>();
+            let text = format!("Request {} was cancelled.", request_id.0);
+            for address in &notified {
+                if let Err(error) = self.notify(address, text.clone()) {
+                    eprintln!(
+                        "flow-nexus: a cancellation notice for {address:?} was not queued: {error}"
+                    );
+                }
+            }
+            notified
+        };
+        for address in notified {
+            self.wake_due(address);
+        }
+        Output::Cancelled(request_id.clone())
     }
 }

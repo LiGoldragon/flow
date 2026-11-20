@@ -121,7 +121,7 @@ use observe_agent::ObservesAgent;
 use observe_sends::ObservesLogicalSends;
 use peer::{NamesMetaPeer, ResolvesPeer};
 use performing::Performs;
-use queue_operations::OperatesOnRequestsAndQueues;
+use queue_operations::{OperatesOnRequestsAndQueues, RequestCancellationByCaller};
 use reporting::RecordsReports;
 use send_tool::ServesLaunchCalls;
 use sending::{BindsSeats, LaunchesDeclared, RehearsesDeclared, SendsRequests};
@@ -277,8 +277,9 @@ impl ReadsMemoryHandoverSource for MemoryHandoverSource {
     }
 }
 
-/// Every query is answered the same to every caller. The origin a caller is
-/// read as is recorded on what it launches and changes no answer.
+/// A query's typed answer is independent of its caller. The caller's origin
+/// is recorded on its launches, binds Refresh to its own flow, and keeps
+/// Cancel from notifying the cancelling flow.
 pub trait Dispatches {
     /// A query no calling process stands behind: its origin is Unbound.
     fn dispatch(&self, query: Input) -> Output {
@@ -1038,7 +1039,7 @@ impl signal_flow::Answering for OrdinaryCall<'_> {
         &self,
         request_id: &signal_flow::RequestId,
     ) -> Result<signal_flow::RequestId, Output> {
-        match self.nexus.cancel(request_id) {
+        match self.nexus.cancel_as(request_id, &self.origin) {
             Output::Cancelled(cancelled) => Ok(cancelled),
             other => Err(other),
         }

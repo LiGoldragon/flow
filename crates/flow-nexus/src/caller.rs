@@ -570,7 +570,7 @@ pub trait ReadsRefreshCaller {
 
 /// The flow a calling process runs in, live or ended, and the Addresses a
 /// flow belongs to.
-trait ResolvesEndedCaller {
+pub(crate) trait ResolvesEndedCaller {
     /// The one flow whose Codex thread the process descends from, or whose
     /// recorded pane holds it, whatever its lifecycle.
     fn ended_caller_flow(&self, peer: &Process) -> Option<FlowId>;

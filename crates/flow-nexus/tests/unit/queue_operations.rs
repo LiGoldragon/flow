@@ -38,6 +38,22 @@ fn asleep(fixture: &NexusFixture, address: &Address) {
     });
 }
 
+fn awake_as(fixture: &NexusFixture, address: &Address, flow_id: &flow_ethos::FlowId) {
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: address.clone(),
+        state: State::Awake(flow_id.clone()),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
+    });
+}
+
+fn origin_of(flow_id: flow_ethos::FlowId) -> Origin {
+    Origin::Flow(signal_flow::FlowOrigin {
+        flow_id,
+        session_id: "queue-operations-session".into(),
+    })
+}
+
 /// Admits `request` for `recipient` from `sender`, queued.
 fn admitted(
     fixture: &NexusFixture,
@@ -153,6 +169,98 @@ fn cancel_closes_a_delivered_order_and_tells_both_ends() {
             .dispatch(Input::Cancel(order.request_id.clone())),
         Output::CancelRejected(RequestRejection::UnknownRequest)
     );
+}
+
+/// The cancelling sender already has Cancelled as its answer, while the
+/// other flow whose request was reached still receives its notice.
+#[test]
+fn cancel_does_not_notice_its_sender_flow_but_tells_the_recipient() {
+    let fixture = NexusFixture::new();
+    let sender = at("selfCancelSender");
+    let recipient = at("selfCancelRecipient");
+    let caller_flow = flow_ethos::FlowId("selfCancelFlow".into());
+    awake_as(&fixture, &sender, &caller_flow);
+    asleep(&fixture, &recipient);
+    let order = admitted(
+        &fixture,
+        &recipient,
+        SentBy::Sender(sender.clone()),
+        Request::Order("Review the drain fix.".into()),
+    );
+    delivered(&fixture, &recipient, &order);
+
+    assert_eq!(
+        fixture.nexus.dispatch_from(
+            Input::Cancel(order.request_id.clone()),
+            origin_of(caller_flow),
+        ),
+        Output::Cancelled(order.request_id.clone())
+    );
+    let notice = format!("Request {} was cancelled.", order.request_id.0);
+    assert!(notices(&fixture, &sender).is_empty());
+    assert_eq!(notices(&fixture, &recipient), vec![notice]);
+}
+
+/// A caller that is the recipient receives no duplicate notice, and the
+/// original sender still receives one.
+#[test]
+fn cancel_does_not_notice_its_recipient_flow_but_tells_the_sender() {
+    let fixture = NexusFixture::new();
+    let sender = at("cancelRecipientSender");
+    let recipient = at("cancelRecipientSelf");
+    let caller_flow = flow_ethos::FlowId("cancelRecipientFlow".into());
+    asleep(&fixture, &sender);
+    awake_as(&fixture, &recipient, &caller_flow);
+    let order = admitted(
+        &fixture,
+        &recipient,
+        SentBy::Sender(sender.clone()),
+        Request::Order("Review the drain fix.".into()),
+    );
+    delivered(&fixture, &recipient, &order);
+
+    assert_eq!(
+        fixture.nexus.dispatch_from(
+            Input::Cancel(order.request_id.clone()),
+            origin_of(caller_flow),
+        ),
+        Output::Cancelled(order.request_id.clone())
+    );
+    let notice = format!("Request {} was cancelled.", order.request_id.0);
+    assert_eq!(notices(&fixture, &sender), vec![notice]);
+    assert!(notices(&fixture, &recipient).is_empty());
+}
+
+/// A different bound flow does not suppress either request participant's
+/// notice.
+#[test]
+fn cancel_by_a_third_flow_still_notifies_both_ends() {
+    let fixture = NexusFixture::new();
+    let sender = at("thirdCancelSender");
+    let recipient = at("thirdCancelRecipient");
+    let caller = at("thirdCancelCaller");
+    let caller_flow = flow_ethos::FlowId("thirdCancelFlow".into());
+    asleep(&fixture, &sender);
+    asleep(&fixture, &recipient);
+    awake_as(&fixture, &caller, &caller_flow);
+    let order = admitted(
+        &fixture,
+        &recipient,
+        SentBy::Sender(sender.clone()),
+        Request::Order("Review the drain fix.".into()),
+    );
+    delivered(&fixture, &recipient, &order);
+
+    assert_eq!(
+        fixture.nexus.dispatch_from(
+            Input::Cancel(order.request_id.clone()),
+            origin_of(caller_flow),
+        ),
+        Output::Cancelled(order.request_id.clone())
+    );
+    let notice = format!("Request {} was cancelled.", order.request_id.0);
+    assert_eq!(notices(&fixture, &sender), vec![notice.clone()]);
+    assert_eq!(notices(&fixture, &recipient), vec![notice]);
 }
 
 /// A Task still queued is cancelled: it leaves its queue, its reminder goes

@@ -258,6 +258,10 @@ impl AdaptsFlowConnection for FlowConnectionAdapter<'_> {
                 let origin = nexus.origin_of_process(caller.process.as_ref());
                 nexus.dispatch_serially(query, origin)
             }
+            query @ Input::Cancel(_) => {
+                let origin = nexus.origin_of_process(caller.process.as_ref());
+                nexus.dispatch_serially(query, origin)
+            }
             // A Refresh is bound to its caller: a flow of the Address,
             // still current or not, refreshes only itself.
             Input::Refresh(address) => {

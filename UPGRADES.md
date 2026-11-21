@@ -1,3 +1,24 @@
+# Flow 0.60.5: delivery attempts end with their seats
+
+Take a store copy before activation. QueueDeliveryAttempt Memory v11 adds
+the finished Abandoned phase. The open upgrades v10 and preserves every
+previous phase and its data. Rolling back requires restoring the store copy.
+
+At open and when a seat is retired, unfinished attempts for that seat get
+a last receipt check. A receipt settles the delivery; an attempt for which
+no receipt is observed is Abandoned and will not be retried. Its request stays
+open, and a Task or Question can be carried as open on the next legitimate
+wake. Archiving an open request through Cancel or CloseRequest ends its
+unfinished attempts in the same commit. NotYet now names its archive hold.
+The meta AbandonQueueDelivery operation records who gave up the attempt and
+why; routine reads omit flow IDs from the abandonment record.
+
+The ordinary and meta wire contracts are signal-flow 0.69.0 and
+meta-signal-flow 0.91.0. Upgrade both clients with the daemon.
+
+A Task reminder queues Soft and waits for its sender's next wake. A Remind
+set by a flow still wakes its destination as MiddleAbrupt.
+
 # Flow 0.60.4: the noise release, Nexus messages removed and shortened
 
 No contract, generated type or stored schema changes. A cancelling flow

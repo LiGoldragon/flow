@@ -3592,7 +3592,9 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
             .store
             .archive_request(&accepted.request_id.0)
             .expect("archive reads while the Deliver answer is held"),
-        Err(signal_flow::ArchiveRejection::NotYet),
+        Err(signal_flow::ArchiveRejection::NotYet(
+            signal_flow::ArchiveHold::AdmissionPending
+        )),
         "the replayed Deliver answer holds archive after Acknowledge removed its key"
     );
     drop(replay);

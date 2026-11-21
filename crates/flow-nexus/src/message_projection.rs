@@ -63,6 +63,7 @@ impl ProjectsDeliveryState for signal_flow::DeliveryState {
             DeliveryState::Failed(value) => VisibleDeliveryState::Failed(value.visible_refusal()),
             DeliveryState::Withdrawn => VisibleDeliveryState::Withdrawn,
             DeliveryState::Archived => VisibleDeliveryState::Archived,
+            DeliveryState::Abandoned => VisibleDeliveryState::Abandoned,
         }
     }
 }
@@ -415,6 +416,25 @@ impl ProjectsQueueStanding for meta_signal_flow::QueueDeliveryStanding {
             Private::ReceiptRecorded => Visible::ReceiptRecorded,
             Private::Absent(value) => Visible::Absent(value.clone()),
             Private::Resolved(value) => Visible::Resolved(value.visible_queue_resolution_record()),
+            Private::Abandoned(value) => {
+                use meta_signal_flow::{
+                    AbandonmentCause, VisibleAbandonmentCause, VisibleAbandonmentRecord,
+                };
+                let cause = match &value.abandonment_cause {
+                    AbandonmentCause::Owner(owner) => {
+                        VisibleAbandonmentCause::Owner(owner.process_identity.clone())
+                    }
+                    AbandonmentCause::FlowRetired(_) => VisibleAbandonmentCause::FlowRetired,
+                    AbandonmentCause::RequestEnded(id) => {
+                        VisibleAbandonmentCause::RequestEnded(id.clone())
+                    }
+                };
+                Visible::Abandoned(VisibleAbandonmentRecord {
+                    visible_abandonment_cause: cause,
+                    queue_resolution_reason: value.queue_resolution_reason.clone(),
+                    unix_seconds: value.unix_seconds,
+                })
+            }
         }
     }
 }

@@ -1438,7 +1438,9 @@ impl ReconcilesQueueDelivery for RunningNexus {
             QueueDeliveryPhase::Settled(_) => {
                 return attempt.as_settled(SeatAfter::InItsTurn);
             }
-            QueueDeliveryPhase::Read { .. } => return Reconciled::Refused,
+            QueueDeliveryPhase::Read { .. } | QueueDeliveryPhase::Abandoned(_) => {
+                return Reconciled::Refused;
+            }
             QueueDeliveryPhase::Absent(_) => return Reconciled::Absent,
             QueueDeliveryPhase::Resolved(record) => {
                 return match record.queue_resolution_outcome {
@@ -3360,7 +3362,8 @@ impl ParksCohort for RunningNexus {
             QueueDeliveryPhase::Settled(_)
             | QueueDeliveryPhase::Read { .. }
             | QueueDeliveryPhase::Absent(_)
-            | QueueDeliveryPhase::Resolved(_) => {}
+            | QueueDeliveryPhase::Resolved(_)
+            | QueueDeliveryPhase::Abandoned(_) => {}
         }
     }
 

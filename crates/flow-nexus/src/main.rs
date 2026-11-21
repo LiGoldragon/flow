@@ -5,7 +5,7 @@ use flow_nexus::{
     AnnouncesReadiness, OpensRunningNexus, Readiness, RunningNexus, ServesMeta, ServesOrdinary,
     StopsNexus, TerminationSignals, WatchesTerminationSignals,
     launching::ReconcilesInterruptedLaunches, send_tool::ServesSendTool, store::StoreError,
-    waking::SleepsAndWakesSeats,
+    store::delivery_retirement::SettlesRetiredDeliveries, waking::SleepsAndWakesSeats,
 };
 use protos::{Compactable, Protosizable, ReaderBudget};
 use std::{
@@ -134,6 +134,10 @@ fn main() -> ExitCode {
     // before anything is served, and readiness is announced only once they
     // are: a unit ordered after this one, or a peer that saw a name moved
     // in, finds both listening.
+    if let Err(error) = nexus.watch_delivery_retirements() {
+        eprintln!("flow-nexus: could not observe retired delivery seats: {error}");
+        return ExitCode::FAILURE;
+    }
     let bound = |socket: &Path| {
         PlacedSocket::at(socket)
             .and_then(|placed| placed.claim())
@@ -170,7 +174,13 @@ fn main() -> ExitCode {
         // Work the last Nexus owed is taken up while the sockets serve:
         // queued deliveries are reconciled, every successor owed is started
         // or resumed, and every metaflow due a wake is woken.
-        scope.spawn(|| nexus.recover_wakes());
+        scope.spawn(|| {
+            if let Err(error) = nexus.settle_stranded_deliveries() {
+                eprintln!("flow-nexus: startup retired delivery settlement failed: {error}");
+            }
+            nexus.recover_wakes();
+            nexus.settle_delivery_retirements();
+        });
         // Reminders held in Memory are sent as they fall due.
         scope.spawn(|| {
             use flow_nexus::reminding::RemindsCallers;

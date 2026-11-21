@@ -13,7 +13,7 @@ use crate::store::closed_request::{
     Closer, MarksEndedReminder, RecordsClosedRequests, RequestEnding,
 };
 use crate::store::logical_delivery::{
-    HoldsOpenRequests, MintsRequestIds, RecordsLogicalDeliveries, RequestClosure, TakesAnswer,
+    MintsRequestIds, RecordsLogicalDeliveries, RequestClosure, TakesAnswer,
 };
 use crate::store::metaflow::{SleepsMetaflows, TakesLaunchAddress};
 use crate::store::queue_delivery::AccountsQueueDelivery;
@@ -184,44 +184,33 @@ impl EndsRequests for RunningNexus {
         };
         let reached = self
             .store
-            .delivered_to_be_answered(&binding.logical_delivery_id)
-            .map_err(|_| RequestRejection::StoreRefused)?;
+            .logical_delivery_snapshot(&binding.logical_delivery_id)
+            .map_err(|_| RequestRejection::StoreRefused)?
+            .is_some_and(|snapshot| {
+                matches!(
+                    snapshot.delivery_state,
+                    signal_flow::DeliveryState::Delivered(_)
+                        | signal_flow::DeliveryState::Uncertain
+                )
+            });
         // A request that takes no answer is finished once it reached its
         // recipient, whatever its id's binding still says, and nothing is
         // left to end or to tell.
         if reached && !retained.entry.message.takes_answer() {
             return Err(RequestRejection::Closed);
         }
-        let queued = match self.store.metaflow(&retained.address) {
-            Ok(metaflow) => metaflow.is_some_and(|metaflow| {
-                metaflow
-                    .queue
-                    .0
-                    .iter()
-                    .any(|entry| entry.logical_delivery_id == binding.logical_delivery_id)
-            }),
-            Err(_) => return Err(RequestRejection::StoreRefused),
-        };
-        // A request still queued that never reached its seat leaves the
-        // queue; one that reached it is closed where it stands.
-        if queued
-            && !reached
-            && self
-                .store
-                .withdraw_queued(&retained.address, &binding.logical_delivery_id.0)
-                .is_err()
-        {
-            return Err(RequestRejection::StoreRefused);
-        }
         let commit = self
             .store
             .ending_commit(ending, &binding.logical_delivery_id, request_id);
-        match self.store.commit_archive_request(&request_id.0, commit) {
+        match self
+            .store
+            .commit_archive_request(&request_id.0, commit, Some(ending))
+        {
             Ok(Ok(())) => {}
             Ok(Err(ArchiveRejection::UnknownRequest)) => {
                 return Err(RequestRejection::UnknownRequest);
             }
-            Ok(Err(ArchiveRejection::NotYet)) => return Err(RequestRejection::NotYet),
+            Ok(Err(ArchiveRejection::NotYet(hold))) => return Err(RequestRejection::NotYet(hold)),
             Ok(Err(ArchiveRejection::StoreRefused)) | Err(_) => {
                 return Err(RequestRejection::StoreRefused);
             }

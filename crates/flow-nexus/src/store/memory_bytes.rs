@@ -805,6 +805,9 @@ mod tests {
     #[test]
     fn queue_delivery_records_archive_as_they_did() {
         use crate::generated::memory as generated;
+        use crate::store::delivery_attempt_upgrade::{
+            QueueDeliveryAttemptV10, QueueDeliveryPhaseV10,
+        };
         use meta_signal_flow::QueueEvidence;
         for (frozen_state, state) in [
             (
@@ -852,26 +855,26 @@ mod tests {
         let phases = vec![
             (
                 frozen::QueueDeliveryPhase::Prepared,
-                generated::QueueDeliveryPhase::Prepared,
+                QueueDeliveryPhaseV10::Prepared,
             ),
             (
                 frozen::QueueDeliveryPhase::Uncertain(None),
-                generated::QueueDeliveryPhase::Uncertain(None),
+                QueueDeliveryPhaseV10::Uncertain(None),
             ),
             (
                 frozen::QueueDeliveryPhase::ReceiptRecorded(frozen_receipt()),
-                generated::QueueDeliveryPhase::ReceiptRecorded(receipt()),
+                QueueDeliveryPhaseV10::ReceiptRecorded(receipt()),
             ),
             (
                 frozen::QueueDeliveryPhase::Settled(frozen_receipt()),
-                generated::QueueDeliveryPhase::Settled(receipt()),
+                QueueDeliveryPhaseV10::Settled(receipt()),
             ),
             (
                 frozen::QueueDeliveryPhase::Read {
                     answer: "logical-answer".into(),
                     late_receipt: None,
                 },
-                generated::QueueDeliveryPhase::Read(generated::Read_Data {
+                QueueDeliveryPhaseV10::Read(generated::Read_Data {
                     answer: generated::Answer("logical-answer".into()),
                     late_receipt: generated::LateReceipt(None),
                 }),
@@ -881,7 +884,7 @@ mod tests {
                     answer: "logical-answer".into(),
                     late_receipt: Some(frozen_receipt()),
                 },
-                generated::QueueDeliveryPhase::Read(generated::Read_Data {
+                QueueDeliveryPhaseV10::Read(generated::Read_Data {
                     answer: generated::Answer("logical-answer".into()),
                     late_receipt: generated::LateReceipt(Some(receipt())),
                 }),
@@ -891,7 +894,7 @@ mod tests {
                     proof: meta_signal_flow::AbsenceProof::HistoryAbsent,
                     observation: "never reached".into(),
                 }),
-                generated::QueueDeliveryPhase::Absent(generated::AbsenceRecord {
+                QueueDeliveryPhaseV10::Absent(generated::AbsenceRecord {
                     absence_proof: meta_signal_flow::AbsenceProof::HistoryAbsent,
                     observation: generated::Observation("never reached".into()),
                 }),
@@ -965,7 +968,7 @@ mod tests {
                         }
                     },
                 }
-                .archives_alike(&generated::QueueDeliveryAttempt {
+                .archives_alike(&QueueDeliveryAttemptV10 {
                     queue_request_id: meta_signal_flow::QueueRequestId("logical-q".into()),
                     queue_attempt_id: meta_signal_flow::QueueAttemptId(
                         "queue-attempt-0000000000000029".into(),

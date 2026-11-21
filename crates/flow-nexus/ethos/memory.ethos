@@ -21,7 +21,7 @@ Memory
 [ signal_flow:[ LaunchRequestId StartRejection ReplaceRejection FlowId HerdrRoute Process NativeSessionId TranscriptPath BackgroundWork NativePrompt Address ReapStanding HandoverCloseRefusal HandoverOwner Successor ]
   flow_nexus:[ LaunchedRecord ReplacedRecord ]
   signal_flow:[ LogicalDeliveryId Metaflow Lock CallerIdentity LaunchAttempt StoreIdentity OrdinarySocketPath MetaSocketPath FlowType Origin HarnessKind EndpointSelection FlowLifecycle SessionId HerdrPaneId DeliverKey SendAcceptance DeliverySnapshot DeliveryCursor RequestId SentBy VisibleNativeInput Section Touch HerdrPaneBinding LaunchProfile TurnEnd UndecodableFrame Tokens ModelName HandoverGeneration ]
-  meta_signal_flow:[ ModelEffort SuccessorRecoveryText ContextWarningLimit ContextUsageProjection WarningBoundary WarningStage HarnessHookEvent ConfigureNexus ConfigureModel ConfigureThreshold ConfigureSendServer ConfigureMetaflow ConfigureHarnessFlags HeartbeatConfig DrawBound TryBound HandoverPoliciesConfiguration HandoverArchiveConfiguration HandoverCountConfiguration Duration RestartRecord SendOutcomeRecord Delivery ProcessId ProcessUserId ProcessStartToken DeliveryId HarnessProfile MetaAspects MessageNexusPath TurnRetentionBound RequestDigest QueueRequestId QueueAttemptId QueueEvidence AbsenceProof Undecided QueueResolutionRecord EveryMinutes ReminderText ]
+  meta_signal_flow:[ ModelEffort SuccessorRecoveryText ContextWarningLimit ContextUsageProjection WarningBoundary WarningStage HarnessHookEvent ConfigureNexus ConfigureModel ConfigureThreshold ConfigureSendServer ConfigureMetaflow ConfigureHarnessFlags HeartbeatConfig DrawBound TryBound HandoverPoliciesConfiguration HandoverArchiveConfiguration HandoverCountConfiguration Duration RestartRecord SendOutcomeRecord Delivery ProcessId ProcessUserId ProcessStartToken DeliveryId HarnessProfile MetaAspects MessageNexusPath TurnRetentionBound RequestDigest QueueRequestId QueueAttemptId QueueEvidence AbsenceProof Undecided QueueResolutionRecord AbandonmentRecord EveryMinutes ReminderText ]
   :meta_signal_flow:generated:signal:[ Path State ]
   :std:boxed:[ Box ]
   flow_ethos:[ Minutes SourceRoot CodexEndpoint ] ]
@@ -232,14 +232,16 @@ Memory
   ; Read: an authenticated answer proves the request read without an exact
   ; receipt; a receipt observed later stays separate. Absent: native history
   ; proved it never reached the seat. Resolved: the owner resolved an
-  ; Uncertain attempt.
+  ; Uncertain attempt. Abandoned: delivery ended without observing a receipt.
+  ; This attempt never authorizes another.
   QueueDeliveryPhase.[ Prepared
                        Uncertain.Option<Undecided>
                        ReceiptRecorded.NativeDeliveryReceipt
                        Settled.NativeDeliveryReceipt
                        Read.{ Answer.String LateReceipt.Option<NativeDeliveryReceipt> }
                        Absent.AbsenceRecord
-                       Resolved.QueueResolutionRecord ]
+                       Resolved.QueueResolutionRecord
+                       Abandoned.AbandonmentRecord ]
   ; One attempt to deliver a queued request, keyed by the attempt.
   QueueDeliveryAttempt.{ QueueRequestId
                          QueueAttemptId

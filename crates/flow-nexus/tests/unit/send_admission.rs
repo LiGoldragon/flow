@@ -213,7 +213,9 @@ fn an_admitted_send_holds_archive_until_its_answer_object_is_released() {
             .store
             .archive_request(&accepted.request_id.0)
             .unwrap(),
-        Err(signal_flow::ArchiveRejection::NotYet)
+        Err(signal_flow::ArchiveRejection::NotYet(
+            signal_flow::ArchiveHold::AdmissionPending
+        ))
     );
     drop(answer);
     assert_eq!(

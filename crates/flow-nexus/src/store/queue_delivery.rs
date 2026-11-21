@@ -10,7 +10,7 @@
 //! that proof recorded, and only then may the request be handed over again.
 
 use super::attempt_membership::{KeepsAttemptMemberships, MembershipOwner};
-use super::logical_delivery::RecordsLogicalDeliveries;
+use super::logical_delivery::{DeliveryRecipient, RecordsLogicalDeliveries};
 use super::*;
 pub(crate) use crate::generated::memory::{
     AbsenceRecord, DeliveryCounter, NativeDeliveryReceipt, NativeHistoryAnchor,
@@ -29,8 +29,9 @@ use meta_signal_flow::AbsenceProof;
 #[cfg(test)]
 use meta_signal_flow::QueueEvidence_Legacy_Data;
 use meta_signal_flow::{
-    QueueDelivery, QueueDeliveryStanding, QueueEvidence, QueueResolutionOutcome,
-    QueueResolutionRecord, ResolveQueueDeliveryRejection, Undecided, WithdrawRejected_Data,
+    AbandonQueueDeliveryRejected_Data, AbandonmentRecord, QueueDelivery, QueueDeliveryStanding,
+    QueueEvidence, QueueResolutionOutcome, QueueResolutionRecord, ResolveQueueDeliveryRejection,
+    Undecided, WithdrawRejected_Data,
 };
 use sema_engine::AtomicCommit;
 #[cfg(test)]
@@ -199,6 +200,7 @@ impl ShowsQueueDelivery for QueueDeliveryAttempt {
                 QueueDeliveryStanding::Absent(absence.absence_proof)
             }
             QueueDeliveryPhase::Resolved(record) => QueueDeliveryStanding::Resolved(record),
+            QueueDeliveryPhase::Abandoned(record) => QueueDeliveryStanding::Abandoned(record),
             QueueDeliveryPhase::Settled(_) | QueueDeliveryPhase::Read { .. } => return None,
         };
         Some(QueueDelivery {
@@ -213,7 +215,7 @@ impl ShowsQueueDelivery for QueueDeliveryAttempt {
 }
 
 pub trait EndsQueueDeliveryPhase {
-    /// Settled, Read, Absent and Resolved attempts hold no request back.
+    /// Settled, Read, Absent, Resolved and Abandoned attempts hold no request back.
     fn is_finished(&self) -> bool;
 }
 
@@ -221,7 +223,11 @@ impl EndsQueueDeliveryPhase for QueueDeliveryPhase {
     fn is_finished(&self) -> bool {
         matches!(
             self,
-            Self::Settled(_) | Self::Read { .. } | Self::Absent(_) | Self::Resolved(_)
+            Self::Settled(_)
+                | Self::Read { .. }
+                | Self::Absent(_)
+                | Self::Resolved(_)
+                | Self::Abandoned(_)
         )
     }
 }
@@ -234,11 +240,11 @@ impl EngineRecord for QueueDeliveryAttempt {
 
 impl MemoryDefinition for QueueDeliveryAttempt {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(10)
+        MemoryVersion::new(11)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v10")
+        SchemaHash::for_label(super::delivery_attempt_upgrade::SCHEMA_V11)
     }
 }
 
@@ -292,7 +298,8 @@ impl DeclaresQueueDeliveryTables for QueueDeliveryTables {
                 QueueDeliveryAttempt::schema_hash(),
             )
             .with_predecessor::<super::request_id_upgrade::PriorQueueDeliveryAttempt>()
-            .with_predecessor::<super::living_upgrade::DeliveryAttemptBeforeLiving>(),
+            .with_predecessor::<super::living_upgrade::DeliveryAttemptBeforeLiving>()
+            .with_predecessor::<super::delivery_attempt_upgrade::QueueDeliveryAttemptV10>(),
         )
     }
 
@@ -489,6 +496,22 @@ pub trait AccountsQueueDelivery {
         &self,
         attempt_id: &str,
     ) -> Result<Option<QueueDeliveryAttempt>, StoreError>;
+
+    /// Stages the queue and attempt changes that accompany archiving an open request.
+    fn stage_request_end(
+        &self,
+        retained: &RetainedLogicalRequest,
+        attempts: Vec<QueueDeliveryAttempt>,
+        record: AbandonmentRecord,
+        commit: AtomicCommit,
+    ) -> Result<(AtomicCommit, Option<DeliveryState>), StoreError>;
+
+    /// Finish one attempt, park its request if queued, and end its logical delivery.
+    fn abandon_queue_delivery(
+        &self,
+        attempt_id: &str,
+        record: AbandonmentRecord,
+    ) -> Result<Result<Address, AbandonQueueDeliveryRejected_Data>, StoreError>;
 
     /// The owner withdraws the request `id` from the queue of the metaflow
     /// at `address`, and closes the attempt that holds it back, as its
@@ -930,9 +953,9 @@ impl AccountsQueueDelivery for FlowStore {
                     }
                 }
             }
-            QueueDeliveryPhase::Absent(_) | QueueDeliveryPhase::Resolved(_) => {
-                Err(StoreError::StateInvariant)
-            }
+            QueueDeliveryPhase::Absent(_)
+            | QueueDeliveryPhase::Resolved(_)
+            | QueueDeliveryPhase::Abandoned(_) => Err(StoreError::StateInvariant),
         }
     }
 
@@ -1081,17 +1104,19 @@ impl AccountsQueueDelivery for FlowStore {
             metaflow.metaflow.queue.0.remove(0);
         }
         attempt.queue_delivery_phase = QueueDeliveryPhase::Settled(receipt);
+        let landed_at = attempt.flow_id.clone();
         let commit = self
             .engine
             .begin_atomic_commit()
             .mutate(self.metaflows, metaflow)
             .mutate(self.queue_delivery.requests, request);
         let commit = self.commit_attempt(commit, attempt)?;
-        self.commit_logical_transition(
+        self.commit_logical_transition_at(
             &logical_id,
             DeliveryState::Delivered(native_receipt),
             receipt_turn,
             commit,
+            DeliveryRecipient::Exact(&landed_at),
         )?;
         Ok(true)
     }
@@ -1357,7 +1382,8 @@ impl AccountsQueueDelivery for FlowStore {
             | QueueDeliveryPhase::Settled(_)
             | QueueDeliveryPhase::Read { .. }
             | QueueDeliveryPhase::Absent(_)
-            | QueueDeliveryPhase::Resolved(_) => Ok(false),
+            | QueueDeliveryPhase::Resolved(_)
+            | QueueDeliveryPhase::Abandoned(_) => Ok(false),
         }
     }
 
@@ -1400,7 +1426,8 @@ impl AccountsQueueDelivery for FlowStore {
             QueueDeliveryPhase::ReceiptRecorded(_)
             | QueueDeliveryPhase::Settled(_)
             | QueueDeliveryPhase::Read { .. }
-            | QueueDeliveryPhase::Resolved(_) => {
+            | QueueDeliveryPhase::Resolved(_)
+            | QueueDeliveryPhase::Abandoned(_) => {
                 return Ok(false);
             }
         }
@@ -1567,10 +1594,121 @@ impl AccountsQueueDelivery for FlowStore {
                 QueueDeliveryPhase::Settled(_)
                 | QueueDeliveryPhase::Read { .. }
                 | QueueDeliveryPhase::Absent(_)
-                | QueueDeliveryPhase::Resolved(_) => {}
+                | QueueDeliveryPhase::Resolved(_)
+                | QueueDeliveryPhase::Abandoned(_) => {}
             }
         }
         Ok(outstanding)
+    }
+
+    fn stage_request_end(
+        &self,
+        retained: &RetainedLogicalRequest,
+        attempts: Vec<QueueDeliveryAttempt>,
+        record: AbandonmentRecord,
+        mut commit: AtomicCommit,
+    ) -> Result<(AtomicCommit, Option<DeliveryState>), StoreError> {
+        let logical_id = &retained.entry.logical_delivery_id;
+        let mut terminal = None;
+        if let Some(mut stored) = self.stored_metaflow(&retained.address)?
+            && let Some(index) = stored
+                .metaflow
+                .queue
+                .0
+                .iter()
+                .position(|entry| entry.logical_delivery_id == *logical_id)
+        {
+            if stored.metaflow.queue.0.remove(index) != retained.entry {
+                return Err(StoreError::StateInvariant);
+            }
+            let rows = self.engine.match_records(QueryPlan::key(
+                self.queue_delivery.requests,
+                RecordKey::new(logical_id.0.clone()),
+            ))?;
+            let [request] = rows.records() else {
+                return Err(StoreError::StateInvariant);
+            };
+            if request.address != retained.address
+                || request.queue_evidence != QueueEvidence::Logical(retained.entry.clone())
+            {
+                return Err(StoreError::StateInvariant);
+            }
+            let mut parked = request.clone();
+            parked.request_state = RequestState::Parked;
+            commit = commit
+                .mutate(self.metaflows, stored)
+                .mutate(self.queue_delivery.requests, parked);
+            terminal = Some(DeliveryState::Withdrawn);
+        }
+        for mut attempt in attempts {
+            attempt.queue_delivery_phase = QueueDeliveryPhase::Abandoned(record.clone());
+            commit = self.commit_attempt(commit, attempt)?;
+            terminal = Some(DeliveryState::Abandoned);
+        }
+        Ok((commit, terminal))
+    }
+
+    fn abandon_queue_delivery(
+        &self,
+        attempt_id: &str,
+        record: AbandonmentRecord,
+    ) -> Result<Result<Address, AbandonQueueDeliveryRejected_Data>, StoreError> {
+        use AbandonQueueDeliveryRejected_Data as Rejected;
+        let Some(mut attempt) = self.queue_delivery_attempt(attempt_id)? else {
+            return Ok(Err(Rejected::UnknownAttempt));
+        };
+        if attempt.queue_delivery_phase.is_finished() {
+            return Ok(Err(Rejected::AlreadyFinished));
+        }
+        if record.queue_resolution_reason.0.trim().is_empty() {
+            return Ok(Err(Rejected::EmptyReason));
+        }
+        let address = attempt.address.clone();
+        let evidence = attempt.queue_evidence.clone();
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.queue_delivery.requests,
+            RecordKey::new(attempt.queue_request_id.0.clone()),
+        ))?;
+        let [request] = rows.records() else {
+            return Err(StoreError::StateInvariant);
+        };
+        if request.address != address || request.queue_evidence != evidence {
+            return Err(StoreError::StateInvariant);
+        }
+        let mut commit = self.engine.begin_atomic_commit();
+        match request.request_state {
+            RequestState::Parked => {}
+            RequestState::Queued => {
+                let Some(mut stored) = self.stored_metaflow(&address)? else {
+                    return Err(StoreError::StateInvariant);
+                };
+                let QueueEvidence::Logical(entry) = &evidence else {
+                    return Err(StoreError::StateInvariant);
+                };
+                if stored.metaflow.queue.0.first() != Some(entry) {
+                    return Err(StoreError::StateInvariant);
+                }
+                stored.metaflow.queue.0.remove(0);
+                let mut parked = request.clone();
+                parked.request_state = RequestState::Parked;
+                commit = commit
+                    .mutate(self.metaflows, stored)
+                    .mutate(self.queue_delivery.requests, parked);
+            }
+            RequestState::Unsent | RequestState::Settled => {
+                return Err(StoreError::StateInvariant);
+            }
+        }
+        attempt.queue_delivery_phase = QueueDeliveryPhase::Abandoned(record);
+        let commit = self.commit_attempt(commit, attempt)?;
+        if let QueueEvidence::Logical(entry) = &evidence
+            && !entry.logical_delivery_id.0.starts_with("legacy:")
+        {
+            self.commit_attempt_state(&evidence, DeliveryState::Abandoned, commit)?;
+        } else {
+            self.engine.commit_atomic(commit)?;
+        }
+        Ok(Ok(address))
     }
 
     fn withdraw_queued(
@@ -2676,7 +2814,9 @@ mod tests {
             store
                 .archive_request(&first.request_id.0)
                 .expect("archive reads unfinished attempt"),
-            Err(signal_flow::ArchiveRejection::NotYet)
+            Err(signal_flow::ArchiveRejection::NotYet(
+                signal_flow::ArchiveHold::AttemptUnfinished
+            ))
         );
         assert!(
             store

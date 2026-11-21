@@ -95,8 +95,11 @@ trait ReservesAttempts {
     /// Reserves `count` consecutive attempt numbers from the stored counter.
     fn reserve_attempts(&self, count: i64) -> Result<AttemptReservation, StoreError>;
     /// Writes the counter `reservation` leaves into `commit`.
-    fn write_reservation(&self, commit: AtomicCommit, reservation: AttemptReservation)
-    -> AtomicCommit;
+    fn write_reservation(
+        &self,
+        commit: AtomicCommit,
+        reservation: AttemptReservation,
+    ) -> AtomicCommit;
 }
 
 impl ReservesAttempts for FlowStore {
@@ -3022,9 +3025,7 @@ mod tests {
             assert_eq!(attempt.native_history_anchor, head.native_history_anchor);
             assert_eq!(attempt.thread_id, head.thread_id);
             assert_eq!(
-                store
-                    .request_state(&attempt.queue_request_id.0)
-                    .unwrap(),
+                store.request_state(&attempt.queue_request_id.0).unwrap(),
                 Some(RequestState::Parked)
             );
             assert_eq!(
@@ -3043,7 +3044,10 @@ mod tests {
         );
 
         let next = prepared_attempt(&store);
-        assert_eq!(next.queue_evidence, QueueEvidence::Logical(queue[3].clone()));
+        assert_eq!(
+            next.queue_evidence,
+            QueueEvidence::Logical(queue[3].clone())
+        );
         assert!(
             attempts
                 .iter()

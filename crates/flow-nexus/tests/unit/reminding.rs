@@ -24,9 +24,7 @@ fn reminders(queue: &[QueueEntry]) -> Vec<(SentBy, flow_ethos::Reminder_Data)> {
     queue
         .iter()
         .map(|entry| match &entry.message {
-            Message::Soft(Request::Reminder(reminder)) => {
-                (entry.sent_by.clone(), reminder.clone())
-            }
+            Message::Soft(Request::Reminder(reminder)) => (entry.sent_by.clone(), reminder.clone()),
             other => panic!("a task's reminder is a Soft Reminder: {other:?}"),
         })
         .collect()

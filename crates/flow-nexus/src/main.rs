@@ -171,6 +171,11 @@ fn main() -> ExitCode {
             use flow_nexus::reaping::ServesReapedPaneWatches;
             reap_nexus.serve_reaped_pane_watches(scope)
         });
+        let rest_nexus = &nexus;
+        scope.spawn(move || {
+            use flow_nexus::rest_watching::ServesRestObservations;
+            rest_nexus.serve_rest_observations(scope);
+        });
         // Work the last Nexus owed is taken up while the sockets serve:
         // queued deliveries are reconciled, every successor owed is started
         // or resumed, and every metaflow due a wake is woken.

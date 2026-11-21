@@ -244,8 +244,15 @@ impl RecordsReports for RunningNexus {
                             flow_id = flow_id.0
                         ),
                     }
-                    if committed_rest && let Some(session) = &stop.native_session_id_option {
-                        self.settle_native_rest(&flow_id.0, &session.0);
+                    if committed_rest
+                        && let Some(session) = &stop.native_session_id_option
+                        && matches!(
+                            self.settle_native_rest(&flow_id.0, &session.0),
+                            crate::waking::AtStop::Kept(crate::waking::KeptAtStop::NotResting(_))
+                        )
+                    {
+                        use crate::rest_watching::RemembersPendingRest;
+                        self.remember_pending_rest(&flow_id.0, &session.0);
                     }
                 } else {
                     eprintln!(

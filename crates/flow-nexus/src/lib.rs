@@ -92,6 +92,7 @@ pub mod placed_socket;
 pub mod reaping;
 pub mod reporting;
 pub mod request_waking;
+pub mod rest_watching;
 pub mod send_tool;
 pub mod sending;
 pub mod store;
@@ -170,6 +171,7 @@ pub struct RunningNexus {
     pub stopped_at_confirmation: waking::StoppedAtConfirmation,
     /// Flows kept because their successor was refused; see `waking`.
     pub refresh_refusals: waking::RefreshRefusals,
+    pub(crate) pending_rests: rest_watching::PendingRests,
     /// Predecessors whose reap worker a bearing event asked to arm again;
     /// the reap supervisor takes them (`reaping`).
     pub(crate) pane_watch_rearms: reaping::PaneWatchRearms,
@@ -2234,6 +2236,7 @@ impl OpensRunningNexus for RunningNexus {
             stopped_at_confirmation: waking::StoppedAtConfirmation::default(),
             refresh_refusals: waking::RefreshRefusals::default(),
             pane_watch_rearms: Default::default(),
+            pending_rests: Default::default(),
             #[cfg(test)]
             pane_watch_hooks: Default::default(),
             stopping: Stopping::default(),
@@ -2973,6 +2976,7 @@ impl StopsNexus for RunningNexus {
             );
         }
         self.store.launch_changes.announce();
+        self.pending_rests.changes.announce();
         self.store.reminder_changes.announce();
         self.store.metaflow_changes.announce();
         self.store.delivery_retirements.changes.announce();
@@ -4388,6 +4392,7 @@ mod tests {
                 stopped_at_confirmation: crate::waking::StoppedAtConfirmation::default(),
                 refresh_refusals: crate::waking::RefreshRefusals::default(),
                 pane_watch_rearms: Default::default(),
+                pending_rests: Default::default(),
                 pane_watch_hooks: Default::default(),
                 stopping: crate::Stopping::default(),
                 launch_calls: crate::send_tool::LaunchCalls::default(),

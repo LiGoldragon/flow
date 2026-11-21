@@ -193,6 +193,24 @@ impl SeedsReportedTransition for FlowEvents {
     }
 }
 
+pub(crate) trait ReadsRestEpoch {
+    /// A stable identity within the append-only history of this flow.
+    fn rest_epoch(&self, flow_id: &str) -> Result<Option<usize>, StoreError>;
+}
+
+impl ReadsRestEpoch for FlowStore {
+    fn rest_epoch(&self, flow_id: &str) -> Result<Option<usize>, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.flow_transitions,
+            RecordKey::new(flow_id.to_owned()),
+        ))?;
+        Ok(rows.records().first().and_then(|flow| {
+            matches!(flow.transition_vector.last(), Some(last) if last.state == State::Resting)
+                .then_some(flow.transition_vector.len())
+        }))
+    }
+}
+
 impl RecordsTransitions for FlowStore {
     fn record_caused(&self, caused: Caused) -> Result<Option<Transition>, StoreError> {
         let _gate = self

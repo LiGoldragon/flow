@@ -40,6 +40,9 @@ pub trait WatchesMetaflows {
     /// first metaflow subscriber, for the store's life: the engine keeps
     /// every subscription it is given.
     fn watch_metaflows(&self) -> Result<(), StoreError>;
+    /// Announces changes that can invalidate a pending native rest.
+    fn watch_native_rests(&self, changes: LaunchChanges) -> Result<(), StoreError>;
+
     /// The metaflows as `Metaflows` lists them: each Awake one, and each
     /// asleep one still declared. An undeclared sleeping row is history,
     /// not an Address an ordinary caller can launch; its past is kept but
@@ -68,6 +71,19 @@ impl WatchesMetaflows for FlowStore {
             declarations,
         )?;
         *watched = true;
+        Ok(())
+    }
+
+    fn watch_native_rests(&self, changes: LaunchChanges) -> Result<(), StoreError> {
+        let sink = Arc::new(MetaflowChangeSink { changes });
+        self.engine
+            .subscribe(QueryPlan::all(self.flows), sink.clone())?;
+        self.engine
+            .subscribe(QueryPlan::all(self.metaflows), sink.clone())?;
+        self.engine
+            .subscribe(QueryPlan::all(self.flow_transitions), sink.clone())?;
+        self.engine
+            .subscribe(QueryPlan::all(self.seat_births), sink)?;
         Ok(())
     }
 

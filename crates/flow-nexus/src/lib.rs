@@ -194,12 +194,14 @@ pub struct RunningNexus {
     /// Announced each time a Configure replaces a family, and at a stop;
     /// see `observe_configuration`.
     pub configuration_changes: store::LaunchChanges,
-    /// The Claude Harness Nexus's subscription socket the daemon's
-    /// configuration names. When there is one, its subscription is the one
-    /// source of a Claude flow's rest, and a Stop hook's report is recorded
-    /// and correlated but rests nothing (`harness_subscription`,
-    /// `reporting`); with none, the Stop hook is.
-    pub claude_harness_subscription: Option<generated::startup::ClaudeHarnessSubscriptionPath>,
+    /// The Claude Harness Nexus's subscription the daemon's configuration
+    /// names: its socket and each session as it last told it. When there is
+    /// one, it is the one source of a Claude flow's rest and of the
+    /// judgement that its turn has ended with nothing in flight, and a Stop
+    /// hook's report is recorded and correlated but rests nothing
+    /// (`harness_subscription`, `reporting`, `JudgesClosingRest`); with
+    /// none, the Stop hook is.
+    pub claude_harness_subscription: Option<harness_subscription::ClaudeHarnessSubscription>,
 }
 
 /// The handover source for fresh successors: the predecessor's sections in

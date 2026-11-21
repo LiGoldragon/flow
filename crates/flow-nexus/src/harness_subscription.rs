@@ -2,12 +2,16 @@
 //! rest. When the daemon's configuration names the Claude Harness Nexus's
 //! subscription socket (signal-harness), Flow subscribes to it: it sends
 //! Subscribe, reads the Subscribed snapshot of every living session and then
-//! each Changed as it happens. A rested turn end of a live Claude flow's
-//! session is that flow's rest, taken below the report
+//! each Changed as it happens, and keeps each session's State and context
+//! size (`ClaudeHarnessSubscription`). The rest is a transition of State: a
+//! live Claude flow's session whose State becomes Flowing.Rested, whatever
+//! Event brought it there, is that flow's rest, taken below the report
 //! (`RestsClaudeFlows`), with the context size the Harness Nexus last told
-//! for the session; nothing is recorded as a harness event. While a socket
-//! is configured the flow's Stop hook rests nothing (`reporting`). With no
-//! socket configured the part never starts.
+//! for the session; nothing is recorded as a harness event. The kept State
+//! is also the judgement of the flow's turn that closing it at rest asks
+//! (`JudgesClosingRest::claude_turn`). While a socket is configured the
+//! flow's Stop hook rests nothing (`reporting`). With no socket configured
+//! the part never starts.
 //!
 //! A connection that ends after its Subscribed is subscribed again at once.
 //! A socket that is absent, refuses the connection, or ends it before its
@@ -18,12 +22,13 @@
 use crate::RunningNexus;
 use crate::event_wait::{Announcement, AnnouncesOnce, AwaitsDescriptors, NameWatch, WatchesName};
 use crate::generated::startup::{
-    DaemonConfiguration, DaemonConfigurationFault, DaemonConfigurationRefusal, Path as FaultPath,
-    Reason,
+    ClaudeHarnessSubscriptionPath, DaemonConfiguration, DaemonConfigurationFault,
+    DaemonConfigurationRefusal, Path as FaultPath, Reason,
 };
 use crate::place::{FindsFlowPlace, PlaceName, ReportsPlaceRefusal};
 use crate::reporting::RestsClaudeFlows;
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
+use crate::waking::ClaudeTurn;
 use crate::{HoldsStopRequest, Stopping};
 use harness::{Event as HarnessEvent, Flow, Identifiable, Observed, State};
 use signal_flow::HarnessKind;
@@ -33,7 +38,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use translator::place_file::{ConfigurationHome, LocatesConfigurationHome, LocatesPlaceFile};
 
 /// The daemon's configuration file, beside its place file.
@@ -158,29 +163,175 @@ pub enum HarnessObservation {
     Changed(Changed),
 }
 
-/// Each kind of observation that rests no flow, logged the first time it is
+/// A living session as the subscription last told it: its State, and the
+/// context size it last told for it, when it told one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionStanding {
+    pub state: State,
+    pub context_size: Option<harness::Tokens>,
+}
+
+/// What shows a session came to rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestEvidence {
+    /// A Changed brought its State to Flowing.Rested from another State,
+    /// whatever its Event: a turn end, an interruption, a failure, the end
+    /// of its last background work, a resumption.
+    Became,
+    /// A snapshot shows it Flowing.Rested: it came to rest before this
+    /// connection, perhaps while none was open.
+    FoundRested,
+}
+
+/// A session the subscription told came to rest, with the context size it
+/// last told for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRest {
+    pub session: flow_ethos::FlowId,
+    pub context_size: Option<harness::Tokens>,
+    pub evidence: RestEvidence,
+}
+
+/// The Claude Harness subscription the daemon's configuration names: its
+/// socket, and each living session as the subscription last told it, keyed
+/// by the FlowId the Harness Nexus names it by. Its sessions are written by
+/// the subscriber alone and read by the judgement of a Claude flow's turn
+/// (`JudgesClosingRest::claude_turn`).
+#[derive(Debug)]
+pub struct ClaudeHarnessSubscription {
+    pub socket: ClaudeHarnessSubscriptionPath,
+    pub sessions: Mutex<BTreeMap<flow_ethos::FlowId, SessionStanding>>,
+}
+
+impl From<ClaudeHarnessSubscriptionPath> for ClaudeHarnessSubscription {
+    fn from(socket: ClaudeHarnessSubscriptionPath) -> Self {
+        Self {
+            socket,
+            sessions: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+/// The subscription's judgement of a session's turn.
+pub trait JudgesHarnessTurns {
+    /// Flowing.Rested is Rested, Flowing.Waiting ended with work in
+    /// flight, and every other State, and a session the subscription has
+    /// not told or no connection holds now, Running.
+    fn turn_of(&self, session: &flow_ethos::FlowId) -> ClaudeTurn;
+}
+
+impl JudgesHarnessTurns for ClaudeHarnessSubscription {
+    fn turn_of(&self, session: &flow_ethos::FlowId) -> ClaudeTurn {
+        match self
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(session)
+            .map(|standing| &standing.state)
+        {
+            Some(State::Flowing(Flow::Rested)) => ClaudeTurn::Rested,
+            Some(State::Flowing(Flow::Waiting)) => ClaudeTurn::EndedWithWorkInFlight,
+            _ => ClaudeTurn::Running,
+        }
+    }
+}
+
+pub trait KeepsHarnessSessions {
+    /// Takes one observation into the sessions and answers the sessions it
+    /// shows came to rest. A snapshot replaces every session with its own,
+    /// each Rested one found rested. A Changed sets its session's State, a
+    /// `ContextSize` its context size too, and an `Ended` drops the
+    /// session; its session became rested when its State is Flowing.Rested
+    /// and was not before. A Changed that leaves a session Rested shows no
+    /// rest.
+    fn keep(&self, observation: &HarnessObservation) -> Vec<SessionRest>;
+    /// Forgets every session: once a connection ends nothing is known of
+    /// them until the next snapshot.
+    fn forget(&self);
+}
+
+impl KeepsHarnessSessions for ClaudeHarnessSubscription {
+    fn keep(&self, observation: &HarnessObservation) -> Vec<SessionRest> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match observation {
+            HarnessObservation::Snapshot(observed) => {
+                *sessions = observed
+                    .iter()
+                    .map(|session| {
+                        (
+                            session.flow_id.clone(),
+                            SessionStanding {
+                                state: session.state.clone(),
+                                context_size: Some(session.tokens),
+                            },
+                        )
+                    })
+                    .collect();
+                observed
+                    .iter()
+                    .filter(|session| session.state == State::Flowing(Flow::Rested))
+                    .map(|session| SessionRest {
+                        session: session.flow_id.clone(),
+                        context_size: Some(session.tokens),
+                        evidence: RestEvidence::FoundRested,
+                    })
+                    .collect()
+            }
+            HarnessObservation::Changed(Changed {
+                flow_id,
+                event: HarnessEvent::Ended(_),
+                ..
+            }) => {
+                sessions.remove(flow_id);
+                vec![]
+            }
+            HarnessObservation::Changed(Changed {
+                flow_id,
+                event,
+                state,
+            }) => {
+                let standing = sessions
+                    .entry(flow_id.clone())
+                    .or_insert_with(|| SessionStanding {
+                        state: State::Dry,
+                        context_size: None,
+                    });
+                let was_rested = standing.state == State::Flowing(Flow::Rested);
+                standing.state = state.clone();
+                if let HarnessEvent::ContextSize(tokens) = event {
+                    standing.context_size = Some(*tokens);
+                }
+                if !was_rested && *state == State::Flowing(Flow::Rested) {
+                    vec![SessionRest {
+                        session: flow_id.clone(),
+                        context_size: standing.context_size,
+                        evidence: RestEvidence::Became,
+                    }]
+                } else {
+                    vec![]
+                }
+            }
+        }
+    }
+
+    fn forget(&self) {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+}
+
+/// Why a session's rest rests no flow, each logged the first time it is
 /// met.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum UnmappedObservation {
-    /// The snapshot of the living sessions; only its sizes are kept.
-    Snapshot,
-    Started,
-    Resumed,
-    PromptSubmitted,
-    ToolUsed,
-    PermissionAsked,
-    Responded,
-    InFlight,
-    WorkStarted,
-    WorkEnded,
-    Compacted,
-    Ended,
-    /// A turn's end with background work still in flight: Waiting, not
-    /// Rested.
-    TurnEndUnrested,
-    /// A rest of a session no live Claude flow is: no flow has its FlowId,
-    /// or the one that has is not a live Claude flow whose registered
-    /// session the Harness Nexus names by that FlowId.
+pub enum UnheldRest {
+    /// No flow has the session's FlowId, or the one that has is not a live
+    /// Claude flow whose registered session the Harness Nexus names by that
+    /// FlowId.
     UnheldSession,
     /// The flow could not be read from Memory.
     FlowUnread,
@@ -196,127 +347,75 @@ pub struct HarnessRest {
     pub context_size: Option<signal_flow::Tokens>,
 }
 
-/// The subscriber: the socket it subscribes to, the Nexus it rests flows
-/// in, the context size the subscription last told for each session, and
-/// the kinds of observation it has logged unmapped.
+/// The subscriber: the Nexus it rests flows in, the subscription whose
+/// sessions it keeps, its socket, and the kinds of unheld rest it has
+/// logged.
 pub struct ClaudeHarnessSubscriber<'nexus> {
     pub nexus: &'nexus RunningNexus,
+    pub subscription: &'nexus ClaudeHarnessSubscription,
     pub socket: PathBuf,
-    pub context_sizes: BTreeMap<flow_ethos::FlowId, harness::Tokens>,
-    pub unmapped: BTreeSet<UnmappedObservation>,
+    pub unheld: BTreeSet<UnheldRest>,
 }
 
-pub trait MapsHarnessObservations {
-    /// Keeps the context size each session was last told at: a snapshot
-    /// replaces them all with its sessions' tokens, a `ContextSize` change
-    /// sets its session's, and an `Ended` one drops it.
-    fn keep_context_size(&mut self, observation: &HarnessObservation);
-    /// The rest an observation stands for, or None.
+pub trait MapsHarnessRests {
+    /// The flow's rest a session's rest stands for, or None.
     ///
-    /// One case only: a Changed whose event is `TurnEnded`, `Interrupted`
-    /// or `Failed` and whose State is `Flowing.Rested`, of the live Claude
-    /// flow whose FlowId is the Changed's and whose registered session the
-    /// Harness Nexus names by that FlowId (`Identifiable`, its first six
-    /// characters), while no restart holds the flow. The Harness Nexus has
-    /// matched the turn to that session, so its turn end is the flow's own;
-    /// it names no harness process, so no seat birth is asked of it. The
-    /// context size is the one last kept for the session.
+    /// The flow is the live Claude flow whose FlowId is the session's and
+    /// whose registered session the Harness Nexus names by that FlowId
+    /// (`Identifiable`, its first six characters), while no restart holds
+    /// it. The Harness Nexus has matched the session's events to that
+    /// session, so its rest is the flow's own; it names no harness
+    /// process, so no seat birth is asked of it.
     ///
-    /// Open, each None and logged once per kind: every other event, a turn
-    /// end still Waiting on background work, and a FlowId no live Claude
-    /// flow is, which every session after a /clear is
+    /// A session found rested in a snapshot is the flow's rest only when
+    /// Flow's own record does not already show the flow Resting: a rest
+    /// missed while no connection was open is taken, a rest already taken
+    /// is not taken again.
+    ///
+    /// Open, None and logged once per kind: a FlowId no live Claude flow
+    /// is, which every session after a /clear is
     /// (flows/900ff3/flow-side-gap.md in the primary workspace). A prompt's
     /// receipt stays the flow's own UserPromptSubmit hook's.
-    fn rest_for(&mut self, observation: &HarnessObservation) -> Option<HarnessRest>;
+    fn rest_of(&mut self, rest: &SessionRest) -> Option<HarnessRest>;
 }
 
-impl MapsHarnessObservations for ClaudeHarnessSubscriber<'_> {
-    fn keep_context_size(&mut self, observation: &HarnessObservation) {
-        match observation {
-            HarnessObservation::Snapshot(sessions) => {
-                self.context_sizes = sessions
-                    .iter()
-                    .map(|session| (session.flow_id.clone(), session.tokens))
-                    .collect();
-            }
-            HarnessObservation::Changed(Changed {
-                flow_id,
-                event: HarnessEvent::ContextSize(tokens),
-                ..
-            }) => {
-                self.context_sizes.insert(flow_id.clone(), *tokens);
-            }
-            HarnessObservation::Changed(Changed {
-                flow_id,
-                event: HarnessEvent::Ended(_),
-                ..
-            }) => {
-                self.context_sizes.remove(flow_id);
-            }
-            HarnessObservation::Changed(_) => {}
-        }
-    }
-
-    fn rest_for(&mut self, observation: &HarnessObservation) -> Option<HarnessRest> {
+impl MapsHarnessRests for ClaudeHarnessSubscriber<'_> {
+    fn rest_of(&mut self, rest: &SessionRest) -> Option<HarnessRest> {
+        use crate::generated::transitions::{AskedFlow, RecordsTransitions};
         use crate::restarting::FencesSeatEvents;
-        let unmapped = |kind| -> Result<HarnessRest, UnmappedObservation> { Err(kind) };
-        let mapped = match observation {
-            HarnessObservation::Snapshot(_) => unmapped(UnmappedObservation::Snapshot),
-            HarnessObservation::Changed(Changed {
-                flow_id,
-                event,
-                state,
-            }) => match event {
-                HarnessEvent::TurnEnded | HarnessEvent::Interrupted | HarnessEvent::Failed(_)
-                    if *state != State::Flowing(Flow::Rested) =>
+        let mapped = match self.nexus.store.flow_node(&rest.session.0) {
+            Err(_) => Err(UnheldRest::FlowUnread),
+            Ok(Some(node))
+                if node.harness_kind == HarnessKind::Claude
+                    && node.flow_lifecycle.is_live()
+                    && harness::SessionId(node.session_id.0.clone()).identify() == rest.session =>
+            {
+                if !self.nexus.session_event_acts(&node.flow_id.0) {
+                    Err(UnheldRest::Restarting)
+                } else if rest.evidence == RestEvidence::FoundRested
+                    && matches!(
+                        self.nexus.store.state_of(AskedFlow(node.flow_id.clone())),
+                        Ok(Some(meta_signal_flow::State::Resting))
+                    )
                 {
-                    unmapped(UnmappedObservation::TurnEndUnrested)
+                    return None;
+                } else {
+                    Ok(HarnessRest {
+                        flow_id: node.flow_id,
+                        context_size: rest
+                            .context_size
+                            .map(|tokens| signal_flow::Tokens(tokens.0)),
+                    })
                 }
-                HarnessEvent::TurnEnded | HarnessEvent::Interrupted | HarnessEvent::Failed(_) => {
-                    match self.nexus.store.flow_node(&flow_id.0) {
-                        Err(_) => unmapped(UnmappedObservation::FlowUnread),
-                        Ok(Some(node))
-                            if node.harness_kind == HarnessKind::Claude
-                                && node.flow_lifecycle.is_live()
-                                && harness::SessionId(node.session_id.0.clone()).identify()
-                                    == *flow_id =>
-                        {
-                            if self.nexus.session_event_acts(&node.flow_id.0) {
-                                Ok(HarnessRest {
-                                    flow_id: node.flow_id,
-                                    context_size: self
-                                        .context_sizes
-                                        .get(flow_id)
-                                        .map(|tokens| signal_flow::Tokens(tokens.0)),
-                                })
-                            } else {
-                                unmapped(UnmappedObservation::Restarting)
-                            }
-                        }
-                        Ok(_) => unmapped(UnmappedObservation::UnheldSession),
-                    }
-                }
-                HarnessEvent::Started => unmapped(UnmappedObservation::Started),
-                HarnessEvent::Resumed => unmapped(UnmappedObservation::Resumed),
-                HarnessEvent::PromptSubmitted => unmapped(UnmappedObservation::PromptSubmitted),
-                HarnessEvent::ToolUsed => unmapped(UnmappedObservation::ToolUsed),
-                HarnessEvent::PermissionAsked => unmapped(UnmappedObservation::PermissionAsked),
-                HarnessEvent::Responded(_) => unmapped(UnmappedObservation::Responded),
-                HarnessEvent::InFlight(_) => unmapped(UnmappedObservation::InFlight),
-                HarnessEvent::WorkStarted(_) => unmapped(UnmappedObservation::WorkStarted),
-                HarnessEvent::WorkEnded(_) => unmapped(UnmappedObservation::WorkEnded),
-                // Kept for the session's next rest (`keep_context_size`).
-                HarnessEvent::ContextSize(_) => return None,
-                HarnessEvent::Compacted(_) => unmapped(UnmappedObservation::Compacted),
-                HarnessEvent::Ended(_) => unmapped(UnmappedObservation::Ended),
-            },
+            }
+            Ok(_) => Err(UnheldRest::UnheldSession),
         };
         match mapped {
             Ok(rest) => Some(rest),
             Err(kind) => {
-                if self.unmapped.insert(kind) {
+                if self.unheld.insert(kind) {
                     eprintln!(
-                        "flow-nexus: a Claude Harness observation of kind {kind:?} rests no flow; it is dropped, and this kind is logged only once"
+                        "flow-nexus: a Claude Harness session's rest of kind {kind:?} rests no flow; it is dropped, and this kind is logged only once"
                     );
                 }
                 None
@@ -427,8 +526,9 @@ pub trait HoldsHarnessSubscription {
     fn placement(&self) -> Option<SocketPlacement>;
     /// One connection, from Subscribe to its end.
     fn subscribe_once(&mut self) -> SubscriptionEnding;
-    /// One observation: its context size kept, and the rest it stands for
-    /// taken (`RestsClaudeFlows`). Nothing is recorded as a harness event.
+    /// One observation: kept in the subscription's sessions, and each
+    /// flow's rest it shows taken (`RestsClaudeFlows`), after the sessions
+    /// hold it. Nothing is recorded as a harness event.
     fn take(&mut self, observation: HarnessObservation);
 }
 
@@ -442,6 +542,7 @@ impl HoldsHarnessSubscription for ClaudeHarnessSubscriber<'_> {
         };
         let mut ending = self.subscribe_once();
         loop {
+            self.subscription.forget();
             match ending {
                 SubscriptionEnding::Stopping => return,
                 SubscriptionEnding::Dropped => {}
@@ -547,13 +648,14 @@ impl HoldsHarnessSubscription for ClaudeHarnessSubscriber<'_> {
     }
 
     fn take(&mut self, observation: HarnessObservation) {
-        self.keep_context_size(&observation);
-        if let Some(HarnessRest {
-            flow_id,
-            context_size,
-        }) = self.rest_for(&observation)
-        {
-            self.nexus.rest_claude_flow(&flow_id, context_size);
+        for rest in self.subscription.keep(&observation) {
+            if let Some(HarnessRest {
+                flow_id,
+                context_size,
+            }) = self.rest_of(&rest)
+            {
+                self.nexus.rest_claude_flow(&flow_id, context_size);
+            }
         }
     }
 }
@@ -574,19 +676,20 @@ impl SubscribesToClaudeHarness for RunningNexus {
     fn configured_by(mut self, configuration: &DaemonConfiguration) -> Self {
         self.claude_harness_subscription = configuration
             .claude_harness_subscription_path_option
-            .clone();
+            .clone()
+            .map(ClaudeHarnessSubscription::from);
         self
     }
 
     fn keep_subscribing_to_claude_harness(&self) {
-        let Some(socket) = &self.claude_harness_subscription else {
+        let Some(subscription) = &self.claude_harness_subscription else {
             return;
         };
         ClaudeHarnessSubscriber {
             nexus: self,
-            socket: PathBuf::from(&socket.0),
-            context_sizes: BTreeMap::new(),
-            unmapped: BTreeSet::new(),
+            subscription,
+            socket: PathBuf::from(&subscription.socket.0),
+            unheld: BTreeSet::new(),
         }
         .keep_subscribed();
     }

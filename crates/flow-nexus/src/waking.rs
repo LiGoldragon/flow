@@ -521,8 +521,9 @@ impl NotesStopsAtConfirmation for StoppedAtConfirmation {
 /// once confirmation commits.
 pub trait SettlesStopsAtConfirmation {
     /// Under the dispatch gate, as confirmation commits: notes the flow when
-    /// the last event its harness reported is `Stopped`, or, for a Codex
-    /// flow, when its thread is resting.
+    /// its own turn has ended (`JudgesClosingRest::own_turn_ended`) or its
+    /// transcript records its main turn's end, or, for a Codex flow, when
+    /// its thread is resting.
     fn note_stop_at_confirmation(&self, flow_id: &str);
     /// Off the dispatch gate: settles every noted flow's Stop.
     fn settle_stops_at_confirmation(&self);
@@ -530,11 +531,12 @@ pub trait SettlesStopsAtConfirmation {
 
 impl SettlesStopsAtConfirmation for RunningNexus {
     fn note_stop_at_confirmation(&self, flow_id: &str) {
-        // A Claude flow's own Stop, or the main end_turn its transcript
-        // records, landed before confirmation stands as its turn end; a
+        // A Claude flow's own turn end, as the source of its rest judges
+        // it, or the main end_turn its transcript records, landed before
+        // confirmation stands as its turn end; a
         // Codex flow reports no Stop: its thread's rest, as its app-server's
         // events showed it, stands for one.
-        let claude_ended = self.turn_end_recorded(flow_id)
+        let claude_ended = self.own_turn_ended(flow_id)
             || matches!(
                 self.store.flow_node(flow_id),
                 Ok(Some(node)) if self.claude_main_turn_ended(&node)
@@ -1211,10 +1213,7 @@ pub(crate) trait CorrelatesNativeEvents {
     fn correlated_stop(&self, flow_id: &str, stop: &impl IdentifiesNativeStop) -> bool;
     /// A prompt the flow's own Claude session took.
     fn correlated_prompt(&self, flow_id: &str, prompt: &NativePrompt) -> bool;
-    /// Of the flow's own Stops and submitted prompts, the last recorded is
-    /// a Stop: a turn end landed with no prompt taken after it.
-    fn turn_end_recorded(&self, flow_id: &str) -> bool;
-    /// That last Stop, when the last of the flow's own Stops and submitted
+    /// The last Stop, when the last of the flow's own Stops and submitted
     /// prompts is a Stop.
     fn last_turn_end(&self, flow_id: &str) -> Option<RecordedStop>;
 }
@@ -1255,10 +1254,6 @@ impl CorrelatesNativeEvents for RunningNexus {
         )
     }
 
-    fn turn_end_recorded(&self, flow_id: &str) -> bool {
-        self.last_turn_end(flow_id).is_some()
-    }
-
     fn last_turn_end(&self, flow_id: &str) -> Option<RecordedStop> {
         let Ok(Some(events)) = self.store.events(flow_id) else {
             return None;
@@ -1282,25 +1277,72 @@ impl CorrelatesNativeEvents for RunningNexus {
     }
 }
 
+/// Where a Claude flow's own turn stands, as the source of its rest judges
+/// it (`JudgesClosingRest::claude_turn`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeTurn {
+    /// In its turn, or not known to have ended it.
+    Running,
+    /// Its turn has ended with background work it started still in flight.
+    EndedWithWorkInFlight,
+    /// Its turn has ended and nothing it started is in flight.
+    Rested,
+}
+
 /// Whether a seat rests as closing it needs: its turn has ended and no
-/// work it started is in flight. A Claude seat rests when the last of its
-/// own Stops and submitted prompts is a Stop naming no background work, and
-/// Herdr shows it resting or its transcript records its main turn's end; a
-/// Codex seat when its app-server shows its thread resting and in no turn.
-/// No reading of Herdr stands for the Stop: a seat whose Stop names work in
-/// flight is not resting, and the Stop Claude ends its turn with once that
-/// work has ended is the event of its rest.
+/// work it started is in flight. A Claude seat rests when the source of its
+/// rest has it Rested, and Herdr shows it resting or its transcript records
+/// its main turn's end; a Codex seat when its app-server shows its thread
+/// resting and in no turn. No reading of Herdr stands for the source's
+/// judgement: a seat whose turn ended with work in flight is not resting,
+/// and the turn end or work end that leaves nothing in flight is the event
+/// of its rest.
 pub(crate) trait JudgesClosingRest {
-    /// The flow's own last turn event is a Stop naming no background work.
+    /// Where the Claude flow's own turn stands, the one judgement every
+    /// reading of a Claude turn's end asks. With a Claude Harness
+    /// subscription configured it is the subscription's: the State the
+    /// Harness Nexus last told for the session the flow is bound to,
+    /// Flowing.Rested and Flowing.Waiting ended, every other State and a
+    /// session it has not told Running. With none it is the flow's own Stop
+    /// hook's: the last of its own Stops and submitted prompts is a Stop,
+    /// which names background work or names none.
+    fn claude_turn(&self, flow_id: &str) -> ClaudeTurn;
+    /// The flow's own turn has ended, with or without work in flight.
+    fn own_turn_ended(&self, flow_id: &str) -> bool;
+    /// The flow's own turn has ended and no work it started is in flight.
     fn background_settled(&self, flow_id: &str) -> bool;
     /// The flow rests now, by every evidence closing it needs.
     fn rests_for_closing(&self, flow_id: &str) -> bool;
 }
 
 impl JudgesClosingRest for RunningNexus {
+    fn claude_turn(&self, flow_id: &str) -> ClaudeTurn {
+        use crate::harness_subscription::JudgesHarnessTurns;
+        use harness::Identifiable;
+        match &self.claude_harness_subscription {
+            Some(subscription) => match self.store.flow_node(flow_id) {
+                Ok(Some(node))
+                    if node.harness_kind == HarnessKind::Claude
+                        && !node.session_id.0.is_empty() =>
+                {
+                    subscription.turn_of(&harness::SessionId(node.session_id.0).identify())
+                }
+                _ => ClaudeTurn::Running,
+            },
+            None => match self.last_turn_end(flow_id) {
+                None => ClaudeTurn::Running,
+                Some(stop) if stop.background_work.0.is_empty() => ClaudeTurn::Rested,
+                Some(_) => ClaudeTurn::EndedWithWorkInFlight,
+            },
+        }
+    }
+
+    fn own_turn_ended(&self, flow_id: &str) -> bool {
+        self.claude_turn(flow_id) != ClaudeTurn::Running
+    }
+
     fn background_settled(&self, flow_id: &str) -> bool {
-        self.last_turn_end(flow_id)
-            .is_some_and(|stop| stop.background_work.0.is_empty())
+        self.claude_turn(flow_id) == ClaudeTurn::Rested
     }
 
     fn rests_for_closing(&self, flow_id: &str) -> bool {
@@ -1642,7 +1684,7 @@ impl ReconcilesQueueDelivery for RunningNexus {
                 })
                 .filter(|flow_id| {
                     matches!(self.store.address_hold(&flow_id.0), Ok(None))
-                        && self.turn_end_recorded(&flow_id.0)
+                        && self.own_turn_ended(&flow_id.0)
                 })
                 .collect::<Vec<_>>()
         };

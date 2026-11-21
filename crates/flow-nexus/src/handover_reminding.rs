@@ -107,7 +107,7 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             HandoverReminderRules, OpensHandoverReminder, SchedulesHandoverReminders,
         };
         use crate::store::logical_delivery::RecordsLogicalDeliveries;
-        use crate::waking::{CorrelatesNativeEvents, SleepsAndWakesSeats};
+        use crate::waking::{JudgesClosingRest, SleepsAndWakesSeats};
         use meta_signal_flow::HandoverPoliciesConfiguration;
         use signal_flow::{Message, Request};
         // Discover warning windows from every awake metaflow before reading
@@ -262,7 +262,7 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             ) && match self.store.flow_node(flow_id) {
                 Ok(Some(node)) => match node.harness_kind {
                     signal_flow::HarnessKind::Codex => self.codex_resting(flow_id),
-                    signal_flow::HarnessKind::Claude => self.turn_end_recorded(flow_id),
+                    signal_flow::HarnessKind::Claude => self.own_turn_ended(flow_id),
                 },
                 _ => false,
             } {

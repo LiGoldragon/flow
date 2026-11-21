@@ -2,11 +2,14 @@
 //! configuration beside the place file; a rested turn end it tells resting
 //! the flow with the context size the Harness Nexus told, recording no
 //! harness event; and the one source of a Claude flow's rest, the
-//! subscription when one is configured, the Stop hook when none is.
+//! subscription when one is configured, the Stop hook when none is. The rest
+//! is a session's State becoming Flowing.Rested, whatever Event brought it
+//! there, and the subscription's State is the judgement of the flow's turn
+//! that closing it at rest asks.
 
 use super::waking::{
-    CLAUDE_SEAT, CLAUDE_SESSION, address, append_main_rows, claude_agent, claude_seat, end_turn,
-    maintain, metaflow, report_claude_stop, stored,
+    CLAUDE_SEAT, CLAUDE_SESSION, address, append_main_rows, claude_agent, claude_prompt_taken,
+    claude_seat, end_turn, maintain, metaflow, report_claude_stop, stored,
 };
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
 use crate::HoldsStopRequest;
@@ -15,7 +18,11 @@ use crate::generated::startup::{
     ClaudeHarnessSubscriptionPath, DaemonConfiguration, DaemonConfigurationRefusal,
 };
 use crate::generated::transitions::{AskedFlow, RecordsTransitions};
-use crate::harness_subscription::{LocatesDaemonConfiguration, SubscribesToClaudeHarness};
+use crate::harness_subscription::{
+    ClaudeHarnessSubscriber, ClaudeHarnessSubscription, HarnessObservation,
+    HoldsHarnessSubscription, KeepsHarnessSessions, LocatesDaemonConfiguration,
+    SubscribesToClaudeHarness,
+};
 use crate::store::context::RecordsContextSize;
 use crate::store::events::RecordsHarnessEvents;
 use crate::store::metaflow::SeedsMetaflow;
@@ -164,19 +171,37 @@ fn with_no_subscription_the_stop_hook_rests_the_flow() {
 }
 
 /// With a subscription configured it is the one source of the rest: the
-/// flow's own Stop is still recorded, and is its own turn end for what reads
-/// the recorded Stops, but rests nothing.
+/// flow's own Stop is still recorded, but rests nothing, and the judgement
+/// of its turn is the subscription's: while the subscription has told
+/// nothing of the session its turn is not known to have ended, and once it
+/// tells the session Rested nothing is in flight.
 #[test]
 fn with_a_subscription_the_stop_hook_is_recorded_and_rests_nothing() {
     let mut fixture = maintained_claude_seat();
-    fixture.nexus.claude_harness_subscription = Some(ClaudeHarnessSubscriptionPath(
-        "/run/user/1001/nexus/main/claude-harness-subscription.sock".into(),
+    fixture.nexus.claude_harness_subscription = Some(ClaudeHarnessSubscription::from(
+        ClaudeHarnessSubscriptionPath(
+            "/run/user/1001/nexus/main/claude-harness-subscription.sock".into(),
+        ),
     ));
     report_claude_stop(&fixture, vec![]);
     assert_eq!(recorded_stops(&fixture).len(), 2, "the Stop is recorded");
     assert!(
+        !fixture.nexus.background_settled(CLAUDE_SEAT),
+        "the recorded Stop is not the judgement of the turn"
+    );
+    fixture
+        .nexus
+        .claude_harness_subscription
+        .as_ref()
+        .unwrap()
+        .keep(&HarnessObservation::Snapshot(vec![observed(
+            harness::Flow::Rested,
+            41_234,
+            vec![],
+        )]));
+    assert!(
         fixture.nexus.background_settled(CLAUDE_SEAT),
-        "the recorded Stop is the flow's own turn end"
+        "the subscription's Rested is the judgement of the turn"
     );
     assert_eq!(
         fixture.nexus.store.context_size(CLAUDE_SEAT).unwrap(),
@@ -230,8 +255,8 @@ fn a_rested_turn_end_rests_the_flow_with_the_harness_s_context_size() {
         .directory
         .path()
         .join("claude-harness/claude-harness-subscription.sock");
-    fixture.nexus.claude_harness_subscription = Some(ClaudeHarnessSubscriptionPath(
-        socket.to_string_lossy().into_owned(),
+    fixture.nexus.claude_harness_subscription = Some(ClaudeHarnessSubscription::from(
+        ClaudeHarnessSubscriptionPath(socket.to_string_lossy().into_owned()),
     ));
     std::thread::scope(|scope| {
         let part = scope.spawn(|| fixture.nexus.keep_subscribing_to_claude_harness());
@@ -291,5 +316,244 @@ fn a_rested_turn_end_rests_the_flow_with_the_harness_s_context_size() {
             .unwrap_or_default()
             .contains("pane close w1:p3"),
         "the seat's harness is closed"
+    );
+}
+
+/// The seat's session as a snapshot shows it.
+fn observed(
+    flow: harness::Flow,
+    tokens: i64,
+    background_work_vector: Vec<harness::BackgroundWork>,
+) -> harness::Observed {
+    harness::Observed {
+        flow_id: seat_session(),
+        state: harness::State::Flowing(flow),
+        tokens: harness::Tokens(tokens),
+        background_work_vector,
+    }
+}
+
+/// The FlowId the Harness Nexus names the seat's session by.
+fn seat_session() -> flow_ethos::FlowId {
+    flow_ethos::FlowId(CLAUDE_SESSION[..6].into())
+}
+
+/// A change of the seat's session, leaving it in `flow`.
+fn changed(event: harness::Event, flow: harness::Flow) -> HarnessObservation {
+    HarnessObservation::Changed(signal_harness::Changed {
+        flow_id: seat_session(),
+        event,
+        state: harness::State::Flowing(flow),
+    })
+}
+
+fn shell_work() -> harness::BackgroundWork {
+    harness::BackgroundWork {
+        work_id: harness::WorkId("b1".into()),
+        work_kind: harness::WorkKind::Shell,
+        description: harness::Description("sleep 60".into()),
+    }
+}
+
+/// The fixture with a subscription configured, each observation taken as
+/// the subscriber takes it from its socket.
+trait TakesObservations {
+    fn subscribe(&mut self);
+    fn take_all(&self, observations: Vec<HarnessObservation>);
+}
+
+impl TakesObservations for NexusFixture {
+    fn subscribe(&mut self) {
+        self.nexus.claude_harness_subscription = Some(ClaudeHarnessSubscription::from(
+            ClaudeHarnessSubscriptionPath(
+                "/run/user/1001/nexus/main/claude-harness-subscription.sock".into(),
+            ),
+        ));
+    }
+
+    fn take_all(&self, observations: Vec<HarnessObservation>) {
+        let subscription = self
+            .nexus
+            .claude_harness_subscription
+            .as_ref()
+            .expect("a subscription configured");
+        let mut subscriber = ClaudeHarnessSubscriber {
+            nexus: &self.nexus,
+            subscription,
+            socket: std::path::PathBuf::from(&subscription.socket.0),
+            unheld: Default::default(),
+        };
+        for observation in observations {
+            subscriber.take(observation);
+        }
+    }
+}
+
+/// An OnDemand Claude seat with nothing queued, whose successor composes,
+/// its transcript showing 40,000, its own session having taken a prompt
+/// after its last Stop: no Stop hook marks its turn's end.
+fn on_demand_seat_in_its_turn() -> NexusFixture {
+    let mut fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    claude_seat(&fixture, 40_000);
+    claude_prompt_taken(&fixture);
+    super::refresh_and_compaction::declare_seat(
+        &fixture,
+        meta_signal_flow::Continuity::OnDemand,
+        vec!["spirit:core:0".into(), "intent:flow:0".into()],
+    );
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Model::Sol,
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        vec![],
+        vec![],
+    ));
+    fixture.subscribe();
+    fixture
+}
+
+fn slept(fixture: &NexusFixture) -> bool {
+    let metaflow = stored(fixture, Model::Sol);
+    metaflow.state == State::Asleep
+        && metaflow.past == flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.to_owned())])
+        && std::fs::read_to_string(fixture.directory.path().join("herdr-operations.log"))
+            .unwrap_or_default()
+            .contains("pane close w1:p3")
+}
+
+/// A turn that ends with background work in flight leaves the session
+/// Waiting: no rest, and the seat stays awake. The WorkEnded that ends the
+/// last of that work brings it to Rested: that is the flow's rest, and the
+/// OnDemand seat with nothing queued sleeps.
+#[test]
+fn a_work_end_that_brings_waiting_to_rested_rests_the_flow() {
+    let fixture = on_demand_seat_in_its_turn();
+    fixture.take_all(vec![
+        HarnessObservation::Snapshot(vec![observed(
+            harness::Flow::Working,
+            41_234,
+            vec![shell_work()],
+        )]),
+        changed(harness::Event::TurnEnded, harness::Flow::Waiting),
+    ]);
+    assert_eq!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
+        "a turn ended Waiting is no rest"
+    );
+    assert_eq!(fixture.nexus.store.context_size(CLAUDE_SEAT).unwrap(), None);
+    assert!(!fixture.nexus.background_settled(CLAUDE_SEAT));
+    fixture.take_all(vec![changed(
+        harness::Event::WorkEnded(harness::WorkId("b1".into())),
+        harness::Flow::Rested,
+    )]);
+    assert_eq!(
+        fixture.nexus.store.context_size(CLAUDE_SEAT).unwrap(),
+        Some(41_234),
+        "the rest wrote the harness's size"
+    );
+    assert!(slept(&fixture), "the resting seat sleeps");
+    assert_eq!(recorded_stops(&fixture).len(), 1, "no Stop is recorded");
+}
+
+/// Escape ends a turn with no Stop hook: the Harness Nexus tells it
+/// Interrupted, Flowing.Rested. That rests the flow, and the subscription's
+/// Rested is the judgement that nothing is in flight, so the OnDemand seat
+/// with nothing queued sleeps as it would after a hook Stop.
+#[test]
+fn an_interrupted_turn_with_no_stop_hook_rests_and_sleeps_an_on_demand_seat() {
+    let fixture = on_demand_seat_in_its_turn();
+    fixture.take_all(vec![
+        HarnessObservation::Snapshot(vec![observed(harness::Flow::Working, 41_234, vec![])]),
+        changed(harness::Event::Interrupted, harness::Flow::Rested),
+    ]);
+    assert_eq!(recorded_stops(&fixture).len(), 1, "no Stop hook ran");
+    assert_eq!(
+        fixture.nexus.store.context_size(CLAUDE_SEAT).unwrap(),
+        Some(41_234)
+    );
+    assert!(slept(&fixture), "the resting seat sleeps");
+}
+
+/// A Changed that leaves a Rested session Rested is no rest: a ContextSize
+/// or a Responded after the rest rests nothing again, though the size is
+/// kept for the next rest, which writes it.
+#[test]
+fn a_context_size_while_rested_does_not_rest_again() {
+    let mut fixture = maintained_claude_seat();
+    fixture.subscribe();
+    fixture.take_all(vec![
+        HarnessObservation::Snapshot(vec![observed(harness::Flow::Working, 41_234, vec![])]),
+        changed(harness::Event::TurnEnded, harness::Flow::Rested),
+    ]);
+    assert_eq!(
+        fixture.nexus.store.context_size(CLAUDE_SEAT).unwrap(),
+        Some(41_234),
+        "the rest wrote the harness's size"
+    );
+    fixture.take_all(vec![
+        changed(
+            harness::Event::ContextSize(harness::Tokens(52_000)),
+            harness::Flow::Rested,
+        ),
+        changed(
+            harness::Event::Responded(harness::Response("done".into())),
+            harness::Flow::Rested,
+        ),
+    ]);
+    assert_eq!(
+        fixture.nexus.store.context_size(CLAUDE_SEAT).unwrap(),
+        Some(41_234),
+        "no rest wrote the size told while Rested"
+    );
+    fixture.take_all(vec![
+        changed(harness::Event::PromptSubmitted, harness::Flow::Working),
+        changed(harness::Event::TurnEnded, harness::Flow::Rested),
+    ]);
+    assert_eq!(
+        fixture.nexus.store.context_size(CLAUDE_SEAT).unwrap(),
+        Some(52_000),
+        "the next rest writes the size kept"
+    );
+}
+
+/// A session a snapshot shows Rested is the flow's rest when Flow's own
+/// record does not show the flow Resting, a rest missed while no
+/// connection was open; when it does, the rest was taken already and is not
+/// taken again.
+#[test]
+fn a_session_found_rested_rests_a_flow_not_yet_resting_once() {
+    let mut fixture = maintained_claude_seat();
+    fixture.subscribe();
+    assert_ne!(
+        the_seat_s_state(&fixture),
+        Some(meta_signal_flow::State::Resting)
+    );
+    fixture.take_all(vec![HarnessObservation::Snapshot(vec![observed(
+        harness::Flow::Rested,
+        41_234,
+        vec![],
+    )])]);
+    assert_eq!(
+        the_seat_s_state(&fixture),
+        Some(meta_signal_flow::State::Resting),
+        "the missed rest is taken"
+    );
+    assert_eq!(
+        fixture.nexus.store.context_size(CLAUDE_SEAT).unwrap(),
+        Some(41_234)
+    );
+    fixture.take_all(vec![HarnessObservation::Snapshot(vec![observed(
+        harness::Flow::Rested,
+        52_000,
+        vec![],
+    )])]);
+    assert_eq!(
+        fixture.nexus.store.context_size(CLAUDE_SEAT).unwrap(),
+        Some(41_234),
+        "a flow already Resting is not rested again"
     );
 }

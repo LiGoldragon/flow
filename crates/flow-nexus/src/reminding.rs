@@ -2,9 +2,9 @@
 //! asked for by Remind. Each is held in Flow's Memory (`store::reminder`,
 //! `store::scheduled_reminder`), so a refresh of the reminded metaflow or a
 //! restart of the Nexus keeps it. A Task's reminder due is queued for its
-//! metaflow as Soft.Notice, as from Flow; a reminder asked for is queued for
-//! the Address it names as MiddleAbrupt `Reminder.{ RequestId String }`,
-//! from whoever asked. Each is woken or handed over as any waking request
+//! sender as Soft `Reminder.{ RequestId String }`, from Flow, naming the
+//! task by its id; a reminder asked for is queued for the Address it names
+//! as MiddleAbrupt `Reminder.{ RequestId String }`, from whoever asked. Each is woken or handed over as any waking request
 //! is.
 
 use crate::HoldsStopRequest;
@@ -72,31 +72,28 @@ impl RemindsCallers for RunningNexus {
                 }
             };
             for reminder in due {
-                let Some(task_words) = retained.iter().find_map(|request| {
+                let Some(task) = retained.iter().find_map(|request| {
                     if request.entry.logical_delivery_id != reminder.logical_delivery_id {
                         return None;
                     }
-                    let request = match &request.entry.message {
-                        Message::HardAbrupt(request)
-                        | Message::MiddleAbrupt(request)
-                        | Message::Soft(request) => request,
-                    };
-                    match request {
-                        Request::Task(task) => Some(task.string.as_str()),
-                        _ => None,
-                    }
+                    let (Message::HardAbrupt(kind)
+                    | Message::MiddleAbrupt(kind)
+                    | Message::Soft(kind)) = &request.entry.message;
+                    matches!(kind, Request::Task(_)).then_some(&request.entry.request_id)
                 }) else {
                     eprintln!("flow-nexus: a reminder's retained task was unreadable");
                     continue;
                 };
-                let (sent, next) = reminder.advanced(task_words, now);
+                let (sent, next) = reminder.advanced(task, now);
                 if let Some(sent) = sent {
+                    use crate::request_waking::WakesSleepingPermaflow;
                     let address = sent.address;
+                    let message = Message::Soft(Request::Reminder(sent.reminder));
                     match self.store.accept_logical_delivery(
                         &address,
                         SentBy::Flow,
-                        flow_ethos::Delivery::Queue,
-                        Message::Soft(Request::Notice(sent.notice)),
+                        message.queued_delivery(),
+                        message,
                         None,
                     ) {
                         Ok(signal_flow::PrivateSendResponse::SendAccepted(_)) => {

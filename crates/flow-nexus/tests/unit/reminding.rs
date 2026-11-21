@@ -20,14 +20,24 @@ fn at(aspect: Aspect, topic: &str, model: Model) -> Address {
     }
 }
 
-fn notices(queue: &[QueueEntry]) -> Vec<(SentBy, String)> {
+fn reminders(queue: &[QueueEntry]) -> Vec<(SentBy, flow_ethos::Reminder_Data)> {
     queue
         .iter()
         .map(|entry| match &entry.message {
-            Message::Soft(Request::Notice(notice)) => (entry.sent_by.clone(), notice.clone()),
-            other => panic!("a reminder is a Soft Notice: {other:?}"),
+            Message::Soft(Request::Reminder(reminder)) => {
+                (entry.sent_by.clone(), reminder.clone())
+            }
+            other => panic!("a task's reminder is a Soft Reminder: {other:?}"),
         })
         .collect()
+}
+
+/// The reminder of the task answered `task`: its id and one short line.
+fn reminder_of(task: &flow_ethos::RequestId, line: &str) -> flow_ethos::Reminder_Data {
+    flow_ethos::Reminder_Data {
+        request_id: task.clone(),
+        string: line.into(),
+    }
 }
 
 /// The last reminder of a Task sent by a Haiku seat queues, for that very
@@ -90,11 +100,15 @@ fn a_tasks_last_reminder_goes_alone_to_the_tasks_own_sender() {
         .unwrap()
         .queue;
     assert_eq!(
-        notices(&told.0),
+        reminders(&told.0),
         vec![(
             SentBy::Flow,
-            "Reminder 1 of 1: the task of 10 minutes, Review the fix, to Mind remindedWork Sol has no Done after 10 minutes.".to_owned()
-        )]
+            reminder_of(
+                &acceptance.request_id,
+                "The task to Mind remindedWork Sol has no Done after 10 minutes."
+            )
+        )],
+        "the reminder names the task by its id, not by its text"
     );
     let spent = fixture
         .nexus
@@ -210,15 +224,14 @@ fn a_task_is_reminded_once_when_its_minutes_pass() {
         .unwrap()
         .unwrap()
         .queue;
-    let reminders = notices(&told.0)
-        .into_iter()
-        .filter(|(_, notice)| notice.starts_with("Reminder "))
-        .collect::<Vec<_>>();
     assert_eq!(
-        reminders,
+        reminders(&told.0),
         vec![(
             SentBy::Flow,
-            "Reminder 1 of 1: the task of 10 minutes, Review the fix, to Mind remindedOnceWork Sol has no Done after 10 minutes.".to_owned()
+            reminder_of(
+                &acceptance.request_id,
+                "The task to Mind remindedOnceWork Sol has no Done after 10 minutes."
+            )
         )]
     );
     let spent = fixture
@@ -340,11 +353,16 @@ fn a_task_a_seat_sent_itself_is_reminded_once_with_no_loop() {
     let queue = fixture.nexus.store.metaflow(&seat).unwrap().unwrap().queue;
     assert_eq!(queue.0.len(), 2, "the task and its one reminder");
     assert_eq!(queue.0[0].logical_delivery_id, key);
-    let reminders = notices(&queue.0[1..]);
-    assert_eq!(reminders.len(), 1, "the reminder is told once");
-    assert!(
-        reminders[0].1.starts_with("Reminder 1 of 1:"),
-        "{reminders:?}"
+    assert_eq!(
+        reminders(&queue.0[1..]),
+        vec![(
+            SentBy::Flow,
+            reminder_of(
+                &acceptance.request_id,
+                "The task to Mind selfTask Sol has no Done after 5 minutes."
+            )
+        )],
+        "the reminder is told once"
     );
     assert_eq!(
         fixture

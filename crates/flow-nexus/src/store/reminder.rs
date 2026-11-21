@@ -3,8 +3,9 @@
 //!
 //! A Task is an order with its minutes, kept under the id Flow answered its
 //! send with. When its minutes lapse with no Done naming it, its sender is
-//! reminded, then again every interval, `TASK_REMINDERS` reminders in all.
-//! A Done naming the task closes it.
+//! reminded, `TASK_REMINDERS` reminders in all, each a
+//! `Reminder.{ RequestId String }` naming the task by its id with one short
+//! line. A Done naming the task closes it.
 
 use super::AnnouncesLaunchChanges;
 use super::{FlowStore, StoreError};
@@ -86,18 +87,28 @@ impl DescribesReminderTable for Reminder {
 pub struct DueReminder {
     /// The task's sender, as Flow recorded it when it admitted the task.
     pub address: Address,
-    pub notice: String,
+    /// The task's own RequestId and one short line, never the task's text.
+    pub reminder: flow_ethos::Reminder_Data,
 }
 
 /// The reminder due at `now`, and its next state. A reminder that has
 /// already sent `TASK_REMINDERS`, as one held from a release that sent more
 /// may have, is spent: it sends nothing and falls due no more.
 pub trait AdvancesReminder {
-    fn advanced(&self, task_words: &str, now: i64) -> (Option<DueReminder>, Option<Reminder>);
+    /// `task` is the RequestId the task was answered with.
+    fn advanced(
+        &self,
+        task: &flow_ethos::RequestId,
+        now: i64,
+    ) -> (Option<DueReminder>, Option<Reminder>);
 }
 
 impl AdvancesReminder for Reminder {
-    fn advanced(&self, task_words: &str, now: i64) -> (Option<DueReminder>, Option<Reminder>) {
+    fn advanced(
+        &self,
+        task: &flow_ethos::RequestId,
+        now: i64,
+    ) -> (Option<DueReminder>, Option<Reminder>) {
         if self.sent.0 >= TASK_REMINDERS {
             let spent = Reminder {
                 due_option: None,
@@ -107,10 +118,8 @@ impl AdvancesReminder for Reminder {
         }
         let sent = self.sent.0 + 1;
         let last = sent >= TASK_REMINDERS;
-        let notice = format!(
-            "Reminder {sent} of {TASK_REMINDERS}: the task of {} minutes, {}, to {} has no Done after {} minutes.",
-            self.minutes.0,
-            task_words,
+        let line = format!(
+            "The task to {} has no Done after {} minutes.",
             self.recipient.0.named(),
             self.minutes.0 * sent,
         );
@@ -122,7 +131,10 @@ impl AdvancesReminder for Reminder {
         (
             Some(DueReminder {
                 address: self.address.clone(),
-                notice,
+                reminder: flow_ethos::Reminder_Data {
+                    request_id: task.clone(),
+                    string: line,
+                },
             }),
             Some(next),
         )
@@ -243,17 +255,22 @@ mod tests {
             due_option: Some(crate::generated::memory::Due(600)),
             sent: crate::generated::memory::Sent(0),
         };
-        let (due, next) = reminder.advanced("Review the fix", 600);
+        let task = flow_ethos::RequestId("k7ph".into());
+        let (due, next) = reminder.advanced(&task, 600);
         let due = due.expect("the first reminder is sent");
         assert_eq!(due.address, address(Model::Sonnet));
         let spent = next.expect("a task stays open for its Done");
         assert_eq!(spent.sent, crate::generated::memory::Sent(TASK_REMINDERS));
         assert_eq!(spent.due_option, None, "no second reminder falls due");
         assert_eq!(
-            due.notice,
-            "Reminder 1 of 1: the task of 10 minutes, Review the fix, to Field core Sol has no Done after 10 minutes."
+            due.reminder,
+            flow_ethos::Reminder_Data {
+                request_id: task,
+                string: "The task to Field core Sol has no Done after 10 minutes.".into(),
+            },
+            "the reminder names the task by its id, not by its text"
         );
-        assert!(!due.notice.contains("logical-delivery-1"));
+        assert!(!due.reminder.string.contains("logical-delivery-1"));
     }
 
     /// A reminder held from a release that sent more, already past its
@@ -268,7 +285,7 @@ mod tests {
             due_option: Some(crate::generated::memory::Due(1200)),
             sent: crate::generated::memory::Sent(2),
         };
-        let (due, next) = reminder.advanced("Review the fix", 1200);
+        let (due, next) = reminder.advanced(&flow_ethos::RequestId("k7ph".into()), 1200);
         assert_eq!(due, None);
         assert_eq!(
             next,

@@ -729,6 +729,7 @@ pub enum AttemptMembership {
     ByLogicalDelivery(ByLogicalDelivery_Data),
     ByAddress(AddressAttempt),
     Unsettled(AddressAttempt),
+    Unfinished(AddressAttempt),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

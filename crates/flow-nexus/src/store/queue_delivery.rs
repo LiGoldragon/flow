@@ -449,12 +449,9 @@ impl ReadsQueueDelivery for FlowStore {
         &self,
         address: &Address,
     ) -> Result<Option<QueueDeliveryAttempt>, StoreError> {
-        // Every unfinished attempt is unsettled.
-        let attempts = self.member_attempts(MembershipOwner::UnsettledAt(address))?;
+        // The range holds this Address's unfinished attempts exactly.
+        let attempts = self.member_attempts(MembershipOwner::UnfinishedAt(address))?;
         let mut matching = attempts.into_iter().filter_map(|attempt| {
-            if &attempt.address != address || attempt.queue_delivery_phase.is_finished() {
-                return None;
-            }
             match self.request_state(&attempt.queue_request_id.0) {
                 Ok(Some(RequestState::Parked)) => None,
                 Ok(_) => Some(Ok(attempt)),
@@ -1408,7 +1405,7 @@ impl AccountsQueueDelivery for FlowStore {
 
     fn recover_outstanding_deliveries(&self) -> Result<Vec<QueueDeliveryAttempt>, StoreError> {
         let mut outstanding = Vec::new();
-        for mut attempt in self.member_attempts(MembershipOwner::Unsettled)? {
+        for mut attempt in self.member_attempts(MembershipOwner::Unfinished)? {
             if self.request_state(&attempt.queue_request_id.0)? == Some(RequestState::Parked)
                 && (matches!(attempt.queue_evidence, QueueEvidence::Legacy(_))
                     || attempt.queue_request_id.0.starts_with("legacy:"))
@@ -1788,7 +1785,7 @@ mod tests {
         let (fixture, store) = Fixture::new();
         let prepared = prepare_codex(&store);
         assert_eq!(store.membership_keys(), store.expected_membership_keys());
-        assert_eq!(store.membership_keys().len(), 3);
+        assert_eq!(store.membership_keys().len(), 4);
         assert!(
             store
                 .record_delivery_receipt(&prepared.queue_attempt_id.0, receipt(&prepared))
@@ -1822,6 +1819,94 @@ mod tests {
             retained
         );
         assert_eq!(reopened.membership_keys().len(), 2);
+    }
+
+    #[test]
+    fn the_unfinished_family_holds_prepared_receipt_recorded_and_uncertain_alone() {
+        use super::super::attempt_membership::{KeepsAttemptMemberships, MembershipOwner};
+        let (_fixture, store) = Fixture::new();
+        let prepared = prepare_codex(&store);
+        let absent = QueueDeliveryPhase::Absent(crate::generated::memory::AbsenceRecord {
+            absence_proof: meta_signal_flow::AbsenceProof::HandOverRefused,
+            observation: crate::generated::memory::Observation("fixture absence".into()),
+        });
+        let write = |id: &str, at: Address, phase: QueueDeliveryPhase| {
+            let mut attempt = prepared.clone();
+            attempt.queue_attempt_id = meta_signal_flow::QueueAttemptId(id.into());
+            attempt.address = at;
+            attempt.queue_delivery_phase = phase;
+            store
+                .engine
+                .commit_atomic(
+                    store
+                        .commit_attempt(store.engine.begin_atomic_commit(), attempt)
+                        .unwrap(),
+                )
+                .unwrap();
+        };
+        let elsewhere = Address {
+            aspect: Aspect::Field,
+            topic: flow_ethos::Topic("elsewhere".into()),
+            model: Model::Sol,
+        };
+        write(
+            "phase-uncertain",
+            address(),
+            QueueDeliveryPhase::Uncertain(None),
+        );
+        write(
+            "phase-receipt",
+            address(),
+            QueueDeliveryPhase::ReceiptRecorded(receipt(&prepared)),
+        );
+        write(
+            "phase-settled",
+            address(),
+            QueueDeliveryPhase::Settled(receipt(&prepared)),
+        );
+        write("phase-absent", address(), absent.clone());
+        write(
+            "phase-elsewhere",
+            elsewhere.clone(),
+            QueueDeliveryPhase::Uncertain(None),
+        );
+        fn ids(store: &FlowStore, owner: MembershipOwner<'_>) -> Vec<String> {
+            store
+                .member_attempts(owner)
+                .unwrap()
+                .into_iter()
+                .map(|attempt| attempt.queue_attempt_id.0)
+                .collect()
+        }
+        let mut here = vec![
+            prepared.queue_attempt_id.0.clone(),
+            "phase-receipt".to_owned(),
+            "phase-uncertain".to_owned(),
+        ];
+        here.sort();
+        assert_eq!(ids(&store, MembershipOwner::UnfinishedAt(&address())), here);
+        assert_eq!(
+            ids(&store, MembershipOwner::UnfinishedAt(&elsewhere)),
+            ["phase-elsewhere"]
+        );
+        assert_eq!(ids(&store, MembershipOwner::Unfinished).len(), 4);
+        // Absent is unsettled and finished: the two families part on it.
+        assert_eq!(
+            ids(&store, MembershipOwner::UnsettledAt(&address())).len(),
+            4
+        );
+        assert_eq!(store.membership_keys(), store.expected_membership_keys());
+        // An attempt that finishes leaves the family in the same commit.
+        write("phase-uncertain", address(), absent);
+        assert_eq!(
+            ids(&store, MembershipOwner::UnfinishedAt(&address())).len(),
+            2
+        );
+        assert_eq!(
+            ids(&store, MembershipOwner::UnsettledAt(&address())).len(),
+            5
+        );
+        assert_eq!(store.membership_keys(), store.expected_membership_keys());
     }
 
     #[test]

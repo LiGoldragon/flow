@@ -9,8 +9,8 @@
 //! in one finite pass, before anything reads them, and the pass is recorded
 //! as built in the same commit, so every later open skips it.
 
-use super::queue_delivery::{QueueDeliveryAttempt, QueueDeliveryPhase};
-use super::{FlowStore, StoreError};
+use super::queue_delivery::{EndsQueueDeliveryPhase, QueueDeliveryAttempt, QueueDeliveryPhase};
+use super::{FlowStore, ReadsFlowMemory, StoreError};
 pub(crate) use crate::generated::memory::{
     AddressAttempt, AttemptMembership, AttemptMembershipBuilt, ByLogicalDelivery_Data,
     IndexedAttempts,
@@ -44,19 +44,27 @@ pub(crate) enum MembershipOwner<'owner> {
     UnsettledAt(&'owner Address),
     /// Every unsettled attempt, at every Address.
     Unsettled,
+    UnfinishedAt(&'owner Address),
+    /// Every unfinished attempt, at every Address.
+    Unfinished,
 }
 
-impl MembershipOwner<'_> {
+/// The key range one owner's memberships fill.
+pub(crate) trait Ranges {
+    fn prefix(&self) -> String;
+    fn range(&self) -> KeyRange;
+}
+
+impl Ranges for MembershipOwner<'_> {
     fn prefix(&self) -> String {
+        let at = |address: &Address| <FlowStore as ReadsFlowMemory>::address_record_key(address);
         match self {
             Self::LogicalDelivery(id) => format!("logical:{}:{}:", id.len(), id),
-            Self::Address(address) => {
-                format!("address:{}:", FlowStore::address_record_key(address))
-            }
-            Self::UnsettledAt(address) => {
-                format!("unsettled:{}:", FlowStore::address_record_key(address))
-            }
+            Self::Address(address) => format!("address:{}:", at(address)),
+            Self::UnsettledAt(address) => format!("unsettled:{}:", at(address)),
             Self::Unsettled => "unsettled:".to_owned(),
+            Self::UnfinishedAt(address) => format!("unfinished:{}:", at(address)),
+            Self::Unfinished => "unfinished:".to_owned(),
         }
     }
 
@@ -69,11 +77,19 @@ impl MembershipOwner<'_> {
     }
 }
 
-impl AttemptMembership {
+/// The attempt a membership names and the owner it belongs to.
+pub(crate) trait NamesItsAttempt {
+    fn attempt_id(&self) -> &str;
+    fn owner(&self) -> MembershipOwner<'_>;
+}
+
+impl NamesItsAttempt for AttemptMembership {
     fn attempt_id(&self) -> &str {
         match self {
             Self::ByLogicalDelivery(member) => &member.queue_attempt_id.0,
-            Self::ByAddress(member) | Self::Unsettled(member) => &member.queue_attempt_id.0,
+            Self::ByAddress(member) | Self::Unsettled(member) | Self::Unfinished(member) => {
+                &member.queue_attempt_id.0
+            }
         }
     }
 
@@ -84,6 +100,7 @@ impl AttemptMembership {
             }
             Self::ByAddress(member) => MembershipOwner::Address(&member.address),
             Self::Unsettled(member) => MembershipOwner::UnsettledAt(&member.address),
+            Self::Unfinished(member) => MembershipOwner::UnfinishedAt(&member.address),
         }
     }
 }
@@ -131,7 +148,7 @@ impl BelongsToOwners for QueueDeliveryAttempt {
             address: self.address.clone(),
             queue_attempt_id: self.queue_attempt_id.clone(),
         };
-        let mut memberships = Vec::with_capacity(3);
+        let mut memberships = Vec::with_capacity(4);
         // A legacy attempt has no authoritative logical delivery.
         if let QueueEvidence::Logical(entry) = &self.queue_evidence {
             memberships.push(AttemptMembership::ByLogicalDelivery(
@@ -146,6 +163,9 @@ impl BelongsToOwners for QueueDeliveryAttempt {
             QueueDeliveryPhase::Settled(_) | QueueDeliveryPhase::Read { .. }
         ) {
             memberships.push(AttemptMembership::Unsettled(at_address.clone()));
+        }
+        if !self.queue_delivery_phase.is_finished() {
+            memberships.push(AttemptMembership::Unfinished(at_address.clone()));
         }
         memberships.push(AttemptMembership::ByAddress(at_address));
         memberships
@@ -251,7 +271,7 @@ impl KeepsAttemptMemberships for FlowStore {
                     .ok_or(StoreError::StateInvariant)?,
             );
         }
-        // Keys of the whole unsettled family run Address by Address.
+        // Keys of a whole family run Address by Address.
         attempts.sort_by(|left, right| left.queue_attempt_id.cmp(&right.queue_attempt_id));
         #[cfg(test)]
         assert_eq!(
@@ -357,6 +377,10 @@ impl FlowStore {
                     attempt.address == **address && unsettled(attempt)
                 }
                 MembershipOwner::Unsettled => unsettled(attempt),
+                MembershipOwner::UnfinishedAt(address) => {
+                    attempt.address == **address && !attempt.queue_delivery_phase.is_finished()
+                }
+                MembershipOwner::Unfinished => !attempt.queue_delivery_phase.is_finished(),
             })
             .cloned()
             .collect();

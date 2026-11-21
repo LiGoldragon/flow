@@ -257,10 +257,12 @@ Memory
   ; owner and the attempt, so a reader visits one owner's attempts alone.
   ; ByLogicalDelivery: an attempt handed one logical delivery. ByAddress: an
   ; attempt at an Address. Unsettled: an Address's attempt in any phase but
-  ; Settled and Read.
+  ; Settled and Read. Unfinished: an Address's attempt Prepared,
+  ; ReceiptRecorded or Uncertain.
   AttemptMembership.[ ByLogicalDelivery.{ LogicalDeliveryId QueueAttemptId }
                       ByAddress.AddressAttempt
-                      Unsettled.AddressAttempt ]
+                      Unsettled.AddressAttempt
+                      Unfinished.AddressAttempt ]
   ; The membership build's completion, written once with the memberships of
   ; every attempt the store held: how many attempts it indexed.
   AttemptMembershipBuilt.{ IndexedAttempts.Integer }

@@ -134,42 +134,40 @@ impl RecordsReports for RunningNexus {
         // compaction its harness made on its own; SessionStart follows one
         // at once.
         crate::compacting::WatchesCompactions::watch_claude_compactions(self, &flow_id.0);
-        // A Stop in the flow's own session ends the turn that took what was
-        // typed into it: those hand-overs are settled first, each arrival
-        // recorded before the rest that ends its turn, so the flow's last
-        // transition is that rest.
-        if let Event::Stopped(stop) = event
-            && self.correlated_stop(&flow_id.0, stop)
-        {
+        // Receipt settlement and a reported transition belong to one
+        // dispatch: a Soft admission must see the committed native rest
+        // only after the previous turn's receipt has settled.
+        let committed_rest = if matches!(event, Event::ToolUsed(_)) {
+            false
+        } else {
             let _turn = self
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Ok(Some(metaflow)) = self.store.metaflow_awake_as(&flow_id.0) {
+            if let Event::Stopped(stop) = event
+                && self.correlated_stop(&flow_id.0, stop)
+                && let Ok(Some(metaflow)) = self.store.metaflow_awake_as(&flow_id.0)
+            {
                 self.settle_turn_receipts(&metaflow.address);
             }
-        }
-        // The report is typed into its Event and recorded as the flow's
-        // transition before anything else it sets going; a tool boundary is
-        // recorded once its context is observed, below.
-        if !matches!(event, Event::ToolUsed(_))
-            && let Some(typed) = self.claude_event(ClaudeReport {
+            self.claude_event(ClaudeReport {
                 flow_id: flow_id.clone(),
                 hook_event: event.clone(),
             })
+            .is_some_and(|typed| {
+                let rests = matches!(typed, crate::generated::memory::Event::Idle(_));
+                self.report_event(ReportedEvent {
+                    flow_id: flow_id.clone(),
+                    event: typed,
+                }) && rests
+            })
+        };
+        // A resume at rest needs no second Stop for its queued work.
+        if committed_rest
+            && matches!(event, Event::Started(_))
+            && let Ok(Some(metaflow)) = self.store.metaflow_awake_as(&flow_id.0)
         {
-            // A session started again at its rest (a restart's resume) has
-            // had its idle event: what waits for its rest is handed over.
-            let resumed_at_rest = matches!(event, Event::Started(_))
-                && matches!(typed, crate::generated::memory::Event::Idle(_));
-            self.report_event(ReportedEvent {
-                flow_id: flow_id.clone(),
-                event: typed,
-            });
-            if resumed_at_rest && let Ok(Some(metaflow)) = self.store.metaflow_awake_as(&flow_id.0)
-            {
-                self.drain_awake(&metaflow.address);
-            }
+            self.drain_awake(&metaflow.address);
         }
         match event {
             // The flow's own Claude session ended: it has exited, its locks
@@ -246,7 +244,9 @@ impl RecordsReports for RunningNexus {
                             flow_id = flow_id.0
                         ),
                     }
-                    self.settle_stopped(&flow_id.0);
+                    if committed_rest {
+                        self.settle_stopped(&flow_id.0);
+                    }
                 } else {
                     eprintln!(
                         "flow-nexus: a Stop reported for flow {flow_id} names session {:?}, not its own; it settles nothing",

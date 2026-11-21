@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn a_family_declaration_is_one_inline_datom_carrying_the_whole_family() {
         let client = FlowMetaClient;
-        let datom = "Configure.Metaflows.[ { { Field core Astra } None [ CodexAgentsMd CodexSkillListing ] [ spirit:core:0 ] [] Regular Default OnDemand «» [] Default } { { Psyche flow Opus } None [ SkillTool WorkflowTool ClaudeMd ] [ spirit:core:0 ] [] Regular Default OnDemand «» [] Default } ]";
+        let datom = "Configure.Metaflows.[ { { Field core Astra } None [ CodexAgentsMd CodexSkillListing ] [ spirit:core:0 ] [] Regular Default OnDemand Automatic «» [] Default } { { Psyche flow Opus } None [ SkillTool WorkflowTool ClaudeMd ] [ spirit:core:0 ] [] Regular Default OnDemand Automatic «» [] Default } ]";
         let query = client
             .parse_query([datom.to_owned()].into_iter())
             .expect("Metaflows declaration parses");
@@ -406,6 +406,7 @@ mod tests {
                     _ => ToolSet::Explicit(vec!["Bash".into(), "ToolSearch".into()]),
                 },
                 continuity: meta_signal_flow::Continuity::OnDemand,
+                refresh_mode: meta_signal_flow::RefreshMode::Automatic,
                 purpose: meta_signal_flow::Purpose(format!("Prints page {index}.")),
                 records: meta_signal_flow::Records(vec![]),
             })

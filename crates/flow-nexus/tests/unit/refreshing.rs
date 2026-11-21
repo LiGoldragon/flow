@@ -84,6 +84,7 @@ fn declare(fixture: &NexusFixture, at: Address) {
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
             continuity: Continuity::OnDemand,
+            refresh_mode: meta_signal_flow::RefreshMode::Automatic,
             purpose: meta_signal_flow::Purpose(String::new()),
             records: meta_signal_flow::Records(vec![]),
         }]))
@@ -159,7 +160,7 @@ fn requests(metaflow: &Metaflow) -> Vec<Request> {
 /// is Asleep with its queue kept, and no successor is started: a Notice
 /// wakes nothing.
 #[test]
-fn a_refresh_ends_the_awake_flow_without_a_turn_and_leaves_the_metaflow_asleep() {
+fn an_explicit_refresh_ends_the_manual_awake_flow_without_a_turn() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![claude_agent(&fixture)],
@@ -170,6 +171,14 @@ fn a_refresh_ends_the_awake_flow_without_a_turn_and_leaves_the_metaflow_asleep()
         vec![Request::Notice("Kept for the next flow.".into())],
     );
     declare(&fixture, seat_address());
+    fixture
+        .nexus
+        .store
+        .configure_change(ConfigurationChange::Amend(meta_signal_flow::Amend_Data {
+            address: seat_address(),
+            change: meta_signal_flow::Change::RefreshMode(meta_signal_flow::RefreshMode::Manual),
+        }))
+        .unwrap();
 
     assert_eq!(
         fixture

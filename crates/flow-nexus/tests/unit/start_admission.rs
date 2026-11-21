@@ -110,6 +110,7 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
             continuity: meta_signal_flow::Continuity::OnDemand,
+            refresh_mode: meta_signal_flow::RefreshMode::Automatic,
             purpose: meta_signal_flow::Purpose(String::new()),
             records: meta_signal_flow::Records(vec![]),
         };

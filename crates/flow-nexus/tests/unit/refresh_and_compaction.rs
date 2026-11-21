@@ -175,6 +175,7 @@ pub(super) fn declare_seat(
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
             continuity,
+            refresh_mode: meta_signal_flow::RefreshMode::Automatic,
             purpose: meta_signal_flow::Purpose(String::new()),
             records: meta_signal_flow::Records(vec![]),
         }]))
@@ -671,6 +672,134 @@ fn an_idle_on_demand_seat_is_refreshed_only_past_its_threshold() {
         assert_eq!(seat_metaflow_now(&fixture).state, State::Asleep);
         assert!(closed(&fixture), "{tokens}");
     }
+}
+
+#[test]
+fn manual_on_demand_keeps_cold_context_and_drains_work_to_the_same_seat() {
+    use crate::store::handover_reminders::SchedulesHandoverReminders;
+    use crate::store::logical_delivery::RecordsLogicalDeliveries;
+    use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    claude_seat(&fixture, 230_000);
+    let mut old_turn = end_turn("cold-turn");
+    old_turn["timestamp"] = serde_json::Value::String("2020-01-01T00:00:00.000Z".into());
+    append_main_rows(&fixture, &[old_turn]);
+    seat_warned_at(&fixture, 200_000, "automatic threshold warning");
+    declare_seat(&fixture, Continuity::OnDemand, vec!["spirit:core:0".into()]);
+    seat_metaflow(&fixture, vec![]);
+    owe_staged_successor(&fixture);
+    let at = seat_address();
+    let generation = fixture
+        .nexus
+        .store
+        .ensure_live_handover(&at, CLAUDE_SEAT)
+        .unwrap()
+        .handover_generation;
+    fixture
+        .nexus
+        .store
+        .hold_handover_reminder(crate::generated::memory::HandoverReminder {
+            address: at.clone(),
+            handover_generation: generation.clone(),
+            model_name: flow_ethos::ModelName(CLAUDE_MODEL.into()),
+            opened_at: crate::generated::memory::OpenedAt(0),
+            next_due: crate::generated::memory::NextDue(0),
+            sent: crate::generated::memory::Sent(0),
+            every_minutes: meta_signal_flow::EveryMinutes(5),
+            reminder_text: meta_signal_flow::ReminderText("old automatic warning".into()),
+        })
+        .unwrap();
+    let change = ConfigurationChange::Amend(meta_signal_flow::Amend_Data {
+        address: at.clone(),
+        change: meta_signal_flow::Change::RefreshMode(meta_signal_flow::RefreshMode::Manual),
+    });
+    fixture.nexus.store.configure_change(change).unwrap();
+    assert_eq!(
+        fixture.nexus.store.refresh_mode(&at).unwrap(),
+        meta_signal_flow::RefreshMode::Manual
+    );
+    let configured = fixture
+        .nexus
+        .store
+        .configuration_snapshot()
+        .unwrap()
+        .unwrap();
+    assert!(
+        configured
+            .configured_metaflows
+            .0
+            .iter()
+            .any(|declared| declared.address == at
+                && declared.refresh_mode == meta_signal_flow::RefreshMode::Manual)
+    );
+    let before = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
+
+    fixture.nexus.recover_wakes();
+    assert!(fixture.nexus.store.successor_intent(&at).unwrap().is_none());
+    fixture
+        .nexus
+        .raise_compaction(&before, "native-compaction", Some(230_000));
+    assert_eq!(fixture.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
+    assert!(
+        fixture
+            .nexus
+            .store
+            .handover_reminder(&at, generation.0)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        fixture.nexus.store.context_size(CLAUDE_SEAT).unwrap(),
+        Some(230_000)
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .flow_node(CLAUDE_SEAT)
+            .unwrap()
+            .unwrap()
+            .session_id,
+        before.session_id
+    );
+    assert!(
+        seat_metaflow_now(&fixture).queue.0.is_empty(),
+        "no default threshold prompt"
+    );
+    assert!(!closed(&fixture));
+
+    super::waking::report_claude_stop(&fixture, vec![]);
+    assert!(crate::waking::HoldsSoftForIdle::rests_now(
+        &fixture.nexus,
+        CLAUDE_SEAT
+    ));
+
+    fixture
+        .nexus
+        .store
+        .accept_logical_delivery(
+            &at,
+            SentBy::Unbound,
+            flow_ethos::Delivery::Wake,
+            Message::Soft(Request::Order("Work for the retained seat.".into())),
+            None,
+        )
+        .unwrap();
+    fixture.nexus.wake_due(at);
+    assert!(
+        fixture
+            .typed()
+            .is_some_and(|text| text.contains("Work for the retained seat."))
+    );
+    assert_eq!(
+        seat_metaflow_now(&fixture).state,
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
+    assert!(!closed(&fixture));
 }
 
 /// A Maintained metaflow is never left without a flow: its seat resting
@@ -1246,6 +1375,7 @@ fn fable_seat_past_its_threshold(fixture: &NexusFixture, protected: Vec<Address>
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
             continuity: Continuity::OnDemand,
+            refresh_mode: meta_signal_flow::RefreshMode::Automatic,
             purpose: meta_signal_flow::Purpose(String::new()),
             records: meta_signal_flow::Records(vec![]),
         }]),

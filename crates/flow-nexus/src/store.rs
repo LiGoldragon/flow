@@ -1592,6 +1592,8 @@ impl AnnouncesLaunchChanges for LaunchChanges {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("RefreshMode Memory upgrade failed: {0}")]
+    RefreshModeUpgrade(String),
     #[error("sema-engine operation failed: {0}")]
     Engine(#[from] sema_engine::Error),
     #[error("queue-delivery attempt Memory upgrade failed: {0}")]
@@ -6002,7 +6004,11 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
             && identity.table_name() == table_key
             && identity.family().as_str()
                 == metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY
-            && identity.schema_hash() == SchemaHash::for_label(effort_upgrade::SCHEMA_V7);
+            && matches!(
+                identity.schema_hash(),
+                schema if schema == SchemaHash::for_label(effort_upgrade::SCHEMA_V7)
+                    || schema == SchemaHash::for_label(effort_upgrade::SCHEMA_V8)
+            );
         let before_abandonment = table_key == delivery_attempt_upgrade::TABLE
             && identity.table_name() == table_key
             && identity.family().as_str() == delivery_attempt_upgrade::FAMILY
@@ -6766,6 +6772,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
             Change::Purpose(purpose) => metaflow.purpose = purpose,
             Change::Kind(flow_kind) => metaflow.flow_kind = flow_kind,
             Change::Continuity(continuity) => metaflow.continuity = continuity,
+            Change::RefreshMode(refresh_mode) => metaflow.refresh_mode = refresh_mode,
             Change::Effort(effort) => metaflow.effort = effort,
             Change::Add(Element::SystemModule(identity)) => {
                 if !metaflow.system_modules.0.contains(&identity) {
@@ -9633,6 +9640,72 @@ mod tests {
             let running = FlowStore::open_configured(&fixture.path()).unwrap();
             assert_eq!(running.configured_effort(&address).unwrap(), "high");
         }
+    }
+
+    #[test]
+    fn refresh_mode_upgrade_admits_exact_v8_with_automatic_and_preserves_effort() {
+        use super::effort_upgrade::{ConfigureMetaflowV8, StoredMetaMetaflowConfigurationV8};
+        use super::metaflow_declaration::{
+            META_METAFLOW_CONFIGURATION_FAMILY, META_METAFLOW_CONFIGURATION_TABLE_NAME,
+        };
+        use sema_engine::{FamilyIdentity, FamilyName, MemoryDefinition, TableRegistration};
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        let address = signal_flow::Address {
+            aspect: signal_flow::Aspect::Psyche,
+            topic: flow_ethos::Topic("refreshModeUpgrade".into()),
+            model: signal_flow::Model::Fable,
+        };
+        let previous = StoredMetaMetaflowConfigurationV8 {
+            configure_metaflow: ConfigureMetaflowV8 {
+                address: address.clone(),
+                root_option: Some(meta_signal_flow::Root("/kept/workspace".into())),
+                leave_outs: signal_flow::LeaveOuts(vec![signal_flow::LeaveOut::ClaudeMd]),
+                system_modules: signal_flow::SystemModules(vec![]),
+                prompt_modules: signal_flow::PromptModules(vec![]),
+                flow_kind: signal_flow::FlowKind::Regular,
+                tool_set: signal_flow::ToolSet::Default,
+                continuity: meta_signal_flow::Continuity::Maintained,
+                purpose: meta_signal_flow::Purpose("kept purpose".into()),
+                records: meta_signal_flow::Records(vec![]),
+                effort: meta_signal_flow::Effort::High,
+            },
+        };
+        let table_name = META_METAFLOW_CONFIGURATION_TABLE_NAME.as_str();
+        let registration = TableRegistration::new(FamilyIdentity::new(
+            FamilyName::new(META_METAFLOW_CONFIGURATION_FAMILY),
+            StoredMetaMetaflowConfigurationV8::schema_hash(),
+            META_METAFLOW_CONFIGURATION_TABLE_NAME,
+        ));
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&previous).unwrap();
+        let registration_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&registration).unwrap();
+        let database = redb::Database::open(fixture.path()).unwrap();
+        let write = database.begin_write().unwrap();
+        {
+            let mut catalog = write.open_table(super::SEMA_CATALOG_TABLE).unwrap();
+            catalog
+                .insert(table_name, registration_bytes.as_slice())
+                .unwrap();
+            let mut rows = write
+                .open_table(redb::TableDefinition::<String, &[u8]>::new(table_name))
+                .unwrap();
+            rows.insert(FlowStore::address_record_key(&address), bytes.as_slice())
+                .unwrap();
+        }
+        write.commit().unwrap();
+        drop(database);
+        let upgraded = ConfigurationOnlyStore::open(&fixture.path()).unwrap();
+        let snapshot = upgraded.configuration_snapshot().unwrap().unwrap();
+        let row = snapshot
+            .metaflows
+            .iter()
+            .find(|row| row.address == address)
+            .unwrap();
+        assert_eq!(row.effort, meta_signal_flow::Effort::High);
+        assert_eq!(row.refresh_mode, meta_signal_flow::RefreshMode::Automatic);
+        assert_eq!(row.purpose, previous.configure_metaflow.purpose);
+        assert_eq!(row.root_option, previous.configure_metaflow.root_option);
+        assert_eq!(row.leave_outs, previous.configure_metaflow.leave_outs);
     }
 
     #[test]

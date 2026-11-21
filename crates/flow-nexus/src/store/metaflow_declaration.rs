@@ -8,7 +8,7 @@
 
 use super::{FlowStore, ReadsFlowMemory, StoreError};
 pub(crate) use crate::generated::memory::StoredMetaMetaflowConfiguration;
-use meta_signal_flow::ConfigureMetaflow;
+use meta_signal_flow::{ConfigureMetaflow, RefreshMode};
 use sema_engine::{
     EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan, RecordKey, SchemaHash,
     TableDescriptor, TableName,
@@ -20,7 +20,7 @@ pub(super) const META_METAFLOW_CONFIGURATION_TABLE_NAME: TableName =
 pub(super) const META_METAFLOW_CONFIGURATION_FAMILY: &str =
     "flow-nexus-meta-metaflow-configuration";
 pub(super) const META_METAFLOW_CONFIGURATION_SCHEMA: &str =
-    "flow-nexus-meta-metaflow-configuration-v8";
+    "flow-nexus-meta-metaflow-configuration-v9";
 
 impl EngineRecord for StoredMetaMetaflowConfiguration {
     fn record_key(&self) -> RecordKey {
@@ -32,7 +32,7 @@ impl EngineRecord for StoredMetaMetaflowConfiguration {
 
 impl MemoryDefinition for StoredMetaMetaflowConfiguration {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(8)
+        MemoryVersion::new(9)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -53,10 +53,18 @@ impl DescribesMetaflowDeclarationTable for StoredMetaMetaflowConfiguration {
         )
         .with_predecessor::<super::leave_out_upgrade::StoredMetaMetaflowConfigurationV6>()
         .with_predecessor::<super::effort_upgrade::StoredMetaMetaflowConfigurationV7>()
+        .with_predecessor::<super::effort_upgrade::StoredMetaMetaflowConfigurationV8>()
     }
 }
 
 pub(crate) trait ReadsMetaflowDeclarations {
+    /// The mode of this permaflow; undeclared seats keep Automatic behavior.
+    fn refresh_mode(&self, address: &Address) -> Result<RefreshMode, StoreError> {
+        Ok(self
+            .metaflow_declaration(address)?
+            .map(|declaration| declaration.refresh_mode)
+            .unwrap_or(RefreshMode::Automatic))
+    }
     /// The declaration of the metaflow at `address`, if Flow's configuration
     /// holds one.
     fn metaflow_declaration(

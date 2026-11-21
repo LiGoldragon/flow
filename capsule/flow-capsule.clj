@@ -1940,9 +1940,9 @@
         line-of (fn [line]
                   (cond
                     (str/starts-with? line "Configure.Metaflows.")
-                    (append-entries (str/replace line " OnDemand «" " Maintained «")
-                                    [(str "{ " codex-secondary " None " terra-leave-outs " [ spirit:core intent:models ] [] Simplified Explicit.[] Maintained «» [] }")
-                                     (str "{ " asleep-primary " None [] [ spirit:core intent:models ] [] Regular Default OnDemand «» [] }")])
+                    (append-entries (str/replace line " OnDemand Automatic «" " Maintained Automatic «")
+                                    [(str "{ " codex-secondary " None " terra-leave-outs " [ spirit:core intent:models ] [] Simplified Explicit.[] Maintained Automatic «» [] }")
+                                     (str "{ " asleep-primary " None [] [ spirit:core intent:models ] [] Regular Default OnDemand Automatic «» [] }")])
                     (and codex-model (str/starts-with? line "Configure.Models."))
                     (append-entries line [(str "{ Sol " codex-model " }")])
                     :else line))

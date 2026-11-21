@@ -1207,6 +1207,7 @@ fn refused_parked_launch_is_terminal_and_never_reexecuted_after_release_or_resta
                     flow_kind: profile.flow_kind.clone(),
                     tool_set: profile.tool_set.clone(),
                     continuity: meta::Continuity::OnDemand,
+                    refresh_mode: meta_signal_flow::RefreshMode::Automatic,
                     purpose: meta::Purpose(String::new()),
                     records: meta::Records(vec![]),
                 },

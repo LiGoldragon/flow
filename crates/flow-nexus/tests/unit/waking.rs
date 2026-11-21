@@ -149,6 +149,7 @@ pub(super) fn maintain(fixture: &NexusFixture, address: Address) {
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
                 continuity: meta_signal_flow::Continuity::Maintained,
+                refresh_mode: meta_signal_flow::RefreshMode::Automatic,
                 purpose: meta_signal_flow::Purpose(String::new()),
                 records: meta_signal_flow::Records(vec![]),
             },
@@ -5435,6 +5436,7 @@ fn a_missing_module_wake_keeps_its_identity_in_the_caller_outcome_and_queue_stat
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
                 continuity: meta_signal_flow::Continuity::Maintained,
+                refresh_mode: meta_signal_flow::RefreshMode::Automatic,
                 purpose: meta_signal_flow::Purpose(String::new()),
                 records: meta_signal_flow::Records(vec![]),
             },
@@ -7211,6 +7213,7 @@ fn a_start_starts_no_other_models_seat_first() {
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
                 continuity: meta_signal_flow::Continuity::OnDemand,
+                refresh_mode: meta_signal_flow::RefreshMode::Automatic,
                 purpose: meta_signal_flow::Purpose(String::new()),
                 records: meta_signal_flow::Records(vec![]),
             },
@@ -8560,9 +8563,26 @@ fn the_request_kind_alone_decides_whether_a_sleeping_permaflow_wakes() {
 /// with the Order as its first prompt. Its priority is Soft, which on
 /// 0.59.3 queued it with nothing to wake the permaflow.
 #[test]
-fn a_soft_order_wakes_an_asleep_permaflow() {
+fn a_soft_order_wakes_a_hand_stopped_manual_permaflow() {
     let mut fixture = NexusFixture::new();
     ended_claude(&fixture);
+    super::refresh_and_compaction::declare_seat(
+        &fixture,
+        meta_signal_flow::Continuity::OnDemand,
+        vec!["spirit:core:0".into(), "intent:flow:0".into()],
+    );
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Amend(
+            meta_signal_flow::Amend_Data {
+                address: address(Model::Sol),
+                change: meta_signal_flow::Change::RefreshMode(
+                    meta_signal_flow::RefreshMode::Manual,
+                ),
+            },
+        ))
+        .unwrap();
     fixture
         .nexus
         .store

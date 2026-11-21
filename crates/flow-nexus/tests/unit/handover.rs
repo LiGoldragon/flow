@@ -195,6 +195,7 @@ fn declare(fixture: &NexusFixture, root_option: Option<String>) {
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
             continuity: Continuity::Maintained,
+            refresh_mode: meta_signal_flow::RefreshMode::Automatic,
             purpose: meta_signal_flow::Purpose(String::new()),
             records: meta_signal_flow::Records(vec![]),
         }]))
@@ -414,6 +415,7 @@ fn a_launch_whose_root_cannot_be_resolved_is_refused_naming_its_predecessor() {
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
             continuity: Continuity::Maintained,
+            refresh_mode: meta_signal_flow::RefreshMode::Automatic,
             purpose: meta_signal_flow::Purpose(String::new()),
             records: meta_signal_flow::Records(vec![]),
         }]))
@@ -862,6 +864,7 @@ fn an_on_demand_seat_whose_successor_is_refused_its_handover_is_not_closed() {
                     flow_kind: signal_flow::FlowKind::Regular,
                     tool_set: signal_flow::ToolSet::Default,
                     continuity: Continuity::OnDemand,
+                    refresh_mode: meta_signal_flow::RefreshMode::Automatic,
                     purpose: meta_signal_flow::Purpose(String::new()),
                     records: meta_signal_flow::Records(vec![]),
                 }]))

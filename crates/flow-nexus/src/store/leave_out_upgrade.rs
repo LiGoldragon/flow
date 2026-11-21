@@ -188,6 +188,7 @@ impl TakesLeaveOuts for ConfigureMetaflowV6 {
             flow_kind: self.flow_kind,
             tool_set: self.tool_set,
             continuity: self.continuity,
+            refresh_mode: meta_signal_flow::RefreshMode::Automatic,
             purpose: self.purpose,
             records: self.records,
             effort: meta_signal_flow::Effort::Default,

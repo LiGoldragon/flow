@@ -128,6 +128,7 @@ use crate::store::logical_delivery::{
     RecordsLogicalDeliveries, SimplifiedReplyBinding, SimplifiedReplyStanding,
 };
 use crate::store::metaflow::{PreparesDeclaredMetaflow, SleepsMetaflows};
+use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
 use crate::store::ordered_replacement::{
     NamesOrderedLaunch, OrderedLaunch, OrderedReplacement, OrdersReplacements, ReplacementOrder,
     ShowsWaitingAttempt,
@@ -1658,6 +1659,19 @@ impl MarksUndecided for RunningNexus {
     }
 }
 
+trait ClassifiesSuccessorCause {
+    fn is_automatic_refresh(&self) -> bool;
+}
+
+impl ClassifiesSuccessorCause for SuccessionCause {
+    fn is_automatic_refresh(&self) -> bool {
+        matches!(
+            self,
+            Self::Refresh | Self::EmergencyRefreshWithoutHandover(_)
+        )
+    }
+}
+
 impl SleepsAndWakesSeats for RunningNexus {
     fn settle_stopped(&self, flow_id: &str) -> AtStop {
         use crate::generated::overriding::SerializesPermaflowEffects;
@@ -1902,7 +1916,18 @@ impl SleepsAndWakesSeats for RunningNexus {
 
         metaflow.state == flow_ethos::State::Asleep
             && (metaflow.queue.0.holds_waking_request()
-                || matches!(self.store.successor_intent(&metaflow.address), Ok(Some(_))))
+                || self
+                    .store
+                    .successor_intent(&metaflow.address)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|intent| {
+                        !intent.succession_cause.is_automatic_refresh()
+                            || matches!(
+                                self.store.refresh_mode(&metaflow.address),
+                                Ok(meta_signal_flow::RefreshMode::Automatic)
+                            )
+                    }))
     }
 
     fn recover_wakes(&self) {
@@ -1980,6 +2005,16 @@ impl SleepsAndWakesSeats for RunningNexus {
             let mut refreshes = Vec::new();
             let mut owed = Vec::new();
             for intent in self.store.successor_intents().unwrap_or_default() {
+                if intent.succession_cause.is_automatic_refresh() {
+                    match self.store.refresh_mode(&intent.address) {
+                        Ok(meta_signal_flow::RefreshMode::Automatic) => {}
+                        Ok(meta_signal_flow::RefreshMode::Manual) => {
+                            let _ = self.store.forget_successor(&intent.address);
+                            continue;
+                        }
+                        Err(_) => continue,
+                    }
+                }
                 match self.store.metaflow(&intent.address) {
                     Ok(Some(metaflow)) => match metaflow.state {
                         flow_ethos::State::Awake(current) if current.0 == intent.predecessor.0 => {
@@ -3728,7 +3763,18 @@ impl WakesInParts for RunningNexus {
             }
         };
         // A metaflow owed a successor wakes with nothing queued.
-        let owed = matches!(self.store.successor_intent(address), Ok(Some(_)));
+        let owed = self
+            .store
+            .successor_intent(address)
+            .ok()
+            .flatten()
+            .is_some_and(|intent| {
+                !intent.succession_cause.is_automatic_refresh()
+                    || matches!(
+                        self.store.refresh_mode(address),
+                        Ok(meta_signal_flow::RefreshMode::Automatic)
+                    )
+            });
         if metaflow.queue.0.is_empty() && !owed {
             return Err(WakeRefusal::NothingQueued);
         }
@@ -3949,6 +3995,7 @@ impl WakesInParts for RunningNexus {
         metaflow: &Metaflow,
         cause: SuccessionCause,
     ) -> AtStop {
+        let automatic = cause.is_automatic_refresh();
         let address = metaflow.address.clone();
         let Some(mut profile) = self.successor_profile(
             flow_id,
@@ -4006,6 +4053,18 @@ impl WakesInParts for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if automatic {
+                match self.store.refresh_mode(&address) {
+                    Ok(meta_signal_flow::RefreshMode::Automatic) => {}
+                    Ok(meta_signal_flow::RefreshMode::Manual) => {
+                        return match self.store.forget_successor(&address) {
+                            Ok(_) => AtStop::Idle,
+                            Err(_) => AtStop::Kept(KeptAtStop::StoreUnreadable),
+                        };
+                    }
+                    Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+                }
+            }
             self.replace(profile, Origin::Unbound)
         };
         self.settle_owed(&address, &response);
@@ -4132,13 +4191,18 @@ impl WakesInParts for RunningNexus {
                 self.store.metaflow(&address),
                 Ok(Some(metaflow)) if !metaflow.queue.0.is_empty()
             ) {
-                let _ = self.perform(Operation::Drain(address));
+                let _ = self.perform(Operation::Drain(address.clone()));
             }
             // The compaction types into the pane and may record the flow
             // Exited when its pane is gone: it runs under the same gate hold,
             // as a meta Command does (the gate is not reentrant, and
             // `command` takes none itself).
-            if compact {
+            if compact
+                && matches!(
+                    self.store.refresh_mode(&address),
+                    Ok(meta_signal_flow::RefreshMode::Automatic)
+                )
+            {
                 let compacted = self.command(meta_signal_flow::CommandRequest {
                     flow_id: signal_flow::FlowId(flow_id.to_owned()),
                     harness_command_kind: meta_signal_flow::HarnessCommandKind::Compact,
@@ -4173,6 +4237,19 @@ impl WakesInParts for RunningNexus {
         let _effect = self.waking.effect(address.clone());
         if self.held() || self.permaflow_held(address.clone()) {
             return AtStop::Idle;
+        }
+        if intent.succession_cause.is_automatic_refresh() {
+            let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+            match self.store.refresh_mode(&address) {
+                Ok(meta_signal_flow::RefreshMode::Automatic) => {}
+                Ok(meta_signal_flow::RefreshMode::Manual) => {
+                    return match self.store.forget_successor(&address) {
+                        Ok(_) => AtStop::Idle,
+                        Err(_) => AtStop::Kept(KeptAtStop::StoreUnreadable),
+                    };
+                }
+                Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+            }
         }
         let Some(lock) = self.waking.hold(&address) else {
             return AtStop::Kept(KeptAtStop::Waking);
@@ -4325,24 +4402,32 @@ impl WakesInParts for RunningNexus {
             Ok(None) => false,
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
-        let refresh_due = match self.store.threshold_standing(flow_id) {
-            Ok(crate::store::context::ThresholdStanding::Past { .. }) => true,
-            Ok(crate::store::context::ThresholdStanding::Below { refresh, .. }) => {
-                use crate::protecting::ProtectsFlows;
-                let warned = !warning_policy_configured
-                    && (warned
-                        || match self.store.handover_green(&address, flow_id, refresh) {
-                            Ok(green) => green,
-                            Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
-                        });
-                warned
-                    && match self.store.protected_address(flow_id) {
-                        Ok(protected) => protected.is_none(),
-                        Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
-                    }
-            }
-            Ok(_) => false,
+        let refresh_mode = match self.store.refresh_mode(&address) {
+            Ok(mode) => mode,
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+        };
+        let refresh_due = if refresh_mode == meta_signal_flow::RefreshMode::Manual {
+            false
+        } else {
+            match self.store.threshold_standing(flow_id) {
+                Ok(crate::store::context::ThresholdStanding::Past { .. }) => true,
+                Ok(crate::store::context::ThresholdStanding::Below { refresh, .. }) => {
+                    use crate::protecting::ProtectsFlows;
+                    let warned = !warning_policy_configured
+                        && (warned
+                            || match self.store.handover_green(&address, flow_id, refresh) {
+                                Ok(green) => green,
+                                Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+                            });
+                    warned
+                        && match self.store.protected_address(flow_id) {
+                            Ok(protected) => protected.is_none(),
+                            Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+                        }
+                }
+                Ok(_) => false,
+                Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+            }
         };
         let node = match self.store.flow_node(flow_id) {
             Ok(Some(node)) => self.herdr.refresh_route(node),
@@ -4458,6 +4543,9 @@ impl WakesInParts for RunningNexus {
                 }
                 outcome => AtStop::Kept(KeptAtStop::DrainRefused(Box::new(outcome))),
             };
+        }
+        if refresh_mode == meta_signal_flow::RefreshMode::Manual {
+            return AtStop::Idle;
         }
         // With nothing queued, how the metaflow continues decides: a
         // Maintained seat stays Awake in its pane; an OnDemand seat closes

@@ -233,6 +233,7 @@ fn production_rehearse_success_and_refusal_create_nothing() {
         flow_kind: signal_flow::FlowKind::Regular,
         tool_set: ToolSet::Default,
         continuity: meta_signal_flow::Continuity::OnDemand,
+        refresh_mode: meta_signal_flow::RefreshMode::Automatic,
         purpose: meta_signal_flow::Purpose(String::new()),
         records: meta_signal_flow::Records(vec![]),
     };

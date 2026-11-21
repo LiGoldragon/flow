@@ -7134,6 +7134,7 @@ mod tests {
                 flow_kind: profile.flow_kind.clone(),
                 tool_set: profile.tool_set.clone(),
                 continuity: meta_signal_flow::Continuity::OnDemand,
+                refresh_mode: meta_signal_flow::RefreshMode::Automatic,
                 purpose: meta_signal_flow::Purpose(String::new()),
                 records: meta_signal_flow::Records(vec![]),
             };
@@ -7190,6 +7191,7 @@ mod tests {
                     flow_kind: staged.profile.flow_kind.clone(),
                     tool_set: staged.profile.tool_set.clone(),
                     continuity: meta_signal_flow::Continuity::OnDemand,
+                    refresh_mode: meta_signal_flow::RefreshMode::Automatic,
                     purpose: meta_signal_flow::Purpose(String::new()),
                     records: meta_signal_flow::Records(vec![]),
                 },
@@ -8533,6 +8535,7 @@ mod tests {
                         flow_kind: signal_flow::FlowKind::Regular,
                         tool_set: signal_flow::ToolSet::Default,
                         continuity: meta_signal_flow::Continuity::OnDemand,
+                        refresh_mode: meta_signal_flow::RefreshMode::Automatic,
                         purpose: meta_signal_flow::Purpose("Publishes the books.".into()),
                         records: meta_signal_flow::Records(vec![meta_signal_flow::RecordPath(
                             "flows/a68420/vision/flow.md".into()

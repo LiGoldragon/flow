@@ -134,6 +134,7 @@ fn declare_secondary(fixture: &NexusFixture, continuity: meta_signal_flow::Conti
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
                 continuity,
+                refresh_mode: meta_signal_flow::RefreshMode::Automatic,
                 purpose: meta_signal_flow::Purpose(String::new()),
                 records: meta_signal_flow::Records(vec![]),
             },

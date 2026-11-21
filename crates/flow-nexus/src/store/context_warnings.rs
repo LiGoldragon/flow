@@ -301,7 +301,11 @@ impl PreparesContextWarningAdmission for FlowStore {
         observation: ContextWarningAdmission,
     ) -> Result<Option<PreparedContextWarning>, StoreError> {
         use super::context::{NamesFlowModel, RecordsContextSize};
+        use super::metaflow_declaration::ReadsMetaflowDeclarations;
         use crate::context_warnings::TracksContextWarnings;
+        if self.refresh_mode(&metaflow.address)? == meta_signal_flow::RefreshMode::Manual {
+            return Ok(None);
+        }
         if observation.tokens.0 < 0
             || metaflow.state != flow_ethos::State::Awake(observation.flow_id.clone())
             || self.context_size(&observation.flow_id.0)? != Some(observation.tokens.0)

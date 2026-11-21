@@ -306,7 +306,7 @@ dependencies = [
  "ethos-zero 29.0.0",
  "flow-ethos",
  "flow-place",
- "meta-signal-flow 0.91.0",
+ "meta-signal-flow 0.92.0",
  "protos",
  "rkyv",
  "signal",
@@ -324,7 +324,7 @@ dependencies = [
 
 [[package]]
 name = "flow-nexus"
-version = "0.60.5"
+version = "0.60.6"
 dependencies = [
  "base64",
  "datom-codec",
@@ -337,7 +337,7 @@ dependencies = [
  "flow-place",
  "getrandom",
  "libc",
- "meta-signal-flow 0.91.0",
+ "meta-signal-flow 0.92.0",
  "meta-signal-flow 77.0.0",
  "meta-signal-flow-before-request-ids",
  "notify",
@@ -551,8 +551,8 @@ dependencies = [
 
 [[package]]
 name = "meta-signal-flow"
-version = "0.91.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=64c09419c06b0260205746318823c942bb713f61#64c09419c06b0260205746318823c942bb713f61"
+version = "0.92.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=741eeebca64fa0c44c10bd9a85542a1c7997e981#741eeebca64fa0c44c10bd9a85542a1c7997e981"
 dependencies = [
  "datom-codec",
  "ethos-zero 29.0.0",

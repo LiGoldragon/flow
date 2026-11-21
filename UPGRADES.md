@@ -1,3 +1,22 @@
+# Flow 0.60.6: permaflow refresh mode
+
+Take a store copy before activation. Permaflow declaration Memory v9 adds
+RefreshMode and opens existing declarations as Automatic without changing
+their other values. The previous daemon requires the pre-upgrade store.
+
+Meta Signal 0.92.0 carries Automatic or Manual immediately after
+Continuity in every full permaflow declaration, including readback. Update
+bootstrap declarations and use a paired meta client. For example:
+`Configure.Amend.{ { Mind core Sol } RefreshMode.Manual }`; read back
+with `Configuration`. Ordinary Signal is unchanged.
+
+Manual keeps a live seat open at rest and delivers later work to that same
+native session. It suppresses automatic refresh and default threshold
+warning admissions, including stale automatic intents and due timers.
+Explicit Refresh and CrystallizeNow remain available; an explicitly
+stopped seat starts fresh on waking work. Maintained recovery after an
+involuntary exit is unchanged.
+
 # Flow 0.60.5: delivery attempts end with their seats
 
 Take a store copy before activation. QueueDeliveryAttempt Memory v11 adds

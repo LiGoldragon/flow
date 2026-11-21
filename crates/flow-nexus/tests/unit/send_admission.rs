@@ -473,6 +473,7 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
         flow_kind: signal_flow::FlowKind::Regular,
         tool_set: signal_flow::ToolSet::Default,
         continuity: meta_signal_flow::Continuity::OnDemand,
+        refresh_mode: meta_signal_flow::RefreshMode::Automatic,
         purpose: meta_signal_flow::Purpose(String::new()),
         records: meta_signal_flow::Records(vec![]),
     };

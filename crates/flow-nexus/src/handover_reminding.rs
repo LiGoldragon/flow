@@ -115,6 +115,7 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             HandoverReminderRules, OpensHandoverReminder, SchedulesHandoverReminders,
         };
         use crate::store::logical_delivery::RecordsLogicalDeliveries;
+        use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
         use crate::waking::{CorrelatesNativeEvents, SleepsAndWakesSeats};
         use meta_signal_flow::HandoverPoliciesConfiguration;
         use signal_flow::{Message, Request};
@@ -133,6 +134,12 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             let flow_ethos::State::Awake(flow_id) = metaflow.state else {
                 continue;
             };
+            if !matches!(
+                self.store.refresh_mode(&metaflow.address),
+                Ok(meta_signal_flow::RefreshMode::Automatic)
+            ) {
+                continue;
+            }
             let Ok(Some(model_name)) = self.store.flow_model(&flow_id.0) else {
                 continue;
             };
@@ -213,6 +220,16 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             return;
         };
         for reminder in due {
+            match self.store.refresh_mode(&reminder.address) {
+                Ok(meta_signal_flow::RefreshMode::Automatic) => {}
+                Ok(meta_signal_flow::RefreshMode::Manual) => {
+                    let _ = self
+                        .store
+                        .close_handover_reminder(&reminder.address, reminder.handover_generation.0);
+                    continue;
+                }
+                Err(_) => continue,
+            }
             let Ok(live) = self.store.handover_memory(&reminder.address) else {
                 continue;
             };
@@ -291,11 +308,20 @@ impl RemindsHandoverCallers for crate::RunningNexus {
                 Ok(value) => crate::generated::memory::NextDue(value),
                 Err(_) => continue,
             };
-            let accepted = self.store.accept_handover_reminder(
-                &reminder.address,
-                Message::MiddleAbrupt(Request::Notice(base.notice_text(flow_id))),
-                admitted,
-            );
+            let accepted = {
+                let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+                if !matches!(
+                    self.store.refresh_mode(&reminder.address),
+                    Ok(meta_signal_flow::RefreshMode::Automatic)
+                ) {
+                    continue;
+                }
+                self.store.accept_handover_reminder(
+                    &reminder.address,
+                    Message::MiddleAbrupt(Request::Notice(base.notice_text(flow_id))),
+                    admitted,
+                )
+            };
             if !matches!(
                 accepted,
                 Ok(signal_flow::PrivateSendResponse::SendAccepted(_))

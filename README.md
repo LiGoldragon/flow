@@ -366,7 +366,7 @@ an entry of `Metaflows`) carries, after its workspace, the leave-outs its
 flows start without, of the harness its Model runs on, then its
 `SystemModules`, composed into the system prompt, and its `PromptModules`,
 composed into the first prompt,
-`{ { Psyche flow Opus } None [ SkillTool WorkflowTool ] [ spirit:core:0 ] [] Regular Default OnDemand «» [] }`;
+`{ { Psyche flow Opus } None [ SkillTool WorkflowTool ] [ spirit:core:0 ] [] Regular Default OnDemand Automatic «» [] Default }`;
 one naming a leave-out of the other harness is refused
 `UnknownFeature.<leave-out>` while that harness is known (the Model's
 native model configured, a Nexus declared). A Start takes its own

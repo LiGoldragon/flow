@@ -125,7 +125,8 @@ trait EndsRequests {
     /// its seat leaves its queue, and it is archived with its id and a
     /// Task's reminder. A closed request's closer is recorded in the same
     /// commit. Answers the Addresses that knew of it: a reminder's asker;
-    /// otherwise its sender, and its recipient when it reached it.
+    /// otherwise its sender, and its recipient when it reached it. A Notice
+    /// that reached its recipient is finished, and is refused Closed.
     fn end_request(
         &self,
         request_id: &RequestId,
@@ -184,6 +185,18 @@ impl EndsRequests for RunningNexus {
             .store
             .delivered_to_be_answered(&binding.logical_delivery_id)
             .map_err(|_| RequestRejection::StoreRefused)?;
+        // A Notice takes no answer: once it reached its recipient it is
+        // finished, whatever its id's binding still says, and nothing is
+        // left to end or to tell.
+        let notice = matches!(
+            &retained.entry.message,
+            Message::HardAbrupt(Request::Notice(_))
+                | Message::MiddleAbrupt(Request::Notice(_))
+                | Message::Soft(Request::Notice(_))
+        );
+        if notice && reached {
+            return Err(RequestRejection::Closed);
+        }
         let queued = match self.store.metaflow(&retained.address) {
             Ok(metaflow) => metaflow.is_some_and(|metaflow| {
                 metaflow

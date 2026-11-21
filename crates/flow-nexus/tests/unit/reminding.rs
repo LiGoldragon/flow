@@ -95,11 +95,11 @@ fn a_tasks_last_reminder_sends_its_failure_to_the_tasks_own_sender() {
         vec![
             (
                 SentBy::Flow,
-                "Reminder 4 of 4: the task of 10 minutes, Review the fix, to Mind remindedWork Sol has no Done after 40 minutes.".to_owned()
+                "Reminder 1 of 1: the task of 10 minutes, Review the fix, to Mind remindedWork Sol has no Done after 10 minutes.".to_owned()
             ),
             (
                 SentBy::Flow,
-                "Failure: the task of 10 minutes, Review the fix, from Psyche reminded Haiku to Mind remindedWork Sol has no Done after 4 reminders.".to_owned()
+                "Failure: the task of 10 minutes, Review the fix, from Psyche reminded Haiku to Mind remindedWork Sol has no Done after 1 reminders.".to_owned()
             ),
         ]
     );
@@ -160,6 +160,84 @@ fn a_tasks_last_reminder_sends_its_failure_to_the_tasks_own_sender() {
             .queue,
         told,
         "nothing more is reminded"
+    );
+}
+
+/// A Task's sender is reminded once, when its minutes pass: the reminder
+/// is then spent, with no due time, and a second pass reminds no more.
+#[test]
+fn a_task_is_reminded_once_when_its_minutes_pass() {
+    let fixture = NexusFixture::new();
+    let sender = at(Aspect::Psyche, "remindedOnce", Model::Haiku);
+    let recipient = at(Aspect::Mind, "remindedOnceWork", Model::Sol);
+    for address in [&sender, &recipient] {
+        fixture.nexus.store.seed_metaflow(Metaflow {
+            address: address.clone(),
+            state: flow_ethos::State::Asleep,
+            past: flow_ethos::Past(vec![]),
+            queue: flow_ethos::Queue(vec![]),
+        });
+    }
+    let PrivateSendResponse::SendAccepted(acceptance) = fixture
+        .nexus
+        .store
+        .accept_logical_delivery(
+            &recipient,
+            SentBy::Sender(sender.clone()),
+            flow_ethos::Delivery::Queue,
+            Message::Soft(Request::Task(flow_ethos::AnswerableTask {
+                minutes: flow_ethos::Minutes(10),
+                string: "Review the fix".into(),
+            })),
+            None,
+        )
+        .unwrap()
+    else {
+        panic!("the task is admitted")
+    };
+    let key = acceptance.logical_delivery_id.clone();
+    let mut reminder = fixture
+        .nexus
+        .store
+        .reminder(&key.0)
+        .unwrap()
+        .expect("the task holds its reminder");
+    assert_eq!(reminder.sent.0, 0, "no reminder is sent yet");
+    // Its minutes pass.
+    reminder.due_option = Some(crate::generated::memory::Due(0));
+    fixture.nexus.store.hold_reminder(reminder).unwrap();
+
+    fixture.nexus.send_due_reminders();
+    fixture.nexus.send_due_reminders();
+
+    let told = fixture
+        .nexus
+        .store
+        .metaflow(&sender)
+        .unwrap()
+        .unwrap()
+        .queue;
+    let reminders = notices(&told.0)
+        .into_iter()
+        .filter(|(_, notice)| notice.starts_with("Reminder "))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reminders,
+        vec![(
+            SentBy::Flow,
+            "Reminder 1 of 1: the task of 10 minutes, Review the fix, to Mind remindedOnceWork Sol has no Done after 10 minutes.".to_owned()
+        )]
+    );
+    let spent = fixture
+        .nexus
+        .store
+        .reminder(&key.0)
+        .unwrap()
+        .expect("the task stays open");
+    assert_eq!(
+        (spent.sent.0, spent.due_option),
+        (1, None),
+        "no second reminder falls due"
     );
 }
 

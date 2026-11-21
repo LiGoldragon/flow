@@ -20,10 +20,9 @@ pub(super) const REMINDER_TABLE_NAME: TableName = TableName::new("flow_nexus_rem
 pub(super) const REMINDER_FAMILY: &str = "flow-nexus-reminder";
 pub(super) const REMINDER_SCHEMA: &str = "flow-nexus-reminder-v3";
 
-/// How many reminders an unanswered task gets: the first at its deadline,
-/// then one every interval. Ruled 2026-10-29: the first firing and three
-/// repeats.
-pub const TASK_REMINDERS: i64 = 4;
+/// How many reminders an unanswered task gets: one, at its deadline, as
+/// vision:flow-nexus:0 says the sender is reminded when the minutes pass.
+pub const TASK_REMINDERS: i64 = 1;
 
 /// The Minutes rule a Task meets at admission, and a default Minutes at
 /// its Configure: above zero, and the deadline of its last reminder,
@@ -236,8 +235,8 @@ mod tests {
     }
 
     #[test]
-    fn a_task_is_reminded_four_times_and_its_sender_told_its_failure_with_the_last() {
-        let mut reminder = Reminder {
+    fn a_task_is_reminded_once_and_its_sender_told_its_failure_with_it() {
+        let reminder = Reminder {
             logical_delivery_id: flow_ethos::LogicalDeliveryId("logical-delivery-1".into()),
             address: address(Model::Sonnet),
             recipient: crate::generated::memory::Recipient(Address {
@@ -249,39 +248,21 @@ mod tests {
             due_option: Some(crate::generated::memory::Due(600)),
             sent: crate::generated::memory::Sent(0),
         };
-        let mut notices = Vec::new();
-        let mut failures = Vec::new();
-        let mut now = 600;
-        for _ in 0..TASK_REMINDERS {
-            let (due, next) = reminder.advanced("Review the fix", now);
-            assert_eq!(due.address, address(Model::Sonnet));
-            notices.push(due.notice);
-            failures.push(due.failure.clone());
-            reminder = next.expect("a task stays open for its Done");
-            now += 600;
-        }
-        assert_eq!(reminder.sent, crate::generated::memory::Sent(4));
-        assert_eq!(reminder.due_option, None);
-        assert!(failures[..3].iter().all(Option::is_none));
+        let (due, next) = reminder.advanced("Review the fix", 600);
+        assert_eq!(due.address, address(Model::Sonnet));
+        let spent = next.expect("a task stays open for its Done");
+        assert_eq!(spent.sent, crate::generated::memory::Sent(TASK_REMINDERS));
+        assert_eq!(spent.due_option, None, "no second reminder falls due");
         assert_eq!(
-            notices[0],
-            "Reminder 1 of 4: the task of 10 minutes, Review the fix, to Field core Sol has no Done after 10 minutes."
+            due.notice,
+            "Reminder 1 of 1: the task of 10 minutes, Review the fix, to Field core Sol has no Done after 10 minutes."
         );
-        assert!(
-            notices
-                .iter()
-                .all(|text| !text.contains("logical-delivery-1"))
-        );
+        assert!(!due.notice.contains("logical-delivery-1"));
         assert_eq!(
-            failures[3].as_deref(),
+            due.failure.as_deref(),
             Some(
-                "Failure: the task of 10 minutes, Review the fix, from Psyche flow Sonnet to Field core Sol has no Done after 4 reminders."
+                "Failure: the task of 10 minutes, Review the fix, from Psyche flow Sonnet to Field core Sol has no Done after 1 reminders."
             )
-        );
-        assert!(
-            failures[3]
-                .as_ref()
-                .is_some_and(|text| !text.contains("logical-delivery-1"))
         );
     }
 

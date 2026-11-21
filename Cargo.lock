@@ -324,7 +324,7 @@ dependencies = [
 
 [[package]]
 name = "flow-nexus"
-version = "0.60.3"
+version = "0.60.4"
 dependencies = [
  "base64",
  "datom-codec",

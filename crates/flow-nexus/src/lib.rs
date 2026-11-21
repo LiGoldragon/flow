@@ -121,7 +121,7 @@ use observe_agent::ObservesAgent;
 use observe_sends::ObservesLogicalSends;
 use peer::{NamesMetaPeer, ResolvesPeer};
 use performing::Performs;
-use queue_operations::{OperatesOnRequestsAndQueues, RequestCancellationByCaller};
+use queue_operations::OperatesOnRequestsAndQueues;
 use reporting::RecordsReports;
 use send_tool::ServesLaunchCalls;
 use sending::{BindsSeats, LaunchesDeclared, RehearsesDeclared, SendsRequests};
@@ -1039,7 +1039,7 @@ impl signal_flow::Answering for OrdinaryCall<'_> {
         &self,
         request_id: &signal_flow::RequestId,
     ) -> Result<signal_flow::RequestId, Output> {
-        match self.nexus.cancel_as(request_id, &self.origin) {
+        match self.nexus.cancel(request_id, &self.origin) {
             Output::Cancelled(cancelled) => Ok(cancelled),
             other => Err(other),
         }

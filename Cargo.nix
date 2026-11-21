@@ -1602,13 +1602,13 @@ rec {
       };
       "harness-nexus-library" = rec {
         crateName = "harness-nexus-library";
-        version = "0.1.0";
+        version = "0.3.0";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/harness-nexus-library";
-          rev = "3613d63d0994de7841bcf6f070c83bebb0ddfa5a";
-          sha256 = "0s56yv6vhd8992hbqn277nmdqxmpn2xkvf9szlispr71fmq00k2j";
+          rev = "ae7e008700972b7f033de6ba94c36e6c49fc93f8";
+          sha256 = "0pzack9igg9qh0yb148pl4yy3a0v5ik3208abgd6gcisjsgxpsqb";
         };
         libName = "harness";
         dependencies = [
@@ -3566,13 +3566,13 @@ rec {
       };
       "signal-harness" = rec {
         crateName = "signal-harness";
-        version = "0.1.0";
+        version = "0.2.0";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal-harness";
-          rev = "eea28159303e9b51e4e211151aba0a3ceb686a32";
-          sha256 = "0jfrvvy3d4804nc8vh5dcbx3qg1akl1y6zkscx6p3hc3qjvhl1am";
+          rev = "f302b3088c719a3df1991b7701899dea7dce7288";
+          sha256 = "16rayxpsnjrl5w7kj1hl3bm1kcsbld66w17pg03lb8hp2lkwrqc6";
         };
         libName = "signal_harness";
         dependencies = [

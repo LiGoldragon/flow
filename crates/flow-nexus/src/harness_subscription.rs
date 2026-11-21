@@ -162,6 +162,7 @@ pub enum HarnessObservation {
 pub enum UnmappedObservation {
     Standing,
     Started,
+    Resumed,
     PromptSubmitted,
     ToolUsed,
     PermissionAsked,
@@ -278,6 +279,7 @@ impl MapsHarnessObservations for ClaudeHarnessSubscriber<'_> {
                     }
                 }
                 HarnessEvent::Started => unmapped(UnmappedObservation::Started),
+                HarnessEvent::Resumed => unmapped(UnmappedObservation::Resumed),
                 HarnessEvent::PromptSubmitted => unmapped(UnmappedObservation::PromptSubmitted),
                 HarnessEvent::ToolUsed => unmapped(UnmappedObservation::ToolUsed),
                 HarnessEvent::PermissionAsked => unmapped(UnmappedObservation::PermissionAsked),

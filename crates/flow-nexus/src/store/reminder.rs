@@ -89,13 +89,22 @@ pub struct DueReminder {
     pub notice: String,
 }
 
-/// The reminder's next state once one is sent at `now`.
+/// The reminder due at `now`, and its next state. A reminder that has
+/// already sent `TASK_REMINDERS`, as one held from a release that sent more
+/// may have, is spent: it sends nothing and falls due no more.
 pub trait AdvancesReminder {
-    fn advanced(&self, task_words: &str, now: i64) -> (DueReminder, Option<Reminder>);
+    fn advanced(&self, task_words: &str, now: i64) -> (Option<DueReminder>, Option<Reminder>);
 }
 
 impl AdvancesReminder for Reminder {
-    fn advanced(&self, task_words: &str, now: i64) -> (DueReminder, Option<Reminder>) {
+    fn advanced(&self, task_words: &str, now: i64) -> (Option<DueReminder>, Option<Reminder>) {
+        if self.sent.0 >= TASK_REMINDERS {
+            let spent = Reminder {
+                due_option: None,
+                ..self.clone()
+            };
+            return (None, Some(spent));
+        }
         let sent = self.sent.0 + 1;
         let last = sent >= TASK_REMINDERS;
         let notice = format!(
@@ -111,10 +120,10 @@ impl AdvancesReminder for Reminder {
             ..self.clone()
         };
         (
-            DueReminder {
+            Some(DueReminder {
                 address: self.address.clone(),
                 notice,
-            },
+            }),
             Some(next),
         )
     }
@@ -235,6 +244,7 @@ mod tests {
             sent: crate::generated::memory::Sent(0),
         };
         let (due, next) = reminder.advanced("Review the fix", 600);
+        let due = due.expect("the first reminder is sent");
         assert_eq!(due.address, address(Model::Sonnet));
         let spent = next.expect("a task stays open for its Done");
         assert_eq!(spent.sent, crate::generated::memory::Sent(TASK_REMINDERS));
@@ -244,6 +254,29 @@ mod tests {
             "Reminder 1 of 1: the task of 10 minutes, Review the fix, to Field core Sol has no Done after 10 minutes."
         );
         assert!(!due.notice.contains("logical-delivery-1"));
+    }
+
+    /// A reminder held from a release that sent more, already past its
+    /// count and still due, sends nothing and falls due no more.
+    #[test]
+    fn a_reminder_past_its_count_is_spent_without_a_notice() {
+        let reminder = Reminder {
+            logical_delivery_id: flow_ethos::LogicalDeliveryId("logical-delivery-1".into()),
+            address: address(Model::Sonnet),
+            recipient: crate::generated::memory::Recipient(address(Model::Sol)),
+            minutes: flow_ethos::Minutes(10),
+            due_option: Some(crate::generated::memory::Due(1200)),
+            sent: crate::generated::memory::Sent(2),
+        };
+        let (due, next) = reminder.advanced("Review the fix", 1200);
+        assert_eq!(due, None);
+        assert_eq!(
+            next,
+            Some(Reminder {
+                due_option: None,
+                ..reminder
+            })
+        );
     }
 
     #[test]

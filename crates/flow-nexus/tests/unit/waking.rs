@@ -698,6 +698,56 @@ fn a_held_soft_is_delivered_at_its_recipients_idle_event() {
     );
 }
 
+#[test]
+fn a_refused_claude_drain_is_retried_at_the_next_stop_of_its_session() {
+    let fixture = NexusFixture::new();
+    let (_caller, peer) = soft_recipient(&fixture, false);
+    for body in ["Oldest retained.", "Next retained."] {
+        assert!(matches!(
+            send_soft(&fixture, &peer, body),
+            signal_flow::Output::SendAccepted(_)
+        ));
+    }
+    let signal_flow::Event::Stopped(stop) = claude_stop(&fixture) else {
+        unreachable!("fixture is a Stop");
+    };
+    let session = stop.native_session_id_option.as_ref().unwrap();
+    assert!(matches!(
+        fixture.nexus.settle_native_rest(CLAUDE_SEAT, &session.0),
+        AtStop::Kept(KeptAtStop::NotResting(_))
+    ));
+    assert!(fixture.typed().is_none());
+    let retained = stored(&fixture, Model::Sol).queue.0;
+    assert_eq!(retained.len(), 2);
+
+    // The later native evidence is ready. A different session's rest can
+    // neither consume the retained queue nor start a replacement.
+    append_main_rows(&fixture, &[end_turn("rest-after-refusal")]);
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .settle_native_rest(CLAUDE_SEAT, "another-session"),
+        AtStop::Kept(KeptAtStop::OtherSession)
+    );
+    assert_eq!(stored(&fixture, Model::Sol).queue.0, retained);
+    assert!(fixture.typed().is_none());
+
+    fixture.nexus.after_report(
+        &flow_ethos::FlowId(CLAUDE_SEAT.into()),
+        &signal_flow::Event::Stopped(stop),
+    );
+    let payload = fixture.typed().expect("next bound Stop drains the queue");
+    for entry in &retained {
+        assert!(payload.contains(&entry.request_id.0));
+    }
+    assert!(payload.find("Oldest retained.").unwrap() < payload.find("Next retained.").unwrap());
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
+}
+
 /// Several Soft requests held during one turn are handed over together at
 /// its one idle event, oldest first.
 #[test]

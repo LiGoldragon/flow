@@ -610,6 +610,8 @@ pub enum KeptAtStop {
     Waking,
     /// Flow holds no row for the flow.
     UnknownFlow,
+    /// The native rest belongs to a session the flow no longer holds.
+    OtherSession,
     /// After the bounded wait, Herdr does not show the seat resting.
     NotResting(PaneAgent),
     /// A replacement ordered from outside was carried out at the seat's
@@ -780,6 +782,9 @@ pub trait SleepsAndWakesSeats {
     /// thread's rest): hands the oldest queued request to its resting seat;
     /// with nothing queued the seat stays Awake in its pane.
     fn settle_stopped(&self, flow_id: &str) -> AtStop;
+    /// A native rest retries the attached session's pending queue. A kept
+    /// seat leaves that queue to its next native rest, with no retry clock.
+    fn settle_native_rest(&self, flow_id: &str, session: &str) -> AtStop;
     /// After a request was queued for `address`, or a queued one was
     /// answered again: holds the metaflow, and when Flow's records show it
     /// due a wake, wakes it and drains what arrived meanwhile. Nothing when
@@ -902,7 +907,7 @@ pub(crate) trait WakesInParts {
     fn refuse_live_session(&self, node: &FlowNode, sessions: &[String]) -> Result<(), WakeRefusal>;
     /// The body of `settle_stopped`: waits, boundedly and off the dispatch
     /// gate, for Herdr to show the seat resting, then drains it.
-    fn settle_rested(&self, flow_id: &str) -> AtStop;
+    fn settle_rested(&self, flow_id: &str, session: &str) -> AtStop;
     /// Closes a resting seat's harness under the pane's lease and records
     /// its flow Stopped (its metaflow Asleep), under the dispatch gate the
     /// caller holds. The refusal names why the seat stays.
@@ -1674,6 +1679,14 @@ impl ClassifiesSuccessorCause for SuccessionCause {
 
 impl SleepsAndWakesSeats for RunningNexus {
     fn settle_stopped(&self, flow_id: &str) -> AtStop {
+        match self.store.flow_node(flow_id) {
+            Ok(Some(node)) => self.settle_native_rest(flow_id, &node.session_id.0),
+            Ok(None) => AtStop::Kept(KeptAtStop::NotAwake),
+            Err(_) => AtStop::Kept(KeptAtStop::StoreUnreadable),
+        }
+    }
+
+    fn settle_native_rest(&self, flow_id: &str, session: &str) -> AtStop {
         use crate::generated::overriding::SerializesPermaflowEffects;
         let _effect = match self.store.metaflow_awake_as(flow_id) {
             Ok(Some(metaflow)) => {
@@ -1705,7 +1718,7 @@ impl SleepsAndWakesSeats for RunningNexus {
             eprintln!("flow-nexus: flow {flow_id} kept at its Stop: the Nexus is held");
             return AtStop::Idle;
         }
-        let at_stop = self.settle_rested(flow_id);
+        let at_stop = self.settle_rested(flow_id, session);
         match &at_stop {
             AtStop::Kept(reason) if reason.successor_refused() => {
                 eprintln!("flow-nexus: flow {flow_id} kept at its Stop: {reason:?}");
@@ -4316,7 +4329,10 @@ impl WakesInParts for RunningNexus {
         taken
     }
 
-    fn settle_rested(&self, flow_id: &str) -> AtStop {
+    fn settle_rested(&self, flow_id: &str, session: &str) -> AtStop {
+        if matches!(self.store.flow_node(flow_id), Ok(Some(node)) if node.session_id.0 != session) {
+            return AtStop::Kept(KeptAtStop::OtherSession);
+        }
         crate::context_warnings::ObservesClaudeContext::observe_claude_context(self, flow_id);
         // Whether the flow was sent its handover warning before this idle
         // event: one warned only by this event's own reminder pass has yet
@@ -4430,7 +4446,8 @@ impl WakesInParts for RunningNexus {
             }
         };
         let node = match self.store.flow_node(flow_id) {
-            Ok(Some(node)) => self.herdr.refresh_route(node),
+            Ok(Some(node)) if node.session_id.0 == session => self.herdr.refresh_route(node),
+            Ok(Some(_)) => return AtStop::Kept(KeptAtStop::OtherSession),
             Ok(None) => return AtStop::Kept(KeptAtStop::UnknownFlow),
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };

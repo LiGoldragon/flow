@@ -877,7 +877,7 @@ impl SettlesRestingCodexSeats for RunningNexus {
         }
         // Settled as a Stop is: off the gate, which it takes, reading the
         // thread's standing again under it.
-        seat.map(|flow_id| self.settle_stopped(&flow_id.0))
+        seat.map(|flow_id| self.settle_native_rest(&flow_id.0, thread))
     }
 
     fn observe_codex_events(&self, thread: &str, events: Vec<LedgerEvent>) {

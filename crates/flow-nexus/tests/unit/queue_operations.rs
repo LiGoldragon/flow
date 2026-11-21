@@ -299,6 +299,100 @@ fn cancel_does_not_notice_the_asker_flow_of_its_own_reminder() {
     assert!(queued(&fixture, &reminded).is_empty());
 }
 
+/// A Notice takes no answer and is finished once it reaches its recipient,
+/// delivered or uncertain: Cancel and CloseRequest naming it are refused
+/// Closed, neither end is told, and its id stays as it was.
+#[test]
+fn a_notice_that_reached_its_recipient_is_closed_to_cancel_and_close_request() {
+    let fixture = NexusFixture::new();
+    let sender = at("noticeSender");
+    let recipient = at("noticeRecipient");
+    asleep(&fixture, &sender);
+    asleep(&fixture, &recipient);
+    let delivered_notice = admitted(
+        &fixture,
+        &recipient,
+        SentBy::Sender(sender.clone()),
+        Request::Notice("The revision is ready.".into()),
+    );
+    delivered(&fixture, &recipient, &delivered_notice);
+    let uncertain_notice = admitted(
+        &fixture,
+        &recipient,
+        SentBy::Sender(sender.clone()),
+        Request::Notice("The gate is open.".into()),
+    );
+    fixture
+        .nexus
+        .store
+        .transition_logical_delivery(
+            &uncertain_notice.logical_delivery_id,
+            DeliveryState::Uncertain,
+        )
+        .expect("the Notice is placed without its receipt");
+    let recipient_queue = queued(&fixture, &recipient);
+
+    for notice in [&delivered_notice, &uncertain_notice] {
+        let binding = fixture
+            .nexus
+            .store
+            .request_binding(&notice.request_id)
+            .unwrap();
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Input::Cancel(notice.request_id.clone())),
+            Output::CancelRejected(RequestRejection::Closed)
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Input::CloseRequest(notice.request_id.clone())),
+            Output::CloseRequestRejected(RequestRejection::Closed)
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .request_binding(&notice.request_id)
+                .unwrap(),
+            binding
+        );
+        assert_eq!(closed_record(&fixture, &notice.logical_delivery_id), None);
+    }
+    assert!(queued(&fixture, &sender).is_empty());
+    assert_eq!(queued(&fixture, &recipient), recipient_queue);
+}
+
+/// A Notice still queued never reached its recipient: Cancel takes it out
+/// of its queue, and only its sender is told.
+#[test]
+fn cancel_takes_a_queued_notice_out_and_tells_its_sender() {
+    let fixture = NexusFixture::new();
+    let sender = at("queuedNoticeSender");
+    let recipient = at("queuedNoticeRecipient");
+    asleep(&fixture, &sender);
+    asleep(&fixture, &recipient);
+    let notice = admitted(
+        &fixture,
+        &recipient,
+        SentBy::Sender(sender.clone()),
+        Request::Notice("The revision is ready.".into()),
+    );
+
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch(Input::Cancel(notice.request_id.clone())),
+        Output::Cancelled(notice.request_id.clone())
+    );
+    assert!(queued(&fixture, &recipient).is_empty());
+    assert_eq!(
+        notices(&fixture, &sender),
+        vec![format!("Request {} was cancelled.", notice.request_id.0)]
+    );
+}
+
 /// A Task still queued is cancelled: it leaves its queue, its reminder goes
 /// with it, and only its sender is told, the recipient never having had it.
 #[test]

@@ -561,6 +561,45 @@ fn responding<T>(
 }
 
 #[test]
+fn a_turn_completed_between_resume_and_terminal_list_commits_as_resting() {
+    use crate::codex_turns::TracksCodexTurns;
+    use crate::generated::turn_ledger::ThreadStanding;
+    let mut fixture = NexusFixture::new();
+    let fake = FakeAppServer::install(vec![FakeConnection {
+        requests: Vec::new(),
+        closes: false,
+        running: Some(TURN.into()),
+    }]);
+    let frames = [
+        serde_json::json!({ "id": 1, "result": {} }),
+        serde_json::json!({ "id": 2, "result": {
+            "thread": { "id": THREAD_A },
+            "initialTurnsPage": { "data": [{
+                "id": TURN, "status": "inProgress", "items": []
+            }] }
+        } }),
+        serde_json::json!({ "method": "turn/completed", "params": {
+            "threadId": THREAD_A, "turn": { "id": TURN, "status": "completed" }
+        } }),
+        serde_json::json!({ "id": 9, "method": "item/tool/call", "params": {} }),
+        serde_json::json!({ "id": 3, "result": { "data": [] } }),
+    ]
+    .iter()
+    .map(frame)
+    .collect::<String>();
+    std::fs::write(fake.directory.path().join("frames-2"), frames).unwrap();
+    let adapter = fixture.adapter("gpt-sol", &fake);
+    responding(&fixture, THREAD_A, &adapter, || {
+        let acknowledged = fake.written_on(2, |value| value["id"] == 9);
+        assert!(acknowledged.iter().any(|value| value["id"] == 9));
+        assert_eq!(
+            fixture.nexus.codex_turns.standing(THREAD_A),
+            ThreadStanding::AtRest
+        );
+    });
+}
+
+#[test]
 fn two_threads_are_each_attributed_to_their_own_metaflow() {
     let mut fixture = NexusFixture::new();
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());

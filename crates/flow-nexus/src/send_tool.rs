@@ -779,6 +779,7 @@ impl RespondsToSendCalls for RunningNexus {
                     drop(watch);
                     // The processes the app-server keeps for the thread,
                     // read on the subscribing connection after its cut.
+                    let before_cut = subscription.early.len();
                     let terminals = match subscription.exchange(
                         &inbox,
                         Self::BACKGROUND_TERMINALS,
@@ -802,18 +803,10 @@ impl RespondsToSendCalls for RunningNexus {
                             continue;
                         }
                     };
-                    let early = std::mem::take(&mut subscription.early);
-                    let mut open = early.into_iter().all(|request| {
-                        self.answer_request(&mut subscription, request)
-                            .inspect_err(|error| {
-                                eprintln!("flow-nexus: send tool for thread {thread}: {error}")
-                            })
-                            .is_ok()
-                    });
-                    // The cut the resume answered, then the processes the
-                    // app-server keeps for the thread: they establish the
-                    // thread's ledger, every later event of this connection
-                    // reaching it after them.
+                    // Commit one native cut. The resume reply describes
+                    // its own boundary, not the later terminal-list reply.
+                    // Notifications received between them advance the cut
+                    // before it can authorize a delivery.
                     let mut cut = Vec::new();
                     if let Some(resumed) = subscription
                         .resumed
@@ -822,10 +815,32 @@ impl RespondsToSendCalls for RunningNexus {
                     {
                         cut.push(LedgerEvent::Cut(resumed));
                     }
+                    let early = std::mem::take(&mut subscription.early);
+                    let pending = early
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(index, request)| {
+                            let events = request.ledger_events(thread);
+                            if events.is_empty() {
+                                return Some(request);
+                            }
+                            if index >= before_cut {
+                                cut.extend(events);
+                            }
+                            None
+                        })
+                        .collect::<Vec<_>>();
                     cut.push(LedgerEvent::BackgroundTerminals(
                         terminals.background_terminals(),
                     ));
                     self.codex_events(thread, cut);
+                    let mut open = pending.into_iter().all(|request| {
+                        self.answer_request(&mut subscription, request)
+                            .inspect_err(|error| {
+                                eprintln!("flow-nexus: send tool for thread {thread}: {error}");
+                            })
+                            .is_ok()
+                    });
                     while open {
                         match subscription.next_event(&inbox, None) {
                             Err(SubscriptionEnd::Stopped) => {

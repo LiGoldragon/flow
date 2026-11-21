@@ -108,6 +108,30 @@ fn a_tasks_last_reminder_goes_alone_to_the_tasks_own_sender() {
         )],
         "the reminder names the task by its id, not by its text"
     );
+    {
+        use crate::request_waking::HoldsWakingRequest;
+        assert!(
+            told.0
+                .iter()
+                .all(|entry| entry.delivery == flow_ethos::Delivery::Queue),
+            "a task's reminder is queued for the next waking: {told:?}"
+        );
+        assert!(
+            !told.0.holds_waking_request(),
+            "a task's reminder wakes no sleeping sender"
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .metaflow(&sender)
+                .unwrap()
+                .unwrap()
+                .state,
+            flow_ethos::State::Asleep,
+            "the sleeping sender is not woken"
+        );
+    }
     let spent = fixture
         .nexus
         .store

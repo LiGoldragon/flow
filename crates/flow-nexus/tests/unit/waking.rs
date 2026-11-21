@@ -8414,7 +8414,9 @@ fn send_unbound(fixture: &NexusFixture, message: Message) -> signal_flow::Output
 }
 
 /// What wakes a sleeping permaflow is the request's kind: every kind but a
-/// Notice wakes it, at every priority, and a Notice waits at every priority.
+/// Notice and a Reminder wakes it, at every priority, and a Notice waits at
+/// every priority. A Reminder wakes by the mark it was queued with: Wake for
+/// one a flow asked for with Remind, Queue for a Task's reminder.
 #[test]
 fn the_request_kind_alone_decides_whether_a_sleeping_permaflow_wakes() {
     use crate::request_waking::WakesSleepingPermaflow;
@@ -8436,10 +8438,6 @@ fn the_request_kind_alone_decides_whether_a_sleeping_permaflow_wakes() {
                 string: "done".into(),
             },
         )),
-        Request::Reminder(flow_ethos::Reminder_Data {
-            request_id: flow_ethos::RequestId("r3m1".into()),
-            string: "reminder".into(),
-        }),
     ];
     for request in waking {
         for message in [
@@ -8463,6 +8461,30 @@ fn the_request_kind_alone_decides_whether_a_sleeping_permaflow_wakes() {
             !super::sendable_message(message.clone()).wakes_sleeping_permaflow(),
             "{message:?} waits on the wire too"
         );
+    }
+    let reminder = Request::Reminder(flow_ethos::Reminder_Data {
+        request_id: flow_ethos::RequestId("r3m1".into()),
+        string: "reminder".into(),
+    });
+    for message in [
+        Message::HardAbrupt(reminder.clone()),
+        Message::MiddleAbrupt(reminder.clone()),
+        Message::Soft(reminder.clone()),
+    ] {
+        assert!(
+            !message.wakes_sleeping_permaflow(),
+            "{message:?} by its kind"
+        );
+        for (delivery, wakes) in [(Delivery::Wake, true), (Delivery::Queue, false)] {
+            let entry = QueueEntry {
+                logical_delivery_id: flow_ethos::LogicalDeliveryId("logical-reminder".into()),
+                request_id: flow_ethos::RequestId("r3m2".into()),
+                sent_by: SentBy::Flow,
+                delivery,
+                message: message.clone(),
+            };
+            assert_eq!(entry.wakes_sleeping_permaflow(), wakes, "{entry:?}");
+        }
     }
 }
 

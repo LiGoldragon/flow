@@ -240,7 +240,9 @@ in the commit that archives it; whoever asks is served, as for a Cancel;
 Task's sender is reminded once, when its minutes pass (`TASK_REMINDERS`),
 by a Soft `Reminder.{ RequestId String }` from Flow that names the task by
 its RequestId with one short line, `The task to Field core Sol has no Done
-after 10 minutes.`, never the task's own text, and is told nothing more;
+after 10 minutes.`, never the task's own text, queued marked Queue so a
+sleeping sender reads it at its next waking and is not woken for it, and is
+told nothing more;
 `Clear.Address` and `ClearAll` withdraw everything queued, answering the ids;
 `Push.{ Address Priority }` delivers the whole queue of an Awake seat now as
 one Waking at the priority named (the waking lease carries it,
@@ -256,7 +258,8 @@ Closed NotTask StoreRefused ]` names why a Cancel, a CloseRequest
 names (`store::scheduled_reminder`), answered `Reminded.RequestId`, its
 request bound open; when its minutes lapse the Address is sent
 `MiddleAbrupt.Reminder.{ RequestId String }` from whoever asked
-(`reminding`), and the request closes. Its Minutes meets a Task's rule;
+(`reminding`), marked Wake so a sleeping Address is woken for it, and the
+request closes. Its Minutes meets a Task's rule;
 `Cancel` ends it before then and tells its asker; `CloseRequest` ends it
 and tells no one.
 
@@ -595,8 +598,10 @@ sender that has ended.
 Whether a target wakes is read from Flow's records, never carried with the
 answer. A metaflow of any Model is due a wake when it is Asleep and holds a
 request whose kind wakes it, whatever its priority (`request_waking`): an
-Order, a Question, a Task, the living's words, a Result, a Done or a
-Reminder. A Notice alone waits in the queue for the next waking. The owner's
+Order, a Question, a Task, the living's words, a Result or a Done. A Notice
+waits in the queue for the next waking, and a Reminder wakes by the mark it
+was queued with: Wake when a flow asked for it with Remind, Queue when it
+reminds a Task's sender. The owner's
 `Deliver`, the hand override, marks every queued entry Wake, so the metaflow
 it names is woken whatever its queue holds. A `Push` adds no mark: it wakes
 an Asleep metaflow by the kinds its queue holds, so a queue of Notices alone

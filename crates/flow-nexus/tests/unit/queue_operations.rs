@@ -1002,7 +1002,8 @@ fn an_answer_to_an_unbound_request_is_kept_and_read_by_answer() {
 
 /// Remind keeps a reminder for the Address it names and answers its id;
 /// when its minutes lapse the Address is sent MiddleAbrupt
-/// `Reminder.{ id words }` from whoever asked, and its request closes.
+/// `Reminder.{ id words }` from whoever asked, marked Wake so a sleeping
+/// Address is woken for it, and its request closes.
 #[test]
 fn remind_sends_its_address_a_reminder_when_its_minutes_lapse() {
     use crate::reminding::RemindsCallers;
@@ -1043,6 +1044,7 @@ fn remind_sends_its_address_a_reminder_when_its_minutes_lapse() {
     assert!(
         sent.iter()
             .any(|entry| entry.sent_by == SentBy::Sender(asker.clone())
+                && entry.delivery == flow_ethos::Delivery::Wake
                 && entry.message
                     == Message::MiddleAbrupt(Request::Reminder(flow_ethos::Reminder_Data {
                         request_id: request_id.clone(),

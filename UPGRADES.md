@@ -36,9 +36,11 @@ activation, or the warning carries both.
 A Task's reminder is a Soft `Reminder.{ RequestId String }` from Flow, the
 RequestId the task was answered with and one short line, `The task to
 Field core Sol has no Done after 10 minutes.`; it no longer repeats the
-task's text or counts "Reminder 1 of 1". A Reminder wakes a sleeping
-permaflow by its kind, so a Task's sender that sleeps is woken for it,
-where the Notice it replaces waited for the next waking.
+task's text or counts "Reminder 1 of 1". It is queued marked Queue, as the
+Notice it replaces was: a Task's sender that sleeps reads it at its next
+waking and is not woken for it. A Reminder wakes by the mark it is queued
+with, so a reminder a flow asked for with Remind, marked Wake, still wakes
+a sleeping Address.
 
 # Flow 0.60.3: attempts read by membership
 

@@ -66,8 +66,9 @@
 //! Awake seat whose pane Herdr shows gone records that flow Exited, which
 //! puts its metaflow Asleep. A request queued for an Asleep metaflow wakes
 //! it by its kind, whatever its priority ([`crate::request_waking`]): an
-//! Order, Question, Task, Living, Result, Done or Reminder does, and a
-//! Notice alone waits for the next waking. The wake (`Operation::Wake`)
+//! Order, Question, Task, Living, Result or Done does, a Notice waits for
+//! the next waking, and a Reminder wakes by the mark it was queued with,
+//! Wake when a flow asked for it, Queue when it reminds a Task's sender. The wake (`Operation::Wake`)
 //! launches a fresh flow from the native model configured for its Model and
 //! the module identities the metaflow's last launch named, composed again
 //! as any Start is, with the whole queue, oldest first, as its brief. The requests leave the queue only in the write that records

@@ -1701,7 +1701,7 @@ mod tests {
         }
     }
 
-    fn prepare_codex(store: &FlowStore) -> QueueDeliveryAttempt {
+    fn prepared_attempt(store: &FlowStore) -> QueueDeliveryAttempt {
         let PrepareQueueDelivery::Prepared(prepared) = store
             .prepare_oldest_delivery(
                 &address(),
@@ -1769,7 +1769,7 @@ mod tests {
     #[test]
     fn an_owner_read_decodes_its_own_attempts_alone_while_others_grow() {
         let (_fixture, store) = Fixture::new();
-        let prepared = prepare_codex(&store);
+        let prepared = prepared_attempt(&store);
         let logical = logical_id(&prepared);
         let alone = reads_of_one_owner(&store, &logical);
         assert_eq!(alone, 4, "each of the four readers reads the one attempt");
@@ -1783,7 +1783,7 @@ mod tests {
     #[test]
     fn memberships_follow_the_phase_through_receipt_and_settlement() {
         let (fixture, store) = Fixture::new();
-        let prepared = prepare_codex(&store);
+        let prepared = prepared_attempt(&store);
         assert_eq!(store.membership_keys(), store.expected_membership_keys());
         assert_eq!(store.membership_keys().len(), 4);
         assert!(
@@ -1825,7 +1825,7 @@ mod tests {
     fn the_unfinished_family_holds_prepared_receipt_recorded_and_uncertain_alone() {
         use super::super::attempt_membership::{KeepsAttemptMemberships, MembershipOwner};
         let (_fixture, store) = Fixture::new();
-        let prepared = prepare_codex(&store);
+        let prepared = prepared_attempt(&store);
         let absent = QueueDeliveryPhase::Absent(crate::generated::memory::AbsenceRecord {
             absence_proof: meta_signal_flow::AbsenceProof::HandOverRefused,
             observation: crate::generated::memory::Observation("fixture absence".into()),
@@ -1913,7 +1913,7 @@ mod tests {
     fn a_refused_commit_writes_neither_the_attempt_nor_its_memberships() {
         use super::super::attempt_membership::KeepsAttemptMemberships;
         let (_fixture, store) = Fixture::new();
-        let prepared = prepare_codex(&store);
+        let prepared = prepared_attempt(&store);
         let before = store.membership_keys();
         let mut settled = prepared.clone();
         settled.queue_delivery_phase = QueueDeliveryPhase::Settled(receipt(&prepared));
@@ -1935,7 +1935,7 @@ mod tests {
     #[test]
     fn the_pre_serving_build_answers_as_the_whole_read_and_runs_once() {
         let (fixture, store) = Fixture::new();
-        let prepared = prepare_codex(&store);
+        let prepared = prepared_attempt(&store);
         // More attempts than one build page holds.
         for number in 0..600 {
             unrelated(&store, &prepared, number);

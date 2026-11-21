@@ -18,9 +18,9 @@
 //! below are the 0.54.2 shapes, built from the current component types
 //! wherever the bytes are the same.
 
+use super::delivery_attempt_upgrade::QueueDeliveryPhaseV10;
 use super::queue_delivery::{
-    NativeHistoryAnchor, QueueDeliveryAttempt, QueueDeliveryPhase, RequestState,
-    StoredDeliveryRequest,
+    NativeHistoryAnchor, QueueDeliveryAttempt, RequestState, StoredDeliveryRequest,
 };
 use super::{StoreError, StoredMetaflow};
 use crate::generated::send_tool::{
@@ -298,7 +298,7 @@ pub(crate) struct DeliveryAttemptBeforeLiving {
     pub(crate) history_anchor: NativeHistoryAnchor,
     pub(crate) address: Address,
     pub(crate) queue_evidence: QueueEvidenceBeforeLiving,
-    pub(crate) phase: QueueDeliveryPhase,
+    pub(crate) phase: QueueDeliveryPhaseV10,
 }
 before_living!(
     DeliveryAttemptBeforeLiving,
@@ -321,7 +321,7 @@ impl UpgradeFrom<DeliveryAttemptBeforeLiving> for QueueDeliveryAttempt {
             native_history_anchor: before.history_anchor,
             address: before.address,
             queue_evidence: before.queue_evidence.living(),
-            queue_delivery_phase: before.phase,
+            queue_delivery_phase: before.phase.into(),
         })
     }
 }

@@ -692,6 +692,7 @@ pub enum QueueDeliveryPhase {
     Read(Read_Data),
     Absent(AbsenceRecord),
     Resolved(meta_signal_flow::QueueResolutionRecord),
+    Abandoned(meta_signal_flow::AbandonmentRecord),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

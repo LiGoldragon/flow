@@ -748,6 +748,7 @@ impl SettlesUpgradeNotices for super::FlowStore {
             | signal_flow::DeliveryState::Attempting
             | signal_flow::DeliveryState::Retryable(_)
             | signal_flow::DeliveryState::Uncertain
+            | signal_flow::DeliveryState::Abandoned
             | signal_flow::DeliveryState::Archived => Ok(false),
         }
     }

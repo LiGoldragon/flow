@@ -265,7 +265,9 @@ fn current_socket_client_serves_request_operations() {
                     &socket,
                     signal_flow::Input::ArchiveRequest(flow_ethos::RequestId(archived))
                 ),
-                signal_flow::Output::ArchiveRejected(signal_flow::ArchiveRejection::NotYet)
+                signal_flow::Output::ArchiveRejected(signal_flow::ArchiveRejection::NotYet(
+                    signal_flow::ArchiveHold::DeliveryNotEnded
+                ))
             );
         }
         mode => panic!("unknown migration client mode {mode}"),

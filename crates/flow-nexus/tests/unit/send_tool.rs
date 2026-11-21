@@ -781,7 +781,9 @@ fn an_admitted_send_tool_call_holds_archive_until_its_answer_object_is_released(
             .store
             .archive_request(&accepted.send_acceptance.request_id.0)
             .unwrap(),
-        Err(signal_flow::ArchiveRejection::NotYet)
+        Err(signal_flow::ArchiveRejection::NotYet(
+            signal_flow::ArchiveHold::AdmissionPending
+        ))
     );
     drop(answer);
     let replay = fixture.nexus.handle_send_call_answer(tool_call(
@@ -806,7 +808,9 @@ fn an_admitted_send_tool_call_holds_archive_until_its_answer_object_is_released(
             .store
             .archive_request(&accepted.send_acceptance.request_id.0)
             .unwrap(),
-        Err(signal_flow::ArchiveRejection::NotYet),
+        Err(signal_flow::ArchiveRejection::NotYet(
+            signal_flow::ArchiveHold::AdmissionPending
+        )),
         "the replayed answer object holds archive until its write completes"
     );
     drop(replay);
@@ -1872,7 +1876,9 @@ fn tool_replay_after_archive_answers_archived_without_the_old_id() {
             .store
             .archive_request(&accepted.send_acceptance.request_id.0)
             .expect("archive checks the admitting call"),
-        Err(signal_flow::ArchiveRejection::NotYet),
+        Err(signal_flow::ArchiveRejection::NotYet(
+            signal_flow::ArchiveHold::AdmissionPending
+        )),
         "an admission whose answer has not been written still holds its request"
     );
     drop(pending_answer);
@@ -2031,7 +2037,9 @@ fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically
             .store
             .archive_request(&request_id.0)
             .expect("an archive by another reads"),
-        Err(signal_flow::ArchiveRejection::NotYet),
+        Err(signal_flow::ArchiveRejection::NotYet(
+            signal_flow::ArchiveHold::DeliveryNotEnded
+        )),
         "an archive asked by another than its sender is answered by the request's state"
     );
     assert_eq!(
@@ -2040,7 +2048,9 @@ fn archive_is_sender_owned_waits_for_the_end_and_retracts_the_binding_atomically
             .store
             .archive_request(&request_id.0)
             .expect("early archive reads"),
-        Err(signal_flow::ArchiveRejection::NotYet)
+        Err(signal_flow::ArchiveRejection::NotYet(
+            signal_flow::ArchiveHold::DeliveryNotEnded
+        ))
     );
     assert_eq!(
         fixture

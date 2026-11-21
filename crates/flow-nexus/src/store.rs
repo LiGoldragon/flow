@@ -27,6 +27,8 @@ pub(crate) mod kept_answer;
 pub(crate) mod launch_cleanup;
 pub(crate) mod leave_out_upgrade;
 use effort_configuration::{RegistersModelEfforts, StoredModelEffort};
+mod delivery_attempt_upgrade;
+pub mod delivery_retirement;
 pub(crate) mod living_upgrade;
 pub(crate) mod logical_delivery;
 #[cfg(test)]
@@ -1591,6 +1593,8 @@ impl AnnouncesLaunchChanges for LaunchChanges {
 pub enum StoreError {
     #[error("sema-engine operation failed: {0}")]
     Engine(#[from] sema_engine::Error),
+    #[error("queue-delivery attempt Memory upgrade failed: {0}")]
+    DeliveryAttemptUpgrade(String),
     #[error("flow nexus state record is absent or duplicated")]
     StateInvariant,
     #[error("launch inspection rows changed while being read")]
@@ -1815,6 +1819,7 @@ pub struct FlowStore {
     /// Whether Memory announces `metaflow_changes`: subscribed once, at the
     /// first metaflow subscriber.
     pub(crate) metaflow_watch: Mutex<bool>,
+    pub(crate) delivery_retirements: Arc<delivery_retirement::DeliveryRetirements>,
 }
 
 impl ReadsRequestPolicy for FlowStore {
@@ -2789,6 +2794,9 @@ impl OpensFlowStore for FlowStore {
             )?;
         }
         <FlowStore as event_upgrade::UpgradesEventMemory>::upgrade_event_memory(&mut engine)?;
+        <FlowStore as delivery_attempt_upgrade::UpgradesDeliveryAttempts>::upgrade_delivery_attempts(
+            &mut engine,
+        )?;
         // What 0.54.2 stored is upgraded before anything is registered.
         <FlowStore as living_upgrade::UpgradesBeforeLiving>::upgrade_running_before_living(
             &mut engine,
@@ -2966,6 +2974,7 @@ impl OpensFlowStore for FlowStore {
             reminder_changes: LaunchChanges::default(),
             metaflow_changes: LaunchChanges::default(),
             metaflow_watch: Mutex::new(false),
+            delivery_retirements: Arc::default(),
         };
 
         // Recognition already checked the authored Memory identity record. A
@@ -3216,6 +3225,7 @@ impl OpensFlowStore for FlowStore {
             reminder_changes: LaunchChanges::default(),
             metaflow_changes: LaunchChanges::default(),
             metaflow_watch: Mutex::new(false),
+            delivery_retirements: Arc::default(),
         };
         store.seed_request_policy()?;
         attempt_membership::KeepsAttemptMemberships::build_attempt_memberships(&store)?;
@@ -3294,7 +3304,8 @@ impl OpensFlowStore for FlowStore {
                 | QueueDeliveryPhase::Settled(_)
                 | QueueDeliveryPhase::Read { .. }
                 | QueueDeliveryPhase::Absent(_)
-                | QueueDeliveryPhase::Resolved(_) => {
+                | QueueDeliveryPhase::Resolved(_)
+                | QueueDeliveryPhase::Abandoned(_) => {
                     return Err(StoreError::StateInvariant);
                 }
             }
@@ -5816,7 +5827,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
             ),
             "flow_nexus_queue_delivery_attempts" => (
                 "flow-nexus-queue-delivery-attempt",
-                "flow-nexus-queue-delivery-attempt-v10",
+                delivery_attempt_upgrade::SCHEMA_V11,
             ),
             _ => return None,
         };
@@ -5978,7 +5989,13 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
             && identity.family().as_str()
                 == metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY
             && identity.schema_hash() == SchemaHash::for_label(effort_upgrade::SCHEMA_V7);
-        before_effort
+        let before_abandonment = table_key == delivery_attempt_upgrade::TABLE
+            && identity.table_name() == table_key
+            && identity.family().as_str() == delivery_attempt_upgrade::FAMILY
+            && identity.schema_hash()
+                == SchemaHash::for_label(delivery_attempt_upgrade::SCHEMA_V10);
+        before_abandonment
+            || before_effort
             || before_refresh_callers
             || before_recovery_cause
             || before_recovery_refusals
@@ -7458,7 +7475,9 @@ mod tests {
             store
                 .archive_request(&task.request_id.0)
                 .expect("archive checks the announcement Notice"),
-            Err(signal_flow::ArchiveRejection::NotYet),
+            Err(signal_flow::ArchiveRejection::NotYet(
+                signal_flow::ArchiveHold::TaskAnnouncementAdmitted
+            )),
             "an unended announcement Notice holds every Task it lists"
         );
         store
@@ -8028,7 +8047,9 @@ mod tests {
             store
                 .archive_request(&assigned_request_id.0)
                 .expect("archive checks assignment Notice"),
-            Err(signal_flow::ArchiveRejection::NotYet),
+            Err(signal_flow::ArchiveRejection::NotYet(
+                signal_flow::ArchiveHold::UpgradeAssignmentAdmitted
+            )),
             "an unended assignment Notice holds every Order it lists"
         );
         store
@@ -11525,7 +11546,9 @@ mod tests {
                 store
                     .archive_request(&accepted.request_id.0)
                     .expect("unfinished archive reads"),
-                Err(signal_flow::ArchiveRejection::NotYet)
+                Err(signal_flow::ArchiveRejection::NotYet(
+                    signal_flow::ArchiveHold::DeliveryNotEnded
+                ))
             );
         }
         let terminal = [

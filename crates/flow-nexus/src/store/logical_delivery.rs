@@ -564,7 +564,7 @@ impl TakesAnswer for Message {
 /// keep it.
 pub(crate) trait HoldsOpenRequests {
     /// Whether the delivery has reached its recipient as far as an answer
-    /// may close it: delivered, or uncertain, whose answer proves it read.
+    /// may close it: delivered, uncertain, or carried as open after abandonment.
     fn delivered_to_be_answered(&self, id: &LogicalDeliveryId) -> Result<bool, StoreError>;
     /// The Address's open requests, oldest first, each as it was delivered,
     /// under the id it was delivered with.
@@ -576,7 +576,7 @@ impl HoldsOpenRequests for FlowStore {
         Ok(self.logical_delivery_snapshot(id)?.is_some_and(|value| {
             matches!(
                 value.delivery_state,
-                DeliveryState::Delivered(_) | DeliveryState::Uncertain
+                DeliveryState::Delivered(_) | DeliveryState::Uncertain | DeliveryState::Abandoned
             )
         }))
     }
@@ -609,6 +609,12 @@ impl HoldsOpenRequests for FlowStore {
     }
 }
 
+/// The seat whose receipt establishes arrival.
+pub(crate) enum DeliveryRecipient<'flow> {
+    Current,
+    Exact(&'flow flow_ethos::FlowId),
+}
+
 pub(crate) trait RecordsLogicalDeliveries {
     fn deliver_call(
         &self,
@@ -631,6 +637,7 @@ pub(crate) trait RecordsLogicalDeliveries {
         &self,
         request_id: &str,
         commit: AtomicCommit,
+        ending: Option<&super::closed_request::RequestEnding>,
     ) -> Result<Result<(), signal_flow::ArchiveRejection>, StoreError>;
     #[cfg(test)]
     fn archive_request_with_injected_commit_failure(
@@ -722,6 +729,23 @@ pub(crate) trait RecordsLogicalDeliveries {
         state: DeliveryState,
         receipt_turn: crate::generated::transitions::ReceiptTurn,
         commit: AtomicCommit,
+    ) -> Result<DeliverySnapshot, StoreError> {
+        self.commit_logical_transition_at(
+            id,
+            state,
+            receipt_turn,
+            commit,
+            DeliveryRecipient::Current,
+        )
+    }
+
+    fn commit_logical_transition_at(
+        &self,
+        id: &LogicalDeliveryId,
+        state: DeliveryState,
+        receipt_turn: crate::generated::transitions::ReceiptTurn,
+        commit: AtomicCommit,
+        recipient: DeliveryRecipient<'_>,
     ) -> Result<DeliverySnapshot, StoreError>;
     fn logical_delivery_snapshot(
         &self,
@@ -905,15 +929,16 @@ impl RecordsLogicalDeliveries for FlowStore {
         &self,
         request_id: &str,
     ) -> Result<Result<(), signal_flow::ArchiveRejection>, StoreError> {
-        self.commit_archive_request(request_id, self.engine.begin_atomic_commit())
+        self.commit_archive_request(request_id, self.engine.begin_atomic_commit(), None)
     }
 
     fn commit_archive_request(
         &self,
         request_id: &str,
         commit: AtomicCommit,
+        ending: Option<&super::closed_request::RequestEnding>,
     ) -> Result<Result<(), signal_flow::ArchiveRejection>, StoreError> {
-        use signal_flow::ArchiveRejection;
+        use signal_flow::{ArchiveHold, ArchiveRejection};
         let _guard = self
             .logical_deliveries
             .write_gate
@@ -931,15 +956,18 @@ impl RecordsLogicalDeliveries for FlowStore {
             return Err(StoreError::StateInvariant);
         };
         if self.admission_answer_is_pending(&binding.request_id) {
-            return Ok(Err(ArchiveRejection::NotYet));
+            return Ok(Err(ArchiveRejection::NotYet(ArchiveHold::AdmissionPending)));
         }
         use super::queue_delivery::EndsQueueDeliveryPhase;
-        if self
+        let unfinished: Vec<_> = self
             .delivery_attempts_for(&binding.logical_delivery_id.0)?
-            .iter()
-            .any(|attempt| !attempt.queue_delivery_phase.is_finished())
-        {
-            return Ok(Err(ArchiveRejection::NotYet));
+            .into_iter()
+            .filter(|attempt| !attempt.queue_delivery_phase.is_finished())
+            .collect();
+        if !unfinished.is_empty() && ending.is_none() {
+            return Ok(Err(ArchiveRejection::NotYet(
+                ArchiveHold::AttemptUnfinished,
+            )));
         }
         let replies = self
             .engine
@@ -947,7 +975,9 @@ impl RecordsLogicalDeliveries for FlowStore {
         if replies.records().iter().any(|reply| {
             !reply.completed.0 && reply.input_delivery_id.0 == binding.logical_delivery_id.0
         }) {
-            return Ok(Err(ArchiveRejection::NotYet));
+            return Ok(Err(ArchiveRejection::NotYet(
+                ArchiveHold::SimplifiedReplyOpen,
+            )));
         }
         let mut request_named = false;
         for held in self.retained_logical_requests()? {
@@ -978,6 +1008,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                                 | DeliveryState::Read
                                 | DeliveryState::Failed(_)
                                 | DeliveryState::Withdrawn
+                                | DeliveryState::Abandoned
                                 | DeliveryState::Archived
                         )
                     })
@@ -987,7 +1018,9 @@ impl RecordsLogicalDeliveries for FlowStore {
             }
         }
         if request_named {
-            return Ok(Err(ArchiveRejection::NotYet));
+            return Ok(Err(ArchiveRejection::NotYet(
+                ArchiveHold::AnswerUndelivered,
+            )));
         }
         let task_announcements = self
             .engine
@@ -998,7 +1031,9 @@ impl RecordsLogicalDeliveries for FlowStore {
                 super::request_id_upgrade::TaskAnnouncementStatus::Admitted(_)
             ) && row.tasks.contains(&binding.logical_delivery_id)
         }) {
-            return Ok(Err(ArchiveRejection::NotYet));
+            return Ok(Err(ArchiveRejection::NotYet(
+                ArchiveHold::TaskAnnouncementAdmitted,
+            )));
         }
         let assignments = self
             .engine
@@ -1018,7 +1053,9 @@ impl RecordsLogicalDeliveries for FlowStore {
                         .any(|order| order.order == binding.logical_delivery_id)
             })
         }) {
-            return Ok(Err(ArchiveRejection::NotYet));
+            return Ok(Err(ArchiveRejection::NotYet(
+                ArchiveHold::UpgradeAssignmentAdmitted,
+            )));
         }
         let deliver_calls = self
             .engine
@@ -1028,7 +1065,9 @@ impl RecordsLogicalDeliveries for FlowStore {
             .iter()
             .any(|call| call.send_acceptance.logical_delivery_id == binding.logical_delivery_id)
         {
-            return Ok(Err(ArchiveRejection::NotYet));
+            return Ok(Err(ArchiveRejection::NotYet(
+                ArchiveHold::DirectSendInFlight,
+            )));
         }
         let rows = self.engine.match_records(QueryPlan::key(
             self.logical_deliveries.current,
@@ -1040,17 +1079,34 @@ impl RecordsLogicalDeliveries for FlowStore {
         if current.archived_cursor.0.is_some() {
             return Err(StoreError::StateInvariant);
         }
+        let (commit, terminal) = match ending {
+            Some(_) => {
+                use crate::reminding::CountsUnixSeconds;
+                use meta_signal_flow::{
+                    AbandonmentCause, AbandonmentRecord, QueueResolutionReason, UnixSeconds,
+                };
+                let abandoned = AbandonmentRecord {
+                    abandonment_cause: AbandonmentCause::RequestEnded(binding.request_id.clone()),
+                    queue_resolution_reason: QueueResolutionReason("The request ended.".into()),
+                    unix_seconds: UnixSeconds(std::time::SystemTime::now().seconds_since_epoch()),
+                };
+                self.stage_request_end(&retained, unfinished, abandoned, commit)?
+            }
+            None => (commit, None),
+        };
         if !matches!(
             current.delivery_snapshot.delivery_state,
             DeliveryState::Delivered(_)
                 | DeliveryState::Read
                 | DeliveryState::Failed(_)
                 | DeliveryState::Withdrawn
-        ) {
-            return Ok(Err(ArchiveRejection::NotYet));
+                | DeliveryState::Abandoned
+        ) && terminal.is_none()
+        {
+            return Ok(Err(ArchiveRejection::NotYet(ArchiveHold::DeliveryNotEnded)));
         }
         let allocation = self.allocate_logical_cursor()?;
-        let cursor = allocation.cursor;
+        let mut cursor = allocation.cursor;
         let is_task = matches!(
             &retained.entry.message,
             Message::HardAbrupt(Request::Task(_))
@@ -1071,8 +1127,21 @@ impl RecordsLogicalDeliveries for FlowStore {
             false
         };
         let mut archived = current.clone();
+        let commit = if let Some(terminal) = terminal {
+            archived.delivery_snapshot.delivery_state = terminal;
+            archived.delivery_snapshot.delivery_cursor = signal_flow::DeliveryCursor(cursor);
+            cursor = cursor.checked_add(1).ok_or(StoreError::StateInvariant)?;
+            commit.assert(
+                self.logical_deliveries.events,
+                LogicalDeliveryEvent {
+                    delivery_snapshot: archived.delivery_snapshot.clone(),
+                },
+            )
+        } else {
+            commit
+        };
         archived.archived_cursor = ArchivedCursor(Some(signal_flow::DeliveryCursor(cursor)));
-        let mut event = current.delivery_snapshot.clone();
+        let mut event = archived.delivery_snapshot.clone();
         event.delivery_cursor = signal_flow::DeliveryCursor(cursor);
         event.delivery_state = DeliveryState::Archived;
         let next_counter = LogicalDeliveryCounter {
@@ -1119,7 +1188,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             self.logical_deliveries.current,
             RecordKey::new("missing-archive-row"),
         );
-        self.commit_archive_request(request_id, failing)
+        self.commit_archive_request(request_id, failing, None)
     }
 
     fn seed_store_identity(&self) -> Result<(), StoreError> {
@@ -2399,12 +2468,13 @@ impl RecordsLogicalDeliveries for FlowStore {
         }
         Ok(changed)
     }
-    fn commit_logical_transition(
+    fn commit_logical_transition_at(
         &self,
         id: &LogicalDeliveryId,
         state: DeliveryState,
         receipt_turn: crate::generated::transitions::ReceiptTurn,
         commit: AtomicCommit,
+        recipient: DeliveryRecipient<'_>,
     ) -> Result<DeliverySnapshot, StoreError> {
         let _guard = self
             .logical_deliveries
@@ -2436,6 +2506,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 | DeliveryState::Failed(_)
                 | DeliveryState::Withdrawn
                 | DeliveryState::Archived
+                | DeliveryState::Abandoned
         ) {
             return Err(StoreError::StateInvariant);
         }
@@ -2483,7 +2554,10 @@ impl RecordsLogicalDeliveries for FlowStore {
         });
         let commit = match self.metaflow(&snapshot.address)? {
             Some(metaflow) if arriving => match metaflow.state {
-                flow_ethos::State::Awake(flow_id) => {
+                flow_ethos::State::Awake(flow_id)
+                    if matches!(recipient, DeliveryRecipient::Current)
+                        || matches!(recipient, DeliveryRecipient::Exact(id) if *id == flow_id) =>
+                {
                     use crate::generated::transitions::{
                         Arrival, Caused, RecordsTransitions, TransitionWrite,
                     };
@@ -2519,7 +2593,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                     }
                     commit
                 }
-                flow_ethos::State::Asleep => commit,
+                flow_ethos::State::Asleep | flow_ethos::State::Awake(_) => commit,
             },
             _ => commit,
         };

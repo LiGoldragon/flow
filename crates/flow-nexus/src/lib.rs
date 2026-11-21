@@ -1433,6 +1433,43 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         }
     }
 
+    fn abandon_queue_delivery(
+        &self,
+        request: &meta_signal_flow::AbandonQueueDelivery_Data,
+    ) -> Result<meta_signal_flow::QueueDeliveryAbandoned_Data, meta_signal_flow::Output> {
+        use crate::peer::NamesMetaPeer;
+        use crate::reminding::CountsUnixSeconds;
+        use crate::store::queue_delivery::AccountsQueueDelivery;
+        use meta_signal_flow::{
+            AbandonmentCause, AbandonmentRecord, Output, QueueDeliveryAbandoned_Data, UnixSeconds,
+        };
+        let nexus = self.nexus;
+        let resolver = self
+            .resolver
+            .clone()
+            .unwrap_or_else(|| nexus.meta_resolver(None));
+        let record = AbandonmentRecord {
+            abandonment_cause: AbandonmentCause::Owner(resolver),
+            queue_resolution_reason: request.queue_resolution_reason.clone(),
+            unix_seconds: UnixSeconds(std::time::SystemTime::now().seconds_since_epoch()),
+        };
+        match nexus
+            .store
+            .abandon_queue_delivery(&request.queue_attempt_id.0, record.clone())
+        {
+            Ok(Ok(address)) => Ok(QueueDeliveryAbandoned_Data {
+                address,
+                abandonment_record: record,
+            }),
+            Ok(Err(refusal)) => Err(Output::AbandonQueueDeliveryRejected(refusal)),
+            Err(error) => Err(Output::Refused(
+                meta_signal_flow::Refused_Data::StoreRefused(meta_signal_flow::StoreFailure(
+                    error.to_string(),
+                )),
+            )),
+        }
+    }
+
     fn inspect(
         &self,
         address: &signal_flow::Address,
@@ -2938,6 +2975,7 @@ impl StopsNexus for RunningNexus {
         self.store.launch_changes.announce();
         self.store.reminder_changes.announce();
         self.store.metaflow_changes.announce();
+        self.store.delivery_retirements.changes.announce();
         self.configuration_changes.announce();
         // Each accept loop is blocked in accept; a connection wakes it. A
         // listener not yet bound sees the request once it binds.
@@ -8324,7 +8362,9 @@ mod tests {
                 .store
                 .archive_request(&question.request_id.0)
                 .expect("archive checks answer"),
-            Err(ArchiveRejection::NotYet)
+            Err(ArchiveRejection::NotYet(
+                signal_flow::ArchiveHold::AnswerUndelivered
+            ))
         );
         fixture
             .nexus

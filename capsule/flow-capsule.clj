@@ -1324,7 +1324,7 @@
   (-> line (str/replace "@SOURCE_ROOT@" source-root) (str/replace "@CAPSULE_RUNTIME@" capsule-runtime)
       (str/replace "@CURRICULUM_SOCKET@" curriculum-socket) (str/replace "@CODEX_CLIENT@" codex-client)
       (str/replace "@CODEX_HOME@" codex-home) (str/replace "@CODEX_SOCKET@" codex-socket)
-      (str/replace "@CODEX_MODEL@" codex-model)))
+      (str/replace "@CODEX_MODEL@" codex-model) (str/replace "@HERDR_SESSION@" session)))
 
 (def codex-server (atom nil))
 

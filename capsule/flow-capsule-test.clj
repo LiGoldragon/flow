@@ -419,6 +419,12 @@
   (check-try "no delivery read before the stop is no witness, so it fails"
              #(not (flow-capsule/deliveries-preserved? {} {"a" "Queued"}))))
 
+;; The capsule's Nexus opens every launch in the capsule's own Herdr
+;; session, which fill writes where configure.datom names @HERDR_SESSION@.
+(check "fill names the capsule's own Herdr session"
+       (= "Configure.Nexus.{ 60 None flow-testing }"
+          (flow-capsule/fill "Configure.Nexus.{ 60 None @HERDR_SESSION@ }")))
+
 ;; Scenario 20 needs a seat that takes its whole queue on a wake: a Regular
 ;; OnDemand seat (a Simplified seat takes its oldest alone).
 (let [metaflows (str "Configure.Metaflows.[ { { Psyche test Sonnet } None [ ClaudeMd ] [ spirit:core ] [] Regular Default OnDemand «» [] }"

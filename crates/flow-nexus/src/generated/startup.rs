@@ -38,6 +38,32 @@ pub enum StoreCheck {
     Refused(StoreRefusal),
 }
 #[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ClaudeHarnessSubscriptionPath(pub String);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct DaemonConfiguration {
+    pub claude_harness_subscription_path_option: std::option::Option<
+        ClaudeHarnessSubscriptionPath,
+    >,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct DaemonConfigurationFault {
+    pub path: Path,
+    pub reason: Reason,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum DaemonConfigurationRefusal {
+    Unreadable(DaemonConfigurationFault),
+    Invalid(DaemonConfigurationFault),
+}
+#[rustfmt::skip]
 pub trait ChecksStore {
     fn check(&self) -> StoreCheck;
 }

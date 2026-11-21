@@ -77,6 +77,7 @@ pub mod handover_archive;
 mod handover_observation;
 pub mod handover_reminding;
 pub(crate) mod harness_command;
+pub mod harness_subscription;
 pub mod heartbeat;
 pub mod herdr;
 pub mod launching;
@@ -3461,6 +3462,7 @@ mod tests {
     pub(crate) mod handover_configuration;
     mod handover_memory;
     mod handover_reminding;
+    mod harness_subscription;
     mod heartbeat_production;
     mod launching_nexus;
     mod model;

@@ -10,6 +10,17 @@ Library
   ; store a running Nexus holds is never touched: a deploy runs it before
   ; it activates this Flow.
   StoreCheckRequest.{ StorePath }
-  StoreCheck.[ Opens.StorePath Absent.StorePath Refused.StoreRefusal ] ]
+  StoreCheck.[ Opens.StorePath Absent.StorePath Refused.StoreRefusal ]
+  ; What the daemon reads beside its place file, one datom at
+  ; <configuration home>/nexus/<place-name>/flow-nexus-daemon.datom. A
+  ; missing file is every option unset, the daemon as it was before the
+  ; file. The Claude Harness Nexus's subscription socket, when set, is
+  ; subscribed to, and each change it tells is taken as the Report it
+  ; stands for.
+  ClaudeHarnessSubscriptionPath.String
+  DaemonConfiguration.{ Option<ClaudeHarnessSubscriptionPath> }
+  DaemonConfigurationFault.{ Path Reason }
+  DaemonConfigurationRefusal.[ Unreadable.DaemonConfigurationFault
+                               Invalid.DaemonConfigurationFault ] ]
 [ ChecksStore.[ check.[ StoreCheck ] ] ]
 []

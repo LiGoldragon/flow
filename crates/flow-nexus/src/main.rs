@@ -1,4 +1,7 @@
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
+use flow_nexus::harness_subscription::{
+    LocatesDaemonConfiguration, ReportsDaemonConfigurationRefusal,
+};
 use flow_nexus::place::{FindsFlowPlace, LaysOutPlace, PlaceName, ReportsPlaceRefusal};
 use flow_nexus::placed_socket::{PlacedSocket, PlacesSocket};
 use flow_nexus::{
@@ -106,6 +109,15 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    // The daemon's own options, beside its place file: none set when there
+    // is no file, and one that cannot be read refuses the start, naming it.
+    let daemon_configuration = match place_name.daemon_configuration() {
+        Ok(configuration) => configuration,
+        Err(refusal) => {
+            eprintln!("flow-nexus: {}", refusal.report());
+            return ExitCode::FAILURE;
+        }
+    };
     let nexus = match RunningNexus::open(&place) {
         Ok(nexus) => nexus,
         Err(StoreError::UnrecognizedMemory { path, reason }) => {
@@ -179,6 +191,12 @@ fn main() -> ExitCode {
         scope.spawn(|| {
             use flow_nexus::heartbeat::RunsHeartbeat;
             nexus.keep_heartbeating()
+        });
+        // The Claude Harness Nexus's subscription, when the configuration
+        // names its socket: each change it tells is taken as its Report.
+        scope.spawn(|| {
+            use flow_nexus::harness_subscription::SubscribesToClaudeHarness;
+            nexus.keep_subscribing_to_claude_harness(&daemon_configuration)
         });
         scope.spawn(|| {
             if signals.watch(&nexus.stopping) {

@@ -50,7 +50,7 @@ fn awake_as(fixture: &NexusFixture, address: &Address, flow_id: &flow_ethos::Flo
 fn origin_of(flow_id: flow_ethos::FlowId) -> Origin {
     Origin::Flow(signal_flow::FlowOrigin {
         flow_id,
-        session_id: "queue-operations-session".into(),
+        session_id: signal_flow::SessionId("queue-operations-session".into()),
     })
 }
 
@@ -263,6 +263,42 @@ fn cancel_by_a_third_flow_still_notifies_both_ends() {
     assert_eq!(notices(&fixture, &recipient), vec![notice]);
 }
 
+/// A flow that cancels the reminder it asked for is told nothing beyond
+/// its answer Cancelled.
+#[test]
+fn cancel_does_not_notice_the_asker_flow_of_its_own_reminder() {
+    use crate::store::scheduled_reminder::SchedulesReminders;
+    let fixture = NexusFixture::new();
+    let reminded = at("ownReminderSeat");
+    let asker = at("ownReminderAsker");
+    let caller_flow = flow_ethos::FlowId("ownReminderFlow".into());
+    asleep(&fixture, &reminded);
+    awake_as(&fixture, &asker, &caller_flow);
+    let Output::Reminded(request_id) = fixture.nexus.remind(
+        signal_flow::Remind_Data {
+            address: reminded.clone(),
+            minutes: flow_ethos::Minutes(5),
+            string: "Later.".into(),
+        },
+        SentBy::Sender(asker.clone()),
+    ) else {
+        panic!("a reminder is kept")
+    };
+
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_from(Input::Cancel(request_id.clone()), origin_of(caller_flow)),
+        Output::Cancelled(request_id.clone())
+    );
+    assert_eq!(
+        fixture.nexus.store.scheduled_reminder(&request_id).unwrap(),
+        None
+    );
+    assert!(notices(&fixture, &asker).is_empty());
+    assert!(queued(&fixture, &reminded).is_empty());
+}
+
 /// A Task still queued is cancelled: it leaves its queue, its reminder goes
 /// with it, and only its sender is told, the recipient never having had it.
 #[test]
@@ -290,7 +326,7 @@ fn cancel_takes_a_queued_task_out_with_its_reminder() {
             .is_some()
     );
     assert_eq!(
-        fixture.nexus.cancel(&task.request_id),
+        fixture.nexus.cancel(&task.request_id, &Origin::Unbound),
         Output::Cancelled(task.request_id.clone())
     );
     assert!(queued(&fixture, &recipient).is_empty(), "it left the queue");

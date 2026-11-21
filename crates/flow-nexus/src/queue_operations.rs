@@ -30,8 +30,9 @@ use signal_flow::{
 pub trait OperatesOnRequestsAndQueues {
     /// Closes an open request: one still queued leaves its queue, it is
     /// archived with its id and a Task's reminder, and its sender, and its
-    /// recipient when it reached it, are told by a Soft Notice.
-    fn cancel(&self, request_id: &RequestId) -> Output;
+    /// recipient when it reached it, are told by a Soft Notice, save the
+    /// flow `caller` names, whose answer Cancelled already tells it.
+    fn cancel(&self, request_id: &RequestId, caller: &Origin) -> Output;
     /// Closes an open request with no answer and tells no one: one still
     /// queued leaves its queue, it is archived with its id and a Task's
     /// reminder, a reminder not yet sent is retired, and `closer`, the
@@ -57,11 +58,6 @@ pub trait OperatesOnRequestsAndQueues {
     fn remind(&self, remind: Remind_Data, sent_by: SentBy) -> Output;
     /// The answer kept with the request `request_id`.
     fn answer(&self, request_id: &RequestId) -> Output;
-}
-
-/// A cancellation with the connection's authenticated caller identity.
-pub(crate) trait RequestCancellationByCaller {
-    fn cancel_as(&self, request_id: &RequestId, caller: &Origin) -> Output;
 }
 
 /// The steps the operations share.
@@ -233,8 +229,37 @@ impl EndsRequests for RunningNexus {
 }
 
 impl OperatesOnRequestsAndQueues for RunningNexus {
-    fn cancel(&self, request_id: &RequestId) -> Output {
-        self.cancel_as(request_id, &Origin::Unbound)
+    fn cancel(&self, request_id: &RequestId, caller: &Origin) -> Output {
+        let notified = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let told = match self.end_request(request_id, &RequestEnding::Cancelled) {
+                Ok(told) => told,
+                Err(rejection) => return Output::CancelRejected(rejection),
+            };
+            let notified = told
+                .into_iter()
+                .filter(|address| match caller {
+                    Origin::Flow(flow) => !self.flow_of_address(&flow.flow_id, address),
+                    Origin::Unbound => true,
+                })
+                .collect::<Vec<_>>();
+            let text = format!("Request {} was cancelled.", request_id.0);
+            for address in &notified {
+                if let Err(error) = self.notify(address, text.clone()) {
+                    eprintln!(
+                        "flow-nexus: a cancellation notice for {address:?} was not queued: {error}"
+                    );
+                }
+            }
+            notified
+        };
+        for address in notified {
+            self.wake_due(address);
+        }
+        Output::Cancelled(request_id.clone())
     }
 
     fn close_request(&self, request_id: &RequestId, closer: Option<&Process>) -> Output {
@@ -481,40 +506,5 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
             Ok(None) => refused(AnswerRejection::UnknownRequest),
             Err(_) => refused(AnswerRejection::StoreRefused),
         }
-    }
-}
-
-impl RequestCancellationByCaller for RunningNexus {
-    fn cancel_as(&self, request_id: &RequestId, caller: &Origin) -> Output {
-        let notified = {
-            let _turn = self
-                .dispatch_gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let told = match self.end_request(request_id, &RequestEnding::Cancelled) {
-                Ok(told) => told,
-                Err(rejection) => return Output::CancelRejected(rejection),
-            };
-            let notified = told
-                .into_iter()
-                .filter(|address| match caller {
-                    Origin::Flow(flow) => !self.flow_of_address(&flow.flow_id, address),
-                    Origin::Unbound => true,
-                })
-                .collect::<Vec<_>>();
-            let text = format!("Request {} was cancelled.", request_id.0);
-            for address in &notified {
-                if let Err(error) = self.notify(address, text.clone()) {
-                    eprintln!(
-                        "flow-nexus: a cancellation notice for {address:?} was not queued: {error}"
-                    );
-                }
-            }
-            notified
-        };
-        for address in notified {
-            self.wake_due(address);
-        }
-        Output::Cancelled(request_id.clone())
     }
 }

@@ -49,6 +49,13 @@ tempfile = "3"
 getrandom = "0.3"
 thiserror.workspace = true
 tungstenite = "0.28"
+# The subscription every Harness Nexus serves (Subscribe, Subscribed,
+# Changed), taken from the Claude Harness Nexus when the daemon's
+# configuration names its socket, over the event vocabulary of the harness
+# library. Each is pinned by its full revision, the string every other
+# consumer writes, so Cargo sees one crate of each.
+signal-harness = { git = "https://github.com/LiGoldragon/signal-harness", rev = "eea28159303e9b51e4e211151aba0a3ceb686a32", features = ["datom"] }
+harness = { package = "harness-nexus-library", git = "https://github.com/LiGoldragon/harness-nexus-library", rev = "3613d63d0994de7841bcf6f070c83bebb0ddfa5a", default-features = false }
 [build-dependencies]
 ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "f23eacf" }
 [dev-dependencies]

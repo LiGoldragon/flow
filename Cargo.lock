@@ -336,6 +336,7 @@ dependencies = [
  "flow-native",
  "flow-place",
  "getrandom",
+ "harness-nexus-library",
  "libc",
  "meta-signal-flow 0.90.0",
  "meta-signal-flow 77.0.0",
@@ -355,6 +356,7 @@ dependencies = [
  "signal-flow 0.68.0",
  "signal-flow 60.0.0",
  "signal-flow-before-request-ids",
+ "signal-harness",
  "tempfile",
  "thiserror",
  "translator",
@@ -425,6 +427,17 @@ dependencies = [
  "libc",
  "r-efi",
  "wasip2",
+]
+
+[[package]]
+name = "harness-nexus-library"
+version = "0.1.0"
+source = "git+https://github.com/LiGoldragon/harness-nexus-library?rev=3613d63d0994de7841bcf6f070c83bebb0ddfa5a#3613d63d0994de7841bcf6f070c83bebb0ddfa5a"
+dependencies = [
+ "datom-codec",
+ "flow-ethos",
+ "protos",
+ "rkyv",
 ]
 
 [[package]]
@@ -1019,6 +1032,18 @@ dependencies = [
  "flow-ethos-before-request-ids",
  "rkyv",
  "signal",
+]
+
+[[package]]
+name = "signal-harness"
+version = "0.1.0"
+source = "git+https://github.com/LiGoldragon/signal-harness?rev=eea28159303e9b51e4e211151aba0a3ceb686a32#eea28159303e9b51e4e211151aba0a3ceb686a32"
+dependencies = [
+ "datom-codec",
+ "flow-ethos",
+ "harness-nexus-library",
+ "protos",
+ "rkyv",
 ]
 
 [[package]]

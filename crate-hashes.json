@@ -5,6 +5,7 @@
   "git+https://github.com/LiGoldragon/ethos-zero?rev=8c95310#27.0.0": "1nqshn23ibbnnadi10wj79dn6wcjjkgfav6qkwsa7jg6r9m87v76",
   "git+https://github.com/LiGoldragon/ethos-zero?rev=970459d#28.0.0": "1iymm3vjsxslkfp1gih72shiav8gk0bkrra1ix3ka9iyg578ldcf",
   "git+https://github.com/LiGoldragon/ethos-zero?rev=f23eacf#29.0.0": "15wh2r0ljqvjqrh8hc8av4p8210nsdyl9iwhb5zh6k467r59ymm8",
+  "git+https://github.com/LiGoldragon/harness-nexus-library?rev=3613d63d0994de7841bcf6f070c83bebb0ddfa5a#0.1.0": "0s56yv6vhd8992hbqn277nmdqxmpn2xkvf9szlispr71fmq00k2j",
   "git+https://github.com/LiGoldragon/memory-engine?rev=3120626a0b63c94df713041bbaa230d49e07952d#sema-engine@0.19.1": "06njjgldx8fyzf0h3fpq11973k9jyb02nddvngqgk0flr4vvyhvi",
   "git+https://github.com/LiGoldragon/memory?rev=712a4a9177e71dc2b397cf4e5a5c65b4fa3c0ec8#sema@0.1.2": "1bd4rh1g2hpp8k0i8zqdmx6pik94a2v287sir6p4rkz936nhyzks",
   "git+https://github.com/LiGoldragon/meta-signal-flow?rev=e613711574ef794f9913bb0b3a8a67fd511f1223#0.90.0": "1xv75ip9gbsvl9gphjra814cqarb77l7fia3cjq7x68ypvr739x4",
@@ -14,6 +15,7 @@
   "git+https://github.com/LiGoldragon/signal-flow?rev=04a72fd#60.0.0": "0lkpi5wfykk30x9b35bia592cs8v83bbmgb6c9nl5dmm44ra693r",
   "git+https://github.com/LiGoldragon/signal-flow?rev=319e3c3f8502e1c4356bd499bf8949905e6fd3c8#0.68.0": "0fm3nzbv3v3w5303ih8lq9flic3nznzy0n9s9w405fgfvmd26v83",
   "git+https://github.com/LiGoldragon/signal-flow?rev=4871bb8#61.0.0": "0rwx0bj0rw938q4z53f682ad173q8k3vkxn4jy3shcsq24a2zjhl",
+  "git+https://github.com/LiGoldragon/signal-harness?rev=eea28159303e9b51e4e211151aba0a3ceb686a32#0.1.0": "0jfrvvy3d4804nc8vh5dcbx3qg1akl1y6zkscx6p3hc3qjvhl1am",
   "git+https://github.com/LiGoldragon/signal-sema.git?rev=4f3a24e6677ab9d200672851016c4c760c1e36e8#signal-sema@0.2.0": "0q6pgw0ymn5ylqlcnqldn7pf1dpv43vi07vqwf7lj5wd04bm3qac",
   "git+https://github.com/LiGoldragon/signal?rev=6d4eb74#11.0.0": "0hqy8k58s6sc9wz76k8iq40bv636js5s951zgd01ncrxcy6h776a",
   "git+https://github.com/LiGoldragon/translator?rev=6892a15b11653a2ef8932a4390b34f5e81583744#0.6.0": "1q8l8606hf7zxfxy7w3r23l4avj3j9y2kdpapsnskvw3l522yfpy"

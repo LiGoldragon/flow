@@ -124,8 +124,7 @@ use crate::store::events::RecordsHarnessEvents;
 use crate::store::events::{IdentifiesNativeStop, RecordedStop};
 use crate::store::handover::HoldsHandovers;
 use crate::store::logical_delivery::{
-    CorePresentationRoute, RecordsLogicalDeliveries, SimplifiedReplyBinding,
-    SimplifiedReplyStanding,
+    RecordsLogicalDeliveries, SimplifiedReplyBinding, SimplifiedReplyStanding,
 };
 use crate::store::metaflow::{PreparesDeclaredMetaflow, SleepsMetaflows};
 use crate::store::ordered_replacement::{
@@ -1184,11 +1183,6 @@ impl QueuesSimplifiedAnswers for RunningNexus {
         ) {
             Ok(Some(recipient)) => {
                 self.defer_wake(recipient.clone());
-                // A core presentation's answer goes to the book Tertiary; its
-                // sender is told by a Notice.
-                if binding.source.0.is_core_presentation() && binding.recipient.0 != recipient {
-                    self.defer_wake(binding.recipient.0.clone());
-                }
                 SimplifiedAnswer::Queued { input, recipient }
             }
             Ok(None) => SimplifiedAnswer::Undelivered { input },

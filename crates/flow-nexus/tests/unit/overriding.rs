@@ -1046,7 +1046,7 @@ fn held_scheduled_reminder_queues_once_across_restart_and_release_delivers_it() 
 }
 
 #[test]
-fn held_task_sender_keeps_due_task_notice_queued_until_release() {
+fn held_task_sender_keeps_due_task_reminder_queued_until_release() {
     let fixture = NexusFixture::new();
     resting_seat(&fixture);
     let sender = address(Model::Sol);
@@ -1090,8 +1090,15 @@ fn held_task_sender_keeps_due_task_notice_queued_until_release() {
     overridden(&fixture, meta::Input::ReleasePermaflow(sender));
     let typed = fixture
         .typed()
-        .expect("release delivers the due task notice");
-    assert!(typed.contains("held-task-reminder"), "{typed}");
+        .expect("release delivers the due task reminder");
+    assert!(
+        typed.contains(&format!("Reminder.{{ {} ", accepted.request_id.0)),
+        "the reminder names the task by its id: {typed}"
+    );
+    assert!(
+        !typed.contains("held-task-reminder"),
+        "the reminder does not repeat the task's text: {typed}"
+    );
 }
 
 #[test]

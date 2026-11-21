@@ -49,9 +49,9 @@ impl DescribesClosedRequestTable for ClosedRequest {
     }
 }
 
-/// How an open request is ended with no answer: cancelled, its sender and
-/// the recipient it reached told; or closed, no one told and the process
-/// that closed it recorded.
+/// How an open request is ended with no answer: Cancel can tell the
+/// distinct receiver of reached work; CloseRequest records its caller
+/// without sending a prompt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RequestEnding {
     Cancelled,

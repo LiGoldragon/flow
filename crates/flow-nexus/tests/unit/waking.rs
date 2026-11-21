@@ -8010,6 +8010,72 @@ fn an_on_demand_codex_seat_whose_successor_cannot_compose_stays_awake_untold() {
     );
 }
 
+#[test]
+fn a_successor_refusal_routes_once_to_the_configured_investigator() {
+    use crate::store::queue_delivery::AccountsQueueDelivery;
+    use crate::waking::{NotesRefreshRefusals, WakesInParts};
+    for investigator in [None, Some(Model::Sol), Some(Model::Astra)] {
+        let fixture = NexusFixture::new();
+        let kept = address(Model::Sol);
+        let investigator_address = address(Model::Astra);
+        codex_rest_seat(&fixture, None, vec![]);
+        fixture.nexus.store.seed_metaflow(Metaflow {
+            address: investigator_address.clone(),
+            state: State::Asleep,
+            past: flow_ethos::Past(vec![]),
+            queue: flow_ethos::Queue(vec![]),
+        });
+        if let Some(model) = &investigator {
+            fixture
+                .nexus
+                .store
+                .configure_change(meta_signal_flow::ConfigurationChange::Investigation(
+                    address(model.clone()),
+                ))
+                .expect("the investigator is configured");
+        }
+
+        let refusal = KeptAtStop::RefreshUnplaceable;
+        fixture.nexus.successor_refused("908786", &refusal);
+        fixture.nexus.successor_refused("908786", &refusal);
+
+        assert!(fixture.nexus.refresh_refusals.holds("908786"));
+        let retained = stored(&fixture, Model::Sol);
+        assert_eq!(retained.address, kept);
+        assert_eq!(
+            retained.state,
+            State::Awake(flow_ethos::FlowId("908786".into()))
+        );
+        let admitted = fixture.nexus.store.retained_logical_requests().unwrap();
+        let prompts: Vec<_> = admitted
+            .iter()
+            .filter(|value| value.entry.sent_by == SentBy::Flow)
+            .collect();
+        let Some(model) = investigator else {
+            assert!(prompts.is_empty());
+            assert!(fixture.typed().is_none());
+            continue;
+        };
+        let [fault] = prompts.as_slice() else {
+            panic!("the configured investigator receives exactly one order");
+        };
+        assert_eq!(fault.address, address(model.clone()));
+        assert_eq!(fault.entry.delivery, Delivery::Wake);
+        assert!(
+            matches!(&fault.entry.message, Message::Soft(Request::Order(words))
+            if words.contains("908786") && words.contains("RefreshUnplaceable"))
+        );
+        if model == Model::Astra {
+            assert!(retained.queue.0.is_empty(), "no status notice was queued");
+            assert!(
+                fixture.typed().is_none(),
+                "nothing was typed at the kept seat"
+            );
+            assert!(fixture.nexus.wake_is_due(&stored(&fixture, Model::Astra)));
+        }
+    }
+}
+
 /// Test 9, on the ledger: a cut settles a resting seat; a second cut of
 /// the same subscription settles nothing; a subscription's end keeps the
 /// seat from rest until the next subscription's cut, which settles it.

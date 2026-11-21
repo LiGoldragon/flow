@@ -29,9 +29,8 @@ use signal_flow::{
 
 pub trait OperatesOnRequestsAndQueues {
     /// Closes an open request: one still queued leaves its queue, it is
-    /// archived with its id and a Task's reminder, and its sender, and its
-    /// recipient when it reached it, are told by a Soft Notice, save the
-    /// flow `caller` names, whose answer Cancelled already tells it.
+    /// archived with its id and a Task's reminder. Cancelled answers the
+    /// caller. Only a distinct receiver of reached work gets a Soft Notice.
     fn cancel(&self, request_id: &RequestId, caller: &Origin) -> Output;
     /// Closes an open request with no answer and tells no one: one still
     /// queued leaves its queue, it is archived with its id and a Task's
@@ -124,15 +123,14 @@ trait EndsRequests {
     /// where it waits; any other request still queued that never reached
     /// its seat leaves its queue, and it is archived with its id and a
     /// Task's reminder. A closed request's closer is recorded in the same
-    /// commit. Answers the Addresses that knew of it: a reminder's asker;
-    /// otherwise its sender, and its recipient when it reached it. A request
+    /// commit. Returns the receiver if the work reached it. A request
     /// that takes no answer and reached its recipient is finished, and is
     /// refused Closed.
     fn end_request(
         &self,
         request_id: &RequestId,
         ending: &RequestEnding,
-    ) -> Result<Vec<Address>, RequestRejection>;
+    ) -> Result<Option<Address>, RequestRejection>;
 }
 
 impl EndsRequests for RunningNexus {
@@ -140,11 +138,9 @@ impl EndsRequests for RunningNexus {
         &self,
         request_id: &RequestId,
         ending: &RequestEnding,
-    ) -> Result<Vec<Address>, RequestRejection> {
+    ) -> Result<Option<Address>, RequestRejection> {
         use crate::store::scheduled_reminder::{MarksScheduledReminder, SchedulesReminders};
-        let mut knew = Vec::new();
-        // A reminder not yet sent is ended where it waits; it reached no
-        // one, so only its asker knew of it.
+        // A reminder not yet sent is ended where it waits.
         match self.store.scheduled_reminder(request_id) {
             Ok(Some(reminder)) => {
                 let commit =
@@ -157,10 +153,7 @@ impl EndsRequests for RunningNexus {
                         commit,
                     )
                     .map_err(|_| RequestRejection::StoreRefused)?;
-                if let SentBy::Sender(asker) = &reminder.sent_by {
-                    knew.push(asker.clone());
-                }
-                return Ok(knew);
+                return Ok(None);
             }
             Ok(None) => {}
             Err(_) => return Err(RequestRejection::StoreRefused),
@@ -190,6 +183,7 @@ impl EndsRequests for RunningNexus {
                 matches!(
                     snapshot.delivery_state,
                     signal_flow::DeliveryState::Delivered(_)
+                        | signal_flow::DeliveryState::Read
                         | signal_flow::DeliveryState::Uncertain
                 )
             });
@@ -215,13 +209,7 @@ impl EndsRequests for RunningNexus {
                 return Err(RequestRejection::StoreRefused);
             }
         }
-        if let SentBy::Sender(sender) = &retained.entry.sent_by {
-            knew.push(sender.clone());
-        }
-        if reached && !knew.contains(&retained.address) {
-            knew.push(retained.address.clone());
-        }
-        Ok(knew)
+        Ok(reached.then_some(retained.address))
     }
 }
 
@@ -232,28 +220,28 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let told = match self.end_request(request_id, &RequestEnding::Cancelled) {
-                Ok(told) => told,
+            let receiver = match self.end_request(request_id, &RequestEnding::Cancelled) {
+                Ok(receiver) => receiver,
                 Err(rejection) => return Output::CancelRejected(rejection),
             };
-            let notified = told
-                .into_iter()
+            receiver
                 .filter(|address| match caller {
                     Origin::Flow(flow) => !self.flow_of_address(&flow.flow_id, address),
                     Origin::Unbound => true,
                 })
-                .collect::<Vec<_>>();
-            let text = format!("Request {} was cancelled.", request_id.0);
-            for address in &notified {
-                if let Err(error) = self.notify(address, text.clone()) {
-                    eprintln!(
-                        "flow-nexus: a cancellation notice for {address:?} was not queued: {error}"
-                    );
-                }
-            }
-            notified
+                .and_then(|address| {
+                    match self.notify(&address, format!("Request {} was cancelled.", request_id.0)) {
+                        Ok(()) => Some(address),
+                        Err(error) => {
+                            eprintln!(
+                                "flow-nexus: a cancellation notice for {address:?} was not queued: {error}"
+                            );
+                            None
+                        }
+                    }
+                })
         };
-        for address in notified {
+        if let Some(address) = notified {
             self.wake_due(address);
         }
         Output::Cancelled(request_id.clone())

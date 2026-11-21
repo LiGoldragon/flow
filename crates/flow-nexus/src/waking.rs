@@ -669,10 +669,6 @@ impl JudgesSuccessorRefusal for KeptAtStop {
     }
 }
 
-/// What a Codex flow kept because its successor was refused is told: it
-/// has no compaction, so it goes on as it is.
-pub(crate) const SUCCESSOR_REFUSED_NOTICE: &str = "Your successor could not be started, so this flow is kept as it is and goes on receiving what is sent to it.";
-
 /// The flows owed a successor whose successor was refused. Each is handed
 /// its queue meanwhile, though past its threshold, until a successor
 /// stands.
@@ -682,8 +678,8 @@ pub struct RefreshRefusals {
 }
 
 pub trait NotesRefreshRefusals {
-    /// Notes the flow's successor refused.
-    fn note(&self, flow_id: &str);
+    /// Notes the refusal and returns whether it is newly standing.
+    fn note(&self, flow_id: &str) -> bool;
     /// Whether the flow's successor stands refused.
     fn holds(&self, flow_id: &str) -> bool;
     /// Forgets the flow: its successor stands, or it has ended.
@@ -691,11 +687,11 @@ pub trait NotesRefreshRefusals {
 }
 
 impl NotesRefreshRefusals for RefreshRefusals {
-    fn note(&self, flow_id: &str) {
+    fn note(&self, flow_id: &str) -> bool {
         self.flows
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(flow_id.to_owned());
+            .insert(flow_id.to_owned())
     }
 
     fn holds(&self, flow_id: &str) -> bool {
@@ -953,10 +949,10 @@ pub(crate) trait WakesInParts {
     /// A seat kept because its successor was refused: notes it, so it is
     /// handed its queue though past its threshold, and hands it what is
     /// queued now, as its rest's drain would. The first time a refusal
-    /// stands, a Claude seat past its threshold is compacted, and a Codex
-    /// seat, which has no compaction, is sent a Notice that it is kept.
+    /// stands, the investigator receives the fault, and a Claude seat past
+    /// its threshold is compacted.
     /// Takes the dispatch gate; the caller holds none.
-    fn successor_refused(&self, flow_id: &str);
+    fn successor_refused(&self, flow_id: &str, reason: &KeptAtStop);
 }
 
 /// The start of a Claude session's history: before its transcript holds
@@ -1699,7 +1695,7 @@ impl SleepsAndWakesSeats for RunningNexus {
         match &at_stop {
             AtStop::Kept(reason) if reason.successor_refused() => {
                 eprintln!("flow-nexus: flow {flow_id} kept at its Stop: {reason:?}");
-                self.successor_refused(flow_id);
+                self.successor_refused(flow_id, reason);
             }
             AtStop::Kept(reason) => {
                 eprintln!("flow-nexus: flow {flow_id} kept at its Stop: {reason:?}");
@@ -4070,18 +4066,15 @@ impl WakesInParts for RunningNexus {
         }
     }
 
-    fn successor_refused(&self, flow_id: &str) {
+    fn successor_refused(&self, flow_id: &str, reason: &KeptAtStop) {
         use crate::delivery::DeliversMessages;
         use crate::store::logical_delivery::RecordsLogicalDeliveries;
         let address = match self.store.metaflow_awake_as(flow_id) {
             Ok(Some(metaflow)) => metaflow.address,
             _ => return,
         };
-        // Once for each refusal that stands: the seat is compacted when it
-        // is past its threshold, and a Codex seat, which has no compaction,
-        // is told it is kept.
-        let first = !self.refresh_refusals.holds(flow_id);
-        self.refresh_refusals.note(flow_id);
+        // A standing refusal is reported once. The kept seat still drains.
+        let first = self.refresh_refusals.note(flow_id);
         let harness = self
             .store
             .flow_node(flow_id)
@@ -4100,19 +4093,39 @@ impl WakesInParts for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if first
-                && harness == Some(HarnessKind::Codex)
-                && let Err(error) = self.store.accept_logical_delivery(
-                    &address,
-                    signal_flow::SentBy::Flow,
-                    flow_ethos::Delivery::Queue,
-                    signal_flow::Message::Soft(signal_flow::Request::Notice(
-                        SUCCESSOR_REFUSED_NOTICE.to_owned(),
-                    )),
-                    None,
-                )
-            {
-                eprintln!("flow-nexus: the kept flow {flow_id} was not told: {error}");
+            if first {
+                match self.store.configured_investigator() {
+                    Ok(Some(investigator)) => {
+                        let fault = format!(
+                            "Investigate the refused successor for {{ {:?} {} {:?} }}, flow {flow_id}: {reason:?}.",
+                            address.aspect, address.topic.0, address.model,
+                        );
+                        match self.store.accept_logical_delivery(
+                            &investigator,
+                            signal_flow::SentBy::Flow,
+                            flow_ethos::Delivery::Wake,
+                            signal_flow::Message::Soft(signal_flow::Request::Order(fault)),
+                            None,
+                        ) {
+                            Ok(signal_flow::PrivateSendResponse::SendAccepted(_)) => {
+                                // If the investigator is this seat, its drain below
+                                // carries the order under the effect already held.
+                                if investigator != address {
+                                    self.defer_wake(investigator);
+                                }
+                            }
+                            refusal => eprintln!(
+                                "flow-nexus: investigator fault for {flow_id} was not queued: {refusal:?}"
+                            ),
+                        }
+                    }
+                    Ok(None) => eprintln!(
+                        "flow-nexus: investigator is not configured; successor fault for {flow_id} stays in the log"
+                    ),
+                    Err(error) => eprintln!(
+                        "flow-nexus: investigator unreadable; successor fault for {flow_id} stays in the log: {error}"
+                    ),
+                }
             }
             self.reconcile_typed(&address);
             if matches!(

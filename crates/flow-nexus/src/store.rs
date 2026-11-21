@@ -153,6 +153,7 @@ const META_THRESHOLD_CONFIGURATION_TABLE_NAME: TableName =
 const META_THRESHOLD_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-model-threshold-configuration";
 const META_THRESHOLD_CONFIGURATION_SCHEMA: &str =
     "flow-nexus-meta-model-threshold-configuration-v1";
+const INVESTIGATION_CONFIGURATION_KEY: &str = "investigation";
 const META_INVESTIGATION_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_investigation_configuration");
 const META_INVESTIGATION_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-investigation-configuration";
@@ -810,7 +811,7 @@ impl DescribesThresholdTable for StoredMetaThresholdConfiguration {
 
 impl EngineRecord for StoredMetaInvestigationConfiguration {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new("investigation")
+        RecordKey::new(INVESTIGATION_CONFIGURATION_KEY)
     }
 }
 
@@ -3353,6 +3354,7 @@ impl EchoesConfigurationEdit for ConfigurationEdit {
 }
 
 pub(crate) trait ManagesMetaflowState: Sized {
+    fn configured_investigator(&self) -> Result<Option<Address>, StoreError>;
     fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError>;
     /// Replace one configuration family whole with its declaration, or
     /// change one declaration alone, with no context composer: the tests'
@@ -3402,6 +3404,18 @@ pub(crate) trait ManagesMetaflowState: Sized {
 }
 
 impl ManagesMetaflowState for FlowStore {
+    fn configured_investigator(&self) -> Result<Option<Address>, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.meta_configuration_tables.investigation,
+            RecordKey::new(INVESTIGATION_CONFIGURATION_KEY),
+        ))?;
+        match rows.records() {
+            [] => Ok(None),
+            [row] => Ok(Some(row.address.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
     /// The committed families with the counters as they stand.
     fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError> {
         use counters::ConfiguresCounters;

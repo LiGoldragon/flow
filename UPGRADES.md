@@ -19,6 +19,12 @@ meta-signal-flow 0.91.0. Upgrade both clients with the daemon.
 A Task reminder queues Soft and waits for its sender's next wake. A Remind
 set by a flow still wakes its destination as MiddleAbrupt.
 
+Cancel replies to its caller and sends a Soft Notice only to a distinct
+receiver of reached open work, including Uncertain. Withdrawing queued work
+or cancelling an unfired Remind sends no prompt. A refused successor is
+reported to the address configured by Configure.Investigation, not to the
+kept seat. Queue recovery, Claude compaction, and heartbeat are unchanged.
+
 # Flow 0.60.4: the noise release, Nexus messages removed and shortened
 
 No contract, generated type or stored schema changes. A cancelling flow

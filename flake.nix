@@ -55,6 +55,52 @@
         assert lib.assertMsg (migration-predecessor.rev == "f7d2336a7380206728cbd5aef2ebb3656d0cfd87")
           "migration-predecessor must stay locked at the accepted 0.53.2, f7d2336a7380206728cbd5aef2ebb3656d0cfd87";
         migration-predecessor.rev;
+      # The accepted 0.53.2's Cargo.lock takes sema 51d7927 from the sema
+      # repository, which no longer holds that commit; the memory repository
+      # holds it, the same tree, so the same store path. The predecessor's
+      # own outputs are evaluated from its own flake.nix with the inputs its
+      # lock holds, its crane library fetching that one checkout from memory.
+      # Every derivation is the one the original names.
+      relocatedCheckout = {
+        locked = "https://github.com/LiGoldragon/sema";
+        fetched = "https://github.com/LiGoldragon/memory";
+      };
+      migrationPredecessorOutputs =
+        let
+          predecessorInputs = migration-predecessor.inputs;
+          relocatingCrane = predecessorInputs.crane // {
+            mkLib =
+              pkgs:
+              (predecessorInputs.crane.mkLib pkgs).overrideScope (
+                final: previous: {
+                  downloadCargoPackageFromGit =
+                    arguments:
+                    let
+                      checkout = previous.downloadCargoPackageFromGit arguments;
+                    in
+                    if arguments.git == relocatedCheckout.locked then
+                      checkout.overrideAttrs (old: {
+                        src = builtins.fetchGit {
+                          url = relocatedCheckout.fetched;
+                          inherit (arguments) rev;
+                          allRefs = true;
+                          submodules = true;
+                        };
+                      })
+                    else
+                      checkout;
+                }
+              );
+          };
+          outputs = (import "${migration-predecessor}/flake.nix").outputs (
+            predecessorInputs
+            // {
+              self = migration-predecessor // outputs;
+              crane = relocatingCrane;
+            }
+          );
+        in
+        outputs;
       mkContext =
         system:
         let
@@ -256,7 +302,7 @@
           # the request-id migration evolves.
           migrationRoot = "/tmp/flow-request-id-migration-intermediate";
           migrationPredecessorPackage =
-            (migration-predecessor.lib.${system}.mkFlowPackage {
+            (migrationPredecessorOutputs.lib.${system}.mkFlowPackage {
               defaultConfiguration = {
                 sourceRoot = "${migrationRoot}/source";
                 runtimeDirectory = "${migrationRoot}/runtime";

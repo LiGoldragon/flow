@@ -173,10 +173,11 @@ impl EndsRequests for RunningNexus {
         if binding.request_closure != RequestClosure::Open {
             return Err(RequestRejection::Closed);
         }
-        let retained = match self.store.retained_logical_requests() {
-            Ok(retained) => retained
-                .into_iter()
-                .find(|request| request.entry.logical_delivery_id == binding.logical_delivery_id),
+        let retained = match self
+            .store
+            .retained_logical_request(&binding.logical_delivery_id)
+        {
+            Ok(retained) => retained,
             Err(_) => return Err(RequestRejection::StoreRefused),
         };
         let Some(retained) = retained else {
@@ -292,15 +293,17 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
         if binding.request_closure != RequestClosure::Open {
             return refused(RequestRejection::Closed);
         }
-        let task = match self.store.retained_logical_requests() {
-            Ok(retained) => retained.into_iter().any(|request| {
-                request.entry.logical_delivery_id == binding.logical_delivery_id
-                    && matches!(
-                        &request.entry.message,
-                        Message::HardAbrupt(Request::Task(_))
-                            | Message::MiddleAbrupt(Request::Task(_))
-                            | Message::Soft(Request::Task(_))
-                    )
+        let task = match self
+            .store
+            .retained_logical_request(&binding.logical_delivery_id)
+        {
+            Ok(retained) => retained.is_some_and(|request| {
+                matches!(
+                    &request.entry.message,
+                    Message::HardAbrupt(Request::Task(_))
+                        | Message::MiddleAbrupt(Request::Task(_))
+                        | Message::Soft(Request::Task(_))
+                )
             }),
             Err(_) => return refused(RequestRejection::StoreRefused),
         };

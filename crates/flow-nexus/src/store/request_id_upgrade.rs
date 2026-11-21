@@ -516,9 +516,34 @@ pub(crate) trait RunsRequestIdAnnouncements {
 
 impl RunsRequestIdAnnouncements for super::FlowStore {
     fn run_request_id_announcements(&self) -> Result<(), StoreError> {
-        use super::logical_delivery::RequestClosure;
+        use super::logical_delivery::{MintsRequestIds, RequestClosure};
         use super::queue_delivery::AccountsQueueDelivery;
         use sema_engine::{KeyedMutation, QueryPlan};
+
+        // The upgrade wrote its notice rows once, and they never grow, so
+        // they are read whole. A pass with no row Pending or Admitted ends
+        // there; every other table is read only at the keys an unsettled
+        // row names.
+        let task_rows = self
+            .engine
+            .match_records(QueryPlan::all(self.request_id_upgrade.task_announcements))?;
+        let assignment_rows = self
+            .engine
+            .match_records(QueryPlan::all(self.request_id_upgrade.upgrade_assignments))?;
+        let unsettled = |status: &TaskAnnouncementStatus| {
+            matches!(
+                status,
+                TaskAnnouncementStatus::Pending(_) | TaskAnnouncementStatus::Admitted(_)
+            )
+        };
+        if !task_rows.records().iter().any(|row| unsettled(&row.status))
+            && !assignment_rows
+                .records()
+                .iter()
+                .any(|row| unsettled(&row.status))
+        {
+            return Ok(());
+        }
 
         let policy = self.engine.match_records(QueryPlan::all(
             self.meta_configuration_tables.request_policy,
@@ -526,75 +551,74 @@ impl RunsRequestIdAnnouncements for super::FlowStore {
         let [policy] = policy.records() else {
             return Err(StoreError::StateInvariant);
         };
-        let retained = self.retained_logical_requests()?;
-        let prior = self
-            .engine
-            .match_records(QueryPlan::all(self.request_id_upgrade.prior_deliveries))?;
-        let bindings = self
-            .engine
-            .match_records(QueryPlan::all(self.logical_deliveries.request_ids))?;
-        let currents = self
-            .engine
-            .match_records(QueryPlan::all(self.logical_deliveries.current))?;
-        let open = |logical_id: &str| {
-            bindings.records().iter().any(|binding| {
-                binding.logical_delivery_id.0 == logical_id
-                    && binding.request_closure == RequestClosure::Open
-            }) && currents.records().iter().any(|current| {
-                current.delivery_snapshot.logical_delivery_id.0 == logical_id
-                    && current.archived_cursor.0.is_none()
-            })
+        // A logical request's id binding: the id its retained request was
+        // admitted under, while that id is still bound to it.
+        let binding = |logical_id: &LogicalDeliveryId| {
+            let Some(retained) = self.retained_logical_request(logical_id)? else {
+                return Ok(None);
+            };
+            Ok::<_, StoreError>(
+                self.request_binding(&retained.entry.request_id)?
+                    .filter(|binding| binding.logical_delivery_id == *logical_id),
+            )
         };
-        let request_id = |logical_id: &str| {
-            bindings
-                .records()
-                .iter()
-                .find(|binding| binding.logical_delivery_id.0 == logical_id)
-                .map(|binding| binding.request_id.clone())
+        let open = |logical_id: &LogicalDeliveryId| {
+            if !binding(logical_id)?
+                .is_some_and(|binding| binding.request_closure == RequestClosure::Open)
+            {
+                return Ok(false);
+            }
+            let currents = self.engine.match_records(QueryPlan::key(
+                self.logical_deliveries.current,
+                RecordKey::new(logical_id.0.clone()),
+            ))?;
+            Ok::<_, StoreError>(
+                currents
+                    .records()
+                    .iter()
+                    .any(|current| current.archived_cursor.0.is_none()),
+            )
         };
-        let task_words = |logical_id: &str| {
-            retained.iter().find_map(|value| {
-                if value.entry.logical_delivery_id.0 != logical_id {
-                    return None;
-                }
-                match &value.entry.message {
-                    flow_ethos::Message::HardAbrupt(flow_ethos::Request::Task(task))
-                    | flow_ethos::Message::MiddleAbrupt(flow_ethos::Request::Task(task))
-                    | flow_ethos::Message::Soft(flow_ethos::Request::Task(task)) => {
-                        Some(task.string.clone())
-                    }
-                    _ => None,
-                }
-            })
+        let request_id = |logical_id: &LogicalDeliveryId| {
+            Ok::<_, StoreError>(binding(logical_id)?.map(|binding| binding.request_id))
         };
-        let order_words = |logical_id: &str| {
-            retained
-                .iter()
-                .find_map(|value| {
-                    if value.entry.logical_delivery_id.0 != logical_id {
-                        return None;
-                    }
-                    match &value.entry.message {
-                        flow_ethos::Message::HardAbrupt(flow_ethos::Request::Order(words))
-                        | flow_ethos::Message::MiddleAbrupt(flow_ethos::Request::Order(words))
-                        | flow_ethos::Message::Soft(flow_ethos::Request::Order(words)) => {
-                            Some(words.clone())
+        let task_words = |logical_id: &LogicalDeliveryId| {
+            Ok::<_, StoreError>(
+                self.retained_logical_request(logical_id)?
+                    .and_then(|value| match value.entry.message {
+                        flow_ethos::Message::HardAbrupt(flow_ethos::Request::Task(task))
+                        | flow_ethos::Message::MiddleAbrupt(flow_ethos::Request::Task(task))
+                        | flow_ethos::Message::Soft(flow_ethos::Request::Task(task)) => {
+                            Some(task.string)
                         }
                         _ => None,
-                    }
-                })
-                .or_else(|| {
-                    prior.records().iter().find_map(|value| {
-                        (value.logical_delivery_id == logical_id)
-                            .then(|| value.request.prior_order_words())
-                            .flatten()
-                    })
-                })
+                    }),
+            )
+        };
+        let order_words = |logical_id: &LogicalDeliveryId| {
+            let retained = self
+                .retained_logical_request(logical_id)?
+                .and_then(|value| match value.entry.message {
+                    flow_ethos::Message::HardAbrupt(flow_ethos::Request::Order(words))
+                    | flow_ethos::Message::MiddleAbrupt(flow_ethos::Request::Order(words))
+                    | flow_ethos::Message::Soft(flow_ethos::Request::Order(words)) => Some(words),
+                    _ => None,
+                });
+            if retained.is_some() {
+                return Ok(retained);
+            }
+            let prior = self.engine.match_records(QueryPlan::key(
+                self.request_id_upgrade.prior_deliveries,
+                RecordKey::new(logical_id.0.clone()),
+            ))?;
+            Ok::<_, StoreError>(
+                prior
+                    .records()
+                    .iter()
+                    .find_map(|value| value.request.prior_order_words()),
+            )
         };
 
-        let task_rows = self
-            .engine
-            .match_records(QueryPlan::all(self.request_id_upgrade.task_announcements))?;
         for mut row in task_rows.records().to_vec() {
             if self.settle_notice_status(&mut row.status, row.tries, policy.try_bound.0)? {
                 self.engine.mutate_keyed(KeyedMutation::new(
@@ -609,9 +633,9 @@ impl RunsRequestIdAnnouncements for super::FlowStore {
             }
             let mut lines = Vec::new();
             for logical_id in &row.tasks {
-                if open(&logical_id.0) {
-                    let id = request_id(&logical_id.0).ok_or(StoreError::StateInvariant)?;
-                    let words = task_words(&logical_id.0).ok_or(StoreError::StateInvariant)?;
+                if open(logical_id)? {
+                    let id = request_id(logical_id)?.ok_or(StoreError::StateInvariant)?;
+                    let words = task_words(logical_id)?.ok_or(StoreError::StateInvariant)?;
                     lines.push(
                         TASK_ANNOUNCEMENT_HEADER
                             .render_bounded_line(&format!("{id} ", id = id.0), &words),
@@ -635,9 +659,6 @@ impl RunsRequestIdAnnouncements for super::FlowStore {
             )?;
         }
 
-        let assignment_rows = self
-            .engine
-            .match_records(QueryPlan::all(self.request_id_upgrade.upgrade_assignments))?;
         for mut row in assignment_rows.records().to_vec() {
             if self.settle_notice_status(&mut row.status, row.tries, policy.try_bound.0)? {
                 self.engine.mutate_keyed(KeyedMutation::new(
@@ -650,13 +671,19 @@ impl RunsRequestIdAnnouncements for super::FlowStore {
             if !matches!(row.status, TaskAnnouncementStatus::Pending(_)) {
                 continue;
             }
-            let has_open = row.decisions.iter().any(|decision| {
-                decision
-                    .assigned
-                    .iter()
-                    .any(|assigned| open(&assigned.order.0))
-                    || decision.open.iter().any(|order| open(&order.order.0))
-            });
+            let has_open = row
+                .decisions
+                .iter()
+                .flat_map(|decision| {
+                    decision
+                        .assigned
+                        .iter()
+                        .map(|assigned| &assigned.order)
+                        .chain(decision.open.iter().map(|order| &order.order))
+                })
+                .try_fold(false, |found, order| {
+                    Ok::<_, StoreError>(found || open(order)?)
+                })?;
             if !has_open {
                 row.status = TaskAnnouncementStatus::Closed;
                 self.engine.mutate_keyed(KeyedMutation::new(
@@ -669,19 +696,19 @@ impl RunsRequestIdAnnouncements for super::FlowStore {
             let mut lines = Vec::new();
             for decision in &row.decisions {
                 for assigned in &decision.assigned {
-                    let id = request_id(&assigned.order.0)
+                    let id = request_id(&assigned.order)?
                         .map(|id| id.0)
                         .unwrap_or_else(|| "archived".into());
-                    let words = order_words(&assigned.order.0).ok_or(StoreError::StateInvariant)?;
+                    let words = order_words(&assigned.order)?.ok_or(StoreError::StateInvariant)?;
                     lines.push(
                         ASSIGNMENT_HEADER.render_bounded_line(&format!("{id} answered "), &words),
                     );
                 }
                 for order in &decision.open {
-                    let id = request_id(&order.order.0)
+                    let id = request_id(&order.order)?
                         .map(|id| id.0)
                         .unwrap_or_else(|| "archived".into());
-                    let words = order_words(&order.order.0).ok_or(StoreError::StateInvariant)?;
+                    let words = order_words(&order.order)?.ok_or(StoreError::StateInvariant)?;
                     lines.push(
                         ASSIGNMENT_HEADER.render_bounded_line(&format!("{id} open "), &words),
                     );

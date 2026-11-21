@@ -10809,14 +10809,6 @@ mod tests {
         }
     }
 
-    struct RefusesRequestIdDraw;
-
-    impl super::logical_delivery::DrawsRequestId for RefusesRequestIdDraw {
-        fn draw_request_id(&self) -> Result<flow_ethos::RequestId, super::StoreError> {
-            panic!("a full id space is refused before entropy is read")
-        }
-    }
-
     #[test]
     fn request_id_collision_redraws_and_stays_four_characters() {
         use super::logical_delivery::{MintsRequestIds, RequestClosure, RequestIdBinding};
@@ -10988,22 +10980,23 @@ mod tests {
     }
 
     #[test]
-    fn request_id_space_full_of_held_requests_refuses_without_drawing() {
-        use super::logical_delivery::MintsRequestIds;
+    fn collided_draws_refuse_as_a_full_space_only_when_every_id_is_held() {
+        use super::logical_delivery::{HeldRequestIds, RefusesCollidedDraws};
 
-        let fixture = StoreFixture::new();
-        let mut store = fixture.store();
-        super::SetsRequestIdDrawerForTests::set_request_id_drawer_for_tests(
-            &mut store,
-            std::sync::Arc::new(RefusesRequestIdDraw),
+        assert_eq!(
+            HeldRequestIds(36usize.pow(4) - 1)
+                .collided_draw_refusal()
+                .expect("a space with room"),
+            signal_flow::Refusal::RequestIdDrawsCollided
         );
         assert_eq!(
-            MintsRequestIds::mint_request_id_with_held_count(&store, 36usize.pow(4))
-                .expect("full-space policy reads"),
-            Err(signal_flow::Refusal::RequestIdSpaceFull)
+            HeldRequestIds(36usize.pow(4))
+                .collided_draw_refusal()
+                .expect("a full space"),
+            signal_flow::Refusal::RequestIdSpaceFull
         );
         assert!(matches!(
-            MintsRequestIds::mint_request_id_with_held_count(&store, 36usize.pow(4) + 1),
+            HeldRequestIds(36usize.pow(4) + 1).collided_draw_refusal(),
             Err(super::StoreError::StateInvariant)
         ));
     }

@@ -64,18 +64,19 @@ impl RemindsCallers for RunningNexus {
                     return;
                 }
             };
-            let retained = match self.store.retained_logical_requests() {
-                Ok(retained) => retained,
-                Err(error) => {
-                    eprintln!("flow-nexus: retained tasks unreadable: {error}");
-                    return;
-                }
-            };
             for reminder in due {
-                let Some(task) = retained.iter().find_map(|request| {
-                    if request.entry.logical_delivery_id != reminder.logical_delivery_id {
-                        return None;
+                // Each due reminder reads the one task it names, by its key.
+                let retained = match self
+                    .store
+                    .retained_logical_request(&reminder.logical_delivery_id)
+                {
+                    Ok(retained) => retained,
+                    Err(error) => {
+                        eprintln!("flow-nexus: retained tasks unreadable: {error}");
+                        return;
                     }
+                };
+                let Some(task) = retained.as_ref().and_then(|request| {
                     let (Message::HardAbrupt(kind)
                     | Message::MiddleAbrupt(kind)
                     | Message::Soft(kind)) = &request.entry.message;

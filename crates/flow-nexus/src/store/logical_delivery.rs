@@ -420,11 +420,9 @@ pub(crate) struct DeliverCallSpec {
 }
 
 pub(crate) trait MintsRequestIds {
+    /// Draws a free request id by point reads alone; the bindings are
+    /// counted only when every draw collided.
     fn mint_request_id(&self) -> Result<Result<flow_ethos::RequestId, Refusal>, StoreError>;
-    fn mint_request_id_with_held_count(
-        &self,
-        held_count: usize,
-    ) -> Result<Result<flow_ethos::RequestId, Refusal>, StoreError>;
     fn request_binding(
         &self,
         id: &flow_ethos::RequestId,
@@ -469,11 +467,7 @@ impl MintsRequestIds for FlowStore {
         Ok(rows.records().first().cloned())
     }
     fn answerable_by(&self, binding: &RequestIdBinding, task: bool) -> Result<bool, StoreError> {
-        let Some(retained) = self
-            .retained_logical_requests()?
-            .into_iter()
-            .find(|value| value.entry.logical_delivery_id == binding.logical_delivery_id)
-        else {
+        let Some(retained) = self.retained_logical_request(&binding.logical_delivery_id)? else {
             return Ok(false);
         };
         let request = match &retained.entry.message {
@@ -490,22 +484,6 @@ impl MintsRequestIds for FlowStore {
         Ok(correct_kind && delivered)
     }
     fn mint_request_id(&self) -> Result<Result<flow_ethos::RequestId, Refusal>, StoreError> {
-        let held = self
-            .engine
-            .match_records(QueryPlan::all(self.logical_deliveries.request_ids))?;
-        self.mint_request_id_with_held_count(held.records().len())
-    }
-    fn mint_request_id_with_held_count(
-        &self,
-        held_count: usize,
-    ) -> Result<Result<flow_ethos::RequestId, Refusal>, StoreError> {
-        const SPACE: usize = 36usize.pow(4);
-        if held_count == SPACE {
-            return Ok(Err(Refusal::RequestIdSpaceFull));
-        }
-        if held_count > SPACE {
-            return Err(StoreError::StateInvariant);
-        }
         let draws = self.request_id_draws()?;
         for _ in 0..draws {
             let id = self.request_id_drawer.draw_request_id()?;
@@ -525,7 +503,35 @@ impl MintsRequestIds for FlowStore {
                 return Ok(Ok(id));
             }
         }
-        Ok(Err(Refusal::RequestIdDrawsCollided))
+        // Every draw collided: only now is it asked whether the space is
+        // full, the one read of every binding, which counts them.
+        let held = self
+            .engine
+            .match_records(QueryPlan::all(self.logical_deliveries.request_ids))?;
+        HeldRequestIds(held.records().len())
+            .collided_draw_refusal()
+            .map(Err)
+    }
+}
+
+/// How many request ids are bound, read when every draw collided.
+pub(crate) struct HeldRequestIds(pub(crate) usize);
+
+pub(crate) trait RefusesCollidedDraws {
+    /// The refusal of a mint whose every draw collided: the space is full
+    /// when every four-character id is bound, and the draws were unlucky
+    /// otherwise. More bindings than the space holds breaks the store.
+    fn collided_draw_refusal(&self) -> Result<Refusal, StoreError>;
+}
+
+impl RefusesCollidedDraws for HeldRequestIds {
+    fn collided_draw_refusal(&self) -> Result<Refusal, StoreError> {
+        const SPACE: usize = 36usize.pow(4);
+        match self.0.cmp(&SPACE) {
+            std::cmp::Ordering::Less => Ok(Refusal::RequestIdDrawsCollided),
+            std::cmp::Ordering::Equal => Ok(Refusal::RequestIdSpaceFull),
+            std::cmp::Ordering::Greater => Err(StoreError::StateInvariant),
+        }
     }
 }
 
@@ -923,11 +929,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         else {
             return Ok(Err(ArchiveRejection::UnknownRequest));
         };
-        let Some(retained) = self
-            .retained_logical_requests()?
-            .into_iter()
-            .find(|value| value.entry.logical_delivery_id == binding.logical_delivery_id)
-        else {
+        let Some(retained) = self.retained_logical_request(&binding.logical_delivery_id)? else {
             return Err(StoreError::StateInvariant);
         };
         if self.admission_answer_is_pending(&binding.request_id) {

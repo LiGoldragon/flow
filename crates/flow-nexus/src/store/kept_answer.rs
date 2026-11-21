@@ -104,9 +104,7 @@ impl RoutesAnswers for FlowStore {
             return Ok(AnswerRoute::Unanswering);
         };
         let sender = self
-            .retained_logical_requests()?
-            .into_iter()
-            .find(|retained| retained.entry.logical_delivery_id == binding.logical_delivery_id)
+            .retained_logical_request(&binding.logical_delivery_id)?
             .map(|retained| retained.entry.sent_by);
         Ok(match sender {
             Some(SentBy::Sender(address)) => AnswerRoute::To(address),

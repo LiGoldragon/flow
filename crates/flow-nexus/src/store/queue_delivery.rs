@@ -325,6 +325,12 @@ pub trait AccountsQueueDelivery {
     /// Legacy evidence is intentionally absent: it has no authoritative
     /// logical identity or chronology for answer correlation.
     fn retained_logical_requests(&self) -> Result<Vec<RetainedLogicalRequest>, StoreError>;
+    /// The one admission retained under this logical delivery id, read by
+    /// its key; None when no complete typed request is retained for it.
+    fn retained_logical_request(
+        &self,
+        logical_delivery_id: &flow_ethos::LogicalDeliveryId,
+    ) -> Result<Option<RetainedLogicalRequest>, StoreError>;
 
     /// Adds the admission's complete request evidence to the same atomic
     /// commit as its metaflow queue and logical lifecycle records. An
@@ -577,6 +583,33 @@ impl AccountsQueueDelivery for FlowStore {
                 QueueEvidence::Legacy(_) => None,
             })
             .collect())
+    }
+
+    fn retained_logical_request(
+        &self,
+        logical_delivery_id: &flow_ethos::LogicalDeliveryId,
+    ) -> Result<Option<RetainedLogicalRequest>, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.queue_delivery.requests,
+            RecordKey::new(logical_delivery_id.0.clone()),
+        ))?;
+        match rows.records() {
+            [] => Ok(None),
+            // A logical request is keyed by its own logical delivery id.
+            [request] => match &request.queue_evidence {
+                QueueEvidence::Logical(entry)
+                    if entry.logical_delivery_id == *logical_delivery_id =>
+                {
+                    Ok(Some(RetainedLogicalRequest {
+                        address: request.address.clone(),
+                        entry: entry.clone(),
+                    }))
+                }
+                QueueEvidence::Logical(_) => Err(StoreError::StateInvariant),
+                QueueEvidence::Legacy(_) => Ok(None),
+            },
+            _ => Err(StoreError::StateInvariant),
+        }
     }
 
     fn assert_logical_request(

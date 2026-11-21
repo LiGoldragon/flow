@@ -302,9 +302,14 @@ fn the_paired_curriculum_serves_state_on_demand_outside_every_startup() {
     write(
         &roots[0],
         "modules.datom",
-        "[ { { Spirit core Single.0 } spirit/core/0.md } ]",
+        "[ { { Spirit core Single.0 } spirit/core/0.md } { { Intent main-flow Single.0 } intent/main-flow/0.md } ]",
     );
     write(&roots[0], "spirit/core/0.md", "Flow system control.");
+    write(
+        &roots[0],
+        "intent/main-flow/0.md",
+        "Flow seat intent control.",
+    );
     write(
         &roots[1],
         "modules.datom",
@@ -405,7 +410,7 @@ fn the_paired_curriculum_serves_state_on_demand_outside_every_startup() {
                 topic: flow_ethos::Topic("stateCheck".into()),
                 model: Model::Sol,
             },
-            &["spirit:core:0"],
+            &["spirit:core:0", "intent:main-flow:0"],
             &["knowledge:control:0"],
         );
         let composition = composer
@@ -413,6 +418,12 @@ fn the_paired_curriculum_serves_state_on_demand_outside_every_startup() {
             .expect("compose normal selected modules");
         assert!(VerifiedContext::verified(&startup, &composition).is_ok());
         assert!(composition.system_text.0.contains("Flow system control."));
+        assert!(
+            composition
+                .system_text
+                .0
+                .contains("Flow seat intent control.")
+        );
         assert!(composition.user_text.0.contains("Flow user control."));
         for payload in [&composition.system_text.0, &composition.user_text.0] {
             assert!(!payload.contains(state_name));

@@ -42,8 +42,6 @@ pub(crate) enum MembershipOwner<'owner> {
     LogicalDelivery(&'owner str),
     Address(&'owner Address),
     UnsettledAt(&'owner Address),
-    /// Every unsettled attempt, at every Address.
-    Unsettled,
     UnfinishedAt(&'owner Address),
     /// Every unfinished attempt, at every Address.
     Unfinished,
@@ -62,7 +60,6 @@ impl Ranges for MembershipOwner<'_> {
             Self::LogicalDelivery(id) => format!("logical:{}:{}:", id.len(), id),
             Self::Address(address) => format!("address:{}:", at(address)),
             Self::UnsettledAt(address) => format!("unsettled:{}:", at(address)),
-            Self::Unsettled => "unsettled:".to_owned(),
             Self::UnfinishedAt(address) => format!("unfinished:{}:", at(address)),
             Self::Unfinished => "unfinished:".to_owned(),
         }
@@ -376,7 +373,6 @@ impl FlowStore {
                 MembershipOwner::UnsettledAt(address) => {
                     attempt.address == **address && unsettled(attempt)
                 }
-                MembershipOwner::Unsettled => unsettled(attempt),
                 MembershipOwner::UnfinishedAt(address) => {
                     attempt.address == **address && !attempt.queue_delivery_phase.is_finished()
                 }

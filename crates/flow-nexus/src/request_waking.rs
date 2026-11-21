@@ -1,8 +1,8 @@
 //! What wakes a sleeping permaflow: the request's kind. A request for an
 //! Asleep metaflow, an Order, Question, Task, Living, Result or Done, starts
 //! a fresh flow with the metaflow's whole queue, oldest first; a Notice
-//! alone waits in the queue for the next waking. A Reminder a flow asked
-//! for with Remind wakes as the request its asker would have sent.
+//! or a Task reminder alone waits in the queue for the next waking. A
+//! reminder scheduled through Remind is admitted with a Wake mark.
 //!
 //! Priority has no part in the decision. It says how an Awake seat receives
 //! the request: HardAbrupt interrupts, MiddleAbrupt arrives at the next tool
@@ -47,9 +47,8 @@ impl WakesSleepingPermaflow for Request {
             | Request::Living(_)
             | Request::Result(_)
             | Request::Task(_)
-            | Request::Done(_)
-            | Request::Reminder(_) => true,
-            Request::Notice(_) => false,
+            | Request::Done(_) => true,
+            Request::Notice(_) | Request::Reminder(_) => false,
         }
     }
 }

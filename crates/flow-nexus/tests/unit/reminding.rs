@@ -9,6 +9,7 @@ use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::reminder::{RecordsReminders, TASK_REMINDERS};
+use crate::waking::SleepsAndWakesSeats;
 use flow_ethos::{Address, Aspect, Model, Request};
 use signal_flow::{Message, Metaflow, PrivateSendResponse, QueueEntry, SentBy};
 
@@ -90,13 +91,11 @@ fn a_tasks_last_reminder_goes_alone_to_the_tasks_own_sender() {
 
     fixture.nexus.send_due_reminders();
 
-    let told = fixture
-        .nexus
-        .store
-        .metaflow(&sender)
-        .unwrap()
-        .unwrap()
-        .queue;
+    let sleeping_sender = fixture.nexus.store.metaflow(&sender).unwrap().unwrap();
+    assert_eq!(sleeping_sender.state, flow_ethos::State::Asleep);
+    assert!(!fixture.nexus.wake_is_due(&sleeping_sender));
+    let told = sleeping_sender.queue;
+    assert_eq!(told.0[0].delivery, flow_ethos::Delivery::Queue);
     assert_eq!(
         reminders(&told.0),
         vec![(

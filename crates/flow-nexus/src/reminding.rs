@@ -4,8 +4,9 @@
 //! restart of the Nexus keeps it. A Task's reminder due is queued for its
 //! sender as Soft `Reminder.{ RequestId String }`, from Flow, naming the
 //! task by its id; a reminder asked for is queued for the Address it names
-//! as MiddleAbrupt `Reminder.{ RequestId String }`, from whoever asked. Each is woken or handed over as any waking request
-//! is.
+//! as MiddleAbrupt `Reminder.{ RequestId String }`, from whoever asked. A
+//! Task reminder waits for its sender to wake; a scheduled Remind wakes
+//! its recipient.
 
 use crate::HoldsStopRequest;
 use crate::RunningNexus;
@@ -14,6 +15,7 @@ use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::reminder::{AdvancesReminder, RecordsReminders};
 use crate::waking::SleepsAndWakesSeats;
+use flow_ethos::Delivery;
 use signal_flow::{Address, Message, Request, SentBy};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -31,8 +33,9 @@ impl CountsUnixSeconds for SystemTime {
 }
 
 pub trait RemindsCallers {
-    /// Queues every reminder due now, and wakes or hands over to each
-    /// metaflow reminded. Takes the dispatch gate; the caller holds none.
+    /// Queues every due reminder and offers it to the recipient. Only a
+    /// scheduled Remind can wake a sleeping recipient. Takes the dispatch
+    /// gate; the caller holds none.
     fn send_due_reminders(&self);
     /// Sends reminders as they fall due, until the Nexus stops.
     fn keep_reminding(&self);
@@ -86,13 +89,12 @@ impl RemindsCallers for RunningNexus {
                 };
                 let (sent, next) = reminder.advanced(task, now);
                 if let Some(sent) = sent {
-                    use crate::request_waking::WakesSleepingPermaflow;
                     let address = sent.address;
                     let message = Message::Soft(Request::Reminder(sent.reminder));
                     match self.store.accept_logical_delivery(
                         &address,
                         SentBy::Flow,
-                        message.queued_delivery(),
+                        Delivery::Queue,
                         message,
                         None,
                     ) {
@@ -128,7 +130,6 @@ impl RemindsCallers for RunningNexus {
                 }
             };
             for reminder in asked {
-                use crate::request_waking::WakesSleepingPermaflow;
                 let address = reminder.address.clone();
                 let message = Message::MiddleAbrupt(Request::Reminder(flow_ethos::Reminder_Data {
                     request_id: reminder.request_id.clone(),
@@ -137,7 +138,7 @@ impl RemindsCallers for RunningNexus {
                 let closed_by = match self.store.accept_logical_delivery(
                     &address,
                     reminder.sent_by.clone(),
-                    message.queued_delivery(),
+                    Delivery::Wake,
                     message,
                     None,
                 ) {

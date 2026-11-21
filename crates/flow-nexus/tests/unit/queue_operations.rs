@@ -1004,14 +1004,14 @@ fn an_answer_to_an_unbound_request_is_kept_and_read_by_answer() {
 /// when its minutes lapse the Address is sent MiddleAbrupt
 /// `Reminder.{ id words }` from whoever asked, and its request closes.
 #[test]
-fn remind_sends_its_address_a_reminder_when_its_minutes_lapse() {
+fn a_reminder_set_for_oneself_is_due_to_wake_that_flow() {
     use crate::reminding::RemindsCallers;
     use crate::store::scheduled_reminder::SchedulesReminders;
+    use crate::waking::SleepsAndWakesSeats;
     let fixture = NexusFixture::new();
     let reminded = at("remindedSeat");
-    let asker = at("remindAsker");
+    let asker = reminded.clone();
     asleep(&fixture, &reminded);
-    asleep(&fixture, &asker);
     let Output::Reminded(request_id) = fixture.nexus.remind(
         signal_flow::Remind_Data {
             address: reminded.clone(),
@@ -1039,10 +1039,13 @@ fn remind_sends_its_address_a_reminder_when_its_minutes_lapse() {
         .rewind_scheduled_reminder(&request_id, 0)
         .unwrap();
     fixture.nexus.send_due_reminders();
-    let sent = queued(&fixture, &reminded);
+    let sleeping_recipient = fixture.nexus.store.metaflow(&reminded).unwrap().unwrap();
+    assert!(fixture.nexus.wake_is_due(&sleeping_recipient));
+    let sent = sleeping_recipient.queue.0;
     assert!(
         sent.iter()
             .any(|entry| entry.sent_by == SentBy::Sender(asker.clone())
+                && entry.delivery == flow_ethos::Delivery::Wake
                 && entry.message
                     == Message::MiddleAbrupt(Request::Reminder(flow_ethos::Reminder_Data {
                         request_id: request_id.clone(),

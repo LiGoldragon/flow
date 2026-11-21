@@ -8414,7 +8414,8 @@ fn send_unbound(fixture: &NexusFixture, message: Message) -> signal_flow::Output
 }
 
 /// What wakes a sleeping permaflow is the request's kind: every kind but a
-/// Notice wakes it, at every priority, and a Notice waits at every priority.
+/// Notice or Reminder wakes it, at every priority. A scheduled Reminder's
+/// Wake mark is applied at admission.
 #[test]
 fn the_request_kind_alone_decides_whether_a_sleeping_permaflow_wakes() {
     use crate::request_waking::WakesSleepingPermaflow;
@@ -8436,10 +8437,6 @@ fn the_request_kind_alone_decides_whether_a_sleeping_permaflow_wakes() {
                 string: "done".into(),
             },
         )),
-        Request::Reminder(flow_ethos::Reminder_Data {
-            request_id: flow_ethos::RequestId("r3m1".into()),
-            string: "reminder".into(),
-        }),
     ];
     for request in waking {
         for message in [
@@ -8450,6 +8447,17 @@ fn the_request_kind_alone_decides_whether_a_sleeping_permaflow_wakes() {
             assert!(message.wakes_sleeping_permaflow(), "{message:?} wakes");
             assert_eq!(message.queued_delivery(), Delivery::Wake, "{message:?}");
         }
+    }
+    let reminder = Request::Reminder(flow_ethos::Reminder_Data {
+        request_id: flow_ethos::RequestId("r3m1".into()),
+        string: "reminder".into(),
+    });
+    for message in [
+        Message::HardAbrupt(reminder.clone()),
+        Message::MiddleAbrupt(reminder.clone()),
+        Message::Soft(reminder),
+    ] {
+        assert_eq!(message.queued_delivery(), Delivery::Queue, "{message:?}");
     }
     let notice = Request::Notice("fyi".into());
     for message in [

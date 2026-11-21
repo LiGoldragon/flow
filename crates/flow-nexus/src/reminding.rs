@@ -90,21 +90,23 @@ impl RemindsCallers for RunningNexus {
                     continue;
                 };
                 let (sent, next) = reminder.advanced(task_words, now);
-                let address = sent.address;
-                match self.store.accept_logical_delivery(
-                    &address,
-                    SentBy::Flow,
-                    flow_ethos::Delivery::Queue,
-                    Message::Soft(Request::Notice(sent.notice)),
-                    None,
-                ) {
-                    Ok(signal_flow::PrivateSendResponse::SendAccepted(_)) => {
-                        if !reminded.contains(&address) {
-                            reminded.push(address);
+                if let Some(sent) = sent {
+                    let address = sent.address;
+                    match self.store.accept_logical_delivery(
+                        &address,
+                        SentBy::Flow,
+                        flow_ethos::Delivery::Queue,
+                        Message::Soft(Request::Notice(sent.notice)),
+                        None,
+                    ) {
+                        Ok(signal_flow::PrivateSendResponse::SendAccepted(_)) => {
+                            if !reminded.contains(&address) {
+                                reminded.push(address);
+                            }
                         }
-                    }
-                    _answer => {
-                        eprintln!("flow-nexus: a reminder was not queued for {address:?}")
+                        _answer => {
+                            eprintln!("flow-nexus: a reminder was not queued for {address:?}")
+                        }
                     }
                 }
                 let kept = match next {

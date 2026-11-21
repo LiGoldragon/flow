@@ -127,137 +127,181 @@ fn notices(fixture: &NexusFixture, address: &Address) -> Vec<String> {
         .collect()
 }
 
-/// Cancel archives a delivered Question and notifies only its receiver.
-/// A second Cancel names no request.
 #[test]
-fn cancel_closes_a_delivered_question_and_notifies_its_receiver() {
+fn verbose_task_dispatch_stores_the_selection_with_its_logical_request() {
+    use crate::store::logical_delivery::ReadsTaskOutcomeEvidence;
+    use signal_flow::{
+        AbruptTask, AnswerableTask, TerminalOutcome, VerboseTask, VerboseTaskAdmission,
+    };
+
+    let fixture = NexusFixture::new();
+    let address = at("taskOutcomes");
+    asleep(&fixture, &address);
+    let task = AnswerableTask {
+        minutes: flow_ethos::Minutes(30),
+        string: "Read.".into(),
+    };
+    let selected = [TerminalOutcome::Fulfilled, TerminalOutcome::Cancelled];
+    let Output::TaskVerboseSent(VerboseTaskAdmission::Accepted(admission)) =
+        fixture.nexus.dispatch(Input::SendTaskVerbose(VerboseTask {
+            address: address.clone(),
+            abrupt_task: AbruptTask::Soft(task.clone()),
+            terminal_outcome_vector: selected.to_vec(),
+        }))
+    else {
+        panic!("expected typed verbose task admission")
+    };
+    let quiet = admitted(&fixture, &address, SentBy::Unbound, Request::Task(task));
+    let store = &fixture.nexus.store;
+    let logical_id = &queued(&fixture, &address)[0].logical_delivery_id;
+    let selections = store.task_outcome_selection(logical_id);
+    let [selected_row] = selections.as_slice() else {
+        panic!("expected one selection")
+    };
+    assert_eq!(selected_row.terminal_outcome_vector, selected);
+    assert_eq!(
+        queued(&fixture, &address)[0].request_id,
+        admission.request_id
+    );
+    assert!(
+        store
+            .task_outcome_selection(&quiet.logical_delivery_id)
+            .is_empty()
+    );
+}
+
+#[test]
+fn cancel_stages_one_selected_terminal_event_with_the_original_request() {
+    use crate::store::logical_delivery::LogicalDeliveryTransition;
+    use crate::store::logical_delivery::ReadsTaskOutcomeEvidence;
+    use signal_flow::TerminalOutcome;
+
+    let fixture = NexusFixture::new();
+    let sender = at("terminalRequester");
+    let recipient = at("terminalWorker");
+    let sender_flow = flow_ethos::FlowId("terminalRequesterFlow".into());
+    awake_as(&fixture, &sender, &sender_flow);
+    asleep(&fixture, &recipient);
+    let store = &fixture.nexus.store;
+    for (origin, outcomes, expected) in [
+        (Origin::Unbound, vec![], false),
+        (Origin::Unbound, vec![TerminalOutcome::Fulfilled], false),
+        (
+            origin_of(sender_flow),
+            vec![TerminalOutcome::Cancelled],
+            false,
+        ),
+        (
+            Origin::Unbound,
+            vec![TerminalOutcome::Cancelled, TerminalOutcome::Cancelled],
+            true,
+        ),
+    ] {
+        let PrivateSendResponse::SendAccepted(work) = store
+            .accept_logical_delivery_for_with_transition(
+                &recipient,
+                SentBy::Sender(sender.clone()),
+                flow_ethos::Delivery::Queue,
+                Message::Soft(Request::Task(flow_ethos::AnswerableTask {
+                    minutes: flow_ethos::Minutes(30),
+                    string: "Review.".into(),
+                })),
+                None,
+                LogicalDeliveryTransition {
+                    purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
+                    task_outcomes: outcomes,
+                    context_warning: None,
+                    handover_reminder: None,
+                    deliver_call: None,
+                    upgrade_notice: None,
+                },
+            )
+            .unwrap()
+        else {
+            panic!("expected task admission")
+        };
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_from(Input::Cancel(work.request_id.clone()), origin.clone()),
+            Output::Cancelled(work.request_id.clone())
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_from(Input::Cancel(work.request_id.clone()), origin),
+            Output::CancelRejected(RequestRejection::UnknownRequest)
+        );
+        let events = store.task_terminal_events(&work.logical_delivery_id);
+        if expected {
+            let [event] = events.as_slice() else {
+                panic!("expected exactly one terminal event")
+            };
+            assert_eq!(event.request_id, work.request_id);
+            assert_eq!(event.logical_delivery_id, work.logical_delivery_id);
+            assert_eq!(event.address, sender);
+            assert_eq!(event.terminal_outcome, TerminalOutcome::Cancelled);
+        } else {
+            assert!(events.is_empty());
+        }
+    }
+    assert!(fixture.typed().is_none());
+}
+
+/// Every caller gets the same refusal when the native receipt proves that
+/// the worker took the work but the Nexus has no exclusive execution owner.
+#[test]
+fn reached_work_preserves_receipts_for_every_cancel_caller() {
     let fixture = NexusFixture::new();
     let sender = at("cancelSender");
     let recipient = at("cancelRecipient");
-    asleep(&fixture, &sender);
-    asleep(&fixture, &recipient);
-    let order = admitted(
+    let outsider = at("cancelOutsider");
+    let sender_flow = flow_ethos::FlowId("senderFlow".into());
+    let recipient_flow = flow_ethos::FlowId("recipientFlow".into());
+    let outsider_flow = flow_ethos::FlowId("outsiderFlow".into());
+    awake_as(&fixture, &sender, &sender_flow);
+    awake_as(&fixture, &recipient, &recipient_flow);
+    awake_as(&fixture, &outsider, &outsider_flow);
+    let work = admitted(
         &fixture,
         &recipient,
         SentBy::Sender(sender.clone()),
         Request::Question("Review the drain fix.".into()),
     );
-    delivered(&fixture, &recipient, &order);
+    delivered(&fixture, &recipient, &work);
 
-    assert_eq!(
-        fixture
-            .nexus
-            .dispatch(Input::Cancel(order.request_id.clone())),
-        Output::Cancelled(order.request_id.clone())
-    );
-    assert_eq!(
-        fixture
-            .nexus
-            .store
-            .request_binding(&order.request_id)
-            .unwrap(),
-        None,
-        "the request's id is closed"
-    );
-    let told = format!("Request {} was cancelled.", order.request_id.0);
-    assert!(notices(&fixture, &sender).is_empty());
-    assert_eq!(notices(&fixture, &recipient), vec![told]);
-    assert_eq!(
-        fixture
-            .nexus
-            .dispatch(Input::Cancel(order.request_id.clone())),
-        Output::CancelRejected(RequestRejection::UnknownRequest)
-    );
-}
-
-/// The cancelling sender already has Cancelled as its answer, while the
-/// other flow whose request was reached still receives its notice.
-#[test]
-fn cancel_does_not_notice_its_sender_flow_but_tells_the_recipient() {
-    let fixture = NexusFixture::new();
-    let sender = at("selfCancelSender");
-    let recipient = at("selfCancelRecipient");
-    let caller_flow = flow_ethos::FlowId("selfCancelFlow".into());
-    awake_as(&fixture, &sender, &caller_flow);
-    asleep(&fixture, &recipient);
-    let order = admitted(
-        &fixture,
-        &recipient,
-        SentBy::Sender(sender.clone()),
-        Request::Question("Review the drain fix.".into()),
-    );
-    delivered(&fixture, &recipient, &order);
-
-    assert_eq!(
-        fixture.nexus.dispatch_from(
-            Input::Cancel(order.request_id.clone()),
-            origin_of(caller_flow),
-        ),
-        Output::Cancelled(order.request_id.clone())
-    );
-    let notice = format!("Request {} was cancelled.", order.request_id.0);
-    assert!(notices(&fixture, &sender).is_empty());
-    assert_eq!(notices(&fixture, &recipient), vec![notice]);
-}
-
-/// The receiver gets the typed reply when it cancels its own request.
-#[test]
-fn cancel_by_the_receiver_only_replies_to_the_call() {
-    let fixture = NexusFixture::new();
-    let sender = at("cancelRecipientSender");
-    let recipient = at("cancelRecipientSelf");
-    let caller_flow = flow_ethos::FlowId("cancelRecipientFlow".into());
-    asleep(&fixture, &sender);
-    awake_as(&fixture, &recipient, &caller_flow);
-    let order = admitted(
-        &fixture,
-        &recipient,
-        SentBy::Sender(sender.clone()),
-        Request::Question("Review the drain fix.".into()),
-    );
-    delivered(&fixture, &recipient, &order);
-
-    assert_eq!(
-        fixture.nexus.dispatch_from(
-            Input::Cancel(order.request_id.clone()),
-            origin_of(caller_flow),
-        ),
-        Output::Cancelled(order.request_id.clone())
-    );
-    assert!(notices(&fixture, &sender).is_empty());
-    assert!(notices(&fixture, &recipient).is_empty());
-}
-
-/// A third party gets the reply; only the receiver gets a prompt.
-#[test]
-fn cancel_by_a_third_flow_only_notifies_the_receiver() {
-    let fixture = NexusFixture::new();
-    let sender = at("thirdCancelSender");
-    let recipient = at("thirdCancelRecipient");
-    let caller = at("thirdCancelCaller");
-    let caller_flow = flow_ethos::FlowId("thirdCancelFlow".into());
-    asleep(&fixture, &sender);
-    asleep(&fixture, &recipient);
-    awake_as(&fixture, &caller, &caller_flow);
-    let order = admitted(
-        &fixture,
-        &recipient,
-        SentBy::Sender(sender.clone()),
-        Request::Question("Review the drain fix.".into()),
-    );
-    delivered(&fixture, &recipient, &order);
-
-    assert_eq!(
-        fixture.nexus.dispatch_from(
-            Input::Cancel(order.request_id.clone()),
-            origin_of(caller_flow),
-        ),
-        Output::Cancelled(order.request_id.clone())
-    );
-    let notice = format!("Request {} was cancelled.", order.request_id.0);
-    assert!(notices(&fixture, &sender).is_empty());
-    assert!(notices(&fixture, &caller).is_empty());
-    assert_eq!(notices(&fixture, &recipient), vec![notice]);
+    let store = &fixture.nexus.store;
+    let before = store
+        .logical_delivery_snapshot(&work.logical_delivery_id)
+        .unwrap();
+    let binding = store.request_binding(&work.request_id).unwrap().unwrap();
+    for caller in [
+        Origin::Unbound,
+        origin_of(sender_flow),
+        origin_of(recipient_flow),
+        origin_of(outsider_flow),
+    ] {
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_from(Input::Cancel(work.request_id.clone()), caller),
+            Output::CancelRejected(RequestRejection::ControlUnavailable)
+        );
+        assert_eq!(
+            store.request_binding(&work.request_id).unwrap(),
+            Some(binding.clone())
+        );
+        assert_eq!(
+            store
+                .logical_delivery_snapshot(&work.logical_delivery_id)
+                .unwrap(),
+            before
+        );
+    }
+    for address in [&sender, &recipient, &outsider] {
+        assert!(queued(&fixture, address).is_empty());
+    }
+    assert!(fixture.typed().is_none());
 }
 
 /// A flow that cancels the reminder it asked for is told nothing beyond
@@ -542,7 +586,7 @@ fn cancel_takes_a_queued_task_out_with_its_reminder() {
 
 /// A parked Uncertain Task counts as reached for cancellation.
 #[test]
-fn cancel_of_a_parked_uncertain_task_notifies_only_its_receiver() {
+fn cancel_of_a_parked_uncertain_task_preserves_its_identity_without_replay() {
     use crate::store::queue_delivery::{
         AccountsQueueDelivery, NativeHistoryAnchor, PrepareQueueDelivery,
     };
@@ -584,17 +628,27 @@ fn cancel_of_a_parked_uncertain_task_notifies_only_its_receiver() {
             .park_uncertain_delivery(&attempt.queue_attempt_id.0)
             .unwrap()
     );
+    let before = store
+        .logical_delivery_snapshot(&task.logical_delivery_id)
+        .unwrap();
+    let binding = store.request_binding(&task.request_id).unwrap().unwrap();
     assert_eq!(
         fixture.nexus.cancel(&task.request_id, &Origin::Unbound),
-        Output::Cancelled(task.request_id.clone())
+        Output::CancelRejected(RequestRejection::ControlUnavailable)
     );
-    assert!(queued(&fixture, &sender).is_empty());
     assert_eq!(
-        notices(&fixture, &recipient),
-        vec![format!("Request {} was cancelled.", task.request_id.0)]
+        store.request_binding(&task.request_id).unwrap(),
+        Some(binding)
     );
+    assert_eq!(
+        store
+            .logical_delivery_snapshot(&task.logical_delivery_id)
+            .unwrap(),
+        before
+    );
+    assert!(notices(&fixture, &sender).is_empty());
+    assert!(notices(&fixture, &recipient).is_empty());
     assert!(fixture.typed().is_none());
-    assert!(store.request_binding(&task.request_id).unwrap().is_none());
 }
 
 #[test]

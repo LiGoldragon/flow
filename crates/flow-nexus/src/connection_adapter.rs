@@ -195,6 +195,21 @@ impl AdaptsFlowConnection for FlowConnectionAdapter<'_> {
                 };
                 return answer.response.reply(completion);
             }
+            Input::SendTaskVerbose(send) => {
+                use crate::sending::PresentsTaskAdmission;
+                let answer = nexus.send_task_verbose(send, caller.process.as_ref());
+                let completion = match answer.pending {
+                    Some(pending) => {
+                        Completion::AfterAnyWrite(PostReplyOperation::WakeDue(pending.address))
+                    }
+                    None => Completion::NoPostReplyWork,
+                };
+                let response = answer
+                    .response
+                    .task_admission()
+                    .map_or_else(|refusal| refusal, Output::TaskVerboseSent);
+                return response.reply(completion);
+            }
             Input::DeliverAll(address) => {
                 return nexus
                     .deliver_all(address)

@@ -182,6 +182,9 @@ const META_HEARTBEAT_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_heartbeat_configuration");
 const META_HEARTBEAT_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-heartbeat-configuration";
 const META_HEARTBEAT_CONFIGURATION_SCHEMA: &str = "flow-nexus-meta-heartbeat-configuration-v2";
+const DESIGNER_NOTICE_TABLE: &str = "flow_nexus_designer_notice_addresses";
+const DESIGNER_NOTICE_FAMILY: &str = "flow-nexus-designer-notice-address";
+const DESIGNER_NOTICE_SCHEMA: &str = "flow-nexus-designer-notice-address-v1";
 const META_PROTECTED_ADDRESS_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_protected_address_configuration");
 const META_PROTECTED_ADDRESS_CONFIGURATION_FAMILY: &str =
@@ -278,6 +281,7 @@ const CONFIGURATION_ONLY_TABLES: &[&str] = &[
     "flow_nexus_meta_protected_address_configuration",
     "flow_nexus_meta_handover_configuration",
     OPTIONAL_HARNESS_HOOK_TABLE,
+    DESIGNER_NOTICE_TABLE,
     OPTIONAL_TURN_RETENTION_TABLE,
 ];
 /// The tables a running store holds, all of them.
@@ -327,6 +331,8 @@ const RUNNING_TABLES: &[&str] = &[
     "flow_nexus_logical_delivery_events",
     "flow_nexus_simplified_reply_bindings",
     "flow_nexus_logical_delivery_purposes",
+    logical_delivery::TASK_OUTCOME_SELECTION_TABLE,
+    logical_delivery::TASK_TERMINAL_EVENT_TABLE,
     "flow_nexus_heartbeat_standings",
     "flow_nexus_restarts",
     "flow_nexus_seat_births",
@@ -338,6 +344,7 @@ const RUNNING_TABLES: &[&str] = &[
     OPTIONAL_UNDECODABLE_FRAME_TABLE,
     OPTIONAL_TURN_END_TABLE,
     OPTIONAL_HARNESS_HOOK_TABLE,
+    DESIGNER_NOTICE_TABLE,
     OPTIONAL_KEPT_ANSWER_TABLE,
     OPTIONAL_SCHEDULED_REMINDER_TABLE,
     OPTIONAL_PENDING_REAP_TABLE,
@@ -1041,6 +1048,55 @@ impl DescribesProtectedAddressTable for StoredMetaProtectedAddressConfiguration 
     }
 }
 
+impl EngineRecord for crate::generated::memory::StoredDesignerNoticeAddress {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key(&self.address))
+    }
+}
+
+impl MemoryDefinition for crate::generated::memory::StoredDesignerNoticeAddress {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(DESIGNER_NOTICE_SCHEMA)
+    }
+}
+
+trait DescribesDesignerNoticeTable {
+    fn descriptor() -> TableDescriptor<crate::generated::memory::StoredDesignerNoticeAddress>;
+}
+
+impl DescribesDesignerNoticeTable for crate::generated::memory::StoredDesignerNoticeAddress {
+    fn descriptor() -> TableDescriptor<Self> {
+        TableDescriptor::new(
+            TableName::new(DESIGNER_NOTICE_TABLE),
+            FamilyName::new(DESIGNER_NOTICE_FAMILY),
+            SchemaHash::for_label(DESIGNER_NOTICE_SCHEMA),
+        )
+    }
+}
+
+pub(crate) trait ReadsDesignerNoticePolicy {
+    fn designer_notice_policy(&self) -> Result<meta_signal_flow::DesignerNoticePolicy, StoreError>;
+}
+
+impl ReadsDesignerNoticePolicy for FlowStore {
+    fn designer_notice_policy(&self) -> Result<meta_signal_flow::DesignerNoticePolicy, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::all(
+            self.meta_configuration_tables.designer_notice_addresses,
+        ))?;
+        let mut addresses: Vec<_> = rows
+            .records()
+            .iter()
+            .map(|row| row.address.clone())
+            .collect();
+        addresses.sort_by_key(FlowStore::address_record_key);
+        Ok(meta_signal_flow::DesignerNoticePolicy(addresses))
+    }
+}
+
 pub(crate) trait JudgesHeartbeatStanding {
     fn changed(&self) -> bool;
 }
@@ -1600,6 +1656,8 @@ pub enum StoreError {
     DeliveryAttemptUpgrade(String),
     #[error("flow nexus state record is absent or duplicated")]
     StateInvariant,
+    #[error("there is no request-scoped control for reached work")]
+    RequestControlUnavailable,
     #[error("launch inspection rows changed while being read")]
     LaunchStatusReadViewChanged,
     #[error("launch inspection rows are inconsistent")]
@@ -1694,6 +1752,8 @@ pub(crate) struct MetaConfigurationTables {
     harness_flags: TableReference<StoredMetaHarnessFlagsConfiguration>,
     heartbeat: TableReference<StoredMetaHeartbeatConfiguration>,
     protected_addresses: TableReference<StoredMetaProtectedAddressConfiguration>,
+    designer_notice_addresses:
+        TableReference<crate::generated::memory::StoredDesignerNoticeAddress>,
     harness_hook: TableReference<StoredMetaHarnessHookConfiguration>,
     turn_retention: TableReference<StoredMetaTurnRetentionConfiguration>,
 }
@@ -1726,6 +1786,8 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
             heartbeat: engine.register_table(StoredMetaHeartbeatConfiguration::descriptor())?,
             protected_addresses: engine
                 .register_table(StoredMetaProtectedAddressConfiguration::descriptor())?,
+            designer_notice_addresses: engine
+                .register_table(crate::generated::memory::StoredDesignerNoticeAddress::descriptor())?,
             harness_hook: engine.register_table(StoredMetaHarnessHookConfiguration::descriptor())?,
             turn_retention: engine
                 .register_table(StoredMetaTurnRetentionConfiguration::descriptor())?,
@@ -2114,6 +2176,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_harness_flags_descriptor)
                 .with_family(&meta_heartbeat_descriptor)
                 .with_family(&meta_protected_addresses_descriptor)
+                .with_family(&crate::generated::memory::StoredDesignerNoticeAddress::descriptor())
                 .with_family(&meta_harness_hook_descriptor)
                 .with_family(&meta_turn_retention_descriptor)
                 .with_family(&meta_metaflows_descriptor)
@@ -2155,6 +2218,8 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             harness_flags: engine.register_table(meta_harness_flags_descriptor)?,
             heartbeat: engine.register_table(meta_heartbeat_descriptor)?,
             protected_addresses: engine.register_table(meta_protected_addresses_descriptor)?,
+            designer_notice_addresses: engine
+                .register_table(crate::generated::memory::StoredDesignerNoticeAddress::descriptor())?,
             harness_hook: engine.register_table(meta_harness_hook_descriptor)?,
             turn_retention: engine.register_table(meta_turn_retention_descriptor)?,
             metaflows: engine.register_table(meta_metaflows_descriptor)?,
@@ -2709,6 +2774,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&StoredMetaHarnessFlagsConfiguration::descriptor())
                 .with_family(&StoredMetaHeartbeatConfiguration::descriptor())
                 .with_family(&StoredMetaProtectedAddressConfiguration::descriptor())
+                .with_family(&crate::generated::memory::StoredDesignerNoticeAddress::descriptor())
                 .with_family(&meta_handover_descriptor)
                 .with_family(&compactions_descriptor)
                 .with_family(&reminders_descriptor)
@@ -2730,6 +2796,8 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&logical_delivery_descriptors.events)
                 .with_family(&logical_delivery_descriptors.simplified_replies)
                 .with_family(&logical_delivery_descriptors.purposes)
+                .with_family(&logical_delivery_descriptors.outcome_selections)
+                .with_family(&logical_delivery_descriptors.terminal_events)
                 .with_family(&heartbeat_standing_descriptor)
                 .with_family(&restart_descriptor)
                 .with_family(&seat_birth_descriptor)
@@ -3686,6 +3754,7 @@ impl AppliesFlowQuery for FlowStore {
             | Input::ArchiveRequest(_)
             | Input::Release(_)
             | Input::Send(_)
+            | Input::SendTaskVerbose(_)
             | Input::DeliverAll(_)
             | Input::BindSeat(_)
             | Input::Adopt(_)
@@ -3768,6 +3837,7 @@ impl ReservesPendingStart for FlowStore {
             | Input::ArchiveRequest(_)
             | Input::Release(_)
             | Input::Send(_)
+            | Input::SendTaskVerbose(_)
             | Input::DeliverAll(_)
             | Input::Launch(_)
             | Input::BindSeat(_)
@@ -5704,6 +5774,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                 attempt_membership::ATTEMPT_MEMBERSHIP_BUILT_FAMILY,
                 attempt_membership::ATTEMPT_MEMBERSHIP_BUILT_SCHEMA,
             ),
+            DESIGNER_NOTICE_TABLE => (DESIGNER_NOTICE_FAMILY, DESIGNER_NOTICE_SCHEMA),
             "flow_nexus_meta_protected_address_configuration" => (
                 META_PROTECTED_ADDRESS_CONFIGURATION_FAMILY,
                 META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA,
@@ -5729,6 +5800,14 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
             "flow_nexus_simplified_reply_bindings" => (
                 "flow-nexus-simplified-reply-binding",
                 "flow-nexus-simplified-reply-binding-v2",
+            ),
+            logical_delivery::TASK_TERMINAL_EVENT_TABLE => (
+                logical_delivery::TASK_TERMINAL_EVENT_FAMILY,
+                logical_delivery::TASK_TERMINAL_EVENT_SCHEMA,
+            ),
+            logical_delivery::TASK_OUTCOME_SELECTION_TABLE => (
+                logical_delivery::TASK_OUTCOME_SELECTION_FAMILY,
+                logical_delivery::TASK_OUTCOME_SELECTION_SCHEMA,
             ),
             "flow_nexus_logical_delivery_purposes" => (
                 "flow-nexus-logical-delivery-purpose",
@@ -6077,6 +6156,9 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                     || *name == OPTIONAL_HOLD_TABLE
                     || *name == OPTIONAL_PERMAFLOW_HOLD_TABLE
                     || *name == OPTIONAL_HELD_LAUNCH_TABLE
+                    || *name == DESIGNER_NOTICE_TABLE
+                    || *name == logical_delivery::TASK_OUTCOME_SELECTION_TABLE
+                    || *name == logical_delivery::TASK_TERMINAL_EVENT_TABLE
                     || *name == OPTIONAL_CLOSED_REQUEST_TABLE
                     || *name == OPTIONAL_ATTEMPT_MEMBERSHIP_TABLE
                     || *name == OPTIONAL_ATTEMPT_MEMBERSHIP_BUILT_TABLE
@@ -6846,6 +6928,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                 config.heartbeat_recipients.0.iter().collect()
             }
             ConfigurationChange::ProtectedAddresses(addresses) => addresses.iter().collect(),
+            ConfigurationChange::DesignerNoticePolicy(addresses) => addresses.0.iter().collect(),
             ConfigurationChange::Permaflow(entry) => vec![&entry.address],
             ConfigurationChange::Amend(amendment) => vec![&amendment.address],
             _ => Vec::new(),
@@ -7194,6 +7277,21 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                         .map(|heartbeat| StoredMetaHeartbeatConfiguration {
                             heartbeat_config: heartbeat,
                         })
+                        .collect(),
+                )
+            }
+            ConfigurationChange::DesignerNoticePolicy(addresses) => {
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.designer_notice_addresses,
+                    addresses
+                        .0
+                        .into_iter()
+                        .map(
+                            |address| crate::generated::memory::StoredDesignerNoticeAddress {
+                                address,
+                            },
+                        )
                         .collect(),
                 )
             }

@@ -113,6 +113,11 @@ impl DigestsMemory for FlowStore {
             meta.protected_addresses,
             lines_ref,
         )?;
+        self.digest_table(
+            "meta.designer_notice_addresses",
+            meta.designer_notice_addresses,
+            lines_ref,
+        )?;
         self.digest_table("meta.harness_hook", meta.harness_hook, lines_ref)?;
         let delivery = &self.delivery_tables;
         self.digest_table("deliveries", delivery.deliveries, lines_ref)?;
@@ -152,6 +157,16 @@ impl DigestsMemory for FlowStore {
             lines_ref,
         )?;
         self.digest_table("logical.purposes", logical.purposes, lines_ref)?;
+        self.digest_table(
+            "logical.outcome_selections",
+            logical.outcome_selections,
+            lines_ref,
+        )?;
+        self.digest_table(
+            "logical.terminal_events",
+            logical.terminal_events,
+            lines_ref,
+        )?;
         self.digest_table("logical.request_ids", logical.request_ids, lines_ref)?;
         self.digest_table("logical.deliver_calls", logical.deliver_calls, lines_ref)?;
         self.digest_table("logical.store_identity", logical.store_identity, lines_ref)?;

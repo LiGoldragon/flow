@@ -49,12 +49,11 @@ impl DescribesClosedRequestTable for ClosedRequest {
     }
 }
 
-/// How an open request is ended with no answer: Cancel can tell the
-/// distinct receiver of reached work; CloseRequest records its caller
-/// without sending a prompt.
+/// How an open request is ended with no answer. Cancel withdraws
+/// unreached work; CloseRequest records its caller without sending a prompt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RequestEnding {
-    Cancelled,
+    Cancelled(Option<flow_ethos::FlowId>),
     Closed(Closer),
 }
 
@@ -67,7 +66,7 @@ pub(crate) trait MarksEndedReminder {
 impl MarksEndedReminder for RequestEnding {
     fn reminder_marker(&self, request_id: &RequestId) -> LogicalDeliveryId {
         match self {
-            RequestEnding::Cancelled => LogicalDeliveryId(format!("cancelled:{}", request_id.0)),
+            RequestEnding::Cancelled(_) => LogicalDeliveryId(format!("cancelled:{}", request_id.0)),
             RequestEnding::Closed(_) => LogicalDeliveryId(format!("closed:{}", request_id.0)),
         }
     }
@@ -101,7 +100,7 @@ impl RecordsClosedRequests for FlowStore {
     ) -> AtomicCommit {
         let commit = self.engine.begin_atomic_commit();
         match ending {
-            RequestEnding::Cancelled => commit,
+            RequestEnding::Cancelled(_) => commit,
             RequestEnding::Closed(closer) => commit.assert(
                 self.closed_requests,
                 ClosedRequest {

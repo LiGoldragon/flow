@@ -38,6 +38,158 @@ pub(super) const EVENT_SCHEMA: &str = "flow-nexus-logical-delivery-event-v7";
 const SIMPLIFIED_REPLY_TABLE_NAME: TableName =
     TableName::new("flow_nexus_simplified_reply_bindings");
 const PURPOSE_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_purposes");
+pub(super) const TASK_OUTCOME_SELECTION_TABLE: &str = "flow_nexus_task_outcome_selections";
+pub(super) const TASK_OUTCOME_SELECTION_FAMILY: &str = "flow-nexus-task-outcome-selection";
+pub(super) const TASK_OUTCOME_SELECTION_SCHEMA: &str = "flow-nexus-task-outcome-selection-v1";
+
+pub(super) const TASK_TERMINAL_EVENT_TABLE: &str = "flow_nexus_task_terminal_events";
+pub(super) const TASK_TERMINAL_EVENT_FAMILY: &str = "flow-nexus-task-terminal-event";
+pub(super) const TASK_TERMINAL_EVENT_SCHEMA: &str = "flow-nexus-task-terminal-event-v1";
+
+use crate::generated::memory::{TaskOutcomeSelection, TaskTerminalEvent};
+
+impl EngineRecord for TaskTerminalEvent {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.logical_delivery_id.0.clone())
+    }
+}
+
+impl MemoryDefinition for TaskTerminalEvent {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(TASK_TERMINAL_EVENT_SCHEMA)
+    }
+}
+
+enum WorkActor<'a> {
+    Answerer(&'a SentBy),
+    Canceller(Option<&'a flow_ethos::FlowId>),
+}
+
+trait ResolvesTerminalDestination {
+    fn terminal_destination(&self, outcome: &signal_flow::TerminalOutcome) -> Option<&Address>;
+}
+
+impl ResolvesTerminalDestination for TaskOutcomeSelection {
+    fn terminal_destination(&self, outcome: &signal_flow::TerminalOutcome) -> Option<&Address> {
+        self.terminal_outcome_vector
+            .contains(outcome)
+            .then_some(())?;
+        self.address_option.as_ref()
+    }
+}
+
+trait StagesTaskTerminalEvent {
+    fn stage_task_terminal_event(
+        &self,
+        binding: &RequestIdBinding,
+        outcome: signal_flow::TerminalOutcome,
+        actor: WorkActor<'_>,
+        commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError>;
+}
+
+impl StagesTaskTerminalEvent for FlowStore {
+    fn stage_task_terminal_event(
+        &self,
+        binding: &RequestIdBinding,
+        outcome: signal_flow::TerminalOutcome,
+        actor: WorkActor<'_>,
+        commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.logical_deliveries.outcome_selections,
+            RecordKey::new(binding.logical_delivery_id.0.clone()),
+        ))?;
+        let selection = match rows.records() {
+            [] => return Ok(commit),
+            [selection] => selection,
+            _ => return Err(StoreError::StateInvariant),
+        };
+        let Some(destination) = selection.terminal_destination(&outcome) else {
+            return Ok(commit);
+        };
+        // Self-action is judged against the requesting flow, independently
+        // of the address chosen to receive an opted-in terminal event.
+        let Some(requester) = selection.address_option.as_ref() else {
+            return Ok(commit);
+        };
+        let self_action = match actor {
+            WorkActor::Answerer(SentBy::Sender(answerer)) => answerer == requester,
+            WorkActor::Canceller(Some(flow_id)) => {
+                let held = self.metaflow(requester)?.is_some_and(|metaflow| {
+                    metaflow.state == flow_ethos::State::Awake(flow_id.clone())
+                        || metaflow.past.0.contains(flow_id)
+                });
+                held || self.launched_address(&flow_id.0).as_ref() == Some(requester)
+            }
+            _ => false,
+        };
+        if self_action {
+            return Ok(commit);
+        }
+        Ok(commit.assert(
+            self.logical_deliveries.terminal_events,
+            TaskTerminalEvent {
+                logical_delivery_id: binding.logical_delivery_id.clone(),
+                request_id: binding.request_id.clone(),
+                address: destination.clone(),
+                terminal_outcome: outcome,
+            },
+        ))
+    }
+}
+
+#[cfg(test)]
+pub(crate) trait ReadsTaskOutcomeEvidence {
+    fn task_outcome_selection(&self, task: &LogicalDeliveryId) -> Vec<TaskOutcomeSelection>;
+    fn task_terminal_events(&self, task: &LogicalDeliveryId) -> Vec<TaskTerminalEvent>;
+}
+
+#[cfg(test)]
+impl ReadsTaskOutcomeEvidence for FlowStore {
+    fn task_outcome_selection(&self, task: &LogicalDeliveryId) -> Vec<TaskOutcomeSelection> {
+        self.engine
+            .match_records(QueryPlan::key(
+                self.logical_deliveries.outcome_selections,
+                RecordKey::new(task.0.clone()),
+            ))
+            .unwrap()
+            .records()
+            .to_vec()
+    }
+
+    fn task_terminal_events(&self, task: &LogicalDeliveryId) -> Vec<TaskTerminalEvent> {
+        self.engine
+            .match_records(QueryPlan::key(
+                self.logical_deliveries.terminal_events,
+                RecordKey::new(task.0.clone()),
+            ))
+            .unwrap()
+            .records()
+            .to_vec()
+    }
+}
+
+impl EngineRecord for TaskOutcomeSelection {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.logical_delivery_id.0.clone())
+    }
+}
+
+impl MemoryDefinition for TaskOutcomeSelection {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(TASK_OUTCOME_SELECTION_SCHEMA)
+    }
+}
+
 const REQUEST_ID_TABLE_NAME: TableName = TableName::new("flow_nexus_request_ids");
 const DELIVER_CALL_TABLE_NAME: TableName = TableName::new("flow_nexus_deliver_calls");
 
@@ -252,6 +404,8 @@ pub(crate) struct LogicalDeliveryTables {
     pub(crate) events: TableReference<LogicalDeliveryEvent>,
     pub(crate) simplified_replies: TableReference<SimplifiedReplyBinding>,
     pub(crate) purposes: TableReference<LogicalDeliveryPurpose>,
+    pub(crate) outcome_selections: TableReference<TaskOutcomeSelection>,
+    pub(crate) terminal_events: TableReference<TaskTerminalEvent>,
     pub(crate) request_ids: TableReference<RequestIdBinding>,
     pub(crate) deliver_calls: TableReference<DeliverCall>,
     pub(crate) store_identity: TableReference<StoredStoreIdentity>,
@@ -295,6 +449,8 @@ pub(crate) struct LogicalDeliveryDescriptors {
     pub(crate) events: TableDescriptor<LogicalDeliveryEvent>,
     pub(crate) simplified_replies: TableDescriptor<SimplifiedReplyBinding>,
     pub(crate) purposes: TableDescriptor<LogicalDeliveryPurpose>,
+    pub(crate) outcome_selections: TableDescriptor<TaskOutcomeSelection>,
+    pub(crate) terminal_events: TableDescriptor<TaskTerminalEvent>,
     pub(crate) request_ids: TableDescriptor<RequestIdBinding>,
     pub(crate) deliver_calls: TableDescriptor<DeliverCall>,
     pub(crate) store_identity: TableDescriptor<StoredStoreIdentity>,
@@ -336,6 +492,16 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
                 FamilyName::new("flow-nexus-logical-delivery-purpose"),
                 LogicalDeliveryPurpose::schema_hash(),
             ),
+            outcome_selections: TableDescriptor::new(
+                TableName::new(TASK_OUTCOME_SELECTION_TABLE),
+                FamilyName::new(TASK_OUTCOME_SELECTION_FAMILY),
+                TaskOutcomeSelection::schema_hash(),
+            ),
+            terminal_events: TableDescriptor::new(
+                TableName::new(TASK_TERMINAL_EVENT_TABLE),
+                FamilyName::new(TASK_TERMINAL_EVENT_FAMILY),
+                TaskTerminalEvent::schema_hash(),
+            ),
             request_ids: TableDescriptor::new(
                 REQUEST_ID_TABLE_NAME,
                 FamilyName::new("flow-nexus-request-id"),
@@ -363,6 +529,8 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
             events: engine.register_table(descriptors.events)?,
             simplified_replies: engine.register_table(descriptors.simplified_replies)?,
             purposes: engine.register_table(descriptors.purposes)?,
+            outcome_selections: engine.register_table(descriptors.outcome_selections)?,
+            terminal_events: engine.register_table(descriptors.terminal_events)?,
             request_ids: engine.register_table(descriptors.request_ids)?,
             deliver_calls: engine.register_table(descriptors.deliver_calls)?,
             store_identity: engine.register_table(descriptors.store_identity)?,
@@ -406,6 +574,7 @@ impl HoldsAdmissionAnswers for FlowStore {
 /// changes and lifecycle transitions have one durability boundary.
 pub(crate) struct LogicalDeliveryTransition {
     pub(crate) purpose: crate::heartbeat::DeliveryPurpose,
+    pub(crate) task_outcomes: Vec<signal_flow::TerminalOutcome>,
     pub(crate) context_warning: Option<super::context_warnings::ContextWarningAdmission>,
     pub(crate) handover_reminder: Option<crate::store::handover_reminders::HandoverReminder>,
     pub(crate) deliver_call: Option<DeliverCallSpec>,
@@ -917,6 +1086,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             message,
             Some(held_lock),
             LogicalDeliveryTransition {
+                task_outcomes: Vec::new(),
                 purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
                 handover_reminder: None,
                 deliver_call: Some(spec),
@@ -1079,6 +1249,32 @@ impl RecordsLogicalDeliveries for FlowStore {
         if current.archived_cursor.0.is_some() {
             return Err(StoreError::StateInvariant);
         }
+        if matches!(
+            ending,
+            Some(super::closed_request::RequestEnding::Cancelled(_))
+        ) {
+            match &current.delivery_snapshot.delivery_state {
+                DeliveryState::Delivered(_) | DeliveryState::Read | DeliveryState::Uncertain => {
+                    return Err(StoreError::RequestControlUnavailable);
+                }
+                _ if !unfinished.is_empty() => {
+                    return Ok(Err(ArchiveRejection::NotYet(
+                        ArchiveHold::AttemptUnfinished,
+                    )));
+                }
+                _ => {}
+            }
+        }
+        let commit = match ending {
+            Some(super::closed_request::RequestEnding::Cancelled(actor)) => self
+                .stage_task_terminal_event(
+                    &binding,
+                    signal_flow::TerminalOutcome::Cancelled,
+                    WorkActor::Canceller(actor.as_ref()),
+                    commit,
+                )?,
+            _ => commit,
+        };
         let (commit, terminal) = match ending {
             Some(_) => {
                 use crate::reminding::CountsUnixSeconds;
@@ -1751,6 +1947,19 @@ impl RecordsLogicalDeliveries for FlowStore {
             if current.archived_cursor.0.is_some() {
                 return Err(StoreError::StateInvariant);
             }
+            let commit = if matches!(
+                &request,
+                Request::Done(flow_ethos::DonePayload::Answered(_))
+            ) {
+                self.stage_task_terminal_event(
+                    &binding,
+                    signal_flow::TerminalOutcome::Fulfilled,
+                    WorkActor::Answerer(&sender),
+                    commit,
+                )?
+            } else {
+                commit
+            };
             let answered_logical_id = binding.logical_delivery_id.clone();
             binding.request_closure = RequestClosure::Answered(accepted_logical_id.clone());
             let commit = commit.mutate(self.logical_deliveries.request_ids, binding);
@@ -2008,6 +2217,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             message,
             held_lock,
             LogicalDeliveryTransition {
+                task_outcomes: Vec::new(),
                 purpose,
                 handover_reminder: None,
                 deliver_call: None,
@@ -2029,6 +2239,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             message,
             None,
             LogicalDeliveryTransition {
+                task_outcomes: Vec::new(),
                 purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
                 handover_reminder: Some(reminder),
                 deliver_call: None,
@@ -2059,6 +2270,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let LogicalDeliveryTransition {
+            task_outcomes,
             purpose,
             handover_reminder,
             deliver_call,
@@ -2275,6 +2487,24 @@ impl RecordsLogicalDeliveries for FlowStore {
                     request_closure: RequestClosure::Open,
                 },
             );
+        let commit = if task_outcomes.is_empty() {
+            commit
+        } else {
+            if !matches!(&request, Request::Task(_)) {
+                return Err(StoreError::StateInvariant);
+            }
+            commit.assert(
+                self.logical_deliveries.outcome_selections,
+                TaskOutcomeSelection {
+                    logical_delivery_id: LogicalDeliveryId(id.clone()),
+                    address_option: match &task_sender {
+                        SentBy::Sender(sender) => Some(sender.clone()),
+                        _ => None,
+                    },
+                    terminal_outcome_vector: task_outcomes,
+                },
+            )
+        };
         let commit = if let Some(call) = deliver_call {
             commit.assert(
                 self.logical_deliveries.deliver_calls,
@@ -2305,6 +2535,19 @@ impl RecordsLogicalDeliveries for FlowStore {
             if current.archived_cursor.0.is_some() {
                 return Err(StoreError::StateInvariant);
             }
+            let commit = if matches!(
+                &request,
+                Request::Done(flow_ethos::DonePayload::Answered(_))
+            ) {
+                self.stage_task_terminal_event(
+                    &binding,
+                    signal_flow::TerminalOutcome::Fulfilled,
+                    WorkActor::Answerer(&task_sender),
+                    commit,
+                )?
+            } else {
+                commit
+            };
             let answered_logical_id = binding.logical_delivery_id.clone();
             binding.request_closure =
                 RequestClosure::Answered(signal_flow::LogicalDeliveryId(id.clone()));

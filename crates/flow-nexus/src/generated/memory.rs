@@ -227,6 +227,29 @@ pub struct StoredMetaProtectedAddressConfiguration {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct StoredDesignerNoticeAddress {
+    pub address: signal_flow::Address,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct TaskOutcomeSelection {
+    pub logical_delivery_id: signal_flow::LogicalDeliveryId,
+    pub address_option: std::option::Option<signal_flow::Address>,
+    pub terminal_outcome_vector: std::vec::Vec<signal_flow::TerminalOutcome>,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct TaskTerminalEvent {
+    pub logical_delivery_id: signal_flow::LogicalDeliveryId,
+    pub request_id: signal_flow::RequestId,
+    pub address: signal_flow::Address,
+    pub terminal_outcome: signal_flow::TerminalOutcome,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct StoredHandoverConfiguration {
     pub handover_policies_configuration: meta_signal_flow::HandoverPoliciesConfiguration,
     pub handover_archive_configuration: meta_signal_flow::HandoverArchiveConfiguration,

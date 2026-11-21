@@ -877,6 +877,17 @@ impl signal_flow::Answering for OrdinaryCall<'_> {
         }
     }
 
+    fn send_task_verbose(
+        &self,
+        send: &signal_flow::VerboseTask,
+    ) -> Result<signal_flow::VerboseTaskAdmission, Output> {
+        use crate::sending::PresentsTaskAdmission;
+        self.nexus
+            .send_task_verbose(send.clone(), None)
+            .response
+            .task_admission()
+    }
+
     // An observation streams over a connection; a direct dispatch answers
     // its opening frame once, as a read.
     fn observe_sends(
@@ -1431,6 +1442,17 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
             meta_signal_flow::Output::QueueDeliveryResolved(resolved) => Ok(resolved),
             other => Err(other),
         }
+    }
+
+    fn read_designer_notice_policy(
+        &self,
+    ) -> Result<meta_signal_flow::DesignerNoticePolicy, meta_signal_flow::Output> {
+        use crate::store::ReadsDesignerNoticePolicy;
+        self.nexus.store.designer_notice_policy().map_err(|_| {
+            meta_signal_flow::Output::ConfigureRefused(
+                meta_signal_flow::ConfigureRefusal::StoreRefused,
+            )
+        })
     }
 
     fn abandon_queue_delivery(
@@ -3188,7 +3210,8 @@ impl DispatchesSerially for RunningNexus {
     }
 
     fn dispatch_serially(&self, query: Input, origin: Origin) -> Output {
-        if let Input::Refresh(_)
+        if let Input::SendTaskVerbose(_)
+        | Input::Refresh(_)
         | Input::Replace(_)
         | Input::Restart(_)
         | Input::DeliverAll(_)

@@ -768,6 +768,7 @@ impl SettlesUpgradeNotices for super::FlowStore {
             flow_ethos::Message::Soft(flow_ethos::Request::Notice(text)),
             None,
             LogicalDeliveryTransition {
+                task_outcomes: Vec::new(),
                 purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
                 handover_reminder: None,
                 deliver_call: None,

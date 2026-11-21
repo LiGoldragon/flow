@@ -43,7 +43,7 @@ use protos::{Compactable, Protosizable};
 use signal_flow::{
     Address, CallerIdentity, HarnessKind, HerdrRoute, LaunchProfile, LaunchRequest, Message,
     Output, PrivateSendResponse, Process, Refusal, Request, SendPayloadSize, SendRequest,
-    SendableMessage, SentBy, StartRejection, Unknown_Data,
+    SendableMessage, SendableRequest, SentBy, StartRejection, Unknown_Data,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -222,9 +222,70 @@ impl AnswersCompletedDirectSend for signal_flow::DeliveryState {
     }
 }
 
+pub struct RequestSubmission {
+    request: SendRequest,
+    task_outcomes: Vec<signal_flow::TerminalOutcome>,
+    digest_text: String,
+}
+
+pub(crate) trait PresentsTaskAdmission {
+    fn task_admission(self) -> Result<signal_flow::VerboseTaskAdmission, Output>;
+}
+
+impl PresentsTaskAdmission for Output {
+    fn task_admission(self) -> Result<signal_flow::VerboseTaskAdmission, Output> {
+        match self {
+            Output::Sent(receipt) => Ok(signal_flow::VerboseTaskAdmission::Sent(receipt)),
+            Output::SendAccepted(acceptance) => {
+                Ok(signal_flow::VerboseTaskAdmission::Accepted(acceptance))
+            }
+            refusal => Err(refusal),
+        }
+    }
+}
+
 pub trait SendsRequests {
     /// Answers a Send from `peer`, under the dispatch gate.
-    fn send_request(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer;
+    fn send_request(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer {
+        let digest_text = send.datomize(Vec::new()).protosize().compact();
+        self.submit_request(
+            RequestSubmission {
+                request: send,
+                task_outcomes: Vec::new(),
+                digest_text,
+            },
+            peer,
+        )
+    }
+    fn send_task_verbose(
+        &self,
+        send: signal_flow::VerboseTask,
+        peer: Option<&Process>,
+    ) -> SendAnswer {
+        use signal_flow::AbruptTask;
+        let digest_text = send.datomize(Vec::new()).protosize().compact();
+        let sendable_message = match send.abrupt_task {
+            AbruptTask::HardAbrupt(task) => {
+                SendableMessage::HardAbrupt(SendableRequest::Task(task))
+            }
+            AbruptTask::MiddleAbrupt(task) => {
+                SendableMessage::MiddleAbrupt(SendableRequest::Task(task))
+            }
+            AbruptTask::Soft(task) => SendableMessage::Soft(SendableRequest::Task(task)),
+        };
+        self.submit_request(
+            RequestSubmission {
+                request: SendRequest {
+                    address: send.address,
+                    sendable_message,
+                },
+                task_outcomes: send.terminal_outcome_vector,
+                digest_text,
+            },
+            peer,
+        )
+    }
+    fn submit_request(&self, submission: RequestSubmission, peer: Option<&Process>) -> SendAnswer;
     /// Delivers every durable request currently queued at `address`,
     /// whoever asks.
     fn deliver_all(&self, address: Address) -> Output;
@@ -233,11 +294,14 @@ pub trait SendsRequests {
 }
 
 impl SendsRequests for RunningNexus {
-    fn send_request(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer {
+    fn submit_request(&self, submission: RequestSubmission, peer: Option<&Process>) -> SendAnswer {
         use sha2::{Digest, Sha256};
-
+        let RequestSubmission {
+            request: send,
+            task_outcomes,
+            digest_text,
+        } = submission;
         let abrupt = !matches!(&send.sendable_message, SendableMessage::Soft(_));
-        let digest_text = send.datomize(Vec::new()).protosize().compact();
         let request_digest = format!("{:x}", Sha256::digest(digest_text.as_bytes()));
         // The sender is read when the Send arrives. A refresh may hold the
         // address until its successor is committed; that transition cannot
@@ -368,12 +432,20 @@ impl SendsRequests for RunningNexus {
             let direct_lease =
                 direct_lease.filter(|_| live.is_some() || message.wakes_sleeping_permaflow());
             let admitted_at = std::time::SystemTime::now();
-            let admitted = self.store.accept_logical_delivery(
+            let admitted = self.store.accept_logical_delivery_for_with_transition(
                 &recipient,
                 sender,
                 delivery.clone(),
                 message.clone(),
                 None,
+                crate::store::logical_delivery::LogicalDeliveryTransition {
+                    task_outcomes,
+                    purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
+                    handover_reminder: None,
+                    deliver_call: None,
+                    upgrade_notice: None,
+                    context_warning: None,
+                },
             );
             // Each admission is logged with its kind, and a Task's
             // Minutes with the deadline its first reminder is due at.

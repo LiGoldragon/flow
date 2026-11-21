@@ -122,6 +122,8 @@ impl ParsesCurriculumIdentity for str {
             "compensation" => ModuleKind::Compensation,
             "role" => ModuleKind::Role,
             "raw" => ModuleKind::Raw,
+            "notion" => ModuleKind::Notion,
+            "state" => ModuleKind::State,
             _ => return None,
         };
         if subject.is_empty()
@@ -174,6 +176,8 @@ impl RendersCurriculumIdentity for signal_curriculum_nexus::ModuleIdentity {
             ModuleKind::Compensation => "compensation",
             ModuleKind::Role => "role",
             ModuleKind::Raw => "raw",
+            ModuleKind::Notion => "notion",
+            ModuleKind::State => "state",
         };
         let version = match &self.versions {
             Versions::Single(version) => version.0.to_string(),
@@ -815,6 +819,8 @@ mod tests {
             "compensation",
             "role",
             "raw",
+            "notion",
+            "state",
         ] {
             for subject in ["core", "psyche-core-tertiary", "book-page2-description"] {
                 for version in ["0", "1", "0-1", "1-9", "9223372036854775807"] {

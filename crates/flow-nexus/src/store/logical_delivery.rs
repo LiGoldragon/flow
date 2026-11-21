@@ -529,6 +529,32 @@ impl MintsRequestIds for FlowStore {
     }
 }
 
+/// Whether a message's request is answered at all. A Question and a Task
+/// are, by a Result and a Done; every other kind (an Order, a Living, a
+/// Result, a Notice, a Done, a Reminder) takes no answer and is finished
+/// once it reaches its recipient. This is the one set of kinds that rule
+/// names.
+pub(crate) trait TakesAnswer {
+    fn takes_answer(&self) -> bool;
+}
+
+impl TakesAnswer for Message {
+    fn takes_answer(&self) -> bool {
+        let (Message::HardAbrupt(request)
+        | Message::MiddleAbrupt(request)
+        | Message::Soft(request)) = self;
+        match request {
+            Request::Question(_) | Request::Task(_) => true,
+            Request::Order(_)
+            | Request::Living(_)
+            | Request::Result(_)
+            | Request::Notice(_)
+            | Request::Done(_)
+            | Request::Reminder(_) => false,
+        }
+    }
+}
+
 /// The requests a permaflow owes an answer. A request is open from its
 /// delivery until the Result or Done that answers it, and it is the
 /// permaflow's, not the flow's: a Question or Task a sender's
@@ -563,10 +589,7 @@ impl HoldsOpenRequests for FlowStore {
             {
                 continue;
             }
-            let (Message::HardAbrupt(request)
-            | Message::MiddleAbrupt(request)
-            | Message::Soft(request)) = &retained.entry.message;
-            if !matches!(request, Request::Question(_) | Request::Task(_)) {
+            if !retained.entry.message.takes_answer() {
                 continue;
             }
             let bound_open = self

@@ -127,11 +127,11 @@ fn notices(fixture: &NexusFixture, address: &Address) -> Vec<String> {
         .collect()
 }
 
-/// A delivered Order is cancelled by anyone: closed, its id archived, and
+/// A delivered Question is cancelled by anyone: closed, its id archived, and
 /// its sender and its recipient each told by a Soft Notice from Flow. A
 /// second Cancel names no request.
 #[test]
-fn cancel_closes_a_delivered_order_and_tells_both_ends() {
+fn cancel_closes_a_delivered_question_and_tells_both_ends() {
     let fixture = NexusFixture::new();
     let sender = at("cancelSender");
     let recipient = at("cancelRecipient");
@@ -141,7 +141,7 @@ fn cancel_closes_a_delivered_order_and_tells_both_ends() {
         &fixture,
         &recipient,
         SentBy::Sender(sender.clone()),
-        Request::Order("Review the drain fix.".into()),
+        Request::Question("Review the drain fix.".into()),
     );
     delivered(&fixture, &recipient, &order);
 
@@ -185,7 +185,7 @@ fn cancel_does_not_notice_its_sender_flow_but_tells_the_recipient() {
         &fixture,
         &recipient,
         SentBy::Sender(sender.clone()),
-        Request::Order("Review the drain fix.".into()),
+        Request::Question("Review the drain fix.".into()),
     );
     delivered(&fixture, &recipient, &order);
 
@@ -215,7 +215,7 @@ fn cancel_does_not_notice_its_recipient_flow_but_tells_the_sender() {
         &fixture,
         &recipient,
         SentBy::Sender(sender.clone()),
-        Request::Order("Review the drain fix.".into()),
+        Request::Question("Review the drain fix.".into()),
     );
     delivered(&fixture, &recipient, &order);
 
@@ -247,7 +247,7 @@ fn cancel_by_a_third_flow_still_notifies_both_ends() {
         &fixture,
         &recipient,
         SentBy::Sender(sender.clone()),
-        Request::Order("Review the drain fix.".into()),
+        Request::Question("Review the drain fix.".into()),
     );
     delivered(&fixture, &recipient, &order);
 
@@ -362,6 +362,115 @@ fn a_notice_that_reached_its_recipient_is_closed_to_cancel_and_close_request() {
     }
     assert!(queued(&fixture, &sender).is_empty());
     assert_eq!(queued(&fixture, &recipient), recipient_queue);
+}
+
+/// Delivers `request`, which takes no answer, from one flow to another
+/// and checks it finished: Cancel and CloseRequest naming it are refused
+/// Closed, neither end is told, and its id and its queue stay as they were.
+fn assert_closed_to_cancel_and_close_request_once_delivered(request: Request) {
+    let fixture = NexusFixture::new();
+    let sender = at("noAnswerSender");
+    let recipient = at("noAnswerRecipient");
+    asleep(&fixture, &sender);
+    asleep(&fixture, &recipient);
+    let reached = admitted(
+        &fixture,
+        &recipient,
+        SentBy::Sender(sender.clone()),
+        request,
+    );
+    delivered(&fixture, &recipient, &reached);
+    let binding = fixture
+        .nexus
+        .store
+        .request_binding(&reached.request_id)
+        .unwrap();
+
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch(Input::Cancel(reached.request_id.clone())),
+        Output::CancelRejected(RequestRejection::Closed)
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch(Input::CloseRequest(reached.request_id.clone())),
+        Output::CloseRequestRejected(RequestRejection::Closed)
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .request_binding(&reached.request_id)
+            .unwrap(),
+        binding
+    );
+    assert_eq!(closed_record(&fixture, &reached.logical_delivery_id), None);
+    assert!(queued(&fixture, &sender).is_empty());
+    assert!(queued(&fixture, &recipient).is_empty());
+}
+
+/// An Order takes no answer: delivered, it is finished, as a Notice is.
+#[test]
+fn an_order_that_reached_its_recipient_is_closed_to_cancel_and_close_request() {
+    assert_closed_to_cancel_and_close_request_once_delivered(Request::Order(
+        "Review the drain fix.".into(),
+    ));
+}
+
+/// A Living takes no answer: delivered, it is finished, as a Notice is.
+#[test]
+fn a_living_that_reached_its_recipient_is_closed_to_cancel_and_close_request() {
+    assert_closed_to_cancel_and_close_request_once_delivered(Request::Living(
+        flow_ethos::Living_Data {
+            context: flow_ethos::Context("the drain".into()),
+            verbatim: flow_ethos::Verbatim("Fix it today.".into()),
+        },
+    ));
+}
+
+/// A Result, a Done and a Reminder take no answer either: of every kind,
+/// only a Question and a Task do, at every priority.
+#[test]
+fn only_a_question_and_a_task_take_an_answer() {
+    use crate::store::logical_delivery::TakesAnswer;
+    let answered = [
+        Request::Question("Which revision?".into()),
+        Request::Task(flow_ethos::AnswerableTask {
+            minutes: flow_ethos::Minutes(30),
+            string: "Land the line.".into(),
+        }),
+    ];
+    let unanswered = [
+        Request::Order("Review the drain fix.".into()),
+        Request::Living(flow_ethos::Living_Data {
+            context: flow_ethos::Context("the drain".into()),
+            verbatim: flow_ethos::Verbatim("Fix it today.".into()),
+        }),
+        Request::Result(flow_ethos::ResultPayload::Historical("result".into())),
+        Request::Notice("The revision is ready.".into()),
+        Request::Done(flow_ethos::DonePayload::Historical(
+            flow_ethos::Historical_Data {
+                logical_delivery_id: flow_ethos::LogicalDeliveryId("logical-task".into()),
+                string: "done".into(),
+            },
+        )),
+        Request::Reminder(flow_ethos::Reminder_Data {
+            request_id: flow_ethos::RequestId("rmnd".into()),
+            string: "reminder".into(),
+        }),
+    ];
+    for request in answered {
+        assert!(Message::HardAbrupt(request.clone()).takes_answer());
+        assert!(Message::MiddleAbrupt(request.clone()).takes_answer());
+        assert!(Message::Soft(request).takes_answer());
+    }
+    for request in unanswered {
+        assert!(!Message::HardAbrupt(request.clone()).takes_answer());
+        assert!(!Message::MiddleAbrupt(request.clone()).takes_answer());
+        assert!(!Message::Soft(request).takes_answer());
+    }
 }
 
 /// A Notice still queued never reached its recipient: Cancel takes it out
@@ -1016,12 +1125,12 @@ fn closed_record(
         .expect("the closed requests read")
 }
 
-/// A delivered Order is closed by anyone with no answer: its id archived,
+/// A delivered Question is closed by anyone with no answer: its id archived,
 /// no Notice queued for its sender or its recipient, and its closer
 /// recorded. A Result naming it afterwards is refused Unresolved, and a
 /// second CloseRequest names no request.
 #[test]
-fn close_request_closes_a_delivered_order_and_tells_no_one() {
+fn close_request_closes_a_delivered_question_and_tells_no_one() {
     let fixture = NexusFixture::new();
     let sender = at("closeSender");
     let recipient = at("closeRecipient");
@@ -1033,7 +1142,7 @@ fn close_request_closes_a_delivered_order_and_tells_no_one() {
         &fixture,
         &recipient,
         SentBy::Sender(sender.clone()),
-        Request::Order("Review the drain fix.".into()),
+        Request::Question("Review the drain fix.".into()),
     );
     delivered(&fixture, &recipient, &order);
 
@@ -1336,7 +1445,7 @@ fn close_request_records_the_process_its_connection_showed() {
         &fixture,
         &recipient,
         SentBy::Sender(sender.clone()),
-        Request::Order("Review the drain fix.".into()),
+        Request::Question("Review the drain fix.".into()),
     );
     delivered(&fixture, &recipient, &order);
     let (peer, mut client) = UnixStream::pair().unwrap();

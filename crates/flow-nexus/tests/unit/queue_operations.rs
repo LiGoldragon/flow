@@ -127,11 +127,10 @@ fn notices(fixture: &NexusFixture, address: &Address) -> Vec<String> {
         .collect()
 }
 
-/// A delivered Question is cancelled by anyone: closed, its id archived, and
-/// its sender and its recipient each told by a Soft Notice from Flow. A
-/// second Cancel names no request.
+/// Cancel archives a delivered Question and notifies only its receiver.
+/// A second Cancel names no request.
 #[test]
-fn cancel_closes_a_delivered_question_and_tells_both_ends() {
+fn cancel_closes_a_delivered_question_and_notifies_its_receiver() {
     let fixture = NexusFixture::new();
     let sender = at("cancelSender");
     let recipient = at("cancelRecipient");
@@ -161,7 +160,7 @@ fn cancel_closes_a_delivered_question_and_tells_both_ends() {
         "the request's id is closed"
     );
     let told = format!("Request {} was cancelled.", order.request_id.0);
-    assert_eq!(notices(&fixture, &sender), vec![told.clone()]);
+    assert!(notices(&fixture, &sender).is_empty());
     assert_eq!(notices(&fixture, &recipient), vec![told]);
     assert_eq!(
         fixture
@@ -201,10 +200,9 @@ fn cancel_does_not_notice_its_sender_flow_but_tells_the_recipient() {
     assert_eq!(notices(&fixture, &recipient), vec![notice]);
 }
 
-/// A caller that is the recipient receives no duplicate notice, and the
-/// original sender still receives one.
+/// The receiver gets the typed reply when it cancels its own request.
 #[test]
-fn cancel_does_not_notice_its_recipient_flow_but_tells_the_sender() {
+fn cancel_by_the_receiver_only_replies_to_the_call() {
     let fixture = NexusFixture::new();
     let sender = at("cancelRecipientSender");
     let recipient = at("cancelRecipientSelf");
@@ -226,15 +224,13 @@ fn cancel_does_not_notice_its_recipient_flow_but_tells_the_sender() {
         ),
         Output::Cancelled(order.request_id.clone())
     );
-    let notice = format!("Request {} was cancelled.", order.request_id.0);
-    assert_eq!(notices(&fixture, &sender), vec![notice]);
+    assert!(notices(&fixture, &sender).is_empty());
     assert!(notices(&fixture, &recipient).is_empty());
 }
 
-/// A different bound flow does not suppress either request participant's
-/// notice.
+/// A third party gets the reply; only the receiver gets a prompt.
 #[test]
-fn cancel_by_a_third_flow_still_notifies_both_ends() {
+fn cancel_by_a_third_flow_only_notifies_the_receiver() {
     let fixture = NexusFixture::new();
     let sender = at("thirdCancelSender");
     let recipient = at("thirdCancelRecipient");
@@ -259,7 +255,8 @@ fn cancel_by_a_third_flow_still_notifies_both_ends() {
         Output::Cancelled(order.request_id.clone())
     );
     let notice = format!("Request {} was cancelled.", order.request_id.0);
-    assert_eq!(notices(&fixture, &sender), vec![notice.clone()]);
+    assert!(notices(&fixture, &sender).is_empty());
+    assert!(notices(&fixture, &caller).is_empty());
     assert_eq!(notices(&fixture, &recipient), vec![notice]);
 }
 
@@ -474,9 +471,9 @@ fn only_a_question_and_a_task_take_an_answer() {
 }
 
 /// A Notice still queued never reached its recipient: Cancel takes it out
-/// of its queue, and only its sender is told.
+/// of its queue without prompting anyone.
 #[test]
-fn cancel_takes_a_queued_notice_out_and_tells_its_sender() {
+fn cancel_withdraws_a_queued_notice_silently() {
     let fixture = NexusFixture::new();
     let sender = at("queuedNoticeSender");
     let recipient = at("queuedNoticeRecipient");
@@ -496,14 +493,11 @@ fn cancel_takes_a_queued_notice_out_and_tells_its_sender() {
         Output::Cancelled(notice.request_id.clone())
     );
     assert!(queued(&fixture, &recipient).is_empty());
-    assert_eq!(
-        notices(&fixture, &sender),
-        vec![format!("Request {} was cancelled.", notice.request_id.0)]
-    );
+    assert!(notices(&fixture, &sender).is_empty());
 }
 
 /// A Task still queued is cancelled: it leaves its queue, its reminder goes
-/// with it, and only its sender is told, the recipient never having had it.
+/// with it, and neither party receives a prompt.
 #[test]
 fn cancel_takes_a_queued_task_out_with_its_reminder() {
     let fixture = NexusFixture::new();
@@ -542,8 +536,62 @@ fn cancel_takes_a_queued_task_out_with_its_reminder() {
         None,
         "its reminder went with it"
     );
-    assert_eq!(notices(&fixture, &sender).len(), 1);
+    assert!(notices(&fixture, &sender).is_empty());
     assert!(notices(&fixture, &recipient).is_empty());
+}
+
+/// A parked attempt without receipt does not earn a cancellation prompt.
+#[test]
+fn cancel_of_a_parked_uncertain_task_is_silent() {
+    use crate::store::queue_delivery::{
+        AccountsQueueDelivery, NativeHistoryAnchor, PrepareQueueDelivery,
+    };
+    let fixture = NexusFixture::new();
+    let sender = at("uncertainCancelSender");
+    let recipient = at("uncertainCancelRecipient");
+    let flow = flow_ethos::FlowId("uncertainCancelSeat".into());
+    asleep(&fixture, &sender);
+    awake_as(&fixture, &recipient, &flow);
+    let task = admitted(
+        &fixture,
+        &recipient,
+        SentBy::Sender(sender.clone()),
+        Request::Task(flow_ethos::AnswerableTask {
+            minutes: flow_ethos::Minutes(30),
+            string: "Read this.".into(),
+        }),
+    );
+    let store = &fixture.nexus.store;
+    let PrepareQueueDelivery::Prepared(attempt) = store
+        .prepare_oldest_delivery(
+            &recipient,
+            &flow.0,
+            "uncertain-thread",
+            HarnessKind::Codex,
+            NativeHistoryAnchor::CodexTurns(None),
+        )
+        .unwrap()
+    else {
+        panic!("the request prepared");
+    };
+    assert!(
+        store
+            .mark_delivery_uncertain(&attempt.queue_attempt_id.0)
+            .unwrap()
+    );
+    assert!(
+        store
+            .park_uncertain_delivery(&attempt.queue_attempt_id.0)
+            .unwrap()
+    );
+    assert_eq!(
+        fixture.nexus.cancel(&task.request_id, &Origin::Unbound),
+        Output::Cancelled(task.request_id.clone())
+    );
+    assert!(queued(&fixture, &sender).is_empty());
+    assert!(queued(&fixture, &recipient).is_empty());
+    assert!(fixture.typed().is_none());
+    assert!(store.request_binding(&task.request_id).unwrap().is_none());
 }
 
 /// Silence stops a Task's reminders and leaves the Task open; a Silence of
@@ -1093,10 +1141,8 @@ fn cancel_ends_a_reminder_and_remind_refuses_what_a_task_refuses() {
         fixture.nexus.store.scheduled_reminder(&request_id).unwrap(),
         None
     );
-    assert_eq!(
-        notices(&fixture, &asker),
-        vec![format!("Request {} was cancelled.", request_id.0)]
-    );
+    assert!(notices(&fixture, &asker).is_empty());
+    assert!(notices(&fixture, &reminded).is_empty());
     assert!(queued(&fixture, &reminded).is_empty());
     assert_eq!(
         fixture.nexus.remind(remind(0, &reminded), SentBy::Unbound),

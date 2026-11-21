@@ -220,10 +220,10 @@ sockets are `0600` under one UID; security is the host's.
 
 A request, a reminder and a queue each have an operation of their own on the
 ordinary socket (`queue_operations`): `Cancel.RequestId` withdraws a request
-still queued, archives it with its id and a Task's reminder, and queues a
-Soft Notice for its sender, and for its recipient when it reached it, save
-the flow that cancelled, whose answer `Cancelled.RequestId` already tells
-it; only a Question and a Task take an answer (`TakesAnswer`), so any other
+still queued and archives it with its id and a Task's reminder.
+`Cancelled.RequestId` answers the caller. A distinct receiver gets a Soft
+Notice only when delivery was established; withdrawal from a queue is
+silent; only a Question and a Task take an answer (`TakesAnswer`), so any other
 request that reached its recipient is finished and Cancel and CloseRequest
 naming it are refused `Closed`;
 `CloseRequest.RequestId` closes an open request with no answer as Cancel
@@ -231,8 +231,8 @@ ends it, answered `RequestClosed.RequestId`, and tells no one: no Notice is
 queued, so a done request leaves the open requests every successor of its
 recipient is given without anyone being woken. Cancel and CloseRequest share
 one ending (`queue_operations::EndsRequests`), told apart by their
-`store::closed_request::RequestEnding`: a Cancel notifies the Addresses the
-ending answers, a CloseRequest records the process the caller's connection
+`store::closed_request::RequestEnding`: Cancel can notify the proven receiver,
+and CloseRequest records the process the caller's connection
 showed, `ClosedRequest.{ LogicalDeliveryId RequestId Closer.Option<Process> }`
 keyed by the logical delivery (a request id is drawn again once archived),
 in the commit that archives it; whoever asks is served, as for a Cancel;
@@ -257,8 +257,7 @@ names (`store::scheduled_reminder`), answered `Reminded.RequestId`, its
 request bound open; when its minutes lapse the Address is sent
 `MiddleAbrupt.Reminder.{ RequestId String }` from whoever asked
 (`reminding`), and the request closes. Its Minutes meets a Task's rule;
-`Cancel` ends it before then and tells its asker; `CloseRequest` ends it
-and tells no one.
+`Cancel` and `CloseRequest` end a pending reminder without sending a prompt.
 
 On the meta socket one declaration is changed alone:
 `Configure.Permaflow.ConfigureMetaflow` (keyed by its Address),

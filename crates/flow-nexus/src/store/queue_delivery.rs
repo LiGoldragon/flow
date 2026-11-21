@@ -1740,7 +1740,7 @@ mod tests {
             entry.logical_delivery_id =
                 flow_ethos::LogicalDeliveryId(format!("unrelated-{number:08}"));
         }
-        attempt.queue_delivery_phase = if number % 2 == 0 {
+        attempt.queue_delivery_phase = if number.is_multiple_of(2) {
             QueueDeliveryPhase::Settled(receipt(template))
         } else {
             QueueDeliveryPhase::Uncertain(None)

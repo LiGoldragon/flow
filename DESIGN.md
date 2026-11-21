@@ -238,7 +238,9 @@ keyed by the logical delivery (a request id is drawn again once archived),
 in the commit that archives it; whoever asks is served, as for a Cancel;
 `Silence.RequestId` closes a Task's reminder and leaves the Task open; a
 Task's sender is reminded once, when its minutes pass (`TASK_REMINDERS`),
-and told nothing more;
+by a Soft `Reminder.{ RequestId String }` from Flow that names the task by
+its RequestId with one short line, `The task to Field core Sol has no Done
+after 10 minutes.`, never the task's own text, and is told nothing more;
 `Clear.Address` and `ClearAll` withdraw everything queued, answering the ids;
 `Push.{ Address Priority }` delivers the whole queue of an Awake seat now as
 one Waking at the priority named (the waking lease carries it,
@@ -615,6 +617,17 @@ At its start the Nexus wakes every metaflow due a wake, so a Nexus that died
 between the commit and the wake leaves none owed. A wake already running for
 the metaflow absorbs the request: it drains what arrives during it.
 
+Every request one typed payload carried leaves the queue in one store
+commit (`store::queue_delivery::park_typed_cohort`), under the gate
+admission writes the queue under: the head's Uncertain attempt is parked,
+and every further request is given its own Uncertain attempt at the head's
+native anchor, its attempt number reserved in the same commit, and parked.
+The batch is parked whole or not at all, so a typed request is never left
+queued to be typed again; the one receipt of the payload settles them all.
+No migration runs on the delivery path: queue data from before logical
+identities is archived once, when the store opens, before anything is
+served (`archive_legacy_queue`).
+
 A wake's fresh flow takes the queued batch in its first prompt. Its launch
 answers `Started` once that prompt is submitted, and the harness may show it
 taken only later: Claude may write it to the transcript after `Started`, and
@@ -826,7 +839,8 @@ schema changes.
 `CrystallizeNow` sends the flow its handover warning now, whatever its
 context, as the warning goes (`handover_reminding::RendersHandoverWarning`):
 the words its model's handover policy configures, then
-`flows/<FlowId>/handover.md`, a MiddleAbrupt Notice from Flow. `Renew` takes
+`flows/<FlowId>/handover.md`, then its own `Refresh.{ Aspect topic Model }`,
+a MiddleAbrupt Notice from Flow. `Renew` takes
 the metaflow's hold and starts its successor through Replace before the old
 flow is reaped (`refresh_successor_first`), whatever its continuity and
 whether or not the old flow rests. The successor's `Started` is the event
@@ -903,7 +917,10 @@ of the threshold (`Configure.HandoverPolicies`, one `{ ModelName
 WarningShareLeft ReminderText EveryMinutes }` per model), the flow is sent the
 warning as a MiddleAbrupt Notice, arriving at its next tool boundary: the
 configured words, then its handover path, `flows/<FlowId>/handover.md`,
-and nothing else, repeated every `EveryMinutes` until it is refreshed; a
+then the Refresh it asks for itself with its own Address filled in,
+`Refresh.{ Mind core Opus }`, and nothing else. Every value in the warning
+is Flow's: the configured words carry no placeholder for the flow to fill.
+It is repeated every `EveryMinutes` until it is refreshed; a
 flow past its threshold is not warned at its idle event, which refreshes
 it. The
 refresh is taken at its next idle event, a Claude Stop or a Codex thread's

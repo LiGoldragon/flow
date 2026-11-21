@@ -1,4 +1,4 @@
-# Flow noise release: five Nexus messages removed
+# Flow 0.60.4: the noise release, Nexus messages removed and shortened
 
 No contract, generated type or stored schema changes. A cancelling flow
 receives no cancellation notice; its answer `Cancelled.<id>` is the whole
@@ -13,6 +13,32 @@ not four times, and no failure notice follows; a Task reminder held from
 an older release that has already sent one is spent and sends nothing. A
 core presentation's answer still goes to Psyche book Sonnet as an Order,
 but its asker is sent no publication notice and is not woken for one.
+
+A typed batch is parked whole in one store commit: its head's Uncertain
+attempt is parked, and every further request it carried is given its own
+Uncertain attempt at the head's native anchor and parked, its attempt
+number reserved in the same commit. Before, each further request was
+prepared alone after the head was parked; one refused preparation left the
+rest queued though typed, and the next drain typed them again (journal:
+`a typed request was not given its attempt`). Preparing a delivery no
+longer runs the legacy queue archive, whose read of every metaflow was
+refused whenever another write landed during it; the archive runs once,
+when the store opens, as it already did.
+
+The handover warning carries every value Flow knows: the configured words,
+then `flows/<FlowId>/handover.md`, then the flow's own
+`Refresh.{ Aspect topic Model }`, filled in. The configured words are to
+carry no placeholder: a live `HandoverPolicies` whose `ReminderText` still
+writes `<your flow id>` or `Refresh.{ <your Aspect> <your topic> <your
+Model> }` is reconfigured with words that name neither, before or at
+activation, or the warning carries both.
+
+A Task's reminder is a Soft `Reminder.{ RequestId String }` from Flow, the
+RequestId the task was answered with and one short line, `The task to
+Field core Sol has no Done after 10 minutes.`; it no longer repeats the
+task's text or counts "Reminder 1 of 1". A Reminder wakes a sleeping
+permaflow by its kind, so a Task's sender that sleeps is woken for it,
+where the Notice it replaces waited for the next waking.
 
 # Flow 0.60.3: attempts read by membership
 

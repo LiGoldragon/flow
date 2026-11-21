@@ -8270,7 +8270,7 @@ mod tests {
     }
 
     #[test]
-    fn core_presentation_is_queued_as_is_once_and_secondary_gets_only_a_notice() {
+    fn core_presentation_is_queued_as_is_once_and_its_sender_is_sent_nothing() {
         use signal_flow::{
             Address, Aspect, DeliveryState, Message, Metaflow, Model, NativeReceipt, Request,
             SentBy,
@@ -8356,7 +8356,7 @@ mod tests {
                 )
                 .unwrap(),
             None,
-            "replayed Stop cannot create another book order or notice"
+            "replayed Stop cannot create another book order"
         );
         let book_queue = store.metaflow(&book).unwrap().unwrap().queue;
         assert_eq!(book_queue.0.len(), 1);
@@ -8365,18 +8365,10 @@ mod tests {
             book_queue.0[0].message,
             Message::Soft(Request::Order("verbatim presentation body".into()))
         );
-        let secondary_queue = store.metaflow(&sender).unwrap().unwrap().queue;
-        assert_eq!(secondary_queue.0.len(), 1);
-        assert_eq!(secondary_queue.0[0].sent_by, SentBy::Sender(source));
-        let Message::Soft(Request::Notice(notice)) = &secondary_queue.0[0].message else {
-            panic!("the core Secondary gets a Notice, not a duplicate body")
-        };
         assert!(
-            notice.contains("queued"),
-            "queued is not delivered: {notice}"
+            store.metaflow(&sender).unwrap().unwrap().queue.0.is_empty(),
+            "the core Secondary is sent no publication notice"
         );
-        assert!(!notice.contains("handed"));
-        assert!(!notice.contains("verbatim presentation body"));
     }
     #[test]
     fn created_pane_survives_reopen_and_a_second_failed_binding_is_orphaned() {

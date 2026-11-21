@@ -1447,60 +1447,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             .engine
             .begin_atomic_commit()
             .mutate(self.metaflows, target);
-        let mut next_cursor = cursor.checked_add(1).ok_or(StoreError::StateInvariant)?;
-        if core_presentation {
-            let Some(mut notification) = self.stored_metaflow(&binding.recipient.0)? else {
-                return Err(StoreError::StateInvariant);
-            };
-            let notice_id = format!("simplified-publication-notice-{flow_id}-{input_delivery_id}");
-            let notice_request_id = self
-                .mint_request_id()?
-                .map_err(|_| StoreError::StateInvariant)?;
-            notification.metaflow.queue.0.push(QueueEntry {
-                logical_delivery_id: flow_ethos::LogicalDeliveryId(notice_id.clone()),
-                request_id: notice_request_id.clone(),
-                sent_by: SentBy::Sender(binding.source.0.clone()),
-                delivery: flow_ethos::Delivery::Wake,
-                message: Message::Soft(Request::Notice(
-                    "The native presentation source was queued for Psyche book Tertiary as the sole artifact source. Publication is not yet witnessed.".into(),
-                )),
-            });
-            let notice_snapshot = DeliverySnapshot {
-                delivery_cursor: signal_flow::DeliveryCursor(next_cursor),
-                logical_delivery_id: signal_flow::LogicalDeliveryId(notice_id),
-                request_id: notice_request_id.clone(),
-                sent_by: SentBy::Sender(binding.source.0.clone()),
-                address: binding.recipient.0.clone(),
-                delivery_state: DeliveryState::Queued,
-            };
-            commit = commit
-                .mutate(self.metaflows, notification)
-                .assert(
-                    self.logical_deliveries.current,
-                    CurrentLogicalDelivery {
-                        delivery_snapshot: notice_snapshot.clone(),
-                        archived_cursor: crate::generated::memory::ArchivedCursor(None),
-                        delivery_admission: DeliveryAdmission::Ordinary,
-                    },
-                )
-                .assert(
-                    self.logical_deliveries.events,
-                    LogicalDeliveryEvent {
-                        delivery_snapshot: notice_snapshot.clone(),
-                    },
-                )
-                .assert(
-                    self.logical_deliveries.request_ids,
-                    RequestIdBinding {
-                        request_id: notice_request_id,
-                        logical_delivery_id: notice_snapshot.logical_delivery_id.clone(),
-                        request_closure: RequestClosure::Open,
-                    },
-                );
-            next_cursor = next_cursor
-                .checked_add(1)
-                .ok_or(StoreError::StateInvariant)?;
-        }
+        let next_cursor = cursor.checked_add(1).ok_or(StoreError::StateInvariant)?;
         let counter = LogicalDeliveryCounter {
             next_cursor: crate::generated::memory::NextCursor(next_cursor),
         };

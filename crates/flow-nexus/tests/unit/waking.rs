@@ -8076,6 +8076,64 @@ fn a_successor_refusal_routes_once_to_the_configured_investigator() {
     }
 }
 
+#[test]
+fn a_retained_investigator_receives_one_order_through_its_existing_drain() {
+    use crate::codex_turns::SettlesRestingCodexSeats;
+    use crate::send_tool::ServesLaunchCalls;
+    use crate::store::SeedsRole;
+    use crate::waking::WakesInParts;
+
+    let mut fixture = NexusFixture::new();
+    let kept = address(Model::Sol);
+    let thread = codex_rest_seat(&fixture, None, vec![]);
+    maintain(&fixture, kept.clone());
+    fixture.nexus.store.seed_role(signal_flow::CallerIdentity {
+        flow_id: flow_ethos::FlowId("908786".into()),
+        aspect: signal_flow::Aspect::Mind,
+        model_name: flow_ethos::ModelName("gpt-sol".into()),
+    });
+    let endpoint = super::send_tool::accepting_codex_endpoint(&mut fixture, "gpt-sol", &thread);
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Investigation(
+            kept.clone(),
+        ))
+        .expect("the retained seat is also the investigator");
+    assert_eq!(
+        fixture
+            .nexus
+            .codex_events(&thread, vec![super::codex_turns::idle()]),
+        Some(AtStop::Idle)
+    );
+
+    fixture
+        .nexus
+        .successor_refused("908786", &KeptAtStop::RefreshUnplaceable);
+
+    let typed = fixture
+        .typed()
+        .expect("the existing seat drained the order");
+    assert_eq!(
+        typed.matches("Investigate the refused successor").count(),
+        1,
+        "{typed}"
+    );
+    assert!(typed.contains("Soft.Order"), "{typed}");
+    assert!(!typed.contains("Notice"), "{typed}");
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
+    assert_eq!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(flow_ethos::FlowId("908786".into()))
+    );
+    assert!(!fixture.nexus.has_deferred_wake(&kept));
+    use super::send_tool::RunsFakeAppServer;
+    assert!(
+        endpoint.queued_turn_texts().is_empty(),
+        "no separate turn/start"
+    );
+}
+
 /// Test 9, on the ledger: a cut settles a resting seat; a second cut of
 /// the same subscription settles nothing; a subscription's end keeps the
 /// seat from rest until the next subscription's cut, which settles it.

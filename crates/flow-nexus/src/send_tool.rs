@@ -953,6 +953,8 @@ pub(crate) trait ServesLaunchCalls {
     /// once the gate is given back.
     fn defer_wake(&self, target: Address);
     /// Off the dispatch gate, considers every target deferred under it.
+    #[cfg(test)]
+    fn has_deferred_wake(&self, target: &Address) -> bool;
     fn wake_deferred(&self);
 }
 
@@ -1129,6 +1131,15 @@ impl ServesLaunchCalls for RunningNexus {
         if !deferred.contains(&target) {
             deferred.push(target);
         }
+    }
+
+    #[cfg(test)]
+    fn has_deferred_wake(&self, target: &Address) -> bool {
+        self.launch_calls
+            .deferred_wakes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(target)
     }
 
     fn wake_deferred(&self) {

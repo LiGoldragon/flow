@@ -221,7 +221,10 @@ sockets are `0600` under one UID; security is the host's.
 A request, a reminder and a queue each have an operation of their own on the
 ordinary socket (`queue_operations`): `Cancel.RequestId` withdraws a request
 still queued, archives it with its id and a Task's reminder, and queues a
-Soft Notice for its sender, and for its recipient when it reached it;
+Soft Notice for its sender, and for its recipient when it reached it, save
+the flow that cancelled, whose answer `Cancelled.RequestId` already tells
+it; a Notice takes no answer, so one that reached its recipient is finished
+and Cancel and CloseRequest naming it are refused `Closed`;
 `CloseRequest.RequestId` closes an open request with no answer as Cancel
 ends it, answered `RequestClosed.RequestId`, and tells no one: no Notice is
 queued, so a done request leaves the open requests every successor of its
@@ -232,7 +235,9 @@ ending answers, a CloseRequest records the process the caller's connection
 showed, `ClosedRequest.{ LogicalDeliveryId RequestId Closer.Option<Process> }`
 keyed by the logical delivery (a request id is drawn again once archived),
 in the commit that archives it; whoever asks is served, as for a Cancel;
-`Silence.RequestId` closes a Task's reminder and leaves the Task open;
+`Silence.RequestId` closes a Task's reminder and leaves the Task open; a
+Task's sender is reminded once, when its minutes pass (`TASK_REMINDERS`),
+and told nothing more;
 `Clear.Address` and `ClearAll` withdraw everything queued, answering the ids;
 `Push.{ Address Priority }` delivers the whole queue of an Awake seat now as
 one Waking at the priority named (the waking lease carries it,

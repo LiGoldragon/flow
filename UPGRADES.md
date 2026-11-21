@@ -1,3 +1,18 @@
+# Flow noise release: five Nexus messages removed
+
+No contract, generated type or stored schema changes. A cancelling flow
+receives no cancellation notice; its answer `Cancelled.<id>` is the whole
+report, and the other party is still told. A Notice that reached its
+recipient, delivered or uncertain, is finished: Cancel and CloseRequest
+naming it are refused `Closed` and queue nothing. As 0.60.1 reads Orders,
+the retained kind and delivery evidence decide; delivered Notices already
+in Memory keep their historical `Open` binding untouched, need no rewrite,
+and are treated as finished on upgrade. A Task's sender is reminded once,
+not four times, and no failure notice follows; a Task reminder held from
+an older release that has already sent one is spent and sends nothing. A
+core presentation's answer still goes to Psyche book Sonnet as an Order,
+but its asker is sent no publication notice and is not woken for one.
+
 # Flow 0.60.3: attempts read by membership
 
 Every read of queue delivery attempts visits a bounded key range instead of

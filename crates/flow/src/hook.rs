@@ -7,7 +7,7 @@
 //! launched the flow.
 //!
 //!   SessionStart     -> Report.{ «FLOW_ID» BIRTH Started.Some.«session_id» }
-//!   PostToolUse      -> Report.{ «FLOW_ID» BIRTH ToolUsed.«tool_name» }
+//!   PostToolUse      -> Report.{ «FLOW_ID» BIRTH ToolUsed.«tool_name» }, on the main thread
 //!   UserPromptSubmit -> Report.{ «FLOW_ID» BIRTH PromptSubmitted.{ Some.«session_id» Some.«prompt_id» SHA256 } }
 //!   Stop             -> Report.{ «FLOW_ID» BIRTH Stopped.{ Some.«session_id» Some.«transcript_path» Some.«last_assistant_message» [ «background_tasks» ] } }
 //!   SessionEnd       -> Report.{ «FLOW_ID» BIRTH Ended.Some.«session_id» }
@@ -20,6 +20,11 @@
 //! now) names it; `None` when no ancestor does. An event names the harness
 //! it came from in its own data, so a resumed seat's events are told from a
 //! late hook of the harness it replaced, which shares its session.
+//!
+//! A PostToolUse whose input names an `agent_id` fired inside a subagent,
+//! a background one among them, and reports nothing: a subagent's work is
+//! not the flow's turn, and the flow it runs beside may rest and take its
+//! prompts meanwhile.
 //!
 //! A SessionEnd whose reason is `clear` is a session change, not an exit:
 //! the harness goes on in the session the SessionStart after it names.
@@ -384,6 +389,13 @@ impl ChoosesHookCall for HarnessHook {
                 self.optional("session_id")
                     .map(signal_flow::NativeSessionId),
             ),
+            // A subagent's tool use is not the flow's turn: Claude Code
+            // names the subagent a hook fires in by `agent_id`, absent on
+            // the main thread, and a background subagent runs on while the
+            // flow rests and takes its prompts.
+            "PostToolUse" if self.optional("agent_id").is_some() => {
+                return HookCall::Nothing("a subagent's tool use is not the flow's turn");
+            }
             "PostToolUse" => match self
                 .input
                 .get("tool_name")
@@ -837,6 +849,52 @@ mod tests {
             .call(),
             HookCall::Nothing(_)
         ));
+    }
+
+    /// Shaped on the live fcov seat ({ Mind subscription Opus }, 0.59.5):
+    /// the flow's turn ends with two background subagents running, and
+    /// their tool uses keep coming. Each carries the `agent_id` Claude Code
+    /// names a subagent by and reports nothing, so the resting flow is not
+    /// made Working and a Soft sent to it is typed at once; a tool use on
+    /// the main thread is still the flow's turn.
+    #[test]
+    fn a_background_subagents_tool_use_reports_nothing() {
+        let stop = hook(
+            serde_json::json!({"hook_event_name": "Stop", "session_id": "s",
+                "transcript_path": "/t/s.jsonl", "last_assistant_message": "resting",
+                "background_tasks": [
+                    {"id": "a1", "type": "subagent", "status": "running",
+                     "description": "review"},
+                    {"id": "a2", "type": "subagent", "status": "running",
+                     "description": "audit"}]}),
+            Some("706921"),
+        );
+        assert!(matches!(stop.call(), HookCall::Report(_)));
+        for (agent, tool) in [("a1", "Bash"), ("a2", "Read"), ("a1", "Grep")] {
+            assert!(
+                matches!(
+                    hook(
+                        serde_json::json!({"hook_event_name": "PostToolUse",
+                            "session_id": "s", "transcript_path": "/t/s.jsonl",
+                            "agent_id": agent, "agent_type": "general-purpose",
+                            "tool_name": tool, "tool_use_id": "t"}),
+                        Some("706921")
+                    )
+                    .call(),
+                    HookCall::Nothing(_)
+                ),
+                "{agent}'s {tool} is not the flow's turn"
+            );
+        }
+        assert_eq!(
+            hook(
+                serde_json::json!({"hook_event_name": "PostToolUse", "session_id": "s",
+                    "transcript_path": "/t/s.jsonl", "tool_name": "Bash"}),
+                Some("706921")
+            )
+            .call(),
+            report("Report.{ «706921» None ToolUsed.«Bash» }".into())
+        );
     }
 
     #[test]

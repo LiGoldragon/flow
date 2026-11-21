@@ -1393,8 +1393,8 @@ pub(crate) trait ReconcilesQueueDelivery {
     /// hand-over whose request it exactly is. Anything else, a task
     /// notification among them, settles nothing.
     fn settle_submitted_prompt(&self, flow_id: &str, prompt: &NativePrompt);
-    /// At the Nexus's start: reconciles every hand-over the last Nexus left
-    /// outstanding, then settles every Claude seat whose own turn end was
+    /// At the Nexus's start: settles every receipt the last Nexus recorded,
+    /// reconciles every hand-over it left outstanding, then settles every Claude seat whose own turn end was
     /// recorded and which holds work, as a Stop would.
     fn recover_deliveries(&self);
 }
@@ -1580,6 +1580,24 @@ impl ReconcilesQueueDelivery for RunningNexus {
                 eprintln!("flow-nexus: metaflows unreadable; no queued delivery reconciled");
                 return;
             };
+            // A receipt the last Nexus recorded and did not settle is settled
+            // first, its arrival folded in the turn the seat's native history
+            // shows it in.
+            for attempt in metaflows.iter().flat_map(|metaflow| {
+                self.store
+                    .unsettled_deliveries(&metaflow.address)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|attempt| {
+                        matches!(
+                            attempt.queue_delivery_phase,
+                            QueueDeliveryPhase::ReceiptRecorded(_)
+                        )
+                    })
+            }) {
+                let reconciled = self.reconcile_delivery(&attempt);
+                eprintln!("flow-nexus: a recorded receipt was settled at start: {reconciled:?}");
+            }
             let outstanding = metaflows
                 .iter()
                 .filter_map(|metaflow| {

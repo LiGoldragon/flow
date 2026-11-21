@@ -1,3 +1,27 @@
+# Flow 0.59.6: a seat at rest is left at rest by what is not its turn
+
+Three ways a resting seat came to stand Acting, so a Soft sent to it
+queued for an idle event that had already come, and one way a Codex rest
+went unrecorded:
+
+- A Claude subagent's tool use (ruling 83od). Claude Code runs PostToolUse
+  for a subagent's tools too, a background one among them, naming the
+  subagent by `agent_id`, absent on the main thread. `flow-hook` now reports
+  nothing for such a tool use: a background subagent is not the flow's
+  turn, and the flow's prompt is open while it runs.
+- A Codex turn left with only its letter awaited. The turn's end
+  reconciles the letter from the thread's history (`reconcile_typed`),
+  which brings the thread to rest; the batch's report is now read after
+  that reconciliation, so the rest is recorded Idle.
+- A receipt recorded before a restart. The store's open no longer settles
+  it as in a running turn; the Nexus's start (`recover_deliveries`) settles
+  every recorded receipt first, reading the turn it lies in from the seat's
+  native history, so an arrival in an ended turn leaves the seat at rest.
+
+Memory, families, schemas and wires are unchanged from 0.59.5; signal-flow
+and meta-signal-flow are unchanged. Only the flow-nexus crate moves to
+0.59.6, and `flow-hook` moves with the deployment.
+
 # Flow 0.59.5: an arrival in an ended turn leaves the seat at its rest
 
 A request's receipt settled after the rest of the turn that took it

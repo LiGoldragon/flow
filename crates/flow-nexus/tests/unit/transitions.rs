@@ -549,6 +549,60 @@ fn a_request_settled_at_start_in_a_turn_that_ended_leaves_its_seat_resting() {
     rests_with_the_request_arrived(&fixture, &peer);
 }
 
+/// A receipt the last Nexus recorded and did not settle: the seat took the
+/// request typed at its Stop, the Nexus recorded the receipt and went down
+/// before settling it, and the turn that took it ended meanwhile. The store
+/// that opens leaves the settlement to the Nexus's start, which reads the
+/// turn from the seat's transcript: the arrival lies in an ended turn and
+/// leaves the seat at its rest. On 0.59.5 the store's open settled it as in
+/// a running turn, leading to Acting, and the next Soft queued.
+#[test]
+fn a_receipt_recorded_before_a_restart_settles_at_start_in_its_ended_turn() {
+    use crate::generated::memory::{NativeDeliveryReceipt, NativeReceiptText, TurnId};
+    use crate::store::queue_delivery::AccountsQueueDelivery;
+    use crate::waking::ReconcilesQueueDelivery;
+    let mut fixture = NexusFixture::new();
+    let (_caller, peer, typed) = handed_over_at_a_stop(&fixture);
+    assert_eq!(last(&fixture, CLAUDE_SEAT).state, meta::State::Resting);
+    let attempt = fixture
+        .nexus
+        .store
+        .unsettled_deliveries(&address(Model::Sol))
+        .unwrap()
+        .pop()
+        .expect("the request is handed over");
+    assert!(
+        fixture
+            .nexus
+            .store
+            .record_delivery_receipt(
+                &attempt.queue_attempt_id.0,
+                NativeDeliveryReceipt {
+                    native_request_id: attempt.native_request_id,
+                    thread_id: attempt.thread_id.clone(),
+                    turn_id: TurnId("second-turn".into()),
+                    native_receipt_text: NativeReceiptText("late-receipt".into()),
+                },
+            )
+            .unwrap()
+    );
+    taken_and_turn_ended(&fixture, &typed);
+
+    reopen(&mut fixture, false);
+    fixture.nexus.recover_deliveries();
+
+    assert!(
+        fixture
+            .nexus
+            .store
+            .unsettled_deliveries(&address(Model::Sol))
+            .unwrap()
+            .is_empty(),
+        "the recorded receipt settled at start"
+    );
+    rests_with_the_request_arrived(&fixture, &peer);
+}
+
 /// The Claude Stop, reaching Flow before Claude writes the receipt of what
 /// its turn took: the Stop's own settlement finds no receipt and its rest
 /// is recorded; the rows land before the drain that rest runs, which

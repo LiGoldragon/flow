@@ -764,10 +764,13 @@ the flow was in.
   when its transcript shows the main turn ended, else Working; its own
   prompt and each tool boundary are Working; its own Stop is Idle with the
   size its transcript shows; its own session's end is Ended; a Cleared is
-  none.
+  none. A tool use inside a subagent, its input naming an `agent_id`, is
+  reported by no hook: a background subagent is not the flow's turn, and
+  the flow rests and takes its prompts while it runs.
 - A Codex flow's app-server (`codex_turns`, `compacting`): its first report
   is preceded by Started; a ledger batch bringing its thread to rest is
-  Idle, one taking it into a turn or a running item Working; a token usage
+  Idle, one taking it into a turn or a running item Working, its standing
+  read after the letters a turn's end reconciles; a token usage
   is Working with its size in a turn and Idle at rest; its thread closed is
   Ended.
 - A compaction either harness makes, asked for or not, is Compacting.
@@ -789,8 +792,8 @@ So a receipt settled after the rest of the turn that took it, whatever
 order the events reached Flow in, leaves the seat at that rest: at the
 Nexus's start (`recover_deliveries`), at a Codex turn's completion (the
 drain its rest allows), and at a Claude Stop (the drain that rest runs).
-A store opening settles a receipt recorded before a crash before any
-native history is read, and folds it as Running. A Claude flow's own
+A store opening leaves a receipt recorded before a crash as it is; the
+Nexus's start settles it first, reading the turn it lies in. A Claude flow's own
 Stop also settles first every hand-over its ended turn took whose receipt
 its transcript shows (`settle_turn_receipts`), so each arrival is
 recorded before the Idle that ends its turn. The state the Nexus

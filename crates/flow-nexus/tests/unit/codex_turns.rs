@@ -1134,3 +1134,168 @@ fn a_letter_settled_at_its_turns_completion_leaves_the_codex_seat_resting() {
     );
     assert!(fixture.nexus.rests_now("908786"));
 }
+
+/// A Codex turn that ends with only its letter awaited, its user message
+/// item unseen by the ledger: the turn's completion reconciles the letter
+/// from the thread's history, which brings the thread to rest, and the
+/// report of that batch is read after the reconciliation, so the rest is
+/// recorded and the seat stands Resting. On 0.59.5 the report was read
+/// before it, saw the letter awaited, and recorded no Idle: the seat stayed
+/// Acting at rest.
+#[test]
+fn a_turn_left_with_only_its_letter_awaited_records_its_rest() {
+    use super::send_tool::{RunsFakeAppServer, accepting_codex_endpoint};
+    use super::waking::{address, stored};
+    use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
+    use crate::codex_turns::SettlesRestingCodexSeats;
+    use crate::composition::RendersQueuedWork;
+    use crate::generated::memory::{Cause, NativeHistoryAnchor};
+    use crate::generated::overriding::RemembersOverrides;
+    use crate::store::SeedsRole;
+    use crate::store::logical_delivery::RecordsLogicalDeliveries;
+    use crate::store::metaflow::SeedsMetaflow;
+    use crate::store::queue_delivery::{AccountsQueueDelivery, PrepareQueueDelivery};
+    use crate::waking::HoldsSoftForIdle;
+    use signal_flow::{FlowLifecycle, Message, Model, Request, SentBy};
+
+    let mut fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![fixture.settled_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.register_with(FlowLifecycle::Active);
+    let target = address(Model::Sol);
+    fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+        address: target.clone(),
+        state: flow_ethos::State::Awake(flow_ethos::FlowId("908786".into())),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
+    });
+    super::refresh_and_compaction::declare_seat(
+        &fixture,
+        meta_signal_flow::Continuity::Maintained,
+        vec![],
+    );
+    fixture.nexus.store.seed_role(signal_flow::CallerIdentity {
+        flow_id: flow_ethos::FlowId("908786".into()),
+        aspect: signal_flow::Aspect::Mind,
+        model_name: flow_ethos::ModelName("gpt-sol".into()),
+    });
+    let thread = fixture.node().session_id.0;
+    let fake = accepting_codex_endpoint(&mut fixture, "gpt-sol", &thread);
+    // The seat rests: its thread's cut shows no turn.
+    fixture.nexus.codex_events(&thread, vec![idle()]);
+    assert!(fixture.nexus.rests_now("908786"));
+
+    // A Soft Order, typed into the resting seat's pane as the drain types
+    // a letter, its receipt not yet read.
+    let admitted = fixture
+        .nexus
+        .store
+        .accept_logical_delivery(
+            &target,
+            SentBy::Flow,
+            flow_ethos::Delivery::Queue,
+            Message::Soft(Request::Order("Carry the design on.".into())),
+            None,
+        )
+        .unwrap();
+    let signal_flow::PrivateSendResponse::SendAccepted(accepted) = admitted else {
+        panic!("admitted: {admitted:?}")
+    };
+    let payload = stored(&fixture, Model::Sol).queue.0.prompt_text(&target);
+    let PrepareQueueDelivery::Prepared(letter) = fixture
+        .nexus
+        .store
+        .prepare_oldest_delivery(
+            &target,
+            "908786",
+            &thread,
+            signal_flow::HarnessKind::Codex,
+            NativeHistoryAnchor::CodexTurns(Some("before-letter".into())),
+        )
+        .unwrap()
+    else {
+        panic!("the letter prepared")
+    };
+    fixture
+        .nexus
+        .store
+        .mark_delivery_uncertain(&letter.queue_attempt_id.0)
+        .unwrap();
+    fixture.nexus.codex_turns.apply(
+        &thread,
+        typed(&letter.queue_attempt_id.0, &payload, Interrupt::NotPressed),
+    );
+
+    // The letter starts a turn whose user message item this ledger never
+    // sees, as after a reconnect, and the turn completes with the letter
+    // still awaited; the thread's history shows the letter in that turn.
+    fixture
+        .nexus
+        .codex_events(&thread, vec![started("letter-turn")]);
+    assert_eq!(
+        last_state(&fixture),
+        meta_signal_flow::State::Acting,
+        "the turn is the seat's"
+    );
+    let history = vec![
+        serde_json::json!({"id":"letter-turn","status":"completed","items":[{
+            "type":"userMessage","id":"letter-item","content":[{"type":"text","text":payload}]
+        }]}),
+        serde_json::json!({"id":"before-letter","status":"completed","items":[]}),
+    ];
+    for run in 1..=16 {
+        fake.serve_turn_history(run, &thread, true, history.clone());
+    }
+    fixture
+        .nexus
+        .codex_events(&thread, vec![completed("letter-turn")]);
+
+    assert!(
+        fixture
+            .nexus
+            .store
+            .unsettled_deliveries(&target)
+            .unwrap()
+            .is_empty(),
+        "the letter settled on its receipt"
+    );
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
+    let held = fixture
+        .nexus
+        .store
+        .transitions()
+        .unwrap()
+        .into_iter()
+        .find(|flow| flow.flow_id.0 == "908786")
+        .map(|flow| flow.transition_vector)
+        .unwrap_or_default();
+    assert!(
+        held.iter()
+            .any(|transition| transition.cause == Cause::Arrived(accepted.request_id.clone())),
+        "the letter arrived: {held:?}"
+    );
+    let last = held.last().expect("a transition is recorded");
+    assert_eq!(
+        last.cause,
+        Cause::Reported(crate::generated::memory::Event::Idle(signal_flow::Tokens(0))),
+        "the turn's rest is recorded once its letter is reconciled: {held:?}"
+    );
+    assert_eq!(last.state, meta_signal_flow::State::Resting, "{held:?}");
+    assert!(fixture.nexus.rests_now("908786"));
+}
+
+/// The state of the Codex seat 908786's last transition.
+fn last_state(fixture: &super::NexusFixture) -> meta_signal_flow::State {
+    use crate::generated::overriding::RemembersOverrides;
+    fixture
+        .nexus
+        .store
+        .transitions()
+        .unwrap()
+        .into_iter()
+        .find(|flow| flow.flow_id.0 == "908786")
+        .and_then(|flow| flow.transition_vector.last().map(|last| last.state.clone()))
+        .expect("a transition is recorded")
+}

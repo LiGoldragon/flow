@@ -3226,19 +3226,14 @@ impl OpensFlowStore for FlowStore {
         // native receipt is enough to finish the local settlement after a
         // restart; an attempt without one becomes Uncertain, is never
         // submitted again automatically, and is reconciled from native
-        // history once the Nexus runs (`ReconcilesQueueDelivery`).
+        // history once the Nexus runs (`ReconcilesQueueDelivery`). Both are
+        // settled by the Nexus's start (`recover_deliveries`), which reads
+        // the turn each receipt lies in from the seat's native history.
         for attempt in store.recover_outstanding_deliveries()? {
             match attempt.queue_delivery_phase {
-                // The store opens before any native history is read: the
-                // arrival is folded as in a turn not shown ended.
-                QueueDeliveryPhase::ReceiptRecorded(_) => {
-                    if !store.settle_recorded_delivery(
-                        &attempt.queue_attempt_id.0,
-                        crate::generated::transitions::ReceiptTurn::Running,
-                    )? {
-                        return Err(StoreError::StateInvariant);
-                    }
-                }
+                QueueDeliveryPhase::ReceiptRecorded(_) => eprintln!(
+                    "flow-nexus: a queued delivery's receipt is recorded; it is settled at start"
+                ),
                 QueueDeliveryPhase::Uncertain(_) => eprintln!(
                     "flow-nexus: a queued delivery is uncertain; it is reconciled from native history"
                 ),

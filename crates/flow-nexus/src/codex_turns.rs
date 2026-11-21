@@ -829,19 +829,6 @@ impl SettlesRestingCodexSeats for RunningNexus {
                 .map(|reading| reading.turns_ended.0.len())
                 .sum::<usize>();
             let flow = self.codex_flow_on(thread);
-            // What the batch says of the thread, recorded as its flow's
-            // event (`transitions`).
-            let reported = flow.as_ref().map(|node| CodexFlowReport {
-                flow_id: node.flow_id.clone(),
-                codex_report: if closed {
-                    CodexReport::Closed
-                } else {
-                    CodexReport::Stepped(Stepped_Data {
-                        before: Before(before.clone()),
-                        after: After(self.codex_turns.standing(thread)),
-                    })
-                },
-            });
             // A turn ended with only letters left: native history is read
             // for the latest one's receipt, which a reconnect may have kept
             // from this ledger.
@@ -855,6 +842,20 @@ impl SettlesRestingCodexSeats for RunningNexus {
             {
                 self.reconcile_typed(&metaflow.address);
             }
+            // What the batch says of the thread, recorded as its flow's
+            // event (`transitions`): read once the letters are reconciled,
+            // so a turn whose letter its history shows taken comes to rest.
+            let reported = flow.as_ref().map(|node| CodexFlowReport {
+                flow_id: node.flow_id.clone(),
+                codex_report: if closed {
+                    CodexReport::Closed
+                } else {
+                    CodexReport::Stepped(Stepped_Data {
+                        before: Before(before.clone()),
+                        after: After(self.codex_turns.standing(thread)),
+                    })
+                },
+            });
             let rested = readings.iter().any(|reading| reading.rest_reached.0)
                 || (before != ThreadStanding::AtRest
                     && self.codex_turns.standing(thread) == ThreadStanding::AtRest);

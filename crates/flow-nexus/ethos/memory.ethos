@@ -251,6 +251,19 @@ Memory
                          Address
                          QueueEvidence
                          QueueDeliveryPhase }
+  ; One attempt at one Address.
+  AddressAttempt.{ Address QueueAttemptId }
+  ; One membership of a queue delivery attempt, keyed by its family, its
+  ; owner and the attempt, so a reader visits one owner's attempts alone.
+  ; ByLogicalDelivery: an attempt handed one logical delivery. ByAddress: an
+  ; attempt at an Address. Unsettled: an Address's attempt in any phase but
+  ; Settled and Read.
+  AttemptMembership.[ ByLogicalDelivery.{ LogicalDeliveryId QueueAttemptId }
+                      ByAddress.AddressAttempt
+                      Unsettled.AddressAttempt ]
+  ; The membership build's completion, written once with the memberships of
+  ; every attempt the store held: how many attempts it indexed.
+  AttemptMembershipBuilt.{ IndexedAttempts.Integer }
   ; The send outcome counter: the number the next outcome takes.
   SendOutcomeCounter.{ NextId.Integer }
   ; An answer kept for its request, keyed by the request id.

@@ -324,7 +324,7 @@ dependencies = [
 
 [[package]]
 name = "flow-nexus"
-version = "0.60.2"
+version = "0.60.3"
 dependencies = [
  "base64",
  "datom-codec",
@@ -859,8 +859,8 @@ dependencies = [
 
 [[package]]
 name = "sema"
-version = "0.1.1"
-source = "git+https://github.com/LiGoldragon/memory?rev=51d7927c872f0df12791bad8d39a4db6433b01a1#51d7927c872f0df12791bad8d39a4db6433b01a1"
+version = "0.1.2"
+source = "git+https://github.com/LiGoldragon/memory?rev=712a4a9177e71dc2b397cf4e5a5c65b4fa3c0ec8#712a4a9177e71dc2b397cf4e5a5c65b4fa3c0ec8"
 dependencies = [
  "redb",
  "rkyv",
@@ -869,8 +869,8 @@ dependencies = [
 
 [[package]]
 name = "sema-engine"
-version = "0.19.0"
-source = "git+https://github.com/LiGoldragon/sema-engine?rev=6a95a0925c9e6a6a144037ffdbad8c7d3cc126f2#6a95a0925c9e6a6a144037ffdbad8c7d3cc126f2"
+version = "0.19.1"
+source = "git+https://github.com/LiGoldragon/memory-engine?rev=3120626a0b63c94df713041bbaa230d49e07952d#3120626a0b63c94df713041bbaa230d49e07952d"
 dependencies = [
  "blake3",
  "rkyv",

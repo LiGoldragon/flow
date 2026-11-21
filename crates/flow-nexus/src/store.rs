@@ -8,6 +8,7 @@ use crate::store::delivery::RegistersDeliveryTables;
 #[cfg(test)]
 use crate::test_faults;
 pub(crate) mod address_hold;
+pub(crate) mod attempt_membership;
 pub(crate) mod closed_request;
 pub mod compaction;
 pub mod context;
@@ -223,6 +224,11 @@ const OPTIONAL_HELD_LAUNCH_TABLE: &str = overriding::HELD_LAUNCH_TABLE;
 /// Added in 0.60.0 with CloseRequest: a store written before holds no
 /// closed request, and is opened with the family registered empty.
 const OPTIONAL_CLOSED_REQUEST_TABLE: &str = closed_request::CLOSED_REQUEST_TABLE;
+/// Added in 0.60.3: a store written before holds attempts and no
+/// membership; its memberships are built at its first open.
+const OPTIONAL_ATTEMPT_MEMBERSHIP_TABLE: &str = attempt_membership::ATTEMPT_MEMBERSHIP_TABLE;
+const OPTIONAL_ATTEMPT_MEMBERSHIP_BUILT_TABLE: &str =
+    attempt_membership::ATTEMPT_MEMBERSHIP_BUILT_TABLE;
 const META_TURN_RETENTION_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_turn_retention_configuration");
 const META_TURN_RETENTION_CONFIGURATION_FAMILY: &str =
@@ -339,6 +345,8 @@ const RUNNING_TABLES: &[&str] = &[
     OPTIONAL_PERMAFLOW_HOLD_TABLE,
     OPTIONAL_HELD_LAUNCH_TABLE,
     OPTIONAL_CLOSED_REQUEST_TABLE,
+    OPTIONAL_ATTEMPT_MEMBERSHIP_TABLE,
+    OPTIONAL_ATTEMPT_MEMBERSHIP_BUILT_TABLE,
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -1771,6 +1779,10 @@ pub struct FlowStore {
     held_launches: TableReference<crate::generated::memory::StoredHeldLaunch>,
     closed_requests: TableReference<closed_request::ClosedRequest>,
     queue_delivery: QueueDeliveryTables,
+    attempt_memberships: attempt_membership::AttemptMembershipTables,
+    /// How many attempts were read by key, for the counted read tests.
+    #[cfg(test)]
+    attempt_reads: std::sync::atomic::AtomicUsize,
     send_outcomes: SendOutcomeTables,
     logical_deliveries: LogicalDeliveryTables,
     request_id_upgrade: request_id_upgrade::RequestIdUpgradeTables,
@@ -2884,6 +2896,7 @@ impl OpensFlowStore for FlowStore {
         let closed_requests = engine.register_table(
             <closed_request::ClosedRequest as closed_request::DescribesClosedRequestTable>::descriptor(),
         )?;
+        let attempt_memberships = <attempt_membership::AttemptMembershipTables as attempt_membership::DeclaresAttemptMembershipTables>::register(&mut engine)?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -2927,6 +2940,7 @@ impl OpensFlowStore for FlowStore {
             permaflow_holds,
             held_launches,
             closed_requests,
+            attempt_memberships,
             queue_delivery,
             send_outcomes,
             logical_deliveries,
@@ -2946,6 +2960,8 @@ impl OpensFlowStore for FlowStore {
             fail_next_retirement_completion_read: Mutex::new(false),
             #[cfg(test)]
             faults: Default::default(),
+            #[cfg(test)]
+            attempt_reads: Default::default(),
             launch_changes: LaunchChanges::default(),
             reminder_changes: LaunchChanges::default(),
             metaflow_changes: LaunchChanges::default(),
@@ -2958,6 +2974,7 @@ impl OpensFlowStore for FlowStore {
         // socket, and each use that needs it is refused until then.
         store.state()?;
         store.seed_request_policy()?;
+        attempt_membership::KeepsAttemptMemberships::build_attempt_memberships(&store)?;
         store.archive_legacy_queue()?;
         store.align_followed_requests()?;
         store.seed_store_identity()?;
@@ -3129,6 +3146,7 @@ impl OpensFlowStore for FlowStore {
         let closed_requests = engine.register_table(
             <closed_request::ClosedRequest as closed_request::DescribesClosedRequestTable>::descriptor(),
         )?;
+        let attempt_memberships = <attempt_membership::AttemptMembershipTables as attempt_membership::DeclaresAttemptMembershipTables>::register(&mut engine)?;
         let store = Self {
             engine,
             native_owner_environment_reader: Arc::new(SystemNativeOwnerEnvironment),
@@ -3172,6 +3190,7 @@ impl OpensFlowStore for FlowStore {
             permaflow_holds,
             held_launches,
             closed_requests,
+            attempt_memberships,
             queue_delivery,
             send_outcomes,
             logical_deliveries,
@@ -3191,12 +3210,15 @@ impl OpensFlowStore for FlowStore {
             fail_next_retirement_completion_read: Mutex::new(false),
             #[cfg(test)]
             faults: Default::default(),
+            #[cfg(test)]
+            attempt_reads: Default::default(),
             launch_changes: LaunchChanges::default(),
             reminder_changes: LaunchChanges::default(),
             metaflow_changes: LaunchChanges::default(),
             metaflow_watch: Mutex::new(false),
         };
         store.seed_request_policy()?;
+        attempt_membership::KeepsAttemptMemberships::build_attempt_memberships(&store)?;
         store.archive_legacy_queue()?;
         store.align_followed_requests()?;
         store.seed_missing_queued_deliveries()?;
@@ -5647,6 +5669,14 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                 closed_request::CLOSED_REQUEST_FAMILY,
                 closed_request::CLOSED_REQUEST_SCHEMA,
             ),
+            "flow_nexus_queue_attempt_memberships" => (
+                attempt_membership::ATTEMPT_MEMBERSHIP_FAMILY,
+                attempt_membership::ATTEMPT_MEMBERSHIP_SCHEMA,
+            ),
+            "flow_nexus_queue_attempt_membership_built" => (
+                attempt_membership::ATTEMPT_MEMBERSHIP_BUILT_FAMILY,
+                attempt_membership::ATTEMPT_MEMBERSHIP_BUILT_SCHEMA,
+            ),
             "flow_nexus_meta_protected_address_configuration" => (
                 META_PROTECTED_ADDRESS_CONFIGURATION_FAMILY,
                 META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA,
@@ -6011,6 +6041,8 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                     || *name == OPTIONAL_PERMAFLOW_HOLD_TABLE
                     || *name == OPTIONAL_HELD_LAUNCH_TABLE
                     || *name == OPTIONAL_CLOSED_REQUEST_TABLE
+                    || *name == OPTIONAL_ATTEMPT_MEMBERSHIP_TABLE
+                    || *name == OPTIONAL_ATTEMPT_MEMBERSHIP_BUILT_TABLE
                     || *name == OPTIONAL_REQUEST_ID_TABLE
                     || *name == OPTIONAL_DELIVER_CALL_TABLE
                     || *name == OPTIONAL_STORE_IDENTITY_TABLE

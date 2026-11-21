@@ -1,6 +1,6 @@
 [package]
 name = "flow-nexus"
-version = "0.60.2"
+version = "0.60.3"
 build = "build.rs"
 edition.workspace = true
 [[bin]]
@@ -34,10 +34,10 @@ libc = "0.2"
 rustix = { version = "1", features = ["fs", "net", "time"] }
 rkyv.workspace = true
 redb = "4"
-# The Sema kernel 0.1.1 at 51d7927: its repository was renamed memory, and
+# The Sema kernel 0.1.2 at 712a4a9: its repository was renamed memory, and
 # github.com/LiGoldragon/sema now holds another project.
-sema = { git = "https://github.com/LiGoldragon/memory", rev = "51d7927c872f0df12791bad8d39a4db6433b01a1" }
-sema-engine = { git = "https://github.com/LiGoldragon/sema-engine", rev = "6a95a0925c9e6a6a144037ffdbad8c7d3cc126f2" }
+sema = { git = "https://github.com/LiGoldragon/memory", rev = "712a4a9177e71dc2b397cf4e5a5c65b4fa3c0ec8" }
+sema-engine = { git = "https://github.com/LiGoldragon/memory-engine", rev = "3120626a0b63c94df713041bbaa230d49e07952d" }
 serde_json.workspace = true
 sha1 = "0.10"
 sha2 = "0.10"

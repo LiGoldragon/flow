@@ -9,6 +9,7 @@
 //! proves the request never reached the seat ends an attempt Absent, with
 //! that proof recorded, and only then may the request be handed over again.
 
+use super::attempt_membership::{KeepsAttemptMemberships, MembershipOwner};
 use super::logical_delivery::RecordsLogicalDeliveries;
 use super::*;
 pub(crate) use crate::generated::memory::{
@@ -424,6 +425,8 @@ pub trait AccountsQueueDelivery {
 }
 
 trait ReadsQueueDelivery {
+    /// Every attempt the store holds: a whole read, for tests alone.
+    #[cfg(test)]
     fn delivery_attempts(&self) -> Result<Vec<QueueDeliveryAttempt>, StoreError>;
     fn outstanding_for(
         &self,
@@ -433,6 +436,7 @@ trait ReadsQueueDelivery {
 }
 
 impl ReadsQueueDelivery for FlowStore {
+    #[cfg(test)]
     fn delivery_attempts(&self) -> Result<Vec<QueueDeliveryAttempt>, StoreError> {
         Ok(self
             .engine
@@ -445,7 +449,8 @@ impl ReadsQueueDelivery for FlowStore {
         &self,
         address: &Address,
     ) -> Result<Option<QueueDeliveryAttempt>, StoreError> {
-        let attempts = self.delivery_attempts()?;
+        // Every unfinished attempt is unsettled.
+        let attempts = self.member_attempts(MembershipOwner::UnsettledAt(address))?;
         let mut matching = attempts.into_iter().filter_map(|attempt| {
             if &attempt.address != address || attempt.queue_delivery_phase.is_finished() {
                 return None;
@@ -480,20 +485,7 @@ impl AccountsQueueDelivery for FlowStore {
         &self,
         logical_delivery_id: &str,
     ) -> Result<Vec<QueueDeliveryAttempt>, StoreError> {
-        Ok(self
-            .engine
-            .match_records(QueryPlan::all(self.queue_delivery.attempts))?
-            .records()
-            .iter()
-            .filter(|attempt| {
-                matches!(
-                    &attempt.queue_evidence,
-                    QueueEvidence::Logical(entry)
-                        if entry.logical_delivery_id.0 == logical_delivery_id
-                )
-            })
-            .cloned()
-            .collect())
+        self.member_attempts(MembershipOwner::LogicalDelivery(logical_delivery_id))
     }
     fn retained_logical_requests(&self) -> Result<Vec<RetainedLogicalRequest>, StoreError> {
         Ok(self
@@ -562,7 +554,6 @@ impl AccountsQueueDelivery for FlowStore {
     }
 
     fn align_followed_requests(&self) -> Result<(), StoreError> {
-        let attempts = self.delivery_attempts()?;
         let mut commit = self.engine.begin_atomic_commit();
         let mut changed = false;
         for metaflow in self.list_metaflows()? {
@@ -588,12 +579,11 @@ impl AccountsQueueDelivery for FlowStore {
                 if !matches!(
                     request.request_state,
                     RequestState::Queued | RequestState::Unsent
-                ) || attempts.iter().any(|attempt| {
-                    !attempt.queue_delivery_phase.is_finished()
-                        && matches!(&attempt.queue_evidence,
-                                QueueEvidence::Logical(handed)
-                                    if handed.logical_delivery_id == entry.logical_delivery_id)
-                }) {
+                ) || self
+                    .delivery_attempts_for(&entry.logical_delivery_id.0)?
+                    .iter()
+                    .any(|attempt| !attempt.queue_delivery_phase.is_finished())
+                {
                     continue;
                 }
                 let mut aligned = request.clone();
@@ -712,28 +702,28 @@ impl AccountsQueueDelivery for FlowStore {
         let requests = self
             .engine
             .match_records(QueryPlan::all(self.queue_delivery.requests))?;
-        let attempts = self.delivery_attempts()?;
-        let mut archive = requests
-            .records()
-            .iter()
-            .filter(|request| {
-                request.request_state == RequestState::Parked
-                    && (matches!(request.queue_evidence, QueueEvidence::Legacy(_))
-                        || request.queue_request_id.0.starts_with("legacy:"))
-            })
-            .map(|request| meta_signal_flow::LegacyArchiveEntry {
+        let mut archive = Vec::new();
+        for request in requests.records().iter().filter(|request| {
+            request.request_state == RequestState::Parked
+                && (matches!(request.queue_evidence, QueueEvidence::Legacy(_))
+                    || request.queue_request_id.0.starts_with("legacy:"))
+        }) {
+            // A request's attempts are all at its Address.
+            let queue_attempt_id_vector = self
+                .member_attempts(MembershipOwner::Address(&request.address))?
+                .into_iter()
+                .filter(|attempt| attempt.queue_request_id == request.queue_request_id)
+                .map(|attempt| attempt.queue_attempt_id)
+                .collect();
+            archive.push(meta_signal_flow::LegacyArchiveEntry {
                 queue_request_id: meta_signal_flow::QueueRequestId(
                     request.queue_request_id.0.clone(),
                 ),
                 address: request.address.clone(),
                 queue_evidence: request.queue_evidence.clone(),
-                queue_attempt_id_vector: attempts
-                    .iter()
-                    .filter(|attempt| attempt.queue_request_id == request.queue_request_id)
-                    .map(|attempt| attempt.queue_attempt_id.clone())
-                    .collect(),
-            })
-            .collect::<Vec<_>>();
+                queue_attempt_id_vector,
+            });
+        }
         archive.sort_by(|left, right| left.queue_request_id.cmp(&right.queue_request_id));
         Ok(archive)
     }
@@ -860,7 +850,7 @@ impl AccountsQueueDelivery for FlowStore {
             &logical_delivery_id,
             DeliveryState::Attempting,
             crate::generated::transitions::ReceiptTurn::Running,
-            commit.assert(self.queue_delivery.attempts, attempt.clone()),
+            self.commit_attempt(commit, attempt.clone())?,
         )?;
         Ok(PrepareQueueDelivery::Prepared(attempt))
     }
@@ -883,11 +873,9 @@ impl AccountsQueueDelivery for FlowStore {
         match &attempt.queue_delivery_phase {
             QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_) => {
                 attempt.queue_delivery_phase = QueueDeliveryPhase::ReceiptRecorded(receipt);
-                self.engine.mutate_keyed(KeyedMutation::new(
-                    self.queue_delivery.attempts,
-                    RecordKey::new(attempt_id),
-                    attempt,
-                ))?;
+                self.engine.commit_atomic(
+                    self.commit_attempt(self.engine.begin_atomic_commit(), attempt)?,
+                )?;
                 Ok(true)
             }
             QueueDeliveryPhase::ReceiptRecorded(recorded)
@@ -904,11 +892,9 @@ impl AccountsQueueDelivery for FlowStore {
                             answer: answer.clone(),
                             late_receipt: LateReceipt(Some(receipt)),
                         });
-                        self.engine.mutate_keyed(KeyedMutation::new(
-                            self.queue_delivery.attempts,
-                            RecordKey::new(attempt_id),
-                            attempt,
-                        ))?;
+                        self.engine.commit_atomic(
+                            self.commit_attempt(self.engine.begin_atomic_commit(), attempt)?,
+                        )?;
                         Ok(true)
                     }
                 }
@@ -994,9 +980,10 @@ impl AccountsQueueDelivery for FlowStore {
             Some(row) => commit.mutate(self.metaflows, row),
             None => commit,
         };
-        Ok(commit
-            .mutate(self.queue_delivery.requests, request)
-            .mutate(self.queue_delivery.attempts, attempt))
+        self.commit_attempt(
+            commit.mutate(self.queue_delivery.requests, request),
+            attempt,
+        )
     }
 
     fn settle_recorded_delivery(
@@ -1067,8 +1054,8 @@ impl AccountsQueueDelivery for FlowStore {
             .engine
             .begin_atomic_commit()
             .mutate(self.metaflows, metaflow)
-            .mutate(self.queue_delivery.requests, request)
-            .mutate(self.queue_delivery.attempts, attempt);
+            .mutate(self.queue_delivery.requests, request);
+        let commit = self.commit_attempt(commit, attempt)?;
         self.commit_logical_transition(
             &logical_id,
             DeliveryState::Delivered(native_receipt),
@@ -1224,10 +1211,7 @@ impl AccountsQueueDelivery for FlowStore {
         match &attempt.queue_delivery_phase {
             QueueDeliveryPhase::Prepared => {
                 attempt.queue_delivery_phase = QueueDeliveryPhase::Uncertain(None);
-                let commit = self
-                    .engine
-                    .begin_atomic_commit()
-                    .mutate(self.queue_delivery.attempts, attempt);
+                let commit = self.commit_attempt(self.engine.begin_atomic_commit(), attempt)?;
                 self.commit_attempt_state(&evidence, DeliveryState::Uncertain, commit)?;
                 Ok(true)
             }
@@ -1260,10 +1244,7 @@ impl AccountsQueueDelivery for FlowStore {
         }
         let evidence = attempt.queue_evidence.clone();
         attempt.queue_delivery_phase = marked;
-        let commit = self
-            .engine
-            .begin_atomic_commit()
-            .mutate(self.queue_delivery.attempts, attempt);
+        let commit = self.commit_attempt(self.engine.begin_atomic_commit(), attempt)?;
         self.commit_attempt_state(&evidence, DeliveryState::Uncertain, commit)?;
         Ok(true)
     }
@@ -1304,11 +1285,12 @@ impl AccountsQueueDelivery for FlowStore {
         let evidence = attempt.queue_evidence.clone();
         request.request_state = RequestState::Unsent;
         attempt.queue_delivery_phase = QueueDeliveryPhase::Absent(absence);
-        let commit = self
-            .engine
-            .begin_atomic_commit()
-            .mutate(self.queue_delivery.requests, request)
-            .mutate(self.queue_delivery.attempts, attempt);
+        let commit = self.commit_attempt(
+            self.engine
+                .begin_atomic_commit()
+                .mutate(self.queue_delivery.requests, request),
+            attempt,
+        )?;
         self.commit_attempt_state(
             &evidence,
             DeliveryState::Retryable(RetryCause::HistoryAbsent),
@@ -1391,8 +1373,8 @@ impl AccountsQueueDelivery for FlowStore {
         let commit = self
             .engine
             .begin_atomic_commit()
-            .mutate(self.queue_delivery.requests, request)
-            .mutate(self.queue_delivery.attempts, attempt.clone());
+            .mutate(self.queue_delivery.requests, request);
+        let commit = self.commit_attempt(commit, attempt.clone())?;
         self.commit_attempt_state(
             &evidence,
             DeliveryState::Retryable(RetryCause::OwnerResolvedAbsent),
@@ -1412,39 +1394,21 @@ impl AccountsQueueDelivery for FlowStore {
         &self,
         address: &Address,
     ) -> Result<Vec<QueueDeliveryAttempt>, StoreError> {
-        let mut retained = self
-            .delivery_attempts()?
-            .into_iter()
-            .filter(|attempt| &attempt.address == address)
-            .collect::<Vec<_>>();
-        retained.sort_by(|left, right| left.queue_attempt_id.cmp(&right.queue_attempt_id));
-        Ok(retained)
+        self.member_attempts(MembershipOwner::Address(address))
     }
 
     fn unsettled_deliveries(
         &self,
         address: &Address,
     ) -> Result<Vec<QueueDeliveryAttempt>, StoreError> {
-        let mut unsettled = self
-            .delivery_attempts()?
-            .into_iter()
-            .filter(|attempt| {
-                &attempt.address == address
-                    && !matches!(
-                        attempt.queue_delivery_phase,
-                        QueueDeliveryPhase::Settled(_) | QueueDeliveryPhase::Read { .. }
-                    )
-            })
-            .collect::<Vec<_>>();
         // Attempt ids are fixed-width hex of one counter: their order is
         // the order they were prepared in.
-        unsettled.sort_by(|left, right| left.queue_attempt_id.cmp(&right.queue_attempt_id));
-        Ok(unsettled)
+        self.member_attempts(MembershipOwner::UnsettledAt(address))
     }
 
     fn recover_outstanding_deliveries(&self) -> Result<Vec<QueueDeliveryAttempt>, StoreError> {
         let mut outstanding = Vec::new();
-        for mut attempt in self.delivery_attempts()? {
+        for mut attempt in self.member_attempts(MembershipOwner::Unsettled)? {
             if self.request_state(&attempt.queue_request_id.0)? == Some(RequestState::Parked)
                 && (matches!(attempt.queue_evidence, QueueEvidence::Legacy(_))
                     || attempt.queue_request_id.0.starts_with("legacy:"))
@@ -1455,10 +1419,8 @@ impl AccountsQueueDelivery for FlowStore {
                 QueueDeliveryPhase::Prepared => {
                     attempt.queue_delivery_phase = QueueDeliveryPhase::Uncertain(None);
                     let evidence = attempt.queue_evidence.clone();
-                    let commit = self
-                        .engine
-                        .begin_atomic_commit()
-                        .mutate(self.queue_delivery.attempts, attempt.clone());
+                    let commit =
+                        self.commit_attempt(self.engine.begin_atomic_commit(), attempt.clone())?;
                     self.commit_attempt_state(&evidence, DeliveryState::Uncertain, commit)?;
                     outstanding.push(attempt);
                 }
@@ -1552,19 +1514,7 @@ impl AccountsQueueDelivery for FlowStore {
         &self,
         attempt_id: &str,
     ) -> Result<Option<QueueDeliveryAttempt>, StoreError> {
-        let rows = self
-            .engine
-            .match_records(QueryPlan::key(
-                self.queue_delivery.attempts,
-                RecordKey::new(attempt_id),
-            ))?
-            .records()
-            .to_vec();
-        match rows.as_slice() {
-            [] => Ok(None),
-            [attempt] => Ok(Some(attempt.clone())),
-            _ => Err(StoreError::StateInvariant),
-        }
+        self.stored_attempt(attempt_id)
     }
 }
 
@@ -1599,7 +1549,11 @@ impl super::counters::CountsIds for QueueAttemptIds<'_> {
         Ok(!self
             .0
             .engine
-            .match_records(QueryPlan::all(self.0.queue_delivery.attempts))?
+            .match_first_in_key_range(QueryPlan::first_in_key_range(
+                self.0.queue_delivery.attempts,
+                sema_engine::KeyRange::new(None, None),
+                sema_engine::KeyRangeLimit::new(1),
+            ))?
             .records()
             .is_empty())
     }
@@ -1748,6 +1702,182 @@ mod tests {
                 r#"{"id":3,"result":{}}"#.into(),
             ),
         }
+    }
+
+    fn prepare_codex(store: &FlowStore) -> QueueDeliveryAttempt {
+        let PrepareQueueDelivery::Prepared(prepared) = store
+            .prepare_oldest_delivery(
+                &address(),
+                "flow-delivery",
+                "thread-7",
+                HarnessKind::Codex,
+                NativeHistoryAnchor::CodexTurns(None),
+            )
+            .unwrap()
+        else {
+            panic!("oldest request prepared")
+        };
+        prepared
+    }
+
+    fn logical_id(attempt: &QueueDeliveryAttempt) -> String {
+        let QueueEvidence::Logical(entry) = &attempt.queue_evidence else {
+            panic!("a prepared attempt carries its logical delivery")
+        };
+        entry.logical_delivery_id.0.clone()
+    }
+
+    /// An attempt at another Address and of another logical delivery,
+    /// written as every attempt write is; every other one settled.
+    fn unrelated(store: &FlowStore, template: &QueueDeliveryAttempt, number: usize) {
+        use super::super::attempt_membership::KeepsAttemptMemberships;
+        let mut attempt = template.clone();
+        attempt.queue_attempt_id =
+            meta_signal_flow::QueueAttemptId(format!("unrelated-{number:08}"));
+        attempt.address = Address {
+            aspect: Aspect::Field,
+            topic: flow_ethos::Topic(format!("other{}", number % 7)),
+            model: Model::Sol,
+        };
+        if let QueueEvidence::Logical(entry) = &mut attempt.queue_evidence {
+            entry.logical_delivery_id =
+                flow_ethos::LogicalDeliveryId(format!("unrelated-{number:08}"));
+        }
+        attempt.queue_delivery_phase = if number % 2 == 0 {
+            QueueDeliveryPhase::Settled(receipt(template))
+        } else {
+            QueueDeliveryPhase::Uncertain(None)
+        };
+        store
+            .engine
+            .commit_atomic(
+                store
+                    .commit_attempt(store.engine.begin_atomic_commit(), attempt)
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+
+    /// How many attempts one Address's and one logical delivery's readers
+    /// read by key.
+    fn reads_of_one_owner(store: &FlowStore, logical: &str) -> usize {
+        let before = store.attempt_reads();
+        store.unsettled_deliveries(&address()).unwrap();
+        store.outstanding_delivery(&address()).unwrap();
+        store.retained_delivery_attempts(&address()).unwrap();
+        store.delivery_attempts_for(logical).unwrap();
+        store.attempt_reads() - before
+    }
+
+    #[test]
+    fn an_owner_read_decodes_its_own_attempts_alone_while_others_grow() {
+        let (_fixture, store) = Fixture::new();
+        let prepared = prepare_codex(&store);
+        let logical = logical_id(&prepared);
+        let alone = reads_of_one_owner(&store, &logical);
+        assert_eq!(alone, 4, "each of the four readers reads the one attempt");
+        for number in 0..512 {
+            unrelated(&store, &prepared, number);
+        }
+        assert_eq!(reads_of_one_owner(&store, &logical), alone);
+        assert_eq!(store.membership_keys(), store.expected_membership_keys());
+    }
+
+    #[test]
+    fn memberships_follow_the_phase_through_receipt_and_settlement() {
+        let (fixture, store) = Fixture::new();
+        let prepared = prepare_codex(&store);
+        assert_eq!(store.membership_keys(), store.expected_membership_keys());
+        assert_eq!(store.membership_keys().len(), 3);
+        assert!(
+            store
+                .record_delivery_receipt(&prepared.queue_attempt_id.0, receipt(&prepared))
+                .unwrap()
+        );
+        assert_eq!(store.unsettled_deliveries(&address()).unwrap().len(), 1);
+        drop(store);
+        // Opening settles the recorded receipt: the attempt leaves the
+        // unsettled range and stays among the Address's attempts.
+        let reopened = fixture.reopen();
+        assert_eq!(
+            reopened.membership_keys(),
+            reopened.expected_membership_keys()
+        );
+        assert!(
+            reopened
+                .unsettled_deliveries(&address())
+                .unwrap()
+                .is_empty()
+        );
+        let retained = reopened.retained_delivery_attempts(&address()).unwrap();
+        assert_eq!(retained.len(), 1);
+        assert!(matches!(
+            retained[0].queue_delivery_phase,
+            QueueDeliveryPhase::Settled(_)
+        ));
+        assert_eq!(
+            reopened
+                .delivery_attempts_for(&logical_id(&prepared))
+                .unwrap(),
+            retained
+        );
+        assert_eq!(reopened.membership_keys().len(), 2);
+    }
+
+    #[test]
+    fn a_refused_commit_writes_neither_the_attempt_nor_its_memberships() {
+        use super::super::attempt_membership::KeepsAttemptMemberships;
+        let (_fixture, store) = Fixture::new();
+        let prepared = prepare_codex(&store);
+        let before = store.membership_keys();
+        let mut settled = prepared.clone();
+        settled.queue_delivery_phase = QueueDeliveryPhase::Settled(receipt(&prepared));
+        // The attempt asserted a second time refuses the whole commit.
+        let commit = store
+            .commit_attempt(store.engine.begin_atomic_commit(), settled)
+            .unwrap()
+            .assert(store.queue_delivery.attempts, prepared.clone());
+        assert!(store.engine.commit_atomic(commit).is_err());
+        assert_eq!(store.membership_keys(), before);
+        assert_eq!(
+            store
+                .queue_delivery_attempt(&prepared.queue_attempt_id.0)
+                .unwrap(),
+            Some(prepared)
+        );
+    }
+
+    #[test]
+    fn the_pre_serving_build_answers_as_the_whole_read_and_runs_once() {
+        let (fixture, store) = Fixture::new();
+        let prepared = prepare_codex(&store);
+        // More attempts than one build page holds.
+        for number in 0..600 {
+            unrelated(&store, &prepared, number);
+        }
+        let expected = store.expected_membership_keys();
+        assert_eq!(store.membership_keys(), expected);
+        store.forget_memberships();
+        assert!(store.membership_keys().is_empty());
+        assert!(store.membership_built().is_none());
+        drop(store);
+
+        let reopened = fixture.reopen();
+        assert_eq!(reopened.membership_keys(), expected);
+        assert_eq!(reopened.membership_built().unwrap().indexed_attempts.0, 601);
+        // Each read is held to the whole read inside the membership read.
+        assert_eq!(reopened.unsettled_deliveries(&address()).unwrap().len(), 1);
+        assert_eq!(
+            reopened.recover_outstanding_deliveries().unwrap().len(),
+            301
+        );
+        let built = reopened.membership_built();
+        drop(reopened);
+
+        // A later open finds the build done and leaves it as it was.
+        let again = fixture.reopen();
+        assert_eq!(again.membership_built(), built);
+        assert_eq!(again.membership_keys(), expected);
     }
 
     #[test]
@@ -2791,10 +2921,14 @@ mod tests {
             .engine
             .commit_atomic(
                 store
-                    .engine
-                    .begin_atomic_commit()
-                    .mutate(store.queue_delivery.requests, request)
-                    .mutate(store.queue_delivery.attempts, attempt.clone()),
+                    .commit_attempt(
+                        store
+                            .engine
+                            .begin_atomic_commit()
+                            .mutate(store.queue_delivery.requests, request),
+                        attempt.clone(),
+                    )
+                    .unwrap(),
             )
             .unwrap();
 

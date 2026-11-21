@@ -1,3 +1,23 @@
+# Flow 0.60.3: attempts read by membership
+
+Every read of queue delivery attempts visits a bounded key range instead of
+the whole attempt table. A new family, `flow_nexus_queue_attempt_memberships`,
+holds one row per membership: by logical delivery, by Address, and unsettled
+by Address (every phase but Settled and Read). Every attempt write passes
+through one helper that writes the attempt and its changed memberships in
+one atomic commit. Results, their order and recovery are unchanged.
+
+A store written before holds attempts and no memberships. At its first open
+the memberships of every attempt are built in one finite pass, reading the
+attempts in pages through the bounded visitor, before anything is served;
+`flow_nexus_queue_attempt_membership_built` records the pass and the number of
+attempts it indexed, in the same commit, so every later open skips it. There
+is no resumable progress: a pass cut short is taken again whole. A store copy
+is required before activation, and the pass's peak is measured on it.
+
+Sema 0.1.2 (712a4a9) and sema-engine 0.19.1 (3120626, memory-engine) carry the
+ordered visit; no contract changes.
+
 # Flow 0.60.2: configurable launch effort
 
 The meta contract adds `Effort.[ Default High Medium Low ]`,

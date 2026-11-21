@@ -1168,7 +1168,7 @@ rec {
       };
       "flow-nexus" = rec {
         crateName = "flow-nexus";
-        version = "0.60.2";
+        version = "0.60.3";
         edition = "2024";
         crateBin = [
           {
@@ -2951,13 +2951,13 @@ rec {
       };
       "sema" = rec {
         crateName = "sema";
-        version = "0.1.1";
+        version = "0.1.2";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/memory";
-          rev = "51d7927c872f0df12791bad8d39a4db6433b01a1";
-          sha256 = "0yhm0k3a2b08c9b1rgymppxd3mgfli235d7p71v8f0h18ddvn3g1";
+          rev = "712a4a9177e71dc2b397cf4e5a5c65b4fa3c0ec8";
+          sha256 = "1bd4rh1g2hpp8k0i8zqdmx6pik94a2v287sir6p4rkz936nhyzks";
         };
         dependencies = [
           {
@@ -2979,13 +2979,13 @@ rec {
       };
       "sema-engine" = rec {
         crateName = "sema-engine";
-        version = "0.19.0";
+        version = "0.19.1";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
-          url = "https://github.com/LiGoldragon/sema-engine";
-          rev = "6a95a0925c9e6a6a144037ffdbad8c7d3cc126f2";
-          sha256 = "0aiy61k4sx809kjks36q8rbidsfvc168zxy0s0jd14h7r1n2winq";
+          url = "https://github.com/LiGoldragon/memory-engine";
+          rev = "3120626a0b63c94df713041bbaa230d49e07952d";
+          sha256 = "06njjgldx8fyzf0h3fpq11973k9jyb02nddvngqgk0flr4vvyhvi";
         };
         libName = "sema_engine";
         dependencies = [

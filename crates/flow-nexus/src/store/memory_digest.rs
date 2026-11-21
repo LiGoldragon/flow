@@ -136,6 +136,9 @@ impl DigestsMemory for FlowStore {
         self.digest_table("queue.counter", queue.counter, lines_ref)?;
         self.digest_table("queue.requests", queue.requests, lines_ref)?;
         self.digest_table("queue.attempts", queue.attempts, lines_ref)?;
+        let members = &self.attempt_memberships;
+        self.digest_table("queue.attempt_memberships", members.memberships, lines_ref)?;
+        self.digest_table("queue.attempt_membership_built", members.built, lines_ref)?;
         let outcomes = &self.send_outcomes;
         self.digest_table("send_outcomes.counter", outcomes.counter, lines_ref)?;
         self.digest_table("send_outcomes.outcomes", outcomes.outcomes, lines_ref)?;

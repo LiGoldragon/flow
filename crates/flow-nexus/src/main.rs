@@ -119,7 +119,10 @@ fn main() -> ExitCode {
         }
     };
     let nexus = match RunningNexus::open(&place) {
-        Ok(nexus) => nexus,
+        Ok(nexus) => {
+            use flow_nexus::harness_subscription::SubscribesToClaudeHarness;
+            nexus.configured_by(&daemon_configuration)
+        }
         Err(StoreError::UnrecognizedMemory { path, reason }) => {
             StartupRefusal::report_unrecognized_store(&path, &reason);
             return ExitCode::FAILURE;
@@ -193,10 +196,10 @@ fn main() -> ExitCode {
             nexus.keep_heartbeating()
         });
         // The Claude Harness Nexus's subscription, when the configuration
-        // names its socket: each change it tells is taken as its Report.
+        // names its socket: the one source of a Claude flow's rest.
         scope.spawn(|| {
             use flow_nexus::harness_subscription::SubscribesToClaudeHarness;
-            nexus.keep_subscribing_to_claude_harness(&daemon_configuration)
+            nexus.keep_subscribing_to_claude_harness()
         });
         scope.spawn(|| {
             if signals.watch(&nexus.stopping) {

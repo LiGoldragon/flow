@@ -271,14 +271,48 @@ impl ObservesContextWithDispatch for crate::RunningNexus {
 /// A named attributed ToolUsed/Stop event reads the last persisted call.
 /// Claude may still be writing the current call: this preserves that lag.
 pub(crate) trait ObservesClaudeContext {
+    /// The context size the transcript of a Claude flow's session shows
+    /// last; None for a flow of another harness, and, logged, for a Claude
+    /// flow whose transcript shows none.
+    fn claude_transcript_context_size(&self, flow_id: &str) -> Option<signal_flow::Tokens>;
+    /// [`Self::observe_claude_context_size`] with the size its transcript
+    /// shows, when it shows one.
     fn observe_claude_context(&self, flow_id: &str);
+    /// The Claude flow's context size is `context_size`: recorded, with
+    /// the context warning it crosses, under the dispatch gate.
+    fn observe_claude_context_size(&self, flow_id: &str, context_size: signal_flow::Tokens);
 }
 
 impl ObservesClaudeContext for crate::RunningNexus {
-    fn observe_claude_context(&self, flow_id: &str) {
+    fn claude_transcript_context_size(&self, flow_id: &str) -> Option<signal_flow::Tokens> {
         use crate::claude::MeasuresClaudeContext;
         use crate::store::ReadsFlowRows;
         use crate::waking::ReadsClaudeDelivery;
+        use signal_flow::HarnessKind;
+        let Ok(Some(node)) = self.store.flow_node(flow_id) else {
+            return None;
+        };
+        if node.harness_kind != HarnessKind::Claude {
+            return None;
+        }
+        let tokens = self
+            .claude_transcript(&node)
+            .and_then(|transcript| transcript.context_tokens())
+            .map(signal_flow::Tokens);
+        if tokens.is_none() {
+            eprintln!("flow-nexus: flow {flow_id} stopped with no context size readable");
+        }
+        tokens
+    }
+
+    fn observe_claude_context(&self, flow_id: &str) {
+        if let Some(context_size) = self.claude_transcript_context_size(flow_id) {
+            self.observe_claude_context_size(flow_id, context_size);
+        }
+    }
+
+    fn observe_claude_context_size(&self, flow_id: &str, context_size: signal_flow::Tokens) {
+        use crate::store::ReadsFlowRows;
         use signal_flow::HarnessKind;
         let Ok(Some(node)) = self.store.flow_node(flow_id) else {
             return;
@@ -286,18 +320,11 @@ impl ObservesClaudeContext for crate::RunningNexus {
         if node.harness_kind != HarnessKind::Claude {
             return;
         }
-        let Some(tokens) = self
-            .claude_transcript(&node)
-            .and_then(|transcript| transcript.context_tokens())
-        else {
-            eprintln!("flow-nexus: flow {flow_id} stopped with no context size readable");
-            return;
-        };
         // Reading the persisted last call precedes exclusion; the held
         // observer revalidates its native session and current owner.
         let _dispatch = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
         use crate::context_warnings::ObservesContextWithDispatch;
-        self.observe_context_with_dispatch(&node, tokens);
+        self.observe_context_with_dispatch(&node, context_size.0);
     }
 }
 

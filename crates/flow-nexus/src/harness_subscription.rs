@@ -1,10 +1,13 @@
-//! The Claude Harness Nexus's subscription, taken as reports. When the
-//! daemon's configuration names the Claude Harness Nexus's subscription
-//! socket (signal-harness), Flow subscribes to it: it sends Subscribe, reads
-//! the Subscribed snapshot of every living session and then each Changed as
-//! it happens, and turns each into the Report it stands for, which is
-//! recorded and acted on as a hook's Report is (`reporting`). With no socket
-//! configured the part never starts.
+//! The Claude Harness Nexus's subscription, the source of a Claude flow's
+//! rest. When the daemon's configuration names the Claude Harness Nexus's
+//! subscription socket (signal-harness), Flow subscribes to it: it sends
+//! Subscribe, reads the Subscribed snapshot of every living session and then
+//! each Changed as it happens. A rested turn end of a live Claude flow's
+//! session is that flow's rest, taken below the report
+//! (`RestsClaudeFlows`), with the context size the Harness Nexus last told
+//! for the session; nothing is recorded as a harness event. While a socket
+//! is configured the flow's Stop hook rests nothing (`reporting`). With no
+//! socket configured the part never starts.
 //!
 //! A connection that ends after its Subscribed is subscribed again at once.
 //! A socket that is absent, refuses the connection, or ends it before its
@@ -19,14 +22,13 @@ use crate::generated::startup::{
     Reason,
 };
 use crate::place::{FindsFlowPlace, PlaceName, ReportsPlaceRefusal};
-use crate::reporting::RecordsReports;
+use crate::reporting::RestsClaudeFlows;
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
-use crate::waking::ReadsClaudeDelivery;
 use crate::{HoldsStopRequest, Stopping};
-use harness::{Event as HarnessEvent, Flow, Observed, State};
-use signal_flow::{HarnessKind, Report_Data};
+use harness::{Event as HarnessEvent, Flow, Identifiable, Observed, State};
+use signal_flow::HarnessKind;
 use signal_harness::Changed;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
@@ -148,19 +150,20 @@ impl ReportsDaemonConfigurationRefusal for DaemonConfigurationRefusal {
     }
 }
 
-/// What the subscription tells: a session as the snapshot shows it, or a
-/// change as it happened.
+/// What the subscription tells: every living session as its snapshot
+/// shows it, or a change as it happened.
 #[derive(Debug, Clone)]
 pub enum HarnessObservation {
-    Standing(Observed),
+    Snapshot(Vec<Observed>),
     Changed(Changed),
 }
 
-/// Each kind of observation that stands for no Report yet, logged the
-/// first time it is met.
+/// Each kind of observation that rests no flow, logged the first time it is
+/// met.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum UnmappedObservation {
-    Standing,
+    /// The snapshot of the living sessions; only its sizes are kept.
+    Snapshot,
     Started,
     Resumed,
     PromptSubmitted,
@@ -170,58 +173,95 @@ pub enum UnmappedObservation {
     InFlight,
     WorkStarted,
     WorkEnded,
-    ContextSize,
     Compacted,
     Ended,
     /// A turn's end with background work still in flight: Waiting, not
     /// Rested.
     TurnEndUnrested,
-    /// A rest of a session no live Claude flow's registered session begins
-    /// with.
+    /// A rest of a session no live Claude flow is: no flow has its FlowId,
+    /// or the one that has is not a live Claude flow whose registered
+    /// session the Harness Nexus names by that FlowId.
     UnheldSession,
-    /// A rest of a session more than one live Claude flow's registered
-    /// session begins with.
-    SeveralFlows,
-    /// The flows could not be read from Memory.
-    FlowsUnread,
-    /// The flow's session has no transcript Flow can name.
-    TranscriptUnnamed,
+    /// The flow could not be read from Memory.
+    FlowUnread,
+    /// A restart holds the flow.
+    Restarting,
 }
 
-/// The subscriber: the socket it subscribes to, the Nexus its reports are
-/// recorded in, and the kinds of observation it has logged unmapped.
+/// A Claude flow's rest the subscription told: the flow, and the context
+/// size the Harness Nexus last told for its session, when it told one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessRest {
+    pub flow_id: signal_flow::FlowId,
+    pub context_size: Option<signal_flow::Tokens>,
+}
+
+/// The subscriber: the socket it subscribes to, the Nexus it rests flows
+/// in, the context size the subscription last told for each session, and
+/// the kinds of observation it has logged unmapped.
 pub struct ClaudeHarnessSubscriber<'nexus> {
     pub nexus: &'nexus RunningNexus,
     pub socket: PathBuf,
+    pub context_sizes: BTreeMap<flow_ethos::FlowId, harness::Tokens>,
     pub unmapped: BTreeSet<UnmappedObservation>,
 }
 
 pub trait MapsHarnessObservations {
-    /// The Report an observation stands for, or None.
+    /// Keeps the context size each session was last told at: a snapshot
+    /// replaces them all with its sessions' tokens, a `ContextSize` change
+    /// sets its session's, and an `Ended` one drops it.
+    fn keep_context_size(&mut self, observation: &HarnessObservation);
+    /// The rest an observation stands for, or None.
     ///
-    /// Filled for one case only: a Changed whose event is `TurnEnded`,
-    /// `Interrupted` or `Failed` and whose State is `Flowing.Rested`, for
-    /// the one live Claude flow whose registered session id begins with the
-    /// Changed's FlowId, is that flow's `Stopped`, naming its session and
-    /// the transcript `correlated_stop` compares against, with no
-    /// background work and no last message.
+    /// One case only: a Changed whose event is `TurnEnded`, `Interrupted`
+    /// or `Failed` and whose State is `Flowing.Rested`, of the live Claude
+    /// flow whose FlowId is the Changed's and whose registered session the
+    /// Harness Nexus names by that FlowId (`Identifiable`, its first six
+    /// characters), while no restart holds the flow. The Harness Nexus has
+    /// matched the turn to that session, so its turn end is the flow's own;
+    /// it names no harness process, so no seat birth is asked of it. The
+    /// context size is the one last kept for the session.
     ///
-    /// Open, each None and logged once per kind, until a harness Event
-    /// carries what Flow's effects key on (flows/900ff3/flow-side-gap.md in
-    /// the primary workspace): the snapshot's sessions; `PromptSubmitted`,
-    /// which lacks the prompt's digest and session a hand-over's receipt
-    /// needs; `Started` and `Ended`, which lack the session Flow rebinds to
-    /// or ends on, and a session after a /clear, which the Harness Nexus
-    /// names by a FlowId Flow holds for no flow; `ToolUsed`, which lacks
-    /// the tool's name; and every event Flow's Report has no place for.
-    fn report_for(&mut self, observation: &HarnessObservation) -> Option<Report_Data>;
+    /// Open, each None and logged once per kind: every other event, a turn
+    /// end still Waiting on background work, and a FlowId no live Claude
+    /// flow is, which every session after a /clear is
+    /// (flows/900ff3/flow-side-gap.md in the primary workspace). A prompt's
+    /// receipt stays the flow's own UserPromptSubmit hook's.
+    fn rest_for(&mut self, observation: &HarnessObservation) -> Option<HarnessRest>;
 }
 
 impl MapsHarnessObservations for ClaudeHarnessSubscriber<'_> {
-    fn report_for(&mut self, observation: &HarnessObservation) -> Option<Report_Data> {
-        let unmapped = |kind| -> Result<Report_Data, UnmappedObservation> { Err(kind) };
+    fn keep_context_size(&mut self, observation: &HarnessObservation) {
+        match observation {
+            HarnessObservation::Snapshot(sessions) => {
+                self.context_sizes = sessions
+                    .iter()
+                    .map(|session| (session.flow_id.clone(), session.tokens))
+                    .collect();
+            }
+            HarnessObservation::Changed(Changed {
+                flow_id,
+                event: HarnessEvent::ContextSize(tokens),
+                ..
+            }) => {
+                self.context_sizes.insert(flow_id.clone(), *tokens);
+            }
+            HarnessObservation::Changed(Changed {
+                flow_id,
+                event: HarnessEvent::Ended(_),
+                ..
+            }) => {
+                self.context_sizes.remove(flow_id);
+            }
+            HarnessObservation::Changed(_) => {}
+        }
+    }
+
+    fn rest_for(&mut self, observation: &HarnessObservation) -> Option<HarnessRest> {
+        use crate::restarting::FencesSeatEvents;
+        let unmapped = |kind| -> Result<HarnessRest, UnmappedObservation> { Err(kind) };
         let mapped = match observation {
-            HarnessObservation::Standing(_) => unmapped(UnmappedObservation::Standing),
+            HarnessObservation::Snapshot(_) => unmapped(UnmappedObservation::Snapshot),
             HarnessObservation::Changed(Changed {
                 flow_id,
                 event,
@@ -233,49 +273,27 @@ impl MapsHarnessObservations for ClaudeHarnessSubscriber<'_> {
                     unmapped(UnmappedObservation::TurnEndUnrested)
                 }
                 HarnessEvent::TurnEnded | HarnessEvent::Interrupted | HarnessEvent::Failed(_) => {
-                    match self.nexus.store.flow_nodes() {
-                        Err(_) => unmapped(UnmappedObservation::FlowsUnread),
-                        Ok(nodes) => {
-                            let held = nodes
-                                .into_iter()
-                                .filter(|node| {
-                                    node.harness_kind == HarnessKind::Claude
-                                        && node.flow_lifecycle.is_live()
-                                        && !flow_id.0.is_empty()
-                                        && node.session_id.0.starts_with(&flow_id.0)
+                    match self.nexus.store.flow_node(&flow_id.0) {
+                        Err(_) => unmapped(UnmappedObservation::FlowUnread),
+                        Ok(Some(node))
+                            if node.harness_kind == HarnessKind::Claude
+                                && node.flow_lifecycle.is_live()
+                                && harness::SessionId(node.session_id.0.clone()).identify()
+                                    == *flow_id =>
+                        {
+                            if self.nexus.session_event_acts(&node.flow_id.0) {
+                                Ok(HarnessRest {
+                                    flow_id: node.flow_id,
+                                    context_size: self
+                                        .context_sizes
+                                        .get(flow_id)
+                                        .map(|tokens| signal_flow::Tokens(tokens.0)),
                                 })
-                                .collect::<Vec<_>>();
-                            match held.as_slice() {
-                                [] => unmapped(UnmappedObservation::UnheldSession),
-                                [node] => match self.nexus.claude_transcript(node) {
-                                    None => unmapped(UnmappedObservation::TranscriptUnnamed),
-                                    Some(transcript) => Ok(Report_Data {
-                                        flow_id: node.flow_id.clone(),
-                                        process_option: None,
-                                        event: signal_flow::Event::Stopped(
-                                            signal_flow::NativeStop {
-                                                native_session_id_option: Some(
-                                                    signal_flow::NativeSessionId(
-                                                        node.session_id.0.clone(),
-                                                    ),
-                                                ),
-                                                transcript_path_option: Some(
-                                                    signal_flow::TranscriptPath(
-                                                        transcript.to_string_lossy().into_owned(),
-                                                    ),
-                                                ),
-                                                last_assistant_message_option:
-                                                    signal_flow::LastAssistantMessageOption(None),
-                                                background_work: signal_flow::BackgroundWork(
-                                                    Vec::new(),
-                                                ),
-                                            },
-                                        ),
-                                    }),
-                                },
-                                _ => unmapped(UnmappedObservation::SeveralFlows),
+                            } else {
+                                unmapped(UnmappedObservation::Restarting)
                             }
                         }
+                        Ok(_) => unmapped(UnmappedObservation::UnheldSession),
                     }
                 }
                 HarnessEvent::Started => unmapped(UnmappedObservation::Started),
@@ -287,17 +305,18 @@ impl MapsHarnessObservations for ClaudeHarnessSubscriber<'_> {
                 HarnessEvent::InFlight(_) => unmapped(UnmappedObservation::InFlight),
                 HarnessEvent::WorkStarted(_) => unmapped(UnmappedObservation::WorkStarted),
                 HarnessEvent::WorkEnded(_) => unmapped(UnmappedObservation::WorkEnded),
-                HarnessEvent::ContextSize(_) => unmapped(UnmappedObservation::ContextSize),
+                // Kept for the session's next rest (`keep_context_size`).
+                HarnessEvent::ContextSize(_) => return None,
                 HarnessEvent::Compacted(_) => unmapped(UnmappedObservation::Compacted),
                 HarnessEvent::Ended(_) => unmapped(UnmappedObservation::Ended),
             },
         };
         match mapped {
-            Ok(report) => Some(report),
+            Ok(rest) => Some(rest),
             Err(kind) => {
                 if self.unmapped.insert(kind) {
                     eprintln!(
-                        "flow-nexus: a Claude Harness observation of kind {kind:?} stands for no Report; it is dropped, and this kind is logged only once"
+                        "flow-nexus: a Claude Harness observation of kind {kind:?} rests no flow; it is dropped, and this kind is logged only once"
                     );
                 }
                 None
@@ -408,8 +427,8 @@ pub trait HoldsHarnessSubscription {
     fn placement(&self) -> Option<SocketPlacement>;
     /// One connection, from Subscribe to its end.
     fn subscribe_once(&mut self) -> SubscriptionEnding;
-    /// One observation, taken as the Report it stands for: recorded, then
-    /// acted on as a hook's Report is.
+    /// One observation: its context size kept, and the rest it stands for
+    /// taken (`RestsClaudeFlows`). Nothing is recorded as a harness event.
     fn take(&mut self, observation: HarnessObservation);
 }
 
@@ -497,9 +516,7 @@ impl HoldsHarnessSubscription for ClaudeHarnessSubscriber<'_> {
                         );
                     }
                     answered = true;
-                    for session in sessions {
-                        self.take(HarnessObservation::Standing(session));
-                    }
+                    self.take(HarnessObservation::Snapshot(sessions));
                 }
                 Ok(Some(signal_harness::Output::Changed(changed))) => {
                     self.take(HarnessObservation::Changed(changed));
@@ -530,17 +547,13 @@ impl HoldsHarnessSubscription for ClaudeHarnessSubscriber<'_> {
     }
 
     fn take(&mut self, observation: HarnessObservation) {
-        let Some(report) = self.report_for(&observation) else {
-            return;
-        };
-        let flow_id = report.flow_id.clone();
-        let event = report.event.clone();
-        match self.nexus.report(report) {
-            signal_flow::Output::Reported => self.nexus.after_report(&flow_id, &event),
-            refused => eprintln!(
-                "flow-nexus: the Claude Harness report for {flow_id} was not recorded: {refused:?}",
-                flow_id = flow_id.0
-            ),
+        self.keep_context_size(&observation);
+        if let Some(HarnessRest {
+            flow_id,
+            context_size,
+        }) = self.rest_for(&observation)
+        {
+            self.nexus.rest_claude_flow(&flow_id, context_size);
         }
     }
 }
@@ -548,19 +561,31 @@ impl HoldsHarnessSubscription for ClaudeHarnessSubscriber<'_> {
 /// The part the daemon runs: the subscription its configuration names, or
 /// nothing.
 pub trait SubscribesToClaudeHarness {
+    /// The Nexus as the daemon's configuration sets it: the subscription
+    /// socket it names, which makes the subscription the one source of a
+    /// Claude flow's rest (`RunningNexus::claude_harness_subscription`).
+    fn configured_by(self, configuration: &DaemonConfiguration) -> Self;
     /// Returns at once when no socket is configured; otherwise holds the
     /// subscription until the Nexus stops.
-    fn keep_subscribing_to_claude_harness(&self, configuration: &DaemonConfiguration);
+    fn keep_subscribing_to_claude_harness(&self);
 }
 
 impl SubscribesToClaudeHarness for RunningNexus {
-    fn keep_subscribing_to_claude_harness(&self, configuration: &DaemonConfiguration) {
-        let Some(socket) = &configuration.claude_harness_subscription_path_option else {
+    fn configured_by(mut self, configuration: &DaemonConfiguration) -> Self {
+        self.claude_harness_subscription = configuration
+            .claude_harness_subscription_path_option
+            .clone();
+        self
+    }
+
+    fn keep_subscribing_to_claude_harness(&self) {
+        let Some(socket) = &self.claude_harness_subscription else {
             return;
         };
         ClaudeHarnessSubscriber {
             nexus: self,
             socket: PathBuf::from(&socket.0),
+            context_sizes: BTreeMap::new(),
             unmapped: BTreeSet::new(),
         }
         .keep_subscribed();

@@ -145,7 +145,7 @@ use flow_native::DigestsPrompt;
 use meta_signal_flow::{AbsenceProof, Continuity, Undecided};
 use signal_flow::{
     Address, AgentState, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile,
-    Metaflow, NativePrompt, Origin, Output, QueueEntry,
+    Metaflow, NativePrompt, Origin, Output, QueueEntry, Tokens,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Condvar, Mutex};
@@ -781,8 +781,12 @@ impl AnswersWakeRefusal for WakeRefusal {
 pub trait SleepsAndWakesSeats {
     /// After a flow's turn ended (a Claude `Stopped` report, a Codex
     /// thread's rest): hands the oldest queued request to its resting seat;
-    /// with nothing queued the seat stays Awake in its pane.
+    /// with nothing queued the seat stays Awake in its pane. The context
+    /// size written at the rest is the one a Claude flow's transcript shows.
     fn settle_stopped(&self, flow_id: &str) -> AtStop;
+    /// [`Self::settle_stopped`], the context size written at the rest being
+    /// `context_size`, when there is one, rather than its transcript's.
+    fn settle_stopped_at(&self, flow_id: &str, context_size: Option<Tokens>) -> AtStop;
     /// After a request was queued for `address`, or a queued one was
     /// answered again: holds the metaflow, and when Flow's records show it
     /// due a wake, wakes it and drains what arrived meanwhile. Nothing when
@@ -904,8 +908,9 @@ pub(crate) trait WakesInParts {
     /// SessionLive when one does, HerdrUnreadable when Herdr is unreadable.
     fn refuse_live_session(&self, node: &FlowNode, sessions: &[String]) -> Result<(), WakeRefusal>;
     /// The body of `settle_stopped`: waits, boundedly and off the dispatch
-    /// gate, for Herdr to show the seat resting, then drains it.
-    fn settle_rested(&self, flow_id: &str) -> AtStop;
+    /// gate, for Herdr to show the seat resting, then drains it; a Claude
+    /// flow's context size is first written as `context_size`.
+    fn settle_rested(&self, flow_id: &str, context_size: Option<Tokens>) -> AtStop;
     /// Closes a resting seat's harness under the pane's lease and records
     /// its flow Stopped (its metaflow Asleep), under the dispatch gate the
     /// caller holds. The refusal names why the seat stays.
@@ -1667,6 +1672,11 @@ impl MarksUndecided for RunningNexus {
 
 impl SleepsAndWakesSeats for RunningNexus {
     fn settle_stopped(&self, flow_id: &str) -> AtStop {
+        use crate::context_warnings::ObservesClaudeContext;
+        self.settle_stopped_at(flow_id, self.claude_transcript_context_size(flow_id))
+    }
+
+    fn settle_stopped_at(&self, flow_id: &str, context_size: Option<Tokens>) -> AtStop {
         use crate::generated::overriding::SerializesPermaflowEffects;
         let _effect = match self.store.metaflow_awake_as(flow_id) {
             Ok(Some(metaflow)) => {
@@ -1698,7 +1708,7 @@ impl SleepsAndWakesSeats for RunningNexus {
             eprintln!("flow-nexus: flow {flow_id} kept at its Stop: the Nexus is held");
             return AtStop::Idle;
         }
-        let at_stop = self.settle_rested(flow_id);
+        let at_stop = self.settle_rested(flow_id, context_size);
         match &at_stop {
             AtStop::Kept(reason) if reason.successor_refused() => {
                 eprintln!("flow-nexus: flow {flow_id} kept at its Stop: {reason:?}");
@@ -4263,8 +4273,14 @@ impl WakesInParts for RunningNexus {
         taken
     }
 
-    fn settle_rested(&self, flow_id: &str) -> AtStop {
-        crate::context_warnings::ObservesClaudeContext::observe_claude_context(self, flow_id);
+    fn settle_rested(&self, flow_id: &str, context_size: Option<Tokens>) -> AtStop {
+        if let Some(context_size) = context_size {
+            crate::context_warnings::ObservesClaudeContext::observe_claude_context_size(
+                self,
+                flow_id,
+                context_size,
+            );
+        }
         // Whether the flow was sent its handover warning before this idle
         // event: one warned only by this event's own reminder pass has yet
         // to read it, and is refreshed at its next idle event.

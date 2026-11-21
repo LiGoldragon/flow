@@ -194,6 +194,12 @@ pub struct RunningNexus {
     /// Announced each time a Configure replaces a family, and at a stop;
     /// see `observe_configuration`.
     pub configuration_changes: store::LaunchChanges,
+    /// The Claude Harness Nexus's subscription socket the daemon's
+    /// configuration names. When there is one, its subscription is the one
+    /// source of a Claude flow's rest, and a Stop hook's report is recorded
+    /// and correlated but rests nothing (`harness_subscription`,
+    /// `reporting`); with none, the Stop hook is.
+    pub claude_harness_subscription: Option<generated::startup::ClaudeHarnessSubscriptionPath>,
 }
 
 /// The handover source for fresh successors: the predecessor's sections in
@@ -2206,6 +2212,7 @@ impl OpensRunningNexus for RunningNexus {
             compactions: compacting::CompactionWatch::default(),
             seat_submissions: Arc::default(),
             configuration_changes: store::LaunchChanges::default(),
+            claude_harness_subscription: None,
         })
     }
 }
@@ -4359,6 +4366,7 @@ mod tests {
                 compactions: crate::compacting::CompactionWatch::default(),
                 seat_submissions: std::sync::Arc::default(),
                 configuration_changes: Default::default(),
+                claude_harness_subscription: None,
             };
             let herdr_config = directory.path().join("herdr-config");
             let session_socket = herdr_config.join("sessions/messaging-build/herdr.sock");

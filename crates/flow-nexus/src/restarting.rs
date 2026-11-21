@@ -173,6 +173,11 @@ pub(crate) trait FencesSeatEvents {
     /// restart bound, only when it names that seat's harness and the flow
     /// still runs in that seat's pane; otherwise as before any restart.
     fn report_acts(&self, flow_id: &str, birth: Option<&Process>) -> bool;
+    /// Whether a harness event the Harness Nexus matched to the flow's own
+    /// session may act: never while a restart holds the flow. It names no
+    /// harness process, so no seat birth is asked of it; the session is
+    /// what names the harness.
+    fn session_event_acts(&self, flow_id: &str) -> bool;
     /// Whether an exit witnessed of `witness` may be recorded: never while a
     /// restart holds the flow, and only while the flow still runs where and
     /// as the witness saw it. None witnesses the flow as it stands.
@@ -1737,6 +1742,10 @@ impl FencesSeatEvents for RunningNexus {
                 && witness.route.herdr_terminal_id == route.herdr_terminal_id
         });
         current && birth == Some(&seat.process)
+    }
+
+    fn session_event_acts(&self, flow_id: &str) -> bool {
+        matches!(self.store.restart_record(flow_id), Ok(None))
     }
 
     fn witness_holds(&self, flow_id: &str, witness: Option<&SeatWitness>) -> bool {

@@ -5,10 +5,12 @@
 //! adopted. The owner reads the events back over the meta socket with
 //! `ReadEvents`. A `Stopped` event, once answered, lets a launch waiting on
 //! it send its next part; when it names the flow's registered session and
-//! that session's transcript, it is the flow's turn end: the hand-overs
-//! that turn took settle on their receipts, then its rest is recorded, so
-//! the rest is the flow's last transition; it writes the flow's context
-//! size, and may drain its queue. A `PromptSubmitted` event
+//! that session's transcript, it is the flow's turn end. Its rest
+//! (`RestsClaudeFlows`) is the Stop's when no Claude Harness subscription
+//! is configured, and the subscription's when one is: the hand-overs that
+//! turn took settle on their receipts, then its rest is recorded, so the
+//! rest is the flow's last transition; it writes the flow's context size,
+//! and may drain its queue. A `PromptSubmitted` event
 //! in the flow's registered session is the seat's word that it took a
 //! prompt, which a writer that typed into its pane waits for
 //! (`submission`); whose digest is exactly the request a hand-over typed is
@@ -41,7 +43,7 @@ use meta_signal_flow::{
     QueueResolutionRecord, ReadEventsRejected_Data, ReadQueueDeliveriesRejected_Data,
     ResolveQueueDeliveryRejection, ResolverIdentity,
 };
-use signal_flow::{Address, Event, FlowId, Output, Report_Data};
+use signal_flow::{Address, Event, FlowId, Output, Report_Data, Tokens};
 
 pub trait RecordsReports {
     fn report(&self, report: Report_Data) -> Output;
@@ -134,25 +136,11 @@ impl RecordsReports for RunningNexus {
         // compaction its harness made on its own; SessionStart follows one
         // at once.
         crate::compacting::WatchesCompactions::watch_claude_compactions(self, &flow_id.0);
-        // A Stop in the flow's own session ends the turn that took what was
-        // typed into it: those hand-overs are settled first, each arrival
-        // recorded before the rest that ends its turn, so the flow's last
-        // transition is that rest.
-        if let Event::Stopped(stop) = event
-            && self.correlated_stop(&flow_id.0, stop)
-        {
-            let _turn = self
-                .dispatch_gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Ok(Some(metaflow)) = self.store.metaflow_awake_as(&flow_id.0) {
-                self.settle_turn_receipts(&metaflow.address);
-            }
-        }
         // The report is typed into its Event and recorded as the flow's
         // transition before anything else it sets going; a tool boundary is
-        // recorded once its context is observed, below.
-        if !matches!(event, Event::ToolUsed(_))
+        // recorded once its context is observed, and a Stop's rest is the
+        // rest's own (`RestsClaudeFlows`), below.
+        if !matches!(event, Event::ToolUsed(_) | Event::Stopped(_))
             && let Some(typed) = self.claude_event(ClaudeReport {
                 flow_id: flow_id.clone(),
                 hook_event: event.clone(),
@@ -200,59 +188,27 @@ impl RecordsReports for RunningNexus {
                 }
             }
             Event::Stopped(stop) => {
-                // A launch sending its first message in parts waits on a
-                // Stop before its next part.
-                self.store.launch_changes.announce();
-                if self.correlated_stop(&flow_id.0, stop) {
-                    // A Stop in the flow's own session ends a turn, whatever
-                    // background work it names.
-                    crate::turn_ends::RecordsTurnEnd::turn_ended(self, &flow_id.0);
-                    // A simplified seat's answer is read from its own
-                    // transcript once its input is received there: the
-                    // payloads typed into it were settled above, before the
-                    // rest, since the prompt's hook may have reported before
-                    // Claude wrote its user row.
-                    let answer = {
-                        let _turn = self
-                            .dispatch_gate
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        self.queue_simplified_answer(&flow_id.0)
-                    };
-                    let later = "it is looked for again at the seat's next rest or drain";
-                    match &answer {
-                        SimplifiedAnswer::NoneOwed => {}
-                        SimplifiedAnswer::Queued { recipient, .. } => eprintln!(
-                            "flow-nexus: simplified answer of {flow_id} queued to {:?} {} {:?}",
-                            recipient.aspect,
-                            recipient.topic.0,
-                            recipient.model,
-                            flow_id = flow_id.0
-                        ),
-                        SimplifiedAnswer::InputUnreceived { .. } => eprintln!(
-                            "flow-nexus: simplified answer of {flow_id} not queued at its Stop: its input is not yet Delivered; {later}",
-                            flow_id = flow_id.0
-                        ),
-                        SimplifiedAnswer::TurnUnanswered { .. } => eprintln!(
-                            "flow-nexus: simplified answer of {flow_id} not queued at its Stop: its transcript shows no ended answer; {later}",
-                            flow_id = flow_id.0
-                        ),
-                        SimplifiedAnswer::Undelivered { .. } => eprintln!(
-                            "flow-nexus: simplified answer of {flow_id} refused by the store: its recipient is unknown or its receipt changed; {later}",
-                            flow_id = flow_id.0
-                        ),
-                        SimplifiedAnswer::StoreRefused => eprintln!(
-                            "flow-nexus: simplified answer of {flow_id} not queued at its Stop: the store refused; {later}",
-                            flow_id = flow_id.0
-                        ),
-                    }
-                    self.settle_stopped(&flow_id.0);
-                } else {
+                if !self.correlated_stop(&flow_id.0, stop) {
+                    // A launch sending its first message in parts waits on
+                    // a Stop before its next part.
+                    self.store.launch_changes.announce();
                     eprintln!(
                         "flow-nexus: a Stop reported for flow {flow_id} names session {:?}, not its own; it settles nothing",
                         stop.native_session_id_option,
                         flow_id = flow_id.0
                     );
+                } else if self.claude_harness_subscription.is_some() {
+                    // The Claude Harness subscription is the one source of
+                    // the flow's rest: the Stop is recorded, and is the
+                    // flow's own turn end for what reads the recorded
+                    // Stops, but rests nothing here.
+                    self.store.launch_changes.announce();
+                } else {
+                    // A Stop in the flow's own session ends a turn,
+                    // whatever background work it names; its context size
+                    // is the one its transcript shows.
+                    use crate::context_warnings::ObservesClaudeContext;
+                    self.rest_claude_flow(flow_id, self.claude_transcript_context_size(&flow_id.0));
                 }
             }
             Event::PromptSubmitted(prompt) => {
@@ -393,6 +349,99 @@ impl RecordsReports for RunningNexus {
             address,
             visible_queue_delivery_vector,
         })
+    }
+}
+
+/// The rest of a Claude flow's turn: what a turn end known to be the
+/// flow's own sets going. Each caller knows it by its own evidence: the
+/// flow's Stop hook by its correlation (`correlated_stop`, the session and
+/// transcript the Stop names are the flow's), the Claude Harness
+/// subscription by the Harness Nexus's own match of the turn to the flow's
+/// session (`harness_subscription`). Whichever is the source of the rest
+/// calls it; the other does not (`RunningNexus::claude_harness_subscription`).
+pub trait RestsClaudeFlows {
+    /// The hand-overs the ended turn took settle on their receipts, each
+    /// arrival recorded before the rest, so the flow's last transition is
+    /// that rest; the rest is recorded, Idle with `context_size`, or with
+    /// the size last written when there is none; a launch waiting on a turn
+    /// end is told, and the turn end is published; a simplified seat's
+    /// answer is queued; and the resting seat is settled
+    /// (`settle_stopped_at`): its context size written when there is one,
+    /// then handed its oldest queued request, slept or refreshed, as
+    /// Memory's records of it decide.
+    fn rest_claude_flow(&self, flow_id: &FlowId, context_size: Option<Tokens>);
+}
+
+impl RestsClaudeFlows for RunningNexus {
+    fn rest_claude_flow(&self, flow_id: &FlowId, context_size: Option<Tokens>) {
+        use crate::store::context::RecordsContextSize;
+        // The turn that ends took what was typed into it: those hand-overs
+        // are settled first.
+        {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Ok(Some(metaflow)) = self.store.metaflow_awake_as(&flow_id.0) {
+                self.settle_turn_receipts(&metaflow.address);
+            }
+        }
+        let rested = context_size.unwrap_or_else(|| {
+            Tokens(
+                self.store
+                    .context_size(&flow_id.0)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0),
+            )
+        });
+        self.report_event(ReportedEvent {
+            flow_id: flow_id.clone(),
+            event: crate::generated::memory::Event::Idle(rested),
+        });
+        // A launch sending its first message in parts waits on a turn end
+        // before its next part.
+        self.store.launch_changes.announce();
+        crate::turn_ends::RecordsTurnEnd::turn_ended(self, &flow_id.0);
+        // A simplified seat's answer is read from its own transcript once
+        // its input is received there: the payloads typed into it were
+        // settled above, before the rest, since the prompt's hook may have
+        // reported before Claude wrote its user row.
+        let answer = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.queue_simplified_answer(&flow_id.0)
+        };
+        let later = "it is looked for again at the seat's next rest or drain";
+        match &answer {
+            SimplifiedAnswer::NoneOwed => {}
+            SimplifiedAnswer::Queued { recipient, .. } => eprintln!(
+                "flow-nexus: simplified answer of {flow_id} queued to {:?} {} {:?}",
+                recipient.aspect,
+                recipient.topic.0,
+                recipient.model,
+                flow_id = flow_id.0
+            ),
+            SimplifiedAnswer::InputUnreceived { .. } => eprintln!(
+                "flow-nexus: simplified answer of {flow_id} not queued at its Stop: its input is not yet Delivered; {later}",
+                flow_id = flow_id.0
+            ),
+            SimplifiedAnswer::TurnUnanswered { .. } => eprintln!(
+                "flow-nexus: simplified answer of {flow_id} not queued at its Stop: its transcript shows no ended answer; {later}",
+                flow_id = flow_id.0
+            ),
+            SimplifiedAnswer::Undelivered { .. } => eprintln!(
+                "flow-nexus: simplified answer of {flow_id} refused by the store: its recipient is unknown or its receipt changed; {later}",
+                flow_id = flow_id.0
+            ),
+            SimplifiedAnswer::StoreRefused => eprintln!(
+                "flow-nexus: simplified answer of {flow_id} not queued at its Stop: the store refused; {later}",
+                flow_id = flow_id.0
+            ),
+        }
+        self.settle_stopped_at(&flow_id.0, context_size);
     }
 }
 

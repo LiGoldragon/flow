@@ -83,6 +83,69 @@ impl CommitsAttemptState for FlowStore {
     }
 }
 
+/// The attempt numbers one commit takes, each with its request number, and
+/// the counter as it stands after them.
+struct AttemptReservation {
+    first_attempt: i64,
+    counter: DeliveryCounter,
+    counter_exists: bool,
+}
+
+trait ReservesAttempts {
+    /// Reserves `count` consecutive attempt numbers from the stored counter.
+    fn reserve_attempts(&self, count: i64) -> Result<AttemptReservation, StoreError>;
+    /// Writes the counter `reservation` leaves into `commit`.
+    fn write_reservation(&self, commit: AtomicCommit, reservation: AttemptReservation)
+    -> AtomicCommit;
+}
+
+impl ReservesAttempts for FlowStore {
+    fn reserve_attempts(&self, count: i64) -> Result<AttemptReservation, StoreError> {
+        let counters = self
+            .engine
+            .match_records(QueryPlan::key(
+                self.queue_delivery.counter,
+                RecordKey::new(COUNTER_KEY),
+            ))?
+            .records()
+            .to_vec();
+        let (first_attempt, next_request, counter_exists) = match counters.as_slice() {
+            [] => (FIRST_ATTEMPT, FIRST_NEXT_REQUEST - 1, false),
+            [counter] => (counter.next_attempt.0, counter.next_request.0, true),
+            _ => return Err(StoreError::StateInvariant),
+        };
+        let counter = DeliveryCounter {
+            next_request: NextRequest(
+                next_request
+                    .checked_add(count)
+                    .ok_or(StoreError::StateInvariant)?,
+            ),
+            next_attempt: NextAttempt(
+                first_attempt
+                    .checked_add(count)
+                    .ok_or(StoreError::StateInvariant)?,
+            ),
+        };
+        Ok(AttemptReservation {
+            first_attempt,
+            counter,
+            counter_exists,
+        })
+    }
+
+    fn write_reservation(
+        &self,
+        commit: AtomicCommit,
+        reservation: AttemptReservation,
+    ) -> AtomicCommit {
+        if reservation.counter_exists {
+            commit.mutate(self.queue_delivery.counter, reservation.counter)
+        } else {
+            commit.assert(self.queue_delivery.counter, reservation.counter)
+        }
+    }
+}
+
 const DELIVERY_COUNTER_TABLE_NAME: TableName = TableName::new("flow_nexus_queue_delivery_counter");
 const DELIVERY_REQUEST_TABLE_NAME: TableName = TableName::new("flow_nexus_queue_delivery_requests");
 const DELIVERY_ATTEMPT_TABLE_NAME: TableName = TableName::new("flow_nexus_queue_delivery_attempts");
@@ -286,9 +349,10 @@ pub trait AccountsQueueDelivery {
     /// and every attempt are kept as they are.
     fn align_followed_requests(&self) -> Result<(), StoreError>;
 
-    /// Quarantine pre-logical-identity queue data before any native I/O.
-    /// Original request and attempt records are kept, never reclassified
-    /// as delivered or absent and never correlated by matching bodies.
+    /// Quarantine pre-logical-identity queue data once, when the store
+    /// opens, before anything is served; no delivery runs it. Original
+    /// request and attempt records are kept, never reclassified as
+    /// delivered or absent and never correlated by matching bodies.
     fn archive_legacy_queue(&self) -> Result<(), StoreError>;
     fn observe_legacy_archive(
         &self,
@@ -339,6 +403,18 @@ pub trait AccountsQueueDelivery {
     /// Removes an unresolved request from active queue processing without
     /// changing its Uncertain delivery record or permitting automatic retry.
     fn park_uncertain_delivery(&self, attempt_id: &str) -> Result<bool, StoreError>;
+
+    /// After one payload carrying `cohort` was typed, `head` being the
+    /// Uncertain attempt of its first request: in one commit, parks `head`
+    /// and gives every further request of the cohort its own Uncertain
+    /// attempt at `head`'s native anchor, parked, so none is typed again.
+    /// False, with nothing written, when `head` is no longer Uncertain or
+    /// the queue no longer begins with the cohort.
+    fn park_typed_cohort(
+        &self,
+        head: &QueueDeliveryAttempt,
+        cohort: &[flow_ethos::QueueEntry],
+    ) -> Result<bool, StoreError>;
 
     /// Ends a synchronous direct call without leaving a request eligible
     /// for a later automatic send. Keeps its complete original request;
@@ -733,8 +809,6 @@ impl AccountsQueueDelivery for FlowStore {
         harness_kind: HarnessKind,
         history_anchor: NativeHistoryAnchor,
     ) -> Result<PrepareQueueDelivery, StoreError> {
-        // Also protects callers that encounter migrated data after opening.
-        self.archive_legacy_queue()?;
         #[cfg(test)]
         {
             use crate::test_faults::{InjectsCrashes, RefusedWrite};
@@ -759,46 +833,8 @@ impl AccountsQueueDelivery for FlowStore {
             return Err(StoreError::StateInvariant);
         }
 
-        let counters = self
-            .engine
-            .match_records(QueryPlan::key(
-                self.queue_delivery.counter,
-                RecordKey::new(COUNTER_KEY),
-            ))?
-            .records()
-            .to_vec();
-        let (current, new_counter) = match counters.as_slice() {
-            [] => (
-                None,
-                DeliveryCounter {
-                    next_request: NextRequest(FIRST_NEXT_REQUEST),
-                    next_attempt: NextAttempt(FIRST_ATTEMPT + 1),
-                },
-            ),
-            [counter] => (
-                Some(counter.clone()),
-                DeliveryCounter {
-                    next_request: NextRequest(
-                        counter
-                            .next_request
-                            .0
-                            .checked_add(1)
-                            .ok_or(StoreError::StateInvariant)?,
-                    ),
-                    next_attempt: NextAttempt(
-                        counter
-                            .next_attempt
-                            .0
-                            .checked_add(1)
-                            .ok_or(StoreError::StateInvariant)?,
-                    ),
-                },
-            ),
-            _ => return Err(StoreError::StateInvariant),
-        };
-        let attempt_number = current
-            .as_ref()
-            .map_or(FIRST_ATTEMPT, |value| value.next_attempt.0);
+        let reservation = self.reserve_attempts(1)?;
+        let attempt_number = reservation.first_attempt;
         let request_id = queued.logical_delivery_id.clone();
         let attempt_id = format!("queue-attempt-{attempt_number:016x}");
         let native_request_id = attempt_number;
@@ -832,12 +868,7 @@ impl AccountsQueueDelivery for FlowStore {
             queue_evidence: QueueEvidence::Logical(queued),
             queue_delivery_phase: QueueDeliveryPhase::Prepared,
         };
-        let commit = self.engine.begin_atomic_commit();
-        let commit = if current.is_some() {
-            commit.mutate(self.queue_delivery.counter, new_counter)
-        } else {
-            commit.assert(self.queue_delivery.counter, new_counter)
-        };
+        let commit = self.write_reservation(self.engine.begin_atomic_commit(), reservation);
         let commit = if old_request.is_some() {
             commit.mutate(self.queue_delivery.requests, request)
         } else {
@@ -1197,6 +1228,112 @@ impl AccountsQueueDelivery for FlowStore {
             .mutate(self.metaflows, metaflow)
             .mutate(self.queue_delivery.requests, parked);
         self.engine.commit_atomic(commit)?;
+        Ok(true)
+    }
+
+    fn park_typed_cohort(
+        &self,
+        head: &QueueDeliveryAttempt,
+        cohort: &[flow_ethos::QueueEntry],
+    ) -> Result<bool, StoreError> {
+        use super::logical_delivery::StagesLogicalTransitions;
+        // Admission writes the queue under this gate; the cohort leaves it
+        // under the same gate, in one commit.
+        let _guard = self
+            .logical_deliveries
+            .write_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some((first, rest)) = cohort.split_first() else {
+            return Ok(false);
+        };
+        let Some(head) = self.queue_delivery_attempt(&head.queue_attempt_id.0)? else {
+            return Ok(false);
+        };
+        if !matches!(head.queue_delivery_phase, QueueDeliveryPhase::Uncertain(_))
+            || head.queue_evidence != QueueEvidence::Logical(first.clone())
+        {
+            return Ok(false);
+        }
+        let Some(mut metaflow) = self.stored_metaflow(&head.address)? else {
+            return Ok(false);
+        };
+        if !metaflow.metaflow.queue.0.starts_with(cohort) {
+            return Ok(false);
+        }
+        let mut commit = self.engine.begin_atomic_commit();
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.queue_delivery.requests,
+            RecordKey::new(head.queue_request_id.0.clone()),
+        ))?;
+        let [request] = rows.records() else {
+            return Err(StoreError::StateInvariant);
+        };
+        if request.address != head.address
+            || request.queue_evidence != head.queue_evidence
+            || request.request_state != RequestState::Queued
+        {
+            return Err(StoreError::StateInvariant);
+        }
+        let mut parked = request.clone();
+        parked.request_state = RequestState::Parked;
+        commit = commit.mutate(self.queue_delivery.requests, parked);
+        if !rest.is_empty() {
+            let count = i64::try_from(rest.len()).map_err(|_| StoreError::StateInvariant)?;
+            let reservation = self.reserve_attempts(count)?;
+            let mut number = reservation.first_attempt;
+            commit = self.write_reservation(commit, reservation);
+            for entry in rest {
+                let request_id = entry.logical_delivery_id.0.clone();
+                let evidence = QueueEvidence::Logical(entry.clone());
+                let request = StoredDeliveryRequest {
+                    queue_request_id: meta_signal_flow::QueueRequestId(request_id.clone()),
+                    address: head.address.clone(),
+                    queue_evidence: evidence.clone(),
+                    request_state: RequestState::Parked,
+                };
+                let old = self.engine.match_records(QueryPlan::key(
+                    self.queue_delivery.requests,
+                    RecordKey::new(request_id.clone()),
+                ))?;
+                commit = match old.records() {
+                    [] => commit.assert(self.queue_delivery.requests, request),
+                    [old] if old.address == head.address && old.queue_evidence == evidence => {
+                        commit.mutate(self.queue_delivery.requests, request)
+                    }
+                    _ => return Err(StoreError::StateInvariant),
+                };
+                let attempt = QueueDeliveryAttempt {
+                    queue_request_id: meta_signal_flow::QueueRequestId(request_id),
+                    queue_attempt_id: meta_signal_flow::QueueAttemptId(format!(
+                        "queue-attempt-{number:016x}"
+                    )),
+                    native_request_id: NativeRequestId(number),
+                    flow_id: head.flow_id.clone(),
+                    thread_id: head.thread_id.clone(),
+                    harness_kind: head.harness_kind.clone(),
+                    native_history_anchor: head.native_history_anchor.clone(),
+                    address: head.address.clone(),
+                    queue_evidence: evidence,
+                    queue_delivery_phase: QueueDeliveryPhase::Uncertain(None),
+                };
+                commit = self.commit_attempt(commit, attempt)?;
+                number = number.checked_add(1).ok_or(StoreError::StateInvariant)?;
+            }
+        }
+        metaflow.metaflow.queue.0.drain(..cohort.len());
+        commit = commit.mutate(self.metaflows, metaflow);
+        let ids = rest
+            .iter()
+            .map(|entry| entry.logical_delivery_id.clone())
+            .collect::<Vec<_>>();
+        commit = self.stage_logical_transitions(
+            &ids,
+            &[DeliveryState::Attempting, DeliveryState::Uncertain],
+            commit,
+        )?;
+        self.engine.commit_atomic(commit)?;
+        self.launch_changes.announce();
         Ok(true)
     }
 
@@ -2819,6 +2956,101 @@ mod tests {
             queue_resolution_reason: meta_signal_flow::QueueResolutionReason(reason.into()),
             unix_seconds: meta_signal_flow::UnixSeconds(1_790_000_123),
         }
+    }
+
+    /// A batch typed as one payload leaves the queue whole, in one commit:
+    /// its head parked, and every further request given its own Uncertain
+    /// attempt at the head's native anchor, parked, so no drain types it
+    /// again. A batch the queue does not begin with writes nothing.
+    #[test]
+    fn a_typed_cohort_is_parked_whole_in_one_commit() {
+        let (_fixture, store) = Fixture::new();
+        let mut metaflow = store.metaflow(&address()).unwrap().unwrap();
+        metaflow.queue.0.push(queued("third"));
+        metaflow.queue.0.push(queued("later"));
+        store.seed_metaflow(metaflow);
+        let queue = store.metaflow(&address()).unwrap().unwrap().queue.0;
+        let cohort = queue[..3].to_vec();
+        let head = prepared_attempt(&store);
+        assert!(
+            store
+                .mark_delivery_uncertain(&head.queue_attempt_id.0)
+                .unwrap()
+        );
+
+        assert!(!store.park_typed_cohort(&head, &queue[1..3]).unwrap());
+        assert_eq!(
+            store.metaflow(&address()).unwrap().unwrap().queue.0,
+            queue,
+            "a refused batch writes nothing"
+        );
+        assert_eq!(
+            store
+                .delivery_attempts()
+                .unwrap()
+                .into_iter()
+                .map(|attempt| attempt.queue_attempt_id)
+                .collect::<Vec<_>>(),
+            vec![head.queue_attempt_id.clone()],
+            "a refused batch gives no attempt"
+        );
+
+        assert!(store.park_typed_cohort(&head, &cohort).unwrap());
+        assert_eq!(
+            store.metaflow(&address()).unwrap().unwrap().queue.0,
+            queue[3..].to_vec(),
+            "the whole batch left the queue"
+        );
+        assert!(store.outstanding_delivery(&address()).unwrap().is_none());
+        let attempts = store.delivery_attempts().unwrap();
+        assert_eq!(
+            attempts
+                .iter()
+                .map(|attempt| attempt.queue_evidence.clone())
+                .collect::<Vec<_>>(),
+            cohort
+                .iter()
+                .cloned()
+                .map(QueueEvidence::Logical)
+                .collect::<Vec<_>>()
+        );
+        for attempt in &attempts {
+            assert_eq!(
+                attempt.queue_delivery_phase,
+                QueueDeliveryPhase::Uncertain(None)
+            );
+            assert_eq!(attempt.native_history_anchor, head.native_history_anchor);
+            assert_eq!(attempt.thread_id, head.thread_id);
+            assert_eq!(
+                store
+                    .request_state(&attempt.queue_request_id.0)
+                    .unwrap(),
+                Some(RequestState::Parked)
+            );
+            assert_eq!(
+                store
+                    .logical_delivery_snapshot(&flow_ethos::LogicalDeliveryId(
+                        attempt.queue_request_id.0.clone()
+                    ))
+                    .unwrap()
+                    .map(|snapshot| snapshot.delivery_state),
+                Some(DeliveryState::Uncertain)
+            );
+        }
+        assert!(
+            !store.park_typed_cohort(&head, &cohort).unwrap(),
+            "a parked batch is not parked again"
+        );
+
+        let next = prepared_attempt(&store);
+        assert_eq!(next.queue_evidence, QueueEvidence::Logical(queue[3].clone()));
+        assert!(
+            attempts
+                .iter()
+                .all(|attempt| attempt.queue_attempt_id != next.queue_attempt_id
+                    && attempt.native_request_id != next.native_request_id),
+            "the batch's attempt numbers are reserved"
+        );
     }
 
     fn prepare_claude(store: &FlowStore) -> QueueDeliveryAttempt {

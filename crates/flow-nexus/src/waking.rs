@@ -3085,10 +3085,10 @@ impl DrainsHeldSeats for RunningNexus {
 /// The messages one payload carried leave the queue together, and are
 /// settled together by its one receipt.
 pub(crate) trait ParksCohort {
-    /// After `head`'s payload was typed: parks `head`, then gives each
+    /// After `head`'s payload was typed: parks `head` and gives each
     /// further message of `cohort` its own attempt at the same native
-    /// anchor and parks it, so none is typed again. Returns those parked,
-    /// oldest first.
+    /// anchor, parked, all in one store commit, so none is typed again.
+    /// Returns those parked, oldest first: the whole cohort, or none.
     fn park_cohort(&self, head: &QueueDeliveryAttempt, cohort: &[QueueEntry]) -> Vec<QueueEntry>;
     /// Candidate runs of retained attempts sharing `attempt`'s native
     /// anchor, including completed comparison members. Only an exact
@@ -3134,51 +3134,16 @@ pub(crate) type Receipted = (Vec<QueueDeliveryAttempt>, String, String, SeatAfte
 
 impl ParksCohort for RunningNexus {
     fn park_cohort(&self, head: &QueueDeliveryAttempt, cohort: &[QueueEntry]) -> Vec<QueueEntry> {
-        let mut parked = Vec::new();
-        let Some((first, rest)) = cohort.split_first() else {
-            return parked;
-        };
-        if !self
-            .store
-            .park_uncertain_delivery(&head.queue_attempt_id.0)
-            .unwrap_or(false)
-        {
-            eprintln!("flow-nexus: a typed attempt was not parked; it stays outstanding");
-            return parked;
-        }
-        parked.push(first.clone());
-        for entry in rest {
-            match self.store.prepare_oldest_delivery(
-                &head.address,
-                &head.flow_id.0,
-                &head.thread_id.0,
-                head.harness_kind.clone(),
-                head.native_history_anchor.clone(),
-            ) {
-                Ok(PrepareQueueDelivery::Prepared(next))
-                    if next.queue_evidence
-                        == meta_signal_flow::QueueEvidence::Logical(entry.clone()) =>
-                {
-                    let _ = self.store.mark_delivery_uncertain(&next.queue_attempt_id.0);
-                    if !self
-                        .store
-                        .park_uncertain_delivery(&next.queue_attempt_id.0)
-                        .unwrap_or(false)
-                    {
-                        eprintln!(
-                            "flow-nexus: a typed attempt was not parked; it stays outstanding"
-                        );
-                        break;
-                    }
-                    parked.push(entry.clone());
-                }
-                other => {
-                    eprintln!("flow-nexus: a typed request was not given its attempt: {other:?}");
-                    break;
-                }
+        match self.store.park_typed_cohort(head, cohort) {
+            Ok(true) => cohort.to_vec(),
+            answer => {
+                eprintln!(
+                    "flow-nexus: a typed batch of {} was not parked; its head stays outstanding: {answer:?}",
+                    cohort.len()
+                );
+                Vec::new()
             }
         }
-        parked
     }
 
     fn find_receipt(&self, attempt: &QueueDeliveryAttempt) -> Result<Receipted, Undecided> {

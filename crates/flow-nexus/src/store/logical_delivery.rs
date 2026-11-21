@@ -2678,6 +2678,96 @@ impl AllocatesLogicalCursor for FlowStore {
     }
 }
 
+/// Several requests' moves written into one commit the caller owns.
+pub(crate) trait StagesLogicalTransitions {
+    /// Adds to `commit` each request's move through `states`, in order: one
+    /// event per state at consecutive cursors, and the cursor counter after
+    /// them. A state that makes a request arrive is refused, since no
+    /// arrival is written here. The caller holds the logical delivery write
+    /// gate and commits.
+    fn stage_logical_transitions(
+        &self,
+        ids: &[LogicalDeliveryId],
+        states: &[DeliveryState],
+        commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError>;
+}
+
+impl StagesLogicalTransitions for FlowStore {
+    fn stage_logical_transitions(
+        &self,
+        ids: &[LogicalDeliveryId],
+        states: &[DeliveryState],
+        commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError> {
+        if states
+            .iter()
+            .any(|state| matches!(state, DeliveryState::Delivered(_) | DeliveryState::Read))
+        {
+            return Err(StoreError::StateInvariant);
+        }
+        let allocation = self.allocate_logical_cursor()?;
+        let mut next = allocation.cursor;
+        let mut commit = commit;
+        for id in ids {
+            let records = self.engine.match_records(QueryPlan::key(
+                self.logical_deliveries.current,
+                RecordKey::new(id.clone().0),
+            ))?;
+            let [current] = records.records() else {
+                return Err(StoreError::StateInvariant);
+            };
+            if current.archived_cursor.0.is_some() {
+                return Err(StoreError::StateInvariant);
+            }
+            let mut snapshot = current.delivery_snapshot.clone();
+            for state in states {
+                if snapshot.delivery_state == *state {
+                    continue;
+                }
+                if matches!(
+                    snapshot.delivery_state,
+                    DeliveryState::Delivered(_)
+                        | DeliveryState::Read
+                        | DeliveryState::Failed(_)
+                        | DeliveryState::Withdrawn
+                        | DeliveryState::Archived
+                ) {
+                    return Err(StoreError::StateInvariant);
+                }
+                snapshot.delivery_cursor = signal_flow::DeliveryCursor(next);
+                snapshot.delivery_state = state.clone();
+                next = next.checked_add(1).ok_or(StoreError::StateInvariant)?;
+                commit = commit.assert(
+                    self.logical_deliveries.events,
+                    LogicalDeliveryEvent {
+                        delivery_snapshot: snapshot.clone(),
+                    },
+                );
+            }
+            commit = commit.mutate(
+                self.logical_deliveries.current,
+                CurrentLogicalDelivery {
+                    delivery_snapshot: snapshot,
+                    archived_cursor: crate::generated::memory::ArchivedCursor(None),
+                    delivery_admission: current.delivery_admission.clone(),
+                },
+            );
+        }
+        if next == allocation.cursor {
+            return Ok(commit);
+        }
+        let counter = LogicalDeliveryCounter {
+            next_cursor: crate::generated::memory::NextCursor(next),
+        };
+        Ok(if allocation.existing {
+            commit.mutate(self.logical_deliveries.counter, counter)
+        } else {
+            commit.assert(self.logical_deliveries.counter, counter)
+        })
+    }
+}
+
 /// The logical delivery ids: a store that has allocated none begins at 1.
 pub(crate) struct LogicalDeliveryIds<'store>(pub(crate) &'store FlowStore);
 

@@ -72,18 +72,22 @@ fn recurrence_advances_from_each_due_instant() {
     assert_eq!(r.next_due, crate::generated::memory::NextDue(900));
 }
 
-/// The warning holds the configured words and the flow's handover path,
-/// nothing else.
+/// The warning holds the configured words, the flow's handover path and
+/// the Refresh of its own Address, every value filled in by Flow, and
+/// nothing else: no placeholder is left for the flow to fill.
 #[test]
-fn the_warning_is_the_configured_words_and_the_handover_path() {
+fn the_warning_is_the_configured_words_the_handover_path_and_the_refresh() {
     let reminder =
         HandoverReminder::open_handover_reminder(address(), 1, "m".into(), 0, 5, "continue".into())
             .unwrap();
     let notice = reminder.notice_if_due(0).unwrap();
+    let text = notice.notice_text("ab12cd");
     assert_eq!(
-        notice.notice_text("ab12cd"),
-        "continue\nflows/ab12cd/handover.md"
+        text,
+        "continue\nflows/ab12cd/handover.md\nRefresh.{ Field core Sol }"
     );
+    assert!(!text.contains('<'), "{text}");
+    assert_eq!(text.matches("handover.md").count(), 1, "{text}");
 }
 
 #[test]
@@ -190,7 +194,7 @@ fn runtime_tick_admits_due_middle_abrupt_notice_and_wakes_recipient() {
     assert!(metaflow.queue.0.iter().any(|entry| matches!(
         &entry.message,
         flow_ethos::Message::MiddleAbrupt(flow_ethos::Request::Notice(text))
-            if text == "configured\nflows/fixture-seat/handover.md"
+            if text == "configured\nflows/fixture-seat/handover.md\nRefresh.{ Field core Sol }"
     )));
     fixture
         .nexus

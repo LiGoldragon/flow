@@ -157,7 +157,7 @@ fn crystallize_now_asks_the_flow_for_its_handover_and_records_crystallizing() {
             && matches!(
                 &entry.message,
                 Message::MiddleAbrupt(Request::Notice(text))
-                    if text.ends_with(&format!("flows/{CLAUDE_SEAT}/handover.md"))
+                    if text.contains(&format!("flows/{CLAUDE_SEAT}/handover.md\nRefresh.{{ "))
             )),
         "the flow is sent its handover warning: {queued:?}"
     );

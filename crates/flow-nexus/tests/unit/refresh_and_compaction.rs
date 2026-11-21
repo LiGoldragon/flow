@@ -468,7 +468,8 @@ fn a_stop_with_live_background_work_past_the_threshold_refreshes() {
 /// A flow busy across several turns, every Stop naming background work and
 /// Herdr showing it Working, is sent its handover warning once its context
 /// reaches the warning share of its threshold, at MiddleAbrupt, the
-/// configured words and its handover path and nothing else; it is not
+/// configured words, its handover path and its own Refresh, and nothing
+/// else; it is not
 /// refreshed at the Stop that warned it, and is refreshed at the next,
 /// though it never rested and wrote no handover.
 #[test]
@@ -548,7 +549,7 @@ fn a_busy_flow_is_warned_and_then_refreshed_at_its_next_stop() {
         State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
     );
     let typed = fixture.typed().expect("the warning reached the pane");
-    let notice = format!("{WORDS}\nflows/{CLAUDE_SEAT}/handover.md");
+    let notice = format!("{WORDS}\nflows/{CLAUDE_SEAT}/handover.md\nRefresh.{{ Mind flow Sol }}");
     assert!(typed.contains("MiddleAbrupt"), "{typed}");
     assert!(typed.contains(&notice), "{typed}");
     assert!(!typed.contains("flow-nexus"), "{typed}");

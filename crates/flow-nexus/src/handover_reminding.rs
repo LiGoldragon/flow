@@ -23,14 +23,22 @@ pub trait DecidesHandoverReminder {
 }
 /// The warning a flow is sent: the configured words, then the path its
 /// handover is written at, `flows/<its FlowId>/handover.md`, which its
-/// successor's first prompt carries; nothing else.
+/// successor's first prompt carries, then the Refresh it asks for itself,
+/// its own Address filled in: `Refresh.{ Mind core Opus }`. Every value is
+/// Flow's; the configured words carry none.
 pub trait RendersHandoverWarning {
     fn notice_text(&self, flow_id: &str) -> String;
 }
 
 impl RendersHandoverWarning for HandoverReminderNotice {
     fn notice_text(&self, flow_id: &str) -> String {
-        format!("{}\nflows/{flow_id}/handover.md", self.text)
+        use datom_codec::Datomizable;
+        use protos::{Compactable, Protosizable};
+        let refresh = signal_flow::Input::Refresh(self.address.clone())
+            .datomize(Vec::new())
+            .protosize()
+            .compact();
+        format!("{}\nflows/{flow_id}/handover.md\n{refresh}", self.text)
     }
 }
 

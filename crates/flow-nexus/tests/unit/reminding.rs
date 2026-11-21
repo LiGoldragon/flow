@@ -1,7 +1,6 @@
-//! A task's reminders go to the sender Flow recorded when it admitted the
-//! task, and with the last of them its failure goes to that same sender.
-//! No model is chosen by rank, and nothing a reminder queues is a task of
-//! its own: no reminder follows a reminder.
+//! A task's reminder goes to the sender Flow recorded when it admitted the
+//! task, and to no one else. No model is chosen by rank, and nothing a
+//! reminder queues is a task of its own: no reminder follows a reminder.
 
 use super::NexusFixture;
 use crate::reminding::RemindsCallers;
@@ -32,11 +31,11 @@ fn notices(queue: &[QueueEntry]) -> Vec<(SentBy, String)> {
 }
 
 /// The last reminder of a Task sent by a Haiku seat queues, for that very
-/// seat, the fourth reminder and then the task's failure, both from Flow.
-/// No Opus, nor any other seat, is told; the task's recipient keeps only
-/// the task; the reminder is spent; and a second pass queues nothing more.
+/// seat, the reminder alone, from Flow, with no failure after it. No Opus,
+/// nor any other seat, is told; the task's recipient keeps only the task;
+/// the reminder is spent; and a second pass queues nothing more.
 #[test]
-fn a_tasks_last_reminder_sends_its_failure_to_the_tasks_own_sender() {
+fn a_tasks_last_reminder_goes_alone_to_the_tasks_own_sender() {
     let fixture = NexusFixture::new();
     let sender = at(Aspect::Psyche, "reminded", Model::Haiku);
     let recipient = at(Aspect::Mind, "remindedWork", Model::Sol);
@@ -92,16 +91,10 @@ fn a_tasks_last_reminder_sends_its_failure_to_the_tasks_own_sender() {
         .queue;
     assert_eq!(
         notices(&told.0),
-        vec![
-            (
-                SentBy::Flow,
-                "Reminder 1 of 1: the task of 10 minutes, Review the fix, to Mind remindedWork Sol has no Done after 10 minutes.".to_owned()
-            ),
-            (
-                SentBy::Flow,
-                "Failure: the task of 10 minutes, Review the fix, from Psyche reminded Haiku to Mind remindedWork Sol has no Done after 1 reminders.".to_owned()
-            ),
-        ]
+        vec![(
+            SentBy::Flow,
+            "Reminder 1 of 1: the task of 10 minutes, Review the fix, to Mind remindedWork Sol has no Done after 10 minutes.".to_owned()
+        )]
     );
     let spent = fixture
         .nexus
@@ -305,10 +298,11 @@ fn archiving_an_ended_task_retracts_its_reminder_atomically() {
     );
 }
 
-/// A seat that sends a task to itself is reminded, and told its failure,
-/// as any sender: the failure goes once to it, and no reminder follows.
+/// A seat that sends a task to itself is reminded as any sender: the
+/// reminder goes once to it, no failure follows it, and no reminder
+/// follows a reminder.
 #[test]
-fn a_task_a_seat_sent_itself_fails_to_it_once_with_no_loop() {
+fn a_task_a_seat_sent_itself_is_reminded_once_with_no_loop() {
     let fixture = NexusFixture::new();
     let seat = at(Aspect::Mind, "selfTask", Model::Sol);
     fixture.nexus.store.seed_metaflow(Metaflow {
@@ -344,17 +338,14 @@ fn a_task_a_seat_sent_itself_fails_to_it_once_with_no_loop() {
     fixture.nexus.send_due_reminders();
 
     let queue = fixture.nexus.store.metaflow(&seat).unwrap().unwrap().queue;
-    assert_eq!(
-        queue.0.len(),
-        3,
-        "the task, its last reminder and its failure"
-    );
+    assert_eq!(queue.0.len(), 2, "the task and its one reminder");
     assert_eq!(queue.0[0].logical_delivery_id, key);
-    let failures = notices(&queue.0[1..])
-        .into_iter()
-        .filter(|(_, notice)| notice.starts_with("Failure:"))
-        .count();
-    assert_eq!(failures, 1, "the failure is told once");
+    let reminders = notices(&queue.0[1..]);
+    assert_eq!(reminders.len(), 1, "the reminder is told once");
+    assert!(
+        reminders[0].1.starts_with("Reminder 1 of 1:"),
+        "{reminders:?}"
+    );
     assert_eq!(
         fixture
             .nexus

@@ -3,9 +3,8 @@
 //!
 //! A Task is an order with its minutes, kept under the id Flow answered its
 //! send with. When its minutes lapse with no Done naming it, its sender is
-//! reminded, then again every interval, `TASK_REMINDERS` reminders in all;
-//! with the last, the sender is told the task's failure. A Done naming the
-//! task closes it.
+//! reminded, then again every interval, `TASK_REMINDERS` reminders in all.
+//! A Done naming the task closes it.
 
 use super::AnnouncesLaunchChanges;
 use super::{FlowStore, StoreError};
@@ -82,15 +81,12 @@ impl DescribesReminderTable for Reminder {
     }
 }
 
-/// One reminder due now: what to queue, for whom, and on a task's last
-/// reminder the failure its sender is told.
+/// One reminder due now: what to queue, and for whom.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DueReminder {
     /// The task's sender, as Flow recorded it when it admitted the task.
     pub address: Address,
     pub notice: String,
-    /// On a task's last reminder, the failure its sender is told.
-    pub failure: Option<String>,
 }
 
 /// The reminder's next state once one is sent at `now`.
@@ -109,15 +105,6 @@ impl AdvancesReminder for Reminder {
             self.recipient.0.named(),
             self.minutes.0 * sent,
         );
-        let failure = last.then(|| {
-            format!(
-                "Failure: the task of {} minutes, {}, from {} to {} has no Done after {TASK_REMINDERS} reminders.",
-                self.minutes.0,
-                task_words,
-                self.address.named(),
-                self.recipient.0.named(),
-            )
-        });
         let next = Reminder {
             due_option: (!last).then(|| Due(now + self.minutes.0 * 60)),
             sent: Sent(sent),
@@ -127,7 +114,6 @@ impl AdvancesReminder for Reminder {
             DueReminder {
                 address: self.address.clone(),
                 notice,
-                failure,
             },
             Some(next),
         )
@@ -235,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn a_task_is_reminded_once_and_its_sender_told_its_failure_with_it() {
+    fn a_task_is_reminded_once_and_told_no_failure() {
         let reminder = Reminder {
             logical_delivery_id: flow_ethos::LogicalDeliveryId("logical-delivery-1".into()),
             address: address(Model::Sonnet),
@@ -258,12 +244,6 @@ mod tests {
             "Reminder 1 of 1: the task of 10 minutes, Review the fix, to Field core Sol has no Done after 10 minutes."
         );
         assert!(!due.notice.contains("logical-delivery-1"));
-        assert_eq!(
-            due.failure.as_deref(),
-            Some(
-                "Failure: the task of 10 minutes, Review the fix, from Psyche flow Sonnet to Field core Sol has no Done after 1 reminders."
-            )
-        );
     }
 
     #[test]

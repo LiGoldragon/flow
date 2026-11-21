@@ -704,7 +704,7 @@ fn manual_on_demand_keeps_cold_context_and_drains_work_to_the_same_seat() {
         .store
         .hold_handover_reminder(crate::generated::memory::HandoverReminder {
             address: at.clone(),
-            handover_generation: generation.clone(),
+            handover_generation: generation,
             model_name: flow_ethos::ModelName(CLAUDE_MODEL.into()),
             opened_at: crate::generated::memory::OpenedAt(0),
             next_due: crate::generated::memory::NextDue(0),

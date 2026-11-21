@@ -1904,7 +1904,8 @@ mod tests {
         );
         assert_eq!(
             ids(&store, MembershipOwner::UnsettledAt(&address())).len(),
-            5
+            4,
+            "Absent stays unsettled"
         );
         assert_eq!(store.membership_keys(), store.expected_membership_keys());
     }

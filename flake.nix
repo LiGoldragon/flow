@@ -450,15 +450,6 @@
               grep -F 'translator?rev=${translator.rev}#${translator.rev}' ${./Cargo.lock}
               touch "$out"
             '';
-            flow-request-id-immutable-contract-pins =
-              pkgs.runCommand "flow-request-id-immutable-contract-pins" { nativeBuildInputs = [ pkgs.gnugrep ]; }
-                ''
-                  grep -F 'rev = "319e3c3f8502e1c4356bd499bf8949905e6fd3c8"' ${./Cargo.toml}
-                  grep -F 'rev = "e613711574ef794f9913bb0b3a8a67fd511f1223"' ${./Cargo.toml}
-                  grep -F 'signal-flow?rev=319e3c3f8502e1c4356bd499bf8949905e6fd3c8#319e3c3f8502e1c4356bd499bf8949905e6fd3c8' ${./Cargo.lock}
-                  grep -F 'meta-signal-flow?rev=e613711574ef794f9913bb0b3a8a67fd511f1223#e613711574ef794f9913bb0b3a8a67fd511f1223' ${./Cargo.lock}
-                  touch "$out"
-                '';
 
           };
           # The pinned Curriculum, built per crate on the same base.

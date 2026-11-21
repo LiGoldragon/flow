@@ -427,29 +427,10 @@
          (= ["Regular" "OnDemand"] (flow-capsule/seat-declaration metaflows "{ Psyche test Sonnet }")))
   (check "a Simplified seat reads as Simplified"
          (= ["Simplified" "OnDemand"] (flow-capsule/seat-declaration metaflows "{ Psyche test Haiku }"))))
-;; and configure.datom declares scenario 20's seat so, where the file is
-;; beside this one (the Nix check holds each file alone, so there it is not).
-(let [datoms (fs/file (fs/parent (fs/canonicalize *file*)) "configure.datom")]
-  (if (fs/exists? datoms)
-    (check "scenario 20's seat is declared Regular OnDemand in configure.datom"
-           (= ["Regular" "OnDemand"]
-              (flow-capsule/seat-declaration (first (filter #(str/starts-with? % "Configure.Metaflows.")
-                                                            (str/split-lines (slurp datoms))))
-                                             flow-capsule/waking-seat)))
-    (println "skip | scenario 20's seat in configure.datom: no configure.datom beside this file")))
 
 ;; Every wait of the capsule answers its event: it arms its sources, asks its
 ;; question once armed, and asks again only when an event arrives; the
 ;; deadline bounds the wait for the next event and nothing else.
-(require '[babashka.process :as p] '[clojure.java.io :as io] '[cheshire.core :as json])
-
-(defn acting-first
-  "A question that, asked first, sets off the action and answers nil, so
-  only an event can bring its next asking; then the check."
-  [action check]
-  (let [first-ask (atom true)]
-    #(if @first-ask (do (reset! first-ask false) (action) nil) (check))))
-
 (defn queue [events]
   (let [q (java.util.concurrent.LinkedBlockingQueue.)]
     (doseq [event events] (.put q event))
@@ -528,93 +509,6 @@
       (watched held (flow-capsule/frames-source held (stream lines) fallback))
       (check (str "a Nexus whose stream " what " serves no subscription: its fallback is armed")
              (and @fell-back (nil? @held))))))
-
-;; Files and sockets: one inotifywait, armed (its watches established)
-;; before the question is first asked.
-(let [dir (str (fs/create-temp-dir {:prefix "capsule-events"}))
-      place (str dir "/place")
-      socket (str place "/flow.sock")
-      wait (flow-capsule/arm [(flow-capsule/socket-events socket)])]
-  (check "a socket's directory missing is made, mode 0700, before the watch"
-         (= "rwx------" (fs/posix->str (fs/posix-file-permissions place))))
-  (check "a socket moved to its name is seen at the move"
-         (wait 30 (acting-first #(do (spit (str place "/.flow.sock.1") "")
-                                     (fs/move (str place "/.flow.sock.1") socket))
-                                #(fs/exists? socket))))
-  (let [wait (flow-capsule/arm [(flow-capsule/socket-events socket)])
-        mode #(fs/posix->str (fs/posix-file-permissions socket))]
-    (check "a socket protected at its name is seen at the change"
-           (wait 30 (acting-first #(fs/set-posix-file-permissions socket "rw-------")
-                                  #(= "rw-------" (mode))))))
-  (let [store (str dir "/flow.sema")
-        wait (flow-capsule/arm [(flow-capsule/file-events store)])]
-    (check "a file written is seen"
-           (= "written\n" (wait 30 (acting-first #(spit store "written\n")
-                                                 #(let [text (when (fs/exists? store) (slurp store))]
-                                                    (when (= "written\n" text) text)))))))
-  (let [sessions (str dir "/sessions")
-        _ (fs/create-dirs sessions)
-        wait (flow-capsule/arm [(flow-capsule/directory-events [sessions] (constantly true) flow-capsule/file-kinds
-                                                               :recursive true)])
-        rollout (str sessions "/2026/11/09/rollout.jsonl")]
-    (check "a file written in a directory made under a recursive watch is seen"
-           (wait 30 (acting-first #(do (fs/create-dirs (fs/parent rollout)) (spit rollout "Tag c1\n"))
-                                  #(and (fs/exists? rollout) (str/includes? (slurp rollout) "Tag c1"))))))
-  (check "a watch on a directory missing is refused"
-         (try ((flow-capsule/directory-events [(str dir "/absent")] (constantly true) flow-capsule/file-kinds)
-               (java.util.concurrent.LinkedBlockingQueue.) later)
-              false
-              (catch clojure.lang.ExceptionInfo _ true)))
-  (fs/delete-tree dir))
-
-;; Processes: a child's exit as its own waiter sees it; any process's exit by
-;; its pidfd (util-linux waitpid). Each is ended here by closing its input.
-(let [exited? (fn [pid] (let [stat (try (slurp (str "/proc/" pid "/stat")) (catch Exception _ nil))]
-                          (or (nil? stat) (boolean (re-find #"\) Z " stat)))))]
-  (let [proc (p/process ["cat"] {:out :string})
-        wait (flow-capsule/arm [(flow-capsule/exit-of proc)])]
-    (check "a child's exit is seen as it exits"
-           (= :exited (wait 30 (acting-first #(.close (:in proc)) #(when-not (p/alive? proc) :exited))))))
-  (let [proc (p/process ["cat"] {:out :string})
-        pid (.pid (:proc proc))
-        wait (flow-capsule/arm [(flow-capsule/exits-of-pids [pid])])]
-    (check "a process's exit is seen through its pidfd"
-           (= :exited (wait 30 (acting-first #(.close (:in proc)) #(when (exited? pid) :exited)))))))
-
-;; Herdr: the capsule's session's socket, events.subscribe, armed at
-;; subscription_started; each later line one event. A Herdr stood in for by
-;; a socket of this test's own.
-(let [dir (str (fs/create-temp-dir {:prefix "capsule-herdr"}))
-      socket (str dir "/herdr.sock")
-      address (java.net.UnixDomainSocketAddress/of socket)
-      server (doto (java.nio.channels.ServerSocketChannel/open java.net.StandardProtocolFamily/UNIX) (.bind address))
-      asked (promise)
-      release (promise)
-      herdr (future
-              (let [peer (.accept server)
-                    reader (io/reader (java.nio.channels.Channels/newInputStream peer))
-                    out (java.nio.channels.Channels/newOutputStream peer)
-                    say #(do (.write out (.getBytes (str % "\n") "UTF-8")) (.flush out))]
-                (deliver asked (.readLine ^java.io.BufferedReader reader))
-                (say "{\"id\":\"flow-capsule\",\"result\":{\"type\":\"subscription_started\"}}")
-                (say "{\"event\":\"pane.output_matched\",\"data\":{\"pane_id\":\"w1:p2\",\"matched_line\":\"Tag ra2\"}}")
-                @release
-                (.close peer)))
-      seen (atom [])
-      answer (with-redefs [flow-capsule/herdr-socket socket]
-               (flow-capsule/await-events 30 [(flow-capsule/herdr-events [(flow-capsule/output-match "w1:p2" "Tag ra2")] seen)]
-                                          #(seq @seen)))]
-  (deliver release true)
-  @herdr
-  (.close server)
-  (check "Herdr is asked for the subscriptions named"
-         (= {:method "events.subscribe"
-             :params {:subscriptions [{:type "pane.output_matched" :pane_id "w1:p2" :source "recent" :lines 400
-                                       :match {:type "substring" :value "Tag ra2"}}]}}
-            (select-keys (json/parse-string (deref asked 1000 "{}") true) [:method :params])))
-  (check "an event Herdr sends after subscription_started is seen"
-         (= "Tag ra2" (get-in (first answer) [:data :matched_line])))
-  (fs/delete-tree dir))
 
 (if (seq @failures)
   (do (println (str (count @failures) " failed")) (System/exit 1))

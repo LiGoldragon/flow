@@ -518,9 +518,8 @@ every crate as its own derivation on the build base
 with tests has one check, `checks.<system>.<member>`, which runs the test
 binaries its test build compiled and compiles nothing, and fails when no test
 ran; `checks.<system>.default` is every member's check, beside `cargo-nix`,
-`clippy`, `fmt`, `capsule-witnesses`, the trait-law checks, the
-`request-id-migration-process` process check and the immutable contract
-pins. After editing a `Cargo.toml` or `Cargo.lock`,
+`clippy`, `fmt`, `capsule-witnesses`, the trait-law checks and the
+`request-id-migration-process` process check. After editing a `Cargo.toml` or `Cargo.lock`,
 regenerate `Cargo.nix` with
 `nix run github:LiGoldragon/build-base#crate2nix -- generate`.
 

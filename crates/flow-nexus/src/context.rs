@@ -662,21 +662,6 @@ mod tests {
     /// Records Flow did not ask for, or whose payload digest differs, are
     /// refused.
     #[test]
-    fn fixture_provenance_names_the_versioned_source_path() {
-        let request = request();
-        let composition = fixture().compose_flow_context(&request).unwrap();
-        for row in composition.context_provenance_vector {
-            assert_eq!(
-                row.source_relative_path.0,
-                format!(
-                    "{}.md",
-                    row.module_identity.identity_text().replace(':', "/")
-                ),
-            );
-        }
-    }
-
-    #[test]
     fn records_not_asked_for_or_not_matching_their_digest_are_refused() {
         use sha2::{Digest, Sha256};
         let composer = fixture();

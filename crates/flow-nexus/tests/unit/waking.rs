@@ -8167,6 +8167,38 @@ fn a_cut_settles_a_resting_codex_seat_and_a_new_subscription_s_cut_again() {
     );
 }
 
+#[test]
+fn a_current_codex_cut_repairs_an_uncommitted_rest_for_its_bound_thread_only() {
+    use super::codex_turns::idle;
+    use crate::codex_turns::SettlesRestingCodexSeats;
+    use crate::generated::memory::Event;
+    use crate::generated::transitions::{ReportedEvent, ReportsEvents};
+    use crate::waking::HoldsSoftForIdle;
+    let fixture = NexusFixture::new();
+    let thread = codex_rest_seat(&fixture, None, vec![]);
+    maintain(&fixture, address(Model::Sol));
+    assert_eq!(
+        fixture.nexus.codex_events(&thread, vec![idle()]),
+        Some(AtStop::Idle)
+    );
+    assert!(fixture.nexus.report_event(ReportedEvent {
+        flow_id: signal_flow::FlowId("908786".into()),
+        event: Event::Working(signal_flow::Tokens(1)),
+    }));
+    assert!(!fixture.nexus.rests_now("908786"));
+    assert_eq!(
+        fixture.nexus.codex_events("another-thread", vec![idle()]),
+        None
+    );
+    assert!(!fixture.nexus.rests_now("908786"));
+    assert_eq!(
+        fixture.nexus.codex_events(&thread, vec![idle()]),
+        Some(AtStop::Idle)
+    );
+    assert!(fixture.nexus.rests_now("908786"));
+    assert_eq!(fixture.nexus.codex_events(&thread, vec![idle()]), None);
+}
+
 /// Every Herdr operation the fixture logged, in order.
 fn herdr_operations(fixture: &NexusFixture) -> String {
     fs::read_to_string(fixture.directory.path().join("herdr-operations.log")).unwrap_or_default()

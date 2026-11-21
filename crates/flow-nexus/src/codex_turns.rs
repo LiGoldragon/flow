@@ -811,7 +811,7 @@ impl SettlesRestingCodexSeats for RunningNexus {
         let closed = events
             .iter()
             .any(|event| matches!(event, LedgerEvent::ThreadClosed));
-        let (seat, ended, reported) = {
+        let (seat, ended) = {
             let _turn = self
                 .dispatch_gate
                 .lock()
@@ -829,19 +829,6 @@ impl SettlesRestingCodexSeats for RunningNexus {
                 .map(|reading| reading.turns_ended.0.len())
                 .sum::<usize>();
             let flow = self.codex_flow_on(thread);
-            // What the batch says of the thread, recorded as its flow's
-            // event (`transitions`).
-            let reported = flow.as_ref().map(|node| CodexFlowReport {
-                flow_id: node.flow_id.clone(),
-                codex_report: if closed {
-                    CodexReport::Closed
-                } else {
-                    CodexReport::Stepped(Stepped_Data {
-                        before: Before(before.clone()),
-                        after: After(self.codex_turns.standing(thread)),
-                    })
-                },
-            });
             // A turn ended with only letters left: native history is read
             // for the latest one's receipt, which a reconnect may have kept
             // from this ledger.
@@ -855,22 +842,32 @@ impl SettlesRestingCodexSeats for RunningNexus {
             {
                 self.reconcile_typed(&metaflow.address);
             }
+            let after = self.codex_turns.standing(thread);
             let rested = readings.iter().any(|reading| reading.rest_reached.0)
-                || (before != ThreadStanding::AtRest
-                    && self.codex_turns.standing(thread) == ThreadStanding::AtRest);
-            // A rest settles once whatever is queued; queued work at an
-            // event that finds the thread already resting is drained.
+                || (before != ThreadStanding::AtRest && after == ThreadStanding::AtRest);
+            // Record the bound thread's standing under the same gate that
+            // admits Soft work. A later batch must not commit before this one.
+            let recorded = flow.as_ref().is_some_and(|node| {
+                self.report_codex(CodexFlowReport {
+                    flow_id: node.flow_id.clone(),
+                    codex_report: if closed {
+                        CodexReport::Closed
+                    } else {
+                        CodexReport::Stepped(Stepped_Data {
+                            before: Before(before),
+                            after: After(after),
+                        })
+                    },
+                })
+            });
             let seat = flow.as_ref().and_then(|node| {
                 let metaflow = self.store.metaflow_awake_as(&node.flow_id.0).ok()??;
-                (rested || !metaflow.queue.0.is_empty())
+                (rested || recorded || !metaflow.queue.0.is_empty())
                     .then(|| self.resting_codex_seat(&metaflow.address))
                     .flatten()
             });
-            (seat, flow.map(|node| (node.flow_id, ended)), reported)
+            (seat, flow.map(|node| (node.flow_id, ended)))
         };
-        if let Some(reported) = reported {
-            self.report_codex(reported);
-        }
         // Each turn the events ended is a turn end, sent before the
         // settlement it allows.
         if let Some((flow_id, ended)) = ended {
@@ -965,13 +962,18 @@ impl SettlesRestingCodexSeats for RunningNexus {
     }
 
     fn resting_codex_seat(&self, address: &Address) -> Option<FlowId> {
+        use crate::generated::transitions::{AskedFlow, RecordsTransitions};
         let metaflow = self.store.metaflow(address).ok()??;
         let flow_ethos::State::Awake(flow_id) = metaflow.state else {
             return None;
         };
         (!self.waking.is_waking(address)
             && matches!(self.store.address_hold(&flow_id.0), Ok(None))
-            && self.codex_resting(&flow_id.0))
+            && self.codex_resting(&flow_id.0)
+            && matches!(
+                self.store.state_of(AskedFlow(flow_id.clone())),
+                Ok(Some(meta_signal_flow::State::Resting))
+            ))
         .then_some(flow_id)
     }
 

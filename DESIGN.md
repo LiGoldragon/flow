@@ -223,8 +223,9 @@ ordinary socket (`queue_operations`): `Cancel.RequestId` withdraws a request
 still queued, archives it with its id and a Task's reminder, and queues a
 Soft Notice for its sender, and for its recipient when it reached it, save
 the flow that cancelled, whose answer `Cancelled.RequestId` already tells
-it; a Notice takes no answer, so one that reached its recipient is finished
-and Cancel and CloseRequest naming it are refused `Closed`;
+it; only a Question and a Task take an answer (`TakesAnswer`), so any other
+request that reached its recipient is finished and Cancel and CloseRequest
+naming it are refused `Closed`;
 `CloseRequest.RequestId` closes an open request with no answer as Cancel
 ends it, answered `RequestClosed.RequestId`, and tells no one: no Notice is
 queued, so a done request leaves the open requests every successor of its

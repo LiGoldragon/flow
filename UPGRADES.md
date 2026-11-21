@@ -3,10 +3,11 @@
 No contract, generated type or stored schema changes. A cancelling flow
 receives no cancellation notice; its answer `Cancelled.<id>` is the whole
 report, and the other party is still told. A Notice that reached its
-recipient, delivered or uncertain, is finished: Cancel and CloseRequest
-naming it are refused `Closed` and queue nothing. As 0.60.1 reads Orders,
-the retained kind and delivery evidence decide; delivered Notices already
-in Memory keep their historical `Open` binding untouched, need no rewrite,
+recipient, delivered or uncertain, is finished, as is every request but a
+Question or a Task (an Order, Living, Result, Done or Reminder): Cancel and
+CloseRequest naming it are refused `Closed` and queue nothing. As 0.60.1
+reads Orders, the retained kind and delivery evidence decide; such requests
+already in Memory keep their historical `Open` binding untouched, need no rewrite,
 and are treated as finished on upgrade. A Task's sender is reminded once,
 not four times, and no failure notice follows; a Task reminder held from
 an older release that has already sent one is spent and sends nothing. A

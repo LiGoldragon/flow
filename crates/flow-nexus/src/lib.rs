@@ -813,6 +813,16 @@ impl signal_flow::Answering for OrdinaryCall<'_> {
         request_id: &signal_flow::RequestId,
     ) -> Result<signal_flow::RequestId, Output> {
         use crate::store::RecordsLogicalDeliveries;
+        if let Ok(Some(binding)) = self.nexus.store.request_binding(request_id)
+            && self
+                .nexus
+                .queue_writes
+                .owns_request(&binding.logical_delivery_id.0)
+        {
+            return Err(Output::ArchiveRejected(
+                signal_flow::ArchiveRejection::NotYet(signal_flow::ArchiveHold::AttemptUnfinished),
+            ));
+        }
         match self.nexus.store.archive_request(&request_id.0) {
             Ok(Ok(())) => Ok(request_id.clone()),
             Ok(Err(rejection)) => Err(Output::ArchiveRejected(rejection)),
@@ -1451,6 +1461,14 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
             .resolver
             .clone()
             .unwrap_or_else(|| nexus.meta_resolver(None));
+        if nexus.queue_writes.owns_attempt(&request.queue_attempt_id.0) {
+            return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                format!(
+                    "Queue attempt {} owns its pane write",
+                    request.queue_attempt_id.0
+                ),
+            ))));
+        }
         let record = AbandonmentRecord {
             abandonment_cause: AbandonmentCause::Owner(resolver),
             queue_resolution_reason: request.queue_resolution_reason.clone(),
@@ -1886,6 +1904,8 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let seat = nexus.seat_named(Subject::Named(flow_id.clone()))?;
+        use crate::repairing::KeepsActiveQueueWrites;
+        nexus.keep_active_queue_write(&seat.address)?;
         let node = match nexus.store.flow_node(&flow_id.0) {
             Ok(Some(node)) => node,
             Ok(None) => return Err(Output::Refused(Refused_Data::UnknownFlow(flow_id.clone()))),

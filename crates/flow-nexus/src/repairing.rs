@@ -6,6 +6,7 @@
 
 use crate::RunningNexus;
 use crate::herdr::{PaneRoute, ReadsHerdrPanes};
+use crate::queue_write_fence::CoordinatesQueueWrites;
 use crate::store::ReadsFlowRows;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::repair::RepairsMetaflows;
@@ -35,6 +36,29 @@ impl RefusesStore for RunningNexus {
     }
 }
 
+/// A binding-changing override must not strand a prepared cohort in
+/// another pane. The caller holds dispatch throughout the decision.
+pub(crate) trait KeepsActiveQueueWrites {
+    fn keep_active_queue_write(&self, address: &Address) -> Result<(), Output>;
+}
+
+impl KeepsActiveQueueWrites for RunningNexus {
+    fn keep_active_queue_write(&self, address: &Address) -> Result<(), Output> {
+        if let Some(attempt) = self
+            .store
+            .outstanding_delivery(address)
+            .map_err(Self::store_refused)?
+            && self.queue_writes.owns_attempt(&attempt.queue_attempt_id.0)
+        {
+            return Err(Self::store_refused(format!(
+                "Queue attempt {} owns its pane write",
+                attempt.queue_attempt_id.0
+            )));
+        }
+        Ok(())
+    }
+}
+
 impl RepairsFromMeta for RunningNexus {
     fn inspect(&self, address: Address) -> Output {
         match self.store.inspection(&address) {
@@ -48,6 +72,9 @@ impl RepairsFromMeta for RunningNexus {
 
     fn rebind(&self, rebind: Rebind_Data) -> Output {
         let Rebind_Data { address, rebinding } = rebind;
+        if let Err(refusal) = self.keep_active_queue_write(&address) {
+            return refusal;
+        }
         let rebound = match rebinding {
             Rebinding::Pane(herdr_pane_id) => {
                 let flow_id = match self.store.current_flow(&address) {
@@ -100,6 +127,12 @@ impl RepairsFromMeta for RunningNexus {
             address,
             logical_delivery_id,
         } = withdraw;
+        if self.queue_writes.owns_request(&logical_delivery_id.0) {
+            return Self::store_refused(format!(
+                "Queue delivery {} owns its pane write",
+                logical_delivery_id.0
+            ));
+        }
         match self.store.withdraw_queued(&address, &logical_delivery_id.0) {
             Ok(Ok(())) => {
                 eprintln!(

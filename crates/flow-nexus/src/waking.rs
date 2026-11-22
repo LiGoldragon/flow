@@ -1798,23 +1798,36 @@ impl SleepsAndWakesSeats for RunningNexus {
             let Ok(Some(node)) = self.store.flow_node(&flow_id.0) else {
                 return;
             };
-            if matches!(
-                self.herdr.pane_presence(&node),
-                PanePresence::Absent | PanePresence::Bare
-            ) {
+            let Some(lease) = self.waking.hold(address) else {
+                return;
+            };
+            let mut dispatch = QueueDispatch::new(&self.dispatch_gate, _turn);
+            let presence = dispatch.outside(|| self.herdr.pane_presence(&node));
+            if self.held()
+                || self.permaflow_held(address.clone())
+                || !matches!(self.store.flow_node(&flow_id.0), Ok(Some(current))
+                    if current.session_id == node.session_id
+                        && current.herdr_route_selection == node.herdr_route_selection)
+            {
+                return;
+            }
+            let Ok(Some(current)) = self.store.metaflow(address) else {
+                return;
+            };
+            if current.state != flow_ethos::State::Awake(flow_id.clone()) {
+                return;
+            }
+            if matches!(presence, PanePresence::Absent | PanePresence::Bare) {
                 let _ = self.perform(Operation::Record(Record_Data::Exited(flow_id)));
                 return;
             }
             // Pressing work is handed over now, the Soft work queued before
             // it included; the delivery engine interrupts only for
             // HardAbrupt. Soft work alone waits for the seat's idle event.
-            if self.waits_for_idle(&metaflow.queue.0, &flow_id.0) {
+            if self.waits_for_idle(&current.queue.0, &flow_id.0) {
                 return;
             }
-            if let Some(lease) = self.waking.hold(address) {
-                let mut dispatch = QueueDispatch::new(&self.dispatch_gate, _turn);
-                let _ = self.drain_all_held(address.clone(), &lease, Some(&mut dispatch));
-            }
+            let _ = self.drain_all_held(address.clone(), &lease, Some(&mut dispatch));
         }
         self.wake_deferred();
     }

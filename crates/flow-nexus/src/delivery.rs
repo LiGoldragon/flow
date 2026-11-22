@@ -228,7 +228,12 @@ enum DeliveryCustody<'delivery> {
     },
 }
 
-impl DeliveryCustody<'_> {
+trait OwnsPaneWrite {
+    fn lease(&self) -> Option<&WakingLease>;
+    fn reconciles_native_intake(&self, request: &DeliveryRequest, target: &DeliveryTarget) -> bool;
+}
+
+impl OwnsPaneWrite for DeliveryCustody<'_> {
     fn lease(&self) -> Option<&WakingLease> {
         match self {
             Self::Privileged(lease) => *lease,

@@ -285,7 +285,9 @@ impl DeliversMessages for RunningNexus {
                 Err(_) => return Output::CommandRejected(CommandRejection::NotDelivered),
             }
         }
-        let _lease = self.pane_leases.hold(&target.route);
+        let Some(_lease) = self.pane_leases.try_hold(&target.route) else {
+            return Output::CommandRejected(CommandRejection::RouteUnavailable);
+        };
         let agent_state = match self.writable_state(&target) {
             Ok(agent_state) => agent_state,
             Err(refusal) => return Output::CommandRejected(refusal.into()),

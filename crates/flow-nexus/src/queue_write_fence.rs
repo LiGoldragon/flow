@@ -17,6 +17,7 @@ struct QueueWriteState {
     reserved: usize,
     started: usize,
     attempts: HashSet<String>,
+    unstarted_attempts: HashSet<String>,
     requests: HashSet<String>,
 }
 
@@ -72,7 +73,8 @@ pub(crate) trait CoordinatesQueueWrites {
     fn owns_request(&self, id: &str) -> bool;
     fn transition(&self) -> MutexGuard<'_, ()>;
     fn reserve(&self) -> Option<QueueWrite<'_>>;
-    fn hold<Error>(&self, commit: impl FnOnce() -> Result<(), Error>) -> Result<(), Error>;
+    fn hold<Error>(&self, commit: impl FnOnce(&[String]) -> Result<(), Error>)
+    -> Result<(), Error>;
     fn resume(&self);
     fn settle_started(&self);
     fn settle_revoked(&self);
@@ -116,9 +118,14 @@ impl CoordinatesQueueWrites for QueueWriteFence {
     }
 
     /// Serialize the durable Hold decision with the first key or byte.
-    fn hold<Error>(&self, commit: impl FnOnce() -> Result<(), Error>) -> Result<(), Error> {
+    fn hold<Error>(
+        &self,
+        commit: impl FnOnce(&[String]) -> Result<(), Error>,
+    ) -> Result<(), Error> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        commit()?;
+        let mut unstarted = state.unstarted_attempts.iter().cloned().collect::<Vec<_>>();
+        unstarted.sort_unstable();
+        commit(&unstarted)?;
         state.held = true;
         state.generation = state.generation.wrapping_add(1);
         self.changed.notify_all();
@@ -170,6 +177,7 @@ impl HoldsQueueWrite for QueueWrite<'_> {
         debug_assert!(self.prepared.borrow().is_none());
         let inserted = state.attempts.insert(attempt.clone());
         debug_assert!(inserted);
+        state.unstarted_attempts.insert(attempt.clone());
         for request in &requests {
             let inserted = state.requests.insert(request.clone());
             debug_assert!(inserted);
@@ -188,6 +196,7 @@ impl HoldsQueueWrite for QueueWrite<'_> {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             state.attempts.remove(&prepared.attempt);
+            state.unstarted_attempts.remove(&prepared.attempt);
             for request in prepared.requests {
                 state.requests.remove(&request);
             }
@@ -208,6 +217,9 @@ impl HoldsQueueWrite for QueueWrite<'_> {
         if state.held || state.generation != self.generation {
             self.stage.set(QueueWriteStage::Revoked);
             return false;
+        }
+        if let Some(prepared) = self.prepared.borrow().as_ref() {
+            state.unstarted_attempts.remove(&prepared.attempt);
         }
         state.started += 1;
         self.stage.set(QueueWriteStage::Started);
@@ -259,7 +271,7 @@ mod tests {
         let not_started = fence.reserve().unwrap();
         assert!(first.start());
         assert!(second.start());
-        fence.hold(|| Ok::<_, ()>(())).unwrap();
+        fence.hold(|_| Ok::<_, ()>(())).unwrap();
         assert!(!not_started.start());
         assert!(not_started.revoked());
         assert!(fence.reserve().is_none());
@@ -335,7 +347,7 @@ mod tests {
                 let _transition = fence.transition();
                 {
                     let _turn = gate.lock().unwrap();
-                    fence.hold(|| Ok::<_, ()>(())).unwrap();
+                    fence.hold(|_| Ok::<_, ()>(())).unwrap();
                     hold_committed.send(()).unwrap();
                 }
                 fence.settle_started();
@@ -363,7 +375,7 @@ mod tests {
     fn a_refused_hold_does_not_revoke_prior_custody() {
         let fence = QueueWriteFence::default();
         let queued = fence.reserve().unwrap();
-        assert_eq!(fence.hold(|| Err("store refused")), Err("store refused"));
+        assert_eq!(fence.hold(|_| Err("store refused")), Err("store refused"));
         assert!(queued.start());
     }
 }

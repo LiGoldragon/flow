@@ -44,6 +44,7 @@ pub struct PaneLease<'leases> {
 /// Takes the exclusive hold on a pane, waiting while another write holds it.
 pub trait LeasesPanes {
     fn hold(&self, route: &HerdrRoute) -> PaneLease<'_>;
+    fn try_hold(&self, route: &HerdrRoute) -> Option<PaneLease<'_>>;
 }
 
 impl LeasesPanes for PaneLeases {
@@ -61,6 +62,16 @@ impl LeasesPanes for PaneLeases {
         }
         held.insert(pane.clone());
         PaneLease { leases: self, pane }
+    }
+
+    fn try_hold(&self, route: &HerdrRoute) -> Option<PaneLease<'_>> {
+        let pane = LeasedPane::from(route);
+        let mut held = self
+            .held
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        held.insert(pane.clone())
+            .then(|| PaneLease { leases: self, pane })
     }
 }
 
@@ -124,7 +135,11 @@ mod tests {
     #[test]
     fn a_held_pane_does_not_hold_another() {
         let leases = PaneLeases::default();
-        let _first = leases.hold(&route("w1:p1"));
-        let _second = leases.hold(&route("w1:p2"));
+        let first = leases.hold(&route("w1:p1"));
+        assert!(leases.try_hold(&route("w1:p1")).is_none());
+        let _second = leases.try_hold(&route("w1:p2")).expect("independent pane");
+        assert!(leases.try_hold(&route("w1:p1")).is_none());
+        drop(first);
+        assert!(leases.try_hold(&route("w1:p1")).is_some());
     }
 }

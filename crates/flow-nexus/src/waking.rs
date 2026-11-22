@@ -1439,6 +1439,18 @@ impl ReconcilesQueueDelivery for RunningNexus {
         if self.queue_writes.owns_attempt(&attempt.queue_attempt_id.0) {
             return Reconciled::Refused;
         }
+        let baseline = if dispatch.is_some() {
+            match self
+                .store
+                .queue_delivery_attempt(&attempt.queue_attempt_id.0)
+            {
+                Ok(Some(current)) => Some(current),
+                _ => return Reconciled::Refused,
+            }
+        } else {
+            None
+        };
+        let attempt = baseline.as_ref().unwrap_or(attempt);
         match &attempt.queue_delivery_phase {
             QueueDeliveryPhase::ReceiptRecorded(_) => {
                 return if self
@@ -3155,15 +3167,9 @@ impl DrainsHeldSeats for RunningNexus {
             let result = dispatch.outside(|| self.deliver_prepared_queue(request, lease, write));
             write.release_preparation();
             if write.revoked() {
-                return if self
-                    .store
-                    .revoke_prepared_delivery(&attempt.queue_attempt_id.0)
-                    .unwrap_or(false)
-                {
-                    Outcome::WaitingForTurn(oldest.logical_delivery_id)
-                } else {
-                    refused(drained, Failed_Data::StoreRefused)
-                };
+                // The Hold transaction already returned this attempt to
+                // its original logical queue before granting Held.
+                return Outcome::WaitingForTurn(oldest.logical_delivery_id);
             }
             result
         } else {

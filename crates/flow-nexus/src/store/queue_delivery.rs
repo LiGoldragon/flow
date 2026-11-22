@@ -51,6 +51,46 @@ impl CarriesLegacySender for Request {
     }
 }
 
+pub(super) trait StagesQueueRevocations {
+    fn stage_queue_revocations(
+        &self,
+        attempts: &[String],
+        commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError>;
+}
+
+impl StagesQueueRevocations for FlowStore {
+    fn stage_queue_revocations(
+        &self,
+        attempts: &[String],
+        mut commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError> {
+        use super::logical_delivery::StagesLogicalTransitions;
+        if attempts.is_empty() {
+            return Ok(commit);
+        }
+        let mut requests = Vec::with_capacity(attempts.len());
+        for id in attempts {
+            let Some(mut attempt) = self.queue_delivery_attempt(id)? else {
+                return Err(StoreError::StateInvariant);
+            };
+            if attempt.queue_delivery_phase != QueueDeliveryPhase::Prepared {
+                return Err(StoreError::StateInvariant);
+            }
+            let QueueEvidence::Logical(entry) = &attempt.queue_evidence else {
+                return Err(StoreError::StateInvariant);
+            };
+            requests.push(entry.logical_delivery_id.clone());
+            attempt.queue_delivery_phase = QueueDeliveryPhase::Absent(AbsenceRecord {
+                absence_proof: AbsenceProof::HandOverRefused,
+                observation: crate::generated::memory::Observation(Default::default()),
+            });
+            commit = self.commit_attempt(commit, attempt)?;
+        }
+        self.stage_logical_transitions(&requests, &[DeliveryState::Queued], commit)
+    }
+}
+
 trait CommitsAttemptState {
     fn commit_attempt_state(
         &self,
@@ -455,10 +495,6 @@ pub trait AccountsQueueDelivery {
         attempt_id: &str,
         absence: AbsenceRecord,
     ) -> Result<bool, StoreError>;
-
-    /// A prepared write was revoked before any pane key or input. Its
-    /// logical request returns to Queued without losing its identity.
-    fn revoke_prepared_delivery(&self, attempt_id: &str) -> Result<bool, StoreError>;
 
     /// The owner's resolution of one Uncertain attempt. Only Absent is
     /// actionable: it retains the request and authorises a retry. Delivered
@@ -1462,25 +1498,6 @@ impl AccountsQueueDelivery for FlowStore {
             DeliveryState::Retryable(RetryCause::HistoryAbsent),
             commit,
         )?;
-        Ok(true)
-    }
-
-    fn revoke_prepared_delivery(&self, attempt_id: &str) -> Result<bool, StoreError> {
-        let Some(mut attempt) = self.queue_delivery_attempt(attempt_id)? else {
-            return Ok(false);
-        };
-        if attempt.queue_delivery_phase != QueueDeliveryPhase::Prepared {
-            return Ok(false);
-        }
-        let evidence = attempt.queue_evidence.clone();
-        attempt.queue_delivery_phase = QueueDeliveryPhase::Absent(AbsenceRecord {
-            absence_proof: AbsenceProof::HandOverRefused,
-            observation: crate::generated::memory::Observation(
-                "Hold revoked write before input".into(),
-            ),
-        });
-        let commit = self.commit_attempt(self.engine.begin_atomic_commit(), attempt)?;
-        self.commit_attempt_state(&evidence, DeliveryState::Queued, commit)?;
         Ok(true)
     }
 

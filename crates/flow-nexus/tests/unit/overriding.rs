@@ -1533,6 +1533,7 @@ fn hold_answers_only_after_the_started_direct_writer_settles() {
 }
 
 fn queue_writer_crosses_hold_at(barrier: &str) {
+    use crate::DispatchesSerially;
     use crate::event_wait::AwaitsPath;
     use crate::fixture_executable::{FixtureExecutable, HoldsLatch, InstallsScript, Latch};
     use crate::sending::SendsRequests;
@@ -1544,6 +1545,11 @@ fn queue_writer_crosses_hold_at(barrier: &str) {
     let fixture = NexusFixture::new();
     resting_seat(&fixture);
     let recipient = address(Model::Sol);
+    let other = address(Model::Astra);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Astra, State::Asleep, vec![], vec![]));
     let marker = "queue write at Hold fence";
     let reaches = fixture.directory.path().join("queue-write-reached");
     let release = Latch::closed(fixture.directory.path().join("queue-write-release"));
@@ -1598,6 +1604,43 @@ fn queue_writer_crosses_hold_at(barrier: &str) {
             panic!("fixture did not reach {barrier}");
         }
         let queued = stored(fixture, Model::Sol).queue.0[0].clone();
+        if !awake_drain {
+            let (command_completed, command_reply) = channel();
+            scope.spawn(move || {
+                let reply = fixture.nexus.dispatch_meta_serially(
+                    meta::Input::Command(meta::CommandRequest {
+                        flow_id: seat_id(),
+                        harness_command_kind: meta::HarnessCommandKind::Interrupt,
+                    }),
+                    None,
+                );
+                command_completed.send(reply).unwrap();
+            });
+            let response = command_reply.recv_timeout(limit);
+            if !matches!(
+                response,
+                Ok(meta::Output::CommandRejected(
+                    meta::CommandRejection::RouteUnavailable
+                ))
+            ) {
+                release.release();
+                panic!("same-pane Command held the dispatcher or wrote: {response:?}");
+            }
+            let another = fixture.nexus.send_request(
+                signal_flow::SendRequest {
+                    address: other.clone(),
+                    sendable_message: super::sendable_message(Message::Soft(Request::Notice(
+                        "distinct recipient".into(),
+                    ))),
+                },
+                None,
+            );
+            assert!(matches!(
+                another.response,
+                signal_flow::Output::SendAccepted(_)
+            ));
+            assert_eq!(stored(fixture, Model::Astra).queue.0.len(), 1);
+        }
         let changes = fixture.nexus.store.launch_changes.clone();
         let seen = changes.current();
         scope.spawn(move || {
@@ -1609,7 +1652,17 @@ fn queue_writer_crosses_hold_at(barrier: &str) {
             && matches!(fixture.nexus.store.holding().unwrap(), Holding::Held(_));
         let response = if awake_drain {
             let answer = held.recv_timeout(limit);
+            // Read the durable Queued transition before the old writer
+            // can clean up; a restart after Held sees the same queue.
+            let at_held = fixture
+                .nexus
+                .store
+                .logical_delivery_snapshot(&queued.logical_delivery_id);
             release.release();
+            assert_eq!(
+                at_held.unwrap().unwrap().delivery_state,
+                signal_flow::DeliveryState::Queued,
+            );
             answer
         } else {
             let still_waiting = matches!(held.try_recv(), Err(TryRecvError::Empty));

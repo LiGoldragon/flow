@@ -2114,10 +2114,9 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
     // the cause Overridden.
     fn hold(&self) -> Result<(), meta_signal_flow::Output> {
         use crate::generated::memory::Moment;
-        use crate::generated::operation::{Operation, Outcome, Record_Data};
         use crate::generated::overriding::{HeedsOverrides, Holding};
-        use crate::performing::Performs;
         use crate::reminding::CountsUnixSeconds;
+        use crate::store::overriding::HoldsQueueWritesDurably;
         use meta_signal_flow::{Output, Refused_Data, StoreFailure};
         let nexus = self.nexus;
         let _transition = nexus.queue_writes.transition();
@@ -2127,15 +2126,14 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let moment = Moment(std::time::SystemTime::now().seconds_since_epoch());
-            nexus.queue_writes.hold(|| {
-                match nexus.perform(Operation::Record(Record_Data::Switched(Holding::Held(
-                    moment,
-                )))) {
-                    Outcome::Recorded => Ok(()),
-                    refused => Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
-                        format!("{refused:?}"),
-                    )))),
-                }
+            nexus.queue_writes.hold(|unstarted| {
+                nexus
+                    .store
+                    .switch_queue_writes(Holding::Held(moment), unstarted)
+                    .map(|_| ())
+                    .map_err(|error| {
+                        Output::Refused(Refused_Data::StoreRefused(StoreFailure(error.to_string())))
+                    })
             })?;
         }
         nexus.queue_writes.settle_started();

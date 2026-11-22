@@ -178,7 +178,22 @@ impl ReportsEvents for RunningNexus {
             .ok()
             .flatten()
             .map(Tokens);
-        match codex_report.codex_event(last) {
+        let event = match &codex_report {
+            // A current native rest also repairs a missing committed rest.
+            // Repeated evidence of a committed rest has no additional effect.
+            CodexReport::Stepped(step)
+                if step.after.0 == ThreadStanding::AtRest
+                    && step.before.0 == ThreadStanding::AtRest
+                    && matches!(
+                        self.store.state_of(AskedFlow(flow_id.clone())),
+                        Ok(Some(meta_signal_flow::State::Acting))
+                    ) =>
+            {
+                Some(Event::Idle(last.unwrap_or(Tokens(0))))
+            }
+            _ => codex_report.codex_event(last),
+        };
+        match event {
             Some(event) => self.report_event(ReportedEvent { flow_id, event }),
             None => false,
         }

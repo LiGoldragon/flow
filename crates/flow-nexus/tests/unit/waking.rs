@@ -698,6 +698,56 @@ fn a_held_soft_is_delivered_at_its_recipients_idle_event() {
     );
 }
 
+#[test]
+fn a_refused_claude_drain_is_retried_at_the_next_stop_of_its_session() {
+    let fixture = NexusFixture::new();
+    let (_caller, peer) = soft_recipient(&fixture, false);
+    for body in ["Oldest retained.", "Next retained."] {
+        assert!(matches!(
+            send_soft(&fixture, &peer, body),
+            signal_flow::Output::SendAccepted(_)
+        ));
+    }
+    let signal_flow::Event::Stopped(stop) = claude_stop(&fixture) else {
+        unreachable!("fixture is a Stop");
+    };
+    let session = stop.native_session_id_option.as_ref().unwrap();
+    assert!(matches!(
+        fixture.nexus.settle_native_rest(CLAUDE_SEAT, &session.0),
+        AtStop::Kept(KeptAtStop::NotResting(_))
+    ));
+    assert!(fixture.typed().is_none());
+    let retained = stored(&fixture, Model::Sol).queue.0;
+    assert_eq!(retained.len(), 2);
+
+    // The later native evidence is ready. A different session's rest can
+    // neither consume the retained queue nor start a replacement.
+    append_main_rows(&fixture, &[end_turn("rest-after-refusal")]);
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .settle_native_rest(CLAUDE_SEAT, "another-session"),
+        AtStop::Kept(KeptAtStop::OtherSession)
+    );
+    assert_eq!(stored(&fixture, Model::Sol).queue.0, retained);
+    assert!(fixture.typed().is_none());
+
+    fixture.nexus.after_report(
+        &flow_ethos::FlowId(CLAUDE_SEAT.into()),
+        &signal_flow::Event::Stopped(stop),
+    );
+    let payload = fixture.typed().expect("next bound Stop drains the queue");
+    for entry in &retained {
+        assert!(payload.contains(&entry.request_id.0));
+    }
+    assert!(payload.find("Oldest retained.").unwrap() < payload.find("Next retained.").unwrap());
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
+}
+
 /// Several Soft requests held during one turn are handed over together at
 /// its one idle event, oldest first.
 #[test]
@@ -8167,6 +8217,38 @@ fn a_cut_settles_a_resting_codex_seat_and_a_new_subscription_s_cut_again() {
     );
 }
 
+#[test]
+fn a_current_codex_cut_repairs_an_uncommitted_rest_for_its_bound_thread_only() {
+    use super::codex_turns::idle;
+    use crate::codex_turns::SettlesRestingCodexSeats;
+    use crate::generated::memory::Event;
+    use crate::generated::transitions::{ReportedEvent, ReportsEvents};
+    use crate::waking::HoldsSoftForIdle;
+    let fixture = NexusFixture::new();
+    let thread = codex_rest_seat(&fixture, None, vec![]);
+    maintain(&fixture, address(Model::Sol));
+    assert_eq!(
+        fixture.nexus.codex_events(&thread, vec![idle()]),
+        Some(AtStop::Idle)
+    );
+    assert!(fixture.nexus.report_event(ReportedEvent {
+        flow_id: signal_flow::FlowId("908786".into()),
+        event: Event::Working(signal_flow::Tokens(1)),
+    }));
+    assert!(!fixture.nexus.rests_now("908786"));
+    assert_eq!(
+        fixture.nexus.codex_events("another-thread", vec![idle()]),
+        None
+    );
+    assert!(!fixture.nexus.rests_now("908786"));
+    assert_eq!(
+        fixture.nexus.codex_events(&thread, vec![idle()]),
+        Some(AtStop::Idle)
+    );
+    assert!(fixture.nexus.rests_now("908786"));
+    assert_eq!(fixture.nexus.codex_events(&thread, vec![idle()]), None);
+}
+
 /// Every Herdr operation the fixture logged, in order.
 fn herdr_operations(fixture: &NexusFixture) -> String {
     fs::read_to_string(fixture.directory.path().join("herdr-operations.log")).unwrap_or_default()
@@ -8851,4 +8933,131 @@ fn a_push_of_a_queue_holding_an_order_wakes_its_asleep_permaflow() {
         .find("Deploy the build.")
         .unwrap_or_else(|| panic!("the Order is in the first prompt: {turns:?}"));
     assert!(notice < order, "oldest first: {first}");
+}
+
+#[test]
+fn a_pending_claude_rest_drains_on_its_herdr_idle() {
+    witness_pending_claude_rest("w1:p3", true);
+}
+
+#[test]
+fn herdr_idle_of_another_pane_leaves_a_pending_claude_queue_intact() {
+    witness_pending_claude_rest("other:p9", false);
+}
+
+fn witness_pending_claude_rest(event_pane: &str, delivered: bool) {
+    use crate::StopsNexus;
+    use crate::event_wait::{AwaitsDescriptors, AwaitsPath};
+    use crate::fixture_executable::{FixtureExecutable, InstallsScript};
+    use crate::rest_watching::ServesRestObservations;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::os::fd::AsFd;
+    use std::os::unix::net::UnixListener;
+    use std::time::{Duration, Instant};
+
+    let fixture = NexusFixture::new();
+    let (_caller, peer) = soft_recipient(&fixture, false);
+    for body in ["First deferred rest.", "Second deferred rest."] {
+        assert!(matches!(
+            send_soft(&fixture, &peer, body),
+            signal_flow::Output::SendAccepted(_)
+        ));
+    }
+    let rest = claude_stop(&fixture);
+    fixture
+        .nexus
+        .after_report(&flow_ethos::FlowId(CLAUDE_SEAT.into()), &rest);
+    let retained = stored(&fixture, Model::Sol).queue.0;
+    assert_eq!(
+        retained.len(),
+        2,
+        "the Stop did not drain while Herdr was working"
+    );
+    assert!(fixture.typed().is_none());
+    let rest_session = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
+    let HerdrRouteSelection::Available(route) = rest_session.herdr_route_selection else {
+        panic!("fixture has a bound route");
+    };
+
+    let socket = fixture.directory.path().join("pending-rest.sock");
+    let server = UnixListener::bind(&socket).unwrap();
+    fixture.list_herdr_sessions(&[(&route.herdr_session_name.0, socket)]);
+    let opening_read = fixture.directory.path().join("pending-rest-opening-read");
+    let script = fs::read_to_string(&fixture.snapshot_program).unwrap();
+    let changed = script.replace(
+        "\"api snapshot\") printf",
+        &format!(
+            "\"api snapshot\") touch '{}'; printf",
+            opening_read.display()
+        ),
+    );
+    assert_ne!(changed, script);
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&changed);
+
+    std::thread::scope(|scope| {
+        let observer = scope.spawn(|| fixture.nexus.serve_rest_observations(scope));
+        let outcome = || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            assert!(
+                [server.as_fd()].ready(Some(deadline)).unwrap()[0],
+                "observer connected"
+            );
+            let (mut stream, _) = server.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut request = String::new();
+            BufReader::new(&stream).read_line(&mut request).unwrap();
+            assert!(request.contains("pane.agent_status_changed") && request.contains("w1:p3"));
+            writeln!(stream, r#"{{"result":{{"type":"subscription_started"}}}}"#).unwrap();
+            assert!(
+                opening_read.as_path().appeared_by(deadline),
+                "subscription precedes the opening readback"
+            );
+            // The opening read runs the Working snapshot. After that, make
+            // the target writable even in the foreign-pane case, to make
+            // the addressed readiness event the only distinguishing input.
+            fixture.accept_pane_operations(
+                vec![claude_agent(&fixture)],
+                PromptFixture::Prompted("w1:p3"),
+            );
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({
+                    "event": "pane_agent_status_changed",
+                    "data": { "pane_id": event_pane, "agent_status": "idle" }
+                })
+            )
+            .unwrap();
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut eof = Vec::new();
+            stream
+                .read_to_end(&mut eof)
+                .expect("observer closed its stream");
+            assert!(eof.is_empty());
+            let queue = stored(&fixture, Model::Sol).queue.0;
+            if delivered {
+                let typed = fixture.typed().expect("retained FIFO was typed");
+                assert!(
+                    typed.find("First deferred rest.").unwrap()
+                        < typed.find("Second deferred rest.").unwrap()
+                );
+                for entry in &retained {
+                    assert!(typed.contains(&entry.request_id.0));
+                }
+                assert!(queue.is_empty());
+            } else {
+                assert_eq!(queue, retained);
+                assert!(fixture.typed().is_none());
+            }
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(outcome));
+        fixture.nexus.stop(&[]);
+        observer.join().unwrap();
+        result.unwrap();
+    });
 }

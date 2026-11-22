@@ -561,6 +561,45 @@ fn responding<T>(
 }
 
 #[test]
+fn a_turn_completed_between_resume_and_terminal_list_commits_as_resting() {
+    use crate::codex_turns::TracksCodexTurns;
+    use crate::generated::turn_ledger::ThreadStanding;
+    let mut fixture = NexusFixture::new();
+    let fake = FakeAppServer::install(vec![FakeConnection {
+        requests: Vec::new(),
+        closes: false,
+        running: Some(TURN.into()),
+    }]);
+    let frames = [
+        serde_json::json!({ "id": 1, "result": {} }),
+        serde_json::json!({ "id": 2, "result": {
+            "thread": { "id": THREAD_A },
+            "initialTurnsPage": { "data": [{
+                "id": TURN, "status": "inProgress", "items": []
+            }] }
+        } }),
+        serde_json::json!({ "method": "turn/completed", "params": {
+            "threadId": THREAD_A, "turn": { "id": TURN, "status": "completed" }
+        } }),
+        serde_json::json!({ "id": 9, "method": "item/tool/call", "params": {} }),
+        serde_json::json!({ "id": 3, "result": { "data": [] } }),
+    ]
+    .iter()
+    .map(frame)
+    .collect::<String>();
+    std::fs::write(fake.directory.path().join("frames-2"), frames).unwrap();
+    let adapter = fixture.adapter("gpt-sol", &fake);
+    responding(&fixture, THREAD_A, &adapter, || {
+        let acknowledged = fake.written_on(2, |value| value["id"] == 9);
+        assert!(acknowledged.iter().any(|value| value["id"] == 9));
+        assert_eq!(
+            fixture.nexus.codex_turns.standing(THREAD_A),
+            ThreadStanding::AtRest
+        );
+    });
+}
+
+#[test]
 fn two_threads_are_each_attributed_to_their_own_metaflow() {
     let mut fixture = NexusFixture::new();
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
@@ -2558,6 +2597,97 @@ fn a_codex_turn_a_crash_left_unacknowledged_is_found_in_thread_history() {
             .any(|m| m["method"] == "thread/turns/list" && m["params"]["itemsView"] == "full"),
         "{reads:?}"
     );
+}
+
+#[test]
+fn a_native_letter_event_settles_the_parked_attempt_without_resubmission() {
+    use crate::codex_turns::SettlesRestingCodexSeats;
+    use crate::composition::RendersQueuedWork;
+    use crate::generated::turn_ledger::{
+        CodexItemId, CodexTurnId, LedgerEvent, PayloadText, SeenLetter,
+    };
+    use crate::store::logical_delivery::RecordsLogicalDeliveries;
+    use crate::store::queue_delivery::AccountsQueueDelivery;
+
+    let mut fixture = NexusFixture::new();
+    let first = from_core(Request::Order("Use the bound native receipt.".into()));
+    fixture.awake_codex_seat(vec![first.clone()]);
+    let fake = FakeAppServer::install(vec![]);
+    fixture.adapter("gpt-sol", &fake);
+    fixture.nexus.codex_events(
+        SEAT_THREAD,
+        vec![LedgerEvent::TurnOpened(CodexTurnId("turn-queued".into()))],
+    );
+    crashed_before_receipt(&fixture);
+    let store = &fixture.nexus.store;
+    let attempt = store.outstanding_delivery(&seat_at()).unwrap().unwrap();
+    assert!(
+        store
+            .park_uncertain_delivery(&attempt.queue_attempt_id.0)
+            .unwrap()
+    );
+    let entry = queue_entry("seat-0", first);
+    let text = [entry.clone()].prompt_text(&seat_at());
+    let id = entry.logical_delivery_id;
+    let notify = |item: &str| {
+        LedgerEvent::LetterSeen(SeenLetter {
+            codex_turn_id: CodexTurnId("turn-queued".into()),
+            codex_item_id: CodexItemId(item.into()),
+            payload_text: PayloadText(text.clone()),
+        })
+    };
+    let before = store.logical_delivery_snapshot(&id).unwrap().unwrap();
+    assert_eq!(before.delivery_state, signal_flow::DeliveryState::Uncertain);
+    fixture
+        .nexus
+        .codex_events("another-thread", vec![notify("foreign")]);
+    assert_eq!(
+        store.logical_delivery_snapshot(&id).unwrap(),
+        Some(before.clone())
+    );
+    assert_eq!(fake.runs(), 0);
+
+    let ambiguous = |id: &str| history_turn(id, "inProgress", Some(&text));
+    fake.serve_turn_history(
+        1,
+        SEAT_THREAD,
+        false,
+        vec![
+            ambiguous("turn-queued"),
+            ambiguous("other-turn"),
+            history_turn("turn-before", "completed", None),
+        ],
+    );
+    fixture
+        .nexus
+        .codex_events(SEAT_THREAD, vec![notify("ambiguous")]);
+    assert_eq!(store.logical_delivery_snapshot(&id).unwrap(), Some(before));
+    fake.serve_turn_history(
+        2,
+        SEAT_THREAD,
+        false,
+        vec![
+            ambiguous("turn-queued"),
+            history_turn("turn-before", "completed", None),
+        ],
+    );
+    fixture
+        .nexus
+        .codex_events(SEAT_THREAD, vec![notify("received")]);
+    let delivered = store.logical_delivery_snapshot(&id).unwrap().unwrap();
+    let signal_flow::DeliveryState::Delivered(receipt) = &delivered.delivery_state else {
+        panic!("the exact native receipt settles the parked attempt: {delivered:?}")
+    };
+    assert_eq!(receipt.native_prompt_id.0, "turn-queued");
+    assert_eq!(receipt.native_session_id.0, SEAT_THREAD);
+    fixture
+        .nexus
+        .codex_events(SEAT_THREAD, vec![notify("received")]);
+    assert_eq!(
+        store.logical_delivery_snapshot(&id).unwrap(),
+        Some(delivered)
+    );
+    assert!(fake.queued_turn_texts().is_empty());
 }
 
 /// The thread is idle but no native user-message receipt identifies the

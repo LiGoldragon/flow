@@ -236,12 +236,12 @@ pub(crate) enum PaneEvent {
 
 /// The observed pane's stream: Herdr's events of it, waited on with its
 /// connection's cancellation.
-struct PaneEvents {
+pub(crate) struct PaneEvents {
     pane_id: String,
     events: HerdrEvents,
 }
 
-trait ReadsPaneEvents: Sized {
+pub(crate) trait ReadsPaneEvents: Sized {
     fn subscribe(
         socket: &std::path::Path,
         pane_id: &str,

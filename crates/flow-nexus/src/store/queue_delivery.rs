@@ -1476,7 +1476,7 @@ impl AccountsQueueDelivery for FlowStore {
         }
         let evidence = attempt.queue_evidence.clone();
         attempt.queue_delivery_phase = QueueDeliveryPhase::Absent(AbsenceRecord {
-            absence_proof: AbsenceProof::HandOverRefused,
+            absence_proof: crate::generated::memory::AbsenceProof::HandOverRefused,
             observation: crate::generated::memory::Observation(
                 "Hold revoked write before input".into(),
             ),
@@ -2322,7 +2322,7 @@ mod tests {
                 .mark_delivery_absent(
                     &old_id,
                     AbsenceRecord {
-                        absence_proof: AbsenceProof::HandOverRefused,
+                        absence_proof: crate::generated::memory::AbsenceProof::HandOverRefused,
                         observation: crate::generated::memory::Observation(
                             "fixture transport refused before native I/O".into()
                         ),

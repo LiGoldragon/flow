@@ -26,6 +26,7 @@ use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::herdr::launch::ConstructsHarnessCommand;
 use crate::launching::ReadsHarnessArguments;
 use crate::performing::Performs;
+use crate::queue_write_fence::LendsQueueDispatch;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::effort_configuration::ReadsEffort;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;

@@ -123,6 +123,7 @@ use observe_sends::ObservesLogicalSends;
 use peer::{NamesMetaPeer, ResolvesPeer};
 use performing::Performs;
 use queue_operations::OperatesOnRequestsAndQueues;
+use queue_write_fence::CoordinatesQueueWrites;
 use reporting::RecordsReports;
 use send_tool::ServesLaunchCalls;
 use sending::{BindsSeats, LaunchesDeclared, RehearsesDeclared, SendsRequests};

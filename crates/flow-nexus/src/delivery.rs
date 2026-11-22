@@ -23,6 +23,7 @@
 //! bounded wait.
 
 use crate::delivery::body::ShowsPaneText;
+use crate::queue_write_fence::HoldsQueueWrite;
 pub mod body;
 pub mod lease;
 

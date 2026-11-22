@@ -9,6 +9,7 @@
 
 use crate::RunningNexus;
 use crate::caller::ResolvesEndedCaller;
+use crate::queue_write_fence::CoordinatesQueueWrites;
 use crate::store::closed_request::{
     Closer, MarksEndedReminder, RecordsClosedRequests, RequestEnding,
 };

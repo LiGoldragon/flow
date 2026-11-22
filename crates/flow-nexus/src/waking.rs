@@ -116,7 +116,9 @@ use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes};
 use crate::launching::LaunchesFlows;
 use crate::live::HoldsLiveValue;
 use crate::performing::Performs;
-use crate::queue_write_fence::QueueDispatch;
+use crate::queue_write_fence::{
+    CoordinatesQueueWrites, HoldsQueueWrite, LendsQueueDispatch, QueueDispatch,
+};
 use crate::request_waking::HoldsWakingRequest;
 use crate::send_tool::ServesLaunchCalls;
 use crate::store::NamesConfiguredModel;

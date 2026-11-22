@@ -1519,3 +1519,128 @@ fn a_parked_prompt_fingerprint_conflict_is_terminal_without_a_profile_conflict()
     );
     assert_eq!(world.claude_starts(), 0, "{}", world.calls());
 }
+
+/// A FIFO stops the actual Herdr adapter immediately before, or immediately
+/// after, the queue writer crosses its first-input boundary.
+#[test]
+fn hold_revokes_the_prepared_awake_write_and_resume_keeps_its_id() {
+    queue_writer_crosses_hold_at("agent read");
+}
+
+#[test]
+fn hold_answers_only_after_the_started_direct_writer_settles() {
+    queue_writer_crosses_hold_at("agent prompt");
+}
+
+fn queue_writer_crosses_hold_at(barrier: &str) {
+    use crate::event_wait::AwaitsPath;
+    use crate::fixture_executable::{FixtureExecutable, HoldsLatch, InstallsScript, Latch};
+    use crate::sending::SendsRequests;
+    use crate::store::AnnouncesLaunchChanges;
+    use std::fs;
+    use std::sync::mpsc::{TryRecvError, channel};
+    use std::time::{Duration, Instant};
+
+    let fixture = NexusFixture::new();
+    resting_seat(&fixture);
+    let recipient = address(Model::Sol);
+    let marker = "queue write at Hold fence";
+    let reaches = fixture.directory.path().join("queue-write-reached");
+    let release = Latch::closed(fixture.directory.path().join("queue-write-release"));
+    let script = fs::read_to_string(&fixture.snapshot_program).unwrap();
+    let arm = format!("\"{barrier}\") ");
+    assert!(script.contains(&arm));
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&script.replacen(
+        &arm,
+        &format!(
+            "{arm} if [ ! -e '{}' ]; then : > '{}'; : < '{}'; fi; ",
+            reaches.display(),
+            reaches.display(),
+            release.path.display(),
+        ),
+        1,
+    ));
+    let awake_drain = barrier == "agent read";
+    if awake_drain {
+        queue_order(&fixture, marker);
+    }
+    let (answers, held) = channel();
+    let limit = Duration::from_secs(15);
+    std::thread::scope(|scope| {
+        let recipient = &recipient;
+        let fixture = &fixture;
+        let writer = scope.spawn(move || {
+            if awake_drain {
+                fixture.nexus.drain_awake(recipient);
+                None
+            } else {
+                Some(
+                    fixture
+                        .nexus
+                        .send_request(
+                            signal_flow::SendRequest {
+                                address: recipient.clone(),
+                                sendable_message: super::sendable_message(Message::MiddleAbrupt(
+                                    Request::Order(marker.into()),
+                                )),
+                            },
+                            None,
+                        )
+                        .response,
+                )
+            }
+        });
+        if !reaches.appeared_by(Instant::now() + limit) {
+            release.release();
+            panic!("fixture did not reach {barrier}");
+        }
+        let queued = stored(fixture, Model::Sol).queue.0[0].clone();
+        let changes = fixture.nexus.store.launch_changes.clone();
+        let seen = changes.current();
+        scope.spawn(move || {
+            answers
+                .send(overridden(fixture, meta::Input::Hold))
+                .unwrap();
+        });
+        let committed = changes.until(seen, Instant::now() + limit)
+            && matches!(fixture.nexus.store.holding().unwrap(), Holding::Held(_));
+        let response = if awake_drain {
+            let answer = held.recv_timeout(limit);
+            release.release();
+            answer
+        } else {
+            let still_waiting = matches!(held.try_recv(), Err(TryRecvError::Empty));
+            release.release();
+            assert!(still_waiting, "started writer outlived Held reply");
+            held.recv_timeout(limit)
+        };
+        assert!(committed, "Hold did not commit while the pane was barred");
+        assert_eq!(response.unwrap(), meta::Output::Held);
+        let _ = writer.join().unwrap();
+        let log = fixture.directory.path().join("herdr-operations.log");
+        if awake_drain {
+            assert!(super::prompts(&log).is_empty());
+            assert_eq!(stored(fixture, Model::Sol).queue.0, vec![queued.clone()]);
+            assert_eq!(
+                fixture
+                    .nexus
+                    .store
+                    .logical_delivery_snapshot(&queued.logical_delivery_id)
+                    .unwrap()
+                    .unwrap()
+                    .delivery_state,
+                signal_flow::DeliveryState::Queued,
+            );
+            assert_eq!(
+                overridden(fixture, meta::Input::Resume),
+                meta::Output::Resumed
+            );
+        }
+        let prompts = super::prompts(&log);
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        assert!(prompts[0].contains(&queued.request_id.0), "{prompts:?}");
+    });
+}

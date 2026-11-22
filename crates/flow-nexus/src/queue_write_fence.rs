@@ -46,15 +46,20 @@ pub(crate) struct QueueDispatch<'gate> {
     turn: Option<MutexGuard<'gate, ()>>,
 }
 
-impl<'gate> QueueDispatch<'gate> {
-    pub(crate) fn new(gate: &'gate Mutex<()>, turn: MutexGuard<'gate, ()>) -> Self {
+pub(crate) trait LendsQueueDispatch<'gate>: Sized {
+    fn new(gate: &'gate Mutex<()>, turn: MutexGuard<'gate, ()>) -> Self;
+    fn outside<Result>(&mut self, effect: impl FnOnce() -> Result) -> Result;
+}
+
+impl<'gate> LendsQueueDispatch<'gate> for QueueDispatch<'gate> {
+    fn new(gate: &'gate Mutex<()>, turn: MutexGuard<'gate, ()>) -> Self {
         Self {
             gate,
             turn: Some(turn),
         }
     }
 
-    pub(crate) fn outside<Result>(&mut self, effect: impl FnOnce() -> Result) -> Result {
+    fn outside<Result>(&mut self, effect: impl FnOnce() -> Result) -> Result {
         drop(self.turn.take());
         let result = effect();
         self.turn = Some(self.gate.lock().unwrap_or_else(|error| error.into_inner()));
@@ -62,8 +67,19 @@ impl<'gate> QueueDispatch<'gate> {
     }
 }
 
-impl QueueWriteFence {
-    pub(crate) fn owns_attempt(&self, id: &str) -> bool {
+pub(crate) trait CoordinatesQueueWrites {
+    fn owns_attempt(&self, id: &str) -> bool;
+    fn owns_request(&self, id: &str) -> bool;
+    fn transition(&self) -> MutexGuard<'_, ()>;
+    fn reserve(&self) -> Option<QueueWrite<'_>>;
+    fn hold<Error>(&self, commit: impl FnOnce() -> Result<(), Error>) -> Result<(), Error>;
+    fn resume(&self);
+    fn settle_started(&self);
+    fn settle_revoked(&self);
+}
+
+impl CoordinatesQueueWrites for QueueWriteFence {
+    fn owns_attempt(&self, id: &str) -> bool {
         self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -71,7 +87,7 @@ impl QueueWriteFence {
             .contains(id)
     }
 
-    pub(crate) fn owns_request(&self, id: &str) -> bool {
+    fn owns_request(&self, id: &str) -> bool {
         self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -79,13 +95,13 @@ impl QueueWriteFence {
             .contains(id)
     }
 
-    pub(crate) fn transition(&self) -> MutexGuard<'_, ()> {
+    fn transition(&self) -> MutexGuard<'_, ()> {
         self.transitions
             .lock()
             .unwrap_or_else(|error| error.into_inner())
     }
 
-    pub(crate) fn reserve(&self) -> Option<QueueWrite<'_>> {
+    fn reserve(&self) -> Option<QueueWrite<'_>> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.held {
             return None;
@@ -100,10 +116,7 @@ impl QueueWriteFence {
     }
 
     /// Serialize the durable Hold decision with the first key or byte.
-    pub(crate) fn hold<Error>(
-        &self,
-        commit: impl FnOnce() -> Result<(), Error>,
-    ) -> Result<(), Error> {
+    fn hold<Error>(&self, commit: impl FnOnce() -> Result<(), Error>) -> Result<(), Error> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         commit()?;
         state.held = true;
@@ -114,12 +127,12 @@ impl QueueWriteFence {
 
     /// The caller has made the new Acting state durable and all revoked
     /// preparations have released their reservations.
-    pub(crate) fn resume(&self) {
+    fn resume(&self) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.held = false;
     }
 
-    pub(crate) fn settle_started(&self) {
+    fn settle_started(&self) {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         drop(
             self.changed
@@ -130,7 +143,7 @@ impl QueueWriteFence {
 
     /// Before a held Nexus resumes its backlog, revoked preparations must
     /// have returned their queued work. The dispatch gate is free meanwhile.
-    pub(crate) fn settle_revoked(&self) {
+    fn settle_revoked(&self) {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         drop(
             self.changed
@@ -140,8 +153,15 @@ impl QueueWriteFence {
     }
 }
 
-impl QueueWrite<'_> {
-    pub(crate) fn prepared(&self, attempt: String, requests: Vec<String>) {
+pub(crate) trait HoldsQueueWrite {
+    fn prepared(&self, attempt: String, requests: Vec<String>);
+    fn release_preparation(&self);
+    fn start(&self) -> bool;
+    fn revoked(&self) -> bool;
+}
+
+impl HoldsQueueWrite for QueueWrite<'_> {
+    fn prepared(&self, attempt: String, requests: Vec<String>) {
         let mut state = self
             .fence
             .state
@@ -160,7 +180,7 @@ impl QueueWrite<'_> {
     /// Native observation can resume as soon as the pane has returned and
     /// this writer is back under the dispatch gate. Hold still waits on
     /// the writer itself through the attempt's disposition.
-    pub(crate) fn release_preparation(&self) {
+    fn release_preparation(&self) {
         if let Some(prepared) = self.prepared.borrow_mut().take() {
             let mut state = self
                 .fence
@@ -174,7 +194,7 @@ impl QueueWrite<'_> {
         }
     }
 
-    pub(crate) fn start(&self) -> bool {
+    fn start(&self) -> bool {
         match self.stage.get() {
             QueueWriteStage::Started => return true,
             QueueWriteStage::Revoked => return false,
@@ -194,7 +214,7 @@ impl QueueWrite<'_> {
         true
     }
 
-    pub(crate) fn revoked(&self) -> bool {
+    fn revoked(&self) -> bool {
         match self.stage.get() {
             QueueWriteStage::Started => false,
             QueueWriteStage::Revoked => true,

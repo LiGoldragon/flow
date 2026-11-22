@@ -222,7 +222,6 @@ impl ReadsLeasedPane for RunningNexus {
 pub trait DeliversMessages {
     fn deliver(&self, request: DeliveryRequest) -> Output;
     fn deliver_while_waking(&self, request: DeliveryRequest, lease: &WakingLease) -> Output;
-    fn deliver_inner(&self, request: DeliveryRequest, lease: Option<&WakingLease>) -> Output;
     fn vet(&self, request: &DeliveryRequest) -> Output;
     fn command(&self, request: CommandRequest) -> Output;
 }
@@ -251,79 +250,11 @@ impl DeliversMessages for RunningNexus {
             Ok(None) => None,
             Err(_) => return Output::DeliveryRejected(DeliveryRejection::PersistenceRefused),
         };
-        self.deliver_inner(request, lease.as_ref())
+        self.deliver_inner(request, lease.as_ref(), None)
     }
 
     fn deliver_while_waking(&self, request: DeliveryRequest, lease: &WakingLease) -> Output {
-        self.deliver_inner(request, Some(lease))
-    }
-
-    fn deliver_inner(&self, request: DeliveryRequest, lease: Option<&WakingLease>) -> Output {
-        match self.store.delivery(&request.delivery_id.0) {
-            Ok(Some(delivery)) => {
-                return Output::MessageTyped(
-                    crate::message_projection::ProjectsDelivery::visible_delivery(&delivery),
-                );
-            }
-            Ok(None) => {}
-            Err(_) => {
-                return Output::DeliveryRejected(DeliveryRejection::PersistenceRefused);
-            }
-        }
-        // A restart holds the flow: nothing is typed into a pane it is
-        // closing or opening.
-        match crate::store::restart::RecordsRestarts::restart_record(
-            &*self.store,
-            &request.flow_id.0,
-        ) {
-            Ok(None) => {}
-            Ok(Some(_)) => return Output::DeliveryRejected(DeliveryRejection::RouteUnavailable),
-            Err(_) => {
-                return Output::DeliveryRejected(DeliveryRejection::PersistenceRefused);
-            }
-        }
-        let target = match self.delivery_target(&request.flow_id.0) {
-            Ok(target) => target,
-            Err(refusal) => return Output::DeliveryRejected(refusal.into()),
-        };
-        let metaflow = match crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(
-            &*self.store,
-            &request.flow_id.0,
-        ) {
-            Ok(metaflow) => metaflow,
-            Err(_) => return Output::DeliveryRejected(DeliveryRejection::PersistenceRefused),
-        };
-        match (lease, metaflow) {
-            (Some(_), None) => {
-                // A binding disappearing after custody was acquired is a
-                // failed revalidation, never an unbound delivery.
-                return Output::DeliveryRejected(DeliveryRejection::RouteUnavailable);
-            }
-            (None, None) => {}
-            (Some(lease), Some(metaflow)) => {
-                if !lease.owned_by(&self.waking)
-                    || lease.address() != &metaflow.address
-                    || !matches!(metaflow.state, flow_ethos::State::Awake(ref id) if id == &request.flow_id)
-                {
-                    return Output::DeliveryRejected(DeliveryRejection::RouteUnavailable);
-                }
-            }
-            (None, Some(_)) => {
-                // A binding appearing after the unbound read is also a
-                // failed revalidation: custody must precede the target.
-                return Output::DeliveryRejected(DeliveryRejection::RouteUnavailable);
-            }
-        }
-        if let Some(refusal) = request.message.refusal(&target.profile) {
-            return Output::DeliveryRejected(DeliveryRejection::BodyRefused(refusal));
-        }
-        let _lease = self.pane_leases.hold(&target.route);
-        match LeasedDelivery::new(self, &request, &target).run() {
-            Ok(delivery) => Output::MessageTyped(
-                crate::message_projection::ProjectsDelivery::visible_delivery(&delivery),
-            ),
-            Err(rejection) => Output::DeliveryRejected(rejection),
-        }
+        self.deliver_inner(request, Some(lease), None)
     }
 
     fn vet(&self, request: &DeliveryRequest) -> Output {
@@ -398,6 +329,105 @@ impl DeliversMessages for RunningNexus {
     }
 }
 
+pub(crate) trait DeliversPreparedQueue {
+    fn deliver_prepared_queue(
+        &self,
+        request: DeliveryRequest,
+        lease: &WakingLease,
+        write: &crate::queue_write_fence::QueueWrite<'_>,
+    ) -> Output;
+    fn deliver_inner(
+        &self,
+        request: DeliveryRequest,
+        lease: Option<&WakingLease>,
+        write: Option<&crate::queue_write_fence::QueueWrite<'_>>,
+    ) -> Output;
+}
+
+impl DeliversPreparedQueue for RunningNexus {
+    fn deliver_prepared_queue(
+        &self,
+        request: DeliveryRequest,
+        lease: &WakingLease,
+        write: &crate::queue_write_fence::QueueWrite<'_>,
+    ) -> Output {
+        self.deliver_inner(request, Some(lease), Some(write))
+    }
+
+    fn deliver_inner(
+        &self,
+        request: DeliveryRequest,
+        lease: Option<&WakingLease>,
+        write: Option<&crate::queue_write_fence::QueueWrite<'_>>,
+    ) -> Output {
+        match self.store.delivery(&request.delivery_id.0) {
+            Ok(Some(delivery)) => {
+                return Output::MessageTyped(
+                    crate::message_projection::ProjectsDelivery::visible_delivery(&delivery),
+                );
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return Output::DeliveryRejected(DeliveryRejection::PersistenceRefused);
+            }
+        }
+        // A restart holds the flow: nothing is typed into a pane it is
+        // closing or opening.
+        match crate::store::restart::RecordsRestarts::restart_record(
+            &*self.store,
+            &request.flow_id.0,
+        ) {
+            Ok(None) => {}
+            Ok(Some(_)) => return Output::DeliveryRejected(DeliveryRejection::RouteUnavailable),
+            Err(_) => {
+                return Output::DeliveryRejected(DeliveryRejection::PersistenceRefused);
+            }
+        }
+        let target = match self.delivery_target(&request.flow_id.0) {
+            Ok(target) => target,
+            Err(refusal) => return Output::DeliveryRejected(refusal.into()),
+        };
+        let metaflow = match crate::store::metaflow::SleepsMetaflows::metaflow_awake_as(
+            &*self.store,
+            &request.flow_id.0,
+        ) {
+            Ok(metaflow) => metaflow,
+            Err(_) => return Output::DeliveryRejected(DeliveryRejection::PersistenceRefused),
+        };
+        match (lease, metaflow) {
+            (Some(_), None) => {
+                // A binding disappearing after custody was acquired is a
+                // failed revalidation, never an unbound delivery.
+                return Output::DeliveryRejected(DeliveryRejection::RouteUnavailable);
+            }
+            (None, None) => {}
+            (Some(lease), Some(metaflow)) => {
+                if !lease.owned_by(&self.waking)
+                    || lease.address() != &metaflow.address
+                    || !matches!(metaflow.state, flow_ethos::State::Awake(ref id) if id == &request.flow_id)
+                {
+                    return Output::DeliveryRejected(DeliveryRejection::RouteUnavailable);
+                }
+            }
+            (None, Some(_)) => {
+                // A binding appearing after the unbound read is also a
+                // failed revalidation: custody must precede the target.
+                return Output::DeliveryRejected(DeliveryRejection::RouteUnavailable);
+            }
+        }
+        if let Some(refusal) = request.message.refusal(&target.profile) {
+            return Output::DeliveryRejected(DeliveryRejection::BodyRefused(refusal));
+        }
+        let _lease = self.pane_leases.hold(&target.route);
+        match LeasedDelivery::new(self, &request, &target).run(write) {
+            Ok(delivery) => Output::MessageTyped(
+                crate::message_projection::ProjectsDelivery::visible_delivery(&delivery),
+            ),
+            Err(rejection) => Output::DeliveryRejected(rejection),
+        }
+    }
+}
+
 /// What became of a placed letter in the composer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Submitted {
@@ -469,7 +499,10 @@ trait RunsLeasedDelivery<'run> {
     /// interrupt cancelled, which its writer had already submitted. It is
     /// never deleted; the letter follows it.
     fn resubmitted_cancelled_prompt(&self) -> bool;
-    fn run(&self) -> Result<Delivery, DeliveryRejection>;
+    fn run(
+        &self,
+        write: Option<&crate::queue_write_fence::QueueWrite<'_>>,
+    ) -> Result<Delivery, DeliveryRejection>;
 }
 
 impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
@@ -629,7 +662,10 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
                 || herdr.composer_now(route, harness_kind) == Submission::Seen)
     }
 
-    fn run(&self) -> Result<Delivery, DeliveryRejection> {
+    fn run(
+        &self,
+        write: Option<&crate::queue_write_fence::QueueWrite<'_>>,
+    ) -> Result<Delivery, DeliveryRejection> {
         let hard = matches!(self.request.message, Message::HardAbrupt(_));
         // A hard delivery reads the composer before it presses any key. A
         // text there that is not Flow's own letter refuses it untouched: an
@@ -666,6 +702,9 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         self.step(LeaseStep::Acquired)?;
         let mut interrupt_witness = InterruptWitness::NotRequested;
         if hard && agent_state == AgentState::Working {
+            if write.is_some_and(|write| !write.start()) {
+                return self.refuse(DeliveryRejection::NotDelivered);
+            }
             let interruption = self.nexus.herdr.interrupt(
                 &self.target.route,
                 &self.target.profile.interrupt_keys.texts(),
@@ -714,6 +753,9 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             .flatten();
         // Whether Herdr saw the recipient react; None when what followed
         // the text is not known.
+        if write.is_some_and(|write| !write.start()) {
+            return self.refuse(DeliveryRejection::NotDelivered);
+        }
         let reacted = match self
             .nexus
             .herdr

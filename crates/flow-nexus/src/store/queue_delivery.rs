@@ -458,6 +458,10 @@ pub trait AccountsQueueDelivery {
         absence: AbsenceRecord,
     ) -> Result<bool, StoreError>;
 
+    /// A prepared write was revoked before any pane key or input. Its
+    /// logical request returns to Queued without losing its identity.
+    fn revoke_prepared_delivery(&self, attempt_id: &str) -> Result<bool, StoreError>;
+
     /// The owner's resolution of one Uncertain attempt. Only Absent is
     /// actionable: it retains the request and authorises a retry. Delivered
     /// requires an exact native receipt and cannot be asserted by an owner.
@@ -1460,6 +1464,25 @@ impl AccountsQueueDelivery for FlowStore {
             DeliveryState::Retryable(RetryCause::HistoryAbsent),
             commit,
         )?;
+        Ok(true)
+    }
+
+    fn revoke_prepared_delivery(&self, attempt_id: &str) -> Result<bool, StoreError> {
+        let Some(mut attempt) = self.queue_delivery_attempt(attempt_id)? else {
+            return Ok(false);
+        };
+        if attempt.queue_delivery_phase != QueueDeliveryPhase::Prepared {
+            return Ok(false);
+        }
+        let evidence = attempt.queue_evidence.clone();
+        attempt.queue_delivery_phase = QueueDeliveryPhase::Absent(AbsenceRecord {
+            absence_proof: AbsenceProof::HandOverRefused,
+            observation: crate::generated::memory::Observation(
+                "Hold revoked write before input".into(),
+            ),
+        });
+        let commit = self.commit_attempt(self.engine.begin_atomic_commit(), attempt)?;
+        self.commit_attempt_state(&evidence, DeliveryState::Queued, commit)?;
         Ok(true)
     }
 

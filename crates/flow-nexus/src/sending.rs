@@ -1377,7 +1377,14 @@ impl CompletesDirectSends for RunningNexus {
             Some(refused @ crate::generated::operation::Outcome::Failed(_)) => refused,
             _ => {
                 let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
-                crate::waking::DrainsHeldSeats::drain_all_held(self, address.clone(), lease)
+                let mut dispatch =
+                    crate::queue_write_fence::QueueDispatch::new(&self.dispatch_gate, _turn);
+                crate::waking::DrainsHeldSeats::drain_all_held(
+                    self,
+                    address.clone(),
+                    lease,
+                    Some(&mut dispatch),
+                )
             }
         };
         // Waiting is a disposition, not a failed attempt: admission already

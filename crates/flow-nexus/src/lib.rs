@@ -59,6 +59,7 @@ pub mod model;
 pub mod observation_lifetime;
 pub mod protecting;
 pub mod queue_operations;
+mod queue_write_fence;
 pub mod recovery;
 pub mod reminding;
 pub mod repairing;
@@ -161,6 +162,7 @@ pub struct RunningNexus {
     pub composer: Live<LaunchComposer>,
     /// Serializes dispatch; see `dispatch_serially`.
     pub dispatch_gate: Mutex<()>,
+    queue_writes: queue_write_fence::QueueWriteFence,
     /// The exclusive hold on each pane Flow is writing; see
     /// `delivery::lease`.
     pub pane_leases: delivery::lease::PaneLeases,
@@ -2095,21 +2097,29 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         use crate::reminding::CountsUnixSeconds;
         use meta_signal_flow::{Output, Refused_Data, StoreFailure};
         let nexus = self.nexus;
+        let _transition = nexus.queue_writes.transition();
+        {
+            let _turn = nexus
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let moment = Moment(std::time::SystemTime::now().seconds_since_epoch());
+            nexus.queue_writes.hold(|| {
+                match nexus.perform(Operation::Record(Record_Data::Switched(Holding::Held(
+                    moment,
+                )))) {
+                    Outcome::Recorded => Ok(()),
+                    refused => Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                        format!("{refused:?}"),
+                    )))),
+                }
+            })?;
+        }
+        nexus.queue_writes.settle_started();
         let _turn = nexus
             .dispatch_gate
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let moment = Moment(std::time::SystemTime::now().seconds_since_epoch());
-        match nexus.perform(Operation::Record(Record_Data::Switched(Holding::Held(
-            moment,
-        )))) {
-            Outcome::Recorded => {}
-            refused => {
-                return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
-                    format!("{refused:?}"),
-                ))));
-            }
-        }
+            .unwrap_or_else(|error| error.into_inner());
         eprintln!("flow-nexus: held by the owner; the Nexus takes no act of its own");
         nexus.record_every_seat().map(|_| ())
     }
@@ -2125,6 +2135,8 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         use meta_signal_flow::{Output, Refused_Data, StoreFailure};
         let nexus = self.nexus;
         {
+            let _transition = nexus.queue_writes.transition();
+            nexus.queue_writes.settle_revoked();
             let _turn = nexus
                 .dispatch_gate
                 .lock()
@@ -2138,6 +2150,7 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
                     ))));
                 }
             }
+            nexus.queue_writes.resume();
             eprintln!("flow-nexus: resumed by the owner; the Nexus acts on its own again");
         }
         crate::launching::ReconcilesInterruptedLaunches::reconcile_interrupted_launches(nexus);
@@ -2229,6 +2242,7 @@ impl OpensRunningNexus for RunningNexus {
             // socket the configuration names.
             composer: Live::holding(configured.composer(store.clone())),
             dispatch_gate: Mutex::new(()),
+            queue_writes: Default::default(),
             pane_leases: delivery::lease::PaneLeases::default(),
             waking: waking::WakingMetaflows::default(),
             stopped_at_confirmation: waking::StoppedAtConfirmation::default(),
@@ -4383,6 +4397,7 @@ mod tests {
                     Arc::new(crate::composition::FixtureSuccessorRecovery::default()),
                 )),
                 dispatch_gate: std::sync::Mutex::new(()),
+                queue_writes: Default::default(),
                 pane_leases: crate::delivery::lease::PaneLeases::default(),
                 waking: crate::waking::WakingMetaflows::default(),
                 stopped_at_confirmation: crate::waking::StoppedAtConfirmation::default(),
@@ -4454,6 +4469,7 @@ mod tests {
             });
             self.nexus.store = store.into();
             self.nexus.dispatch_gate = std::sync::Mutex::new(());
+            self.nexus.queue_writes = Default::default();
             self.nexus.waking = crate::waking::WakingMetaflows::default();
             self.nexus.stopped_at_confirmation = crate::waking::StoppedAtConfirmation::default();
             self.nexus.refresh_refusals = crate::waking::RefreshRefusals::default();

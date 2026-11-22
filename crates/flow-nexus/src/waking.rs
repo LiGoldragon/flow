@@ -102,7 +102,9 @@ use crate::codex_turns::{SettlesRestingCodexSeats, TracksCodexTurns};
 use crate::composition::{FreshSeat, JoinsPurpose, RendersQueuedWork};
 use crate::delivery::body::RendersNativeContent;
 use crate::delivery::lease::LeasesPanes;
-use crate::delivery::{DeliversMessages, FindsDeliveryTarget, ReadsLeasedPane};
+use crate::delivery::{
+    DeliversMessages, DeliversPreparedQueue, FindsDeliveryTarget, ReadsLeasedPane,
+};
 use crate::generated::memory::{Device, Inode, Offset, RefreshCaller};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
@@ -114,6 +116,7 @@ use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes};
 use crate::launching::LaunchesFlows;
 use crate::live::HoldsLiveValue;
 use crate::performing::Performs;
+use crate::queue_write_fence::QueueDispatch;
 use crate::request_waking::HoldsWakingRequest;
 use crate::send_tool::ServesLaunchCalls;
 use crate::store::NamesConfiguredModel;
@@ -1418,6 +1421,9 @@ impl RendersAttemptInput for QueueDeliveryAttempt {
 
 impl ReconcilesQueueDelivery for RunningNexus {
     fn reconcile_delivery(&self, attempt: &QueueDeliveryAttempt) -> Reconciled {
+        if self.queue_writes.owns_attempt(&attempt.queue_attempt_id.0) {
+            return Reconciled::Refused;
+        }
         match &attempt.queue_delivery_phase {
             QueueDeliveryPhase::ReceiptRecorded(_) => {
                 return if self
@@ -1527,7 +1533,8 @@ impl ReconcilesQueueDelivery for RunningNexus {
             return;
         };
         let own = |attempt: &QueueDeliveryAttempt| {
-            attempt.flow_id.0 == flow_id
+            !self.queue_writes.owns_attempt(&attempt.queue_attempt_id.0)
+                && attempt.flow_id.0 == flow_id
                 && attempt.harness_kind == HarnessKind::Claude
                 && prompt
                     .native_session_id_option
@@ -1602,6 +1609,9 @@ impl ReconcilesQueueDelivery for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if self.queue_writes.owns_attempt(&attempt.queue_attempt_id.0) {
+                continue;
+            }
             let reconciled = match found {
                 Some(Ok((run, turn_id, native_receipt, seat_after))) => {
                     self.settle_received(&attempt, &run, turn_id, native_receipt, seat_after)
@@ -1800,7 +1810,8 @@ impl SleepsAndWakesSeats for RunningNexus {
                 return;
             }
             if let Some(lease) = self.waking.hold(address) {
-                let _ = self.drain_all_held(address.clone(), &lease);
+                let mut dispatch = QueueDispatch::new(&self.dispatch_gate, _turn);
+                let _ = self.drain_all_held(address.clone(), &lease, Some(&mut dispatch));
             }
         }
         self.wake_deferred();
@@ -1854,7 +1865,8 @@ impl SleepsAndWakesSeats for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            match self.drain_held(address.clone(), &lease) {
+            let mut dispatch = QueueDispatch::new(&self.dispatch_gate, _turn);
+            match self.drain_held(address.clone(), &lease, Some(&mut dispatch)) {
                 Outcome::Drained(typed) if typed.is_empty() => {
                     drop(lease);
                     return;
@@ -2778,24 +2790,39 @@ impl PerformsWakeAndDrain for RunningNexus {
         let Some(lease) = self.waking.hold(&address) else {
             return Outcome::Failed(Failed_Data::NotAwake);
         };
-        self.drain_held(address, &lease)
+        self.drain_held(address, &lease, None)
     }
 
     fn drain_all(&self, address: Address) -> Outcome {
         let Some(lease) = self.waking.hold(&address) else {
             return Outcome::Failed(Failed_Data::NotAwake);
         };
-        self.drain_all_held(address, &lease)
+        self.drain_all_held(address, &lease, None)
     }
 }
 
 pub(crate) trait DrainsHeldSeats {
-    fn drain_held(&self, address: Address, lease: &WakingLease) -> Outcome;
-    fn drain_all_held(&self, address: Address, lease: &WakingLease) -> Outcome;
+    fn drain_held(
+        &self,
+        address: Address,
+        lease: &WakingLease,
+        dispatch: Option<&mut QueueDispatch<'_>>,
+    ) -> Outcome;
+    fn drain_all_held(
+        &self,
+        address: Address,
+        lease: &WakingLease,
+        dispatch: Option<&mut QueueDispatch<'_>>,
+    ) -> Outcome;
 }
 
 impl DrainsHeldSeats for RunningNexus {
-    fn drain_held(&self, address: Address, lease: &WakingLease) -> Outcome {
+    fn drain_held(
+        &self,
+        address: Address,
+        lease: &WakingLease,
+        mut dispatch: Option<&mut QueueDispatch<'_>>,
+    ) -> Outcome {
         if self.permaflow_held(address.clone()) {
             return Outcome::Drained(Vec::new());
         }
@@ -2850,7 +2877,7 @@ impl DrainsHeldSeats for RunningNexus {
                     {
                         return Outcome::Failed(Failed_Data::StoreRefused);
                     }
-                    return match self.drain_held(address.clone(), lease) {
+                    return match self.drain_held(address.clone(), lease, dispatch) {
                         Outcome::Drained(mut following) => {
                             drained.append(&mut following);
                             Outcome::Drained(drained)
@@ -2941,26 +2968,61 @@ impl DrainsHeldSeats for RunningNexus {
                 Outcome::Drained(drained)
             }
         };
+        let write = if dispatch.is_some() {
+            if self.held() {
+                return Outcome::WaitingForTurn(oldest.logical_delivery_id);
+            }
+            let Some(write) = self.queue_writes.reserve() else {
+                return Outcome::WaitingForTurn(oldest.logical_delivery_id);
+            };
+            Some(write)
+        } else {
+            None
+        };
         // Native history is anchored before any native input.
-        let anchor = match node.harness_kind {
+        let read_anchor = || match node.harness_kind {
             HarnessKind::Claude => match self.claude_delivery_cursor(&node) {
-                Some(cursor) => NativeHistoryAnchor::ClaudeTranscript(cursor),
-                None => return refused(drained, Failed_Data::HerdrRefused),
+                Some(cursor) => Ok(NativeHistoryAnchor::ClaudeTranscript(cursor)),
+                None => Err(Failed_Data::HerdrRefused),
             },
             HarnessKind::Codex => {
                 let model = match self.store.role(&flow_id.0) {
                     Ok(Some(role)) => role.model_name,
-                    _ => return refused(drained, Failed_Data::StoreRefused),
+                    _ => return Err(Failed_Data::StoreRefused),
                 };
                 let adapter = match self.codex_endpoints.current().adapter_for(&model.0) {
                     Ok(adapter) => adapter,
-                    Err(_) => return refused(drained, Failed_Data::CodexRefused),
+                    Err(_) => return Err(Failed_Data::CodexRefused),
                 };
-                match adapter.newest_turn(&node.session_id.0) {
-                    Ok(newest) => NativeHistoryAnchor::CodexTurns(newest),
-                    Err(_) => return refused(drained, Failed_Data::CodexRefused),
-                }
+                adapter
+                    .newest_turn(&node.session_id.0)
+                    .map(NativeHistoryAnchor::CodexTurns)
+                    .map_err(|_| Failed_Data::CodexRefused)
             }
+        };
+        let anchor = match dispatch.as_mut() {
+            Some(dispatch) => dispatch.outside(read_anchor),
+            None => read_anchor(),
+        };
+        if let Some(write) = &write {
+            // Other calls may append work while this recipient's native
+            // thread supplies its anchor. Only the same bound queue prefix
+            // may proceed; this cohort never includes a newer admission.
+            if write.revoked()
+                || self.permaflow_held(address.clone())
+                || !matches!(self.store.metaflow(&address), Ok(Some(latest))
+                    if latest.state == flow_ethos::State::Awake(flow_id.clone())
+                        && latest.queue.0.starts_with(&cohort))
+                || !matches!(self.store.flow_node(&flow_id.0), Ok(Some(latest))
+                    if latest.session_id == node.session_id
+                        && latest.herdr_route_selection == node.herdr_route_selection)
+            {
+                return Outcome::WaitingForTurn(oldest.logical_delivery_id);
+            }
+        }
+        let anchor = match anchor {
+            Ok(anchor) => anchor,
+            Err(failure) => return refused(drained, failure),
         };
         let attempt = match self.store.prepare_oldest_delivery(
             &address,
@@ -3021,14 +3083,36 @@ impl DrainsHeldSeats for RunningNexus {
         } else {
             meta_signal_flow::Message::Soft(letter)
         };
-        let result = self.deliver_while_waking(
-            meta_signal_flow::DeliveryRequest {
-                delivery_id: meta_signal_flow::DeliveryId(attempt.queue_attempt_id.0.clone()),
-                flow_id: flow_id.clone(),
-                message,
-            },
-            lease,
-        );
+        let request = meta_signal_flow::DeliveryRequest {
+            delivery_id: meta_signal_flow::DeliveryId(attempt.queue_attempt_id.0.clone()),
+            flow_id: flow_id.clone(),
+            message,
+        };
+        let result = if let (Some(dispatch), Some(write)) = (dispatch, &write) {
+            write.prepared(
+                attempt.queue_attempt_id.0.clone(),
+                cohort
+                    .iter()
+                    .map(|entry| entry.logical_delivery_id.0.clone())
+                    .collect(),
+            );
+            let result = dispatch.outside(|| self.deliver_prepared_queue(request, lease, write));
+            write.release_preparation();
+            if write.revoked() {
+                return if self
+                    .store
+                    .revoke_prepared_delivery(&attempt.queue_attempt_id.0)
+                    .unwrap_or(false)
+                {
+                    Outcome::WaitingForTurn(oldest.logical_delivery_id)
+                } else {
+                    refused(drained, Failed_Data::StoreRefused)
+                };
+            }
+            result
+        } else {
+            self.deliver_while_waking(request, lease)
+        };
         let proved_absent = matches!(&result,
             meta_signal_flow::Output::DeliveryRejected(rejected)
                 if matches!(rejected,
@@ -3082,7 +3166,12 @@ impl DrainsHeldSeats for RunningNexus {
         Outcome::Drained(drained)
     }
 
-    fn drain_all_held(&self, address: Address, lease: &WakingLease) -> Outcome {
+    fn drain_all_held(
+        &self,
+        address: Address,
+        lease: &WakingLease,
+        mut dispatch: Option<&mut QueueDispatch<'_>>,
+    ) -> Outcome {
         if self.permaflow_held(address.clone()) {
             return Outcome::Drained(Vec::new());
         }
@@ -3095,7 +3184,7 @@ impl DrainsHeldSeats for RunningNexus {
         let mut removed = 0;
         let mut delivered = Vec::new();
         loop {
-            let outcome = self.drain_held(address.clone(), lease);
+            let outcome = self.drain_held(address.clone(), lease, dispatch.as_deref_mut());
             match outcome {
                 Outcome::Drained(mut entries) => delivered.append(&mut entries),
                 Outcome::AwaitingReceipt(id) => return Outcome::AwaitingReceipt(id),
@@ -3382,6 +3471,9 @@ impl ParksCohort for RunningNexus {
         let Ok(Some(head)) = self.store.outstanding_delivery(address) else {
             return;
         };
+        if self.queue_writes.owns_attempt(&head.queue_attempt_id.0) {
+            return;
+        }
         match head.queue_delivery_phase {
             QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_) => {
                 if let Ok((run, turn_id, native_receipt, seat_after)) = self.find_receipt(&head) {
@@ -4537,7 +4629,11 @@ impl WakesInParts for RunningNexus {
         // more or sleeps.
         self.queue_simplified_answer(flow_id);
         if !metaflow.queue.0.is_empty() {
-            return match self.perform(Operation::Drain(address)) {
+            let Some(lease) = self.waking.hold(&address) else {
+                return AtStop::Kept(KeptAtStop::Waking);
+            };
+            let mut dispatch = QueueDispatch::new(&self.dispatch_gate, turn);
+            return match self.drain_held(address, &lease, Some(&mut dispatch)) {
                 Outcome::Drained(mut typed) if !typed.is_empty() => {
                     AtStop::Drained(typed.remove(0))
                 }

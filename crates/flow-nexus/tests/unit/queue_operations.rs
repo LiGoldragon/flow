@@ -248,6 +248,85 @@ fn cancel_stages_one_selected_terminal_event_with_the_original_request() {
     assert!(fixture.typed().is_none());
 }
 
+#[test]
+fn fulfilling_selected_work_preserves_the_explicit_done_and_stages_one_outcome() {
+    use crate::store::logical_delivery::{LogicalDeliveryTransition, ReadsTaskOutcomeEvidence};
+    use signal_flow::TerminalOutcome;
+
+    let fixture = NexusFixture::new();
+    let requester = at("fulfillmentRequester");
+    let worker = at("fulfillmentWorker");
+    asleep(&fixture, &requester);
+    asleep(&fixture, &worker);
+    let store = &fixture.nexus.store;
+    let PrivateSendResponse::SendAccepted(work) = store
+        .accept_logical_delivery_for_with_transition(
+            &worker,
+            SentBy::Sender(requester.clone()),
+            flow_ethos::Delivery::Queue,
+            Message::Soft(Request::Task(flow_ethos::AnswerableTask {
+                minutes: flow_ethos::Minutes(30),
+                string: "Review.".into(),
+            })),
+            None,
+            LogicalDeliveryTransition {
+                purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
+                task_outcomes: vec![TerminalOutcome::Fulfilled],
+                context_warning: None,
+                handover_reminder: None,
+                deliver_call: None,
+                upgrade_notice: None,
+            },
+        )
+        .unwrap()
+    else {
+        panic!("expected task admission")
+    };
+    delivered(&fixture, &worker, &work);
+    let done = Message::Soft(Request::Done(flow_ethos::DonePayload::Answered(
+        flow_ethos::DonePayload_Answered_Data {
+            logical_delivery_id: work.logical_delivery_id.clone(),
+            request_id: work.request_id.clone(),
+            string: "Reviewed, with evidence.".into(),
+        },
+    )));
+    let answer = || {
+        store
+            .accept_logical_delivery(
+                &requester,
+                SentBy::Sender(worker.clone()),
+                flow_ethos::Delivery::Wake,
+                done.clone(),
+                None,
+            )
+            .unwrap()
+    };
+    assert!(matches!(answer(), PrivateSendResponse::SendAccepted(_)));
+    let entries = queued(&fixture, &requester);
+    let [entry] = entries.as_slice() else {
+        panic!("expected one explicit answer")
+    };
+    assert_eq!(entry.message, done);
+    assert_eq!(entry.sent_by, SentBy::Sender(worker.clone()));
+    let events = store.task_terminal_events(&work.logical_delivery_id);
+    let [event] = events.as_slice() else {
+        panic!("expected one terminal event")
+    };
+    assert_eq!(event.request_id, work.request_id);
+    assert_eq!(event.terminal_outcome, TerminalOutcome::Fulfilled);
+    assert_eq!(event.address, requester);
+    assert_eq!(store.reminder(&work.logical_delivery_id.0).unwrap(), None);
+    assert_eq!(
+        answer(),
+        PrivateSendResponse::Refused(signal_flow::Refusal::Unresolved)
+    );
+    assert_eq!(
+        store.task_terminal_events(&work.logical_delivery_id),
+        events
+    );
+    assert!(fixture.typed().is_none());
+}
+
 /// Every caller gets the same refusal when the native receipt proves that
 /// the worker took the work but the Nexus has no exclusive execution owner.
 #[test]

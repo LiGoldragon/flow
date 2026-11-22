@@ -1377,6 +1377,11 @@ pub enum Reconciled {
 pub(crate) trait ReconcilesQueueDelivery {
     /// Under the dispatch gate.
     fn reconcile_delivery(&self, attempt: &QueueDeliveryAttempt) -> Reconciled;
+    fn reconcile_delivery_during_dispatch(
+        &self,
+        attempt: &QueueDeliveryAttempt,
+        dispatch: Option<&mut QueueDispatch<'_>>,
+    ) -> Reconciled;
     /// Records the one receipt on every attempt of `run`, the payload
     /// that carried `attempt`, and settles their requests in order.
     fn settle_received(
@@ -1423,6 +1428,14 @@ impl RendersAttemptInput for QueueDeliveryAttempt {
 
 impl ReconcilesQueueDelivery for RunningNexus {
     fn reconcile_delivery(&self, attempt: &QueueDeliveryAttempt) -> Reconciled {
+        self.reconcile_delivery_during_dispatch(attempt, None)
+    }
+
+    fn reconcile_delivery_during_dispatch(
+        &self,
+        attempt: &QueueDeliveryAttempt,
+        dispatch: Option<&mut QueueDispatch<'_>>,
+    ) -> Reconciled {
         if self.queue_writes.owns_attempt(&attempt.queue_attempt_id.0) {
             return Reconciled::Refused;
         }
@@ -1458,7 +1471,33 @@ impl ReconcilesQueueDelivery for RunningNexus {
             }
             QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_) => {}
         }
-        match self.find_receipt(attempt) {
+        let evidence = match dispatch {
+            Some(dispatch) => {
+                let evidence = dispatch.outside(|| self.find_receipt(attempt));
+                // A native hook or an explicit resolution may have moved
+                // the stored attempt while the history read was in flight.
+                match self
+                    .store
+                    .queue_delivery_attempt(&attempt.queue_attempt_id.0)
+                {
+                    Ok(Some(current))
+                        if current.queue_delivery_phase == attempt.queue_delivery_phase => {}
+                    Ok(Some(current)) => {
+                        return match current.queue_delivery_phase {
+                            QueueDeliveryPhase::Settled(_) => {
+                                current.as_settled(SeatAfter::InItsTurn)
+                            }
+                            QueueDeliveryPhase::Absent(_) => Reconciled::Absent,
+                            _ => Reconciled::Refused,
+                        };
+                    }
+                    _ => return Reconciled::Refused,
+                }
+                evidence
+            }
+            None => self.find_receipt(attempt),
+        };
+        match evidence {
             Ok((run, turn_id, native_receipt, seat_after)) => {
                 self.settle_received(attempt, &run, turn_id, native_receipt, seat_after)
             }
@@ -2860,7 +2899,9 @@ impl DrainsHeldSeats for RunningNexus {
         let mut drained = Vec::new();
         match self.store.outstanding_delivery(&address) {
             Ok(None) => {}
-            Ok(Some(attempt)) => match self.reconcile_delivery(&attempt) {
+            Ok(Some(attempt)) => match self
+                .reconcile_delivery_during_dispatch(&attempt, dispatch.as_deref_mut())
+            {
                 Reconciled::Settled(queued, SeatAfter::Resting) => drained.push(queued),
                 Reconciled::Settled(queued, SeatAfter::InItsTurn) => {
                     if attempt.flow_id == flow_id
@@ -2918,7 +2959,7 @@ impl DrainsHeldSeats for RunningNexus {
         // now shows, and a simplified seat's answer to the input it was
         // bound to is queued once its transcript shows it, so the binding
         // is free for the request now oldest.
-        self.reconcile_typed(&address);
+        self.reconcile_typed_during_dispatch(&address, dispatch.as_deref_mut());
         self.queue_simplified_answer(&flow_id.0);
         let queue = match self.store.metaflow(&address) {
             Ok(Some(metaflow)) => metaflow.queue,
@@ -3103,7 +3144,7 @@ impl DrainsHeldSeats for RunningNexus {
             flow_id: flow_id.clone(),
             message,
         };
-        let result = if let (Some(dispatch), Some(write)) = (dispatch, &write) {
+        let result = if let (Some(dispatch), Some(write)) = (dispatch.as_deref_mut(), &write) {
             write.prepared(
                 attempt.queue_attempt_id.0.clone(),
                 cohort
@@ -3149,7 +3190,7 @@ impl DrainsHeldSeats for RunningNexus {
             .store
             .mark_delivery_uncertain(&attempt.queue_attempt_id.0);
         let typed = self.park_cohort(&attempt, &cohort);
-        let _ = self.reconcile_delivery(&attempt);
+        let _ = self.reconcile_delivery_during_dispatch(&attempt, dispatch);
         // A payload typed into a Codex pane is a letter its thread holds
         // until a user message of exactly its text takes it, whether or not
         // a turn has begun: the seat does not rest meanwhile, so the rest
@@ -3242,6 +3283,11 @@ pub(crate) trait ParksCohort {
     /// Under the gate the caller holds: reconciles every disjoint pending
     /// payload of the seat `address` is Awake as, using exact native receipts.
     fn reconcile_typed(&self, address: &Address);
+    fn reconcile_typed_during_dispatch(
+        &self,
+        address: &Address,
+        dispatch: Option<&mut QueueDispatch<'_>>,
+    );
     /// Under the gate the caller holds, at the seat's own turn end: settles
     /// every hand-over the ended turn took whose exact native receipt its
     /// history shows, each payload typed past the queue's head and then the
@@ -3459,6 +3505,14 @@ impl ParksCohort for RunningNexus {
     }
 
     fn reconcile_typed(&self, address: &Address) {
+        self.reconcile_typed_during_dispatch(address, None);
+    }
+
+    fn reconcile_typed_during_dispatch(
+        &self,
+        address: &Address,
+        mut dispatch: Option<&mut QueueDispatch<'_>>,
+    ) {
         let Ok(Some(Metaflow {
             state: flow_ethos::State::Awake(flow_id),
             ..
@@ -3471,7 +3525,16 @@ impl ParksCohort for RunningNexus {
             if !covered.insert(attempt.queue_attempt_id.0.clone()) {
                 continue;
             }
-            if let Ok((run, turn_id, native_receipt, seat_after)) = self.find_receipt(&attempt) {
+            let evidence = match dispatch.as_deref_mut() {
+                Some(dispatch) => dispatch.outside(|| self.find_receipt(&attempt)),
+                None => self.find_receipt(&attempt),
+            };
+            if let Ok((run, turn_id, native_receipt, seat_after)) = evidence {
+                if !matches!(self.store.queue_delivery_attempt(&attempt.queue_attempt_id.0),
+                    Ok(Some(current)) if current.queue_delivery_phase == attempt.queue_delivery_phase)
+                {
+                    continue;
+                }
                 covered.extend(run.iter().map(|member| member.queue_attempt_id.0.clone()));
                 let _ = self.settle_received(&attempt, &run, turn_id, native_receipt, seat_after);
             }

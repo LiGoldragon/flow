@@ -612,9 +612,14 @@ impl signal_flow::Answering for OrdinaryCall<'_> {
         };
         match nexus.herdr.pane_presence(&node) {
             herdr::PanePresence::Present | herdr::PanePresence::Bare => {
-                // No write is left half-typed into a pane as it closes.
+                // A write holds its pane through settlement. Refuse a
+                // competing close rather than wait under dispatch.
                 let closed = {
-                    let _lease = nexus.pane_leases.hold(route);
+                    let Some(_lease) = nexus.pane_leases.try_hold(route) else {
+                        return Err(Output::StopRejected(
+                            signal_flow::StopRejection::CloseRefused,
+                        ));
+                    };
                     nexus.perform(Operation::Close(node.clone()))
                 };
                 if closed != Outcome::Closed {
@@ -1942,7 +1947,11 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
                 )
             {
                 let closed = {
-                    let _lease = nexus.pane_leases.hold(route);
+                    let Some(_lease) = nexus.pane_leases.try_hold(route) else {
+                        return Err(Output::Refused(Refused_Data::CapsuleRefused(
+                            flow_id.clone(),
+                        )));
+                    };
                     nexus.perform(Operation::Close(node.clone()))
                 };
                 if closed != Outcome::Closed {

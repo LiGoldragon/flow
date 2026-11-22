@@ -5,6 +5,7 @@
 //! attempt that holds it back.
 
 use crate::RunningNexus;
+use crate::delivery::lease::LeasesPanes;
 use crate::herdr::{PaneRoute, ReadsHerdrPanes};
 use crate::queue_write_fence::CoordinatesQueueWrites;
 use crate::store::ReadsFlowRows;
@@ -75,21 +76,43 @@ impl RepairsFromMeta for RunningNexus {
         if let Err(refusal) = self.keep_active_queue_write(&address) {
             return refusal;
         }
+        let flow_id = match self.store.current_flow(&address) {
+            Ok(Ok(flow_id)) => flow_id,
+            Ok(Err(rejection)) => return Output::RebindRejected(rejection),
+            Err(error) => return Self::store_refused(error),
+        };
+        let node = match self.store.flow_node(&flow_id.0) {
+            Ok(node) => node,
+            Err(error) => return Self::store_refused(error),
+        };
+        // Commands confirm and act under the old pane's lease. Rebind
+        // acquires the same lease without waiting under global dispatch.
+        let old_route = node
+            .as_ref()
+            .and_then(|node| match &node.herdr_route_selection {
+                HerdrRouteSelection::Available(route) => Some(route),
+                HerdrRouteSelection::Unavailable => None,
+            });
+        let _binding = match old_route {
+            Some(route) => match self.pane_leases.try_hold(route) {
+                Some(lease) => Some(lease),
+                None => {
+                    return Self::store_refused(format!(
+                        "Pane {} owns an unfinished write",
+                        route.herdr_pane_id.0
+                    ));
+                }
+            },
+            None => None,
+        };
         let rebound = match rebinding {
             Rebinding::Pane(herdr_pane_id) => {
-                let flow_id = match self.store.current_flow(&address) {
-                    Ok(Ok(flow_id)) => flow_id,
-                    Ok(Err(rejection)) => return Output::RebindRejected(rejection),
-                    Err(error) => return Self::store_refused(error),
-                };
-                let node = match self.store.flow_node(&flow_id.0) {
-                    Ok(Some(node)) => node,
-                    Ok(None) => return Output::RebindRejected(RebindRejected_Data::FlowUnknown),
-                    Err(error) => return Self::store_refused(error),
+                let Some(node) = node.as_ref() else {
+                    return Output::RebindRejected(RebindRejected_Data::FlowUnknown);
                 };
                 // The pane is looked for in the Herdr session the flow's
                 // route names.
-                let HerdrRouteSelection::Available(recorded) = &node.herdr_route_selection else {
+                let Some(recorded) = old_route else {
                     return Output::RebindRejected(RebindRejected_Data::PaneAbsent);
                 };
                 let route = match self.herdr.pane_route(

@@ -1725,3 +1725,87 @@ fn queue_writer_crosses_hold_at(barrier: &str) {
         assert!(prompts[0].contains(&queued.request_id.0), "{prompts:?}");
     });
 }
+
+#[test]
+fn rebind_cannot_move_a_pane_while_its_confirmed_owner_command_writes() {
+    use crate::DispatchesSerially;
+    use crate::event_wait::AwaitsPath;
+    use crate::fixture_executable::{FixtureExecutable, HoldsLatch, InstallsScript, Latch};
+    use std::fs;
+    use std::time::{Duration, Instant};
+
+    let fixture = NexusFixture::new();
+    resting_seat(&fixture);
+    let mut old = claude_agent(&fixture);
+    old["agent_status"] = "working".into();
+    let mut alternate = old.clone();
+    alternate["pane_id"] = "w1:p9".into();
+    alternate["terminal_id"] = "term_moved".into();
+    alternate["name"] = "mind-flow-moved".into();
+    let log =
+        fixture.accept_pane_operations(vec![old, alternate], PromptFixture::Prompted("w1:p3"));
+    let started = fixture.directory.path().join("owner-command-before-key");
+    let release = Latch::closed(fixture.directory.path().join("owner-command-key-release"));
+    let script = fs::read_to_string(&fixture.snapshot_program).unwrap();
+    assert!(script.contains("\"agent read\") "));
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&script.replacen(
+        "\"agent read\") ",
+        &format!(
+            "\"agent read\") : > '{}'; : < '{}'; ",
+            started.display(),
+            release.path.display()
+        ),
+        1,
+    ));
+    let rebind = || {
+        fixture.nexus.dispatch_meta_serially(
+            meta::Input::Rebind(meta::Rebind_Data {
+                address: address(Model::Sol),
+                rebinding: meta::Rebinding::Pane(signal_flow::HerdrPaneId("w1:p9".into())),
+            }),
+            None,
+        )
+    };
+    std::thread::scope(|scope| {
+        let command = scope.spawn(|| {
+            fixture.nexus.dispatch_meta_serially(
+                meta::Input::Command(meta::CommandRequest {
+                    flow_id: seat_id(),
+                    harness_command_kind: meta::HarnessCommandKind::Interrupt,
+                }),
+                None,
+            )
+        });
+        if !started.appeared_by(Instant::now() + Duration::from_secs(15)) {
+            release.release();
+            panic!("the confirmed owner command did not reach its pane read");
+        }
+        let concurrent = rebind();
+        let before = fs::read_to_string(&log).unwrap_or_default();
+        release.release();
+        let command = command.join().unwrap();
+        assert!(
+            matches!(
+                concurrent,
+                meta::Output::Refused(meta::Refused_Data::StoreRefused(_))
+            ),
+            "{concurrent:?}"
+        );
+        assert!(!before.contains("send-keys"));
+        assert!(matches!(command, meta::Output::Commanded(_)), "{command:?}");
+    });
+    assert_eq!(rebind(), meta::Output::Rebound(address(Model::Sol)));
+    let after = fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        after
+            .lines()
+            .filter(|line| line.contains("send-keys w1:p3"))
+            .count(),
+        1,
+        "{after}"
+    );
+    assert!(!after.contains("send-keys w1:p9"));
+}

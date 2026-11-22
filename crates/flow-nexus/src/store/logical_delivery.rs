@@ -588,6 +588,30 @@ pub(crate) struct DeliverCallSpec {
     pub digest: String,
 }
 
+pub(crate) trait ChecksTaskCompletion {
+    fn permits_completion(&self, message: &Message, actor: &SentBy) -> Result<bool, StoreError>;
+}
+
+impl ChecksTaskCompletion for FlowStore {
+    fn permits_completion(&self, message: &Message, actor: &SentBy) -> Result<bool, StoreError> {
+        let (Message::Soft(request)
+        | Message::MiddleAbrupt(request)
+        | Message::HardAbrupt(request)) = message;
+        let Request::Done(flow_ethos::DonePayload::Answered(done)) = request else {
+            return Ok(true);
+        };
+        let SentBy::Sender(actor) = actor else {
+            return Ok(false);
+        };
+        // The durable request owns the receiver entitlement. A fresh
+        // native seat of that same permaflow has the same authenticated
+        // Address; the caller's written reply destination is irrelevant.
+        Ok(self
+            .logical_delivery_snapshot(&done.logical_delivery_id)?
+            .is_some_and(|stored| stored.request_id == done.request_id && stored.address == *actor))
+    }
+}
+
 pub(crate) trait MintsRequestIds {
     fn mint_request_id(&self) -> Result<Result<flow_ethos::RequestId, Refusal>, StoreError>;
     fn mint_request_id_with_held_count(
@@ -1848,6 +1872,12 @@ impl RecordsLogicalDeliveries for FlowStore {
                 .assert(Assertion::new(self.send_calls, record(outcome.clone())))?;
             return Ok(outcome);
         }
+        if !self.permits_completion(&message, &sender)? {
+            let outcome = ToolSendOutcome::Refused(ToolSendRefusal::Unresolved);
+            self.engine
+                .assert(Assertion::new(self.send_calls, record(outcome.clone())))?;
+            return Ok(outcome);
+        }
         let request = match &message {
             Message::HardAbrupt(request)
             | Message::MiddleAbrupt(request)
@@ -2353,6 +2383,11 @@ impl RecordsLogicalDeliveries for FlowStore {
             | Message::MiddleAbrupt(request)
             | Message::Soft(request) => request.clone(),
         };
+        if !self.permits_completion(&message, &sent_by)? {
+            return Ok(signal_flow::PrivateSendResponse::Refused(
+                Refusal::Unresolved,
+            ));
+        }
         if let Request::Done(flow_ethos::DonePayload::Answered(done)) = &request
             && self.reminder(&done.logical_delivery_id.0)?.is_none()
         {

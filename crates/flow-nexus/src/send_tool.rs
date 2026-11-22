@@ -611,8 +611,11 @@ impl HandlesSendCall for RunningNexus {
             // kept with the request.
             let target = {
                 use crate::store::kept_answer::{AnswerRoute, RoutesAnswers};
-                match self.store.answer_route(&message) {
+                match self.store.answer_route(&message, &sender) {
                     Ok(AnswerRoute::Unanswering) => arguments.target.clone(),
+                    Ok(AnswerRoute::Unentitled) => {
+                        return refused_kept(SendRefusal::Unresolved, content_sha256.0);
+                    }
                     Ok(AnswerRoute::To(address)) => crate::generated::send_tool::Target(address),
                     Ok(AnswerRoute::Kept(binding)) => {
                         let request_id = binding.request_id.clone();

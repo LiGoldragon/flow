@@ -376,8 +376,11 @@ impl SendsRequests for RunningNexus {
             // Address is kept with the request, answered Sent with its id.
             let recipient = {
                 use crate::store::kept_answer::{AnswerRoute, MarksKeptAnswer, RoutesAnswers};
-                match self.store.answer_route(&message) {
+                match self.store.answer_route(&message, &sender) {
                     Ok(AnswerRoute::Unanswering) => send.address.clone(),
+                    Ok(AnswerRoute::Unentitled) => {
+                        return PrivateSendResponse::Refused(Refusal::Unresolved).into();
+                    }
                     Ok(AnswerRoute::To(address)) => {
                         recipient = Some(address.clone());
                         address

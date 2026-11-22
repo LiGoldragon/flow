@@ -327,6 +327,80 @@ fn fulfilling_selected_work_preserves_the_explicit_done_and_stages_one_outcome()
     assert!(fixture.typed().is_none());
 }
 
+#[test]
+fn only_the_work_receiver_address_or_its_next_seat_may_complete_work() {
+    use crate::store::kept_answer::{AnswerRoute, RoutesAnswers};
+
+    let fixture = NexusFixture::new();
+    let requester = at("completionRequester");
+    let worker = at("completionWorker");
+    let unrelated = at("completionOther");
+    let old = flow_ethos::FlowId("oldNative".into());
+    let next = flow_ethos::FlowId("newNative".into());
+    asleep(&fixture, &requester);
+    asleep(&fixture, &unrelated);
+    awake_as(&fixture, &worker, &old);
+    let work = admitted(
+        &fixture,
+        &worker,
+        SentBy::Sender(requester.clone()),
+        Request::Task(flow_ethos::AnswerableTask {
+            minutes: flow_ethos::Minutes(30),
+            string: "Review.".into(),
+        }),
+    );
+    delivered(&fixture, &worker, &work);
+    let done = Message::Soft(Request::Done(flow_ethos::DonePayload::Answered(
+        flow_ethos::DonePayload_Answered_Data {
+            logical_delivery_id: work.logical_delivery_id.clone(),
+            request_id: work.request_id.clone(),
+            string: "Reviewed.".into(),
+        },
+    )));
+    let store = &fixture.nexus.store;
+    let before = store.request_binding(&work.request_id).unwrap();
+    let admit_answer = |actor: SentBy| {
+        store
+            .accept_logical_delivery(
+                &requester,
+                actor,
+                flow_ethos::Delivery::Wake,
+                done.clone(),
+                None,
+            )
+            .unwrap()
+    };
+    for actor in [
+        SentBy::Unbound,
+        SentBy::Sender(unrelated),
+        SentBy::Sender(requester.clone()),
+    ] {
+        assert!(matches!(
+            store.answer_route(&done, &actor).unwrap(),
+            AnswerRoute::Unentitled
+        ));
+        assert_eq!(
+            admit_answer(actor),
+            PrivateSendResponse::Refused(signal_flow::Refusal::Unresolved)
+        );
+        assert_eq!(store.request_binding(&work.request_id).unwrap(), before);
+    }
+    awake_as(&fixture, &worker, &next);
+    let successor = SentBy::Sender(worker.clone());
+    assert!(
+        matches!(store.answer_route(&done, &successor).unwrap(), AnswerRoute::To(address) if address == requester)
+    );
+    assert!(matches!(
+        admit_answer(successor),
+        PrivateSendResponse::SendAccepted(_)
+    ));
+    assert_ne!(store.request_binding(&work.request_id).unwrap(), before);
+    assert_eq!(
+        admit_answer(SentBy::Sender(worker)),
+        PrivateSendResponse::Refused(signal_flow::Refusal::Unresolved)
+    );
+}
+
 /// Every caller gets the same refusal when the native receipt proves that
 /// the worker took the work but the Nexus has no exclusive execution owner.
 #[test]

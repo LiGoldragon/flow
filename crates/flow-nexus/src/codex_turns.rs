@@ -811,6 +811,11 @@ impl SettlesRestingCodexSeats for RunningNexus {
         let closed = events
             .iter()
             .any(|event| matches!(event, LedgerEvent::ThreadClosed));
+        let announces_user_input = events.iter().any(|event| match event {
+            LedgerEvent::LetterSeen(_) => true,
+            LedgerEvent::Cut(cut) => !cut.seen_letter_vector.is_empty(),
+            _ => false,
+        });
         let (seat, ended, reported) = {
             let _turn = self
                 .dispatch_gate
@@ -842,18 +847,22 @@ impl SettlesRestingCodexSeats for RunningNexus {
                     })
                 },
             });
-            // A turn ended with only letters left: native history is read
-            // for the latest one's receipt, which a reconnect may have kept
-            // from this ledger.
-            if ended > 0
-                && matches!(
-                    self.codex_turns.standing(thread),
-                    ThreadStanding::LetterAwaited(_)
-                )
-                && let Some(node) = &flow
+            // The bound native item or reconnect cut tells the existing
+            // anchored matcher to read receipts. An item or cut alone
+            // neither settles an attempt nor authorizes another write.
+            if let Some(node) = &flow
                 && let Ok(Some(metaflow)) = self.store.metaflow_awake_as(&node.flow_id.0)
             {
-                self.reconcile_typed(&metaflow.address);
+                if announces_user_input {
+                    self.settle_turn_receipts(&metaflow.address);
+                } else if ended > 0
+                    && matches!(
+                        self.codex_turns.standing(thread),
+                        ThreadStanding::LetterAwaited(_)
+                    )
+                {
+                    self.reconcile_typed(&metaflow.address);
+                }
             }
             let rested = readings.iter().any(|reading| reading.rest_reached.0)
                 || (before != ThreadStanding::AtRest

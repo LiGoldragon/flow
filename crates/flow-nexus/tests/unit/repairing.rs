@@ -529,7 +529,9 @@ fn rebind_flow_preserves_the_receiving_predecessor_while_a_successor_is_unconfir
     use crate::store::metaflow::{ReadsSuccession, Succession};
     let fixture = NexusFixture::new();
     awake_seat(&fixture, vec![]);
-    let third = fixture.node();
+    let mut third = fixture.node();
+    third.flow_id = flow_ethos::FlowId("c78001".into());
+    third.session_id = signal_flow::SessionId("01a23456-7890-7000-8000-000000c78001".into());
     let third_id = third.flow_id.clone();
     fixture
         .nexus

@@ -3028,6 +3028,7 @@ impl DrainsHeldSeats for RunningNexus {
                 message,
             },
             lease,
+            &attempt,
         );
         let proved_absent = matches!(&result,
             meta_signal_flow::Output::DeliveryRejected(rejected)

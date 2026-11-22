@@ -811,6 +811,11 @@ impl SettlesRestingCodexSeats for RunningNexus {
         let closed = events
             .iter()
             .any(|event| matches!(event, LedgerEvent::ThreadClosed));
+        let announces_user_input = events.iter().any(|event| match event {
+            LedgerEvent::LetterSeen(_) => true,
+            LedgerEvent::Cut(cut) => !cut.seen_letter_vector.is_empty(),
+            _ => false,
+        });
         let (seat, ended) = {
             let _turn = self
                 .dispatch_gate
@@ -829,18 +834,23 @@ impl SettlesRestingCodexSeats for RunningNexus {
                 .map(|reading| reading.turns_ended.0.len())
                 .sum::<usize>();
             let flow = self.codex_flow_on(thread);
-            // A turn ended with only letters left: native history is read
-            // for the latest one's receipt, which a reconnect may have kept
-            // from this ledger.
-            if ended > 0
-                && matches!(
-                    self.codex_turns.standing(thread),
-                    ThreadStanding::LetterAwaited(_)
-                )
-                && let Some(node) = &flow
+            // The observed item or reconnect cut is a cause to read native
+            // receipts. The exact prior anchor, cohort and unique matching
+            // turn still govern settlement. The in-memory letter can leave
+            // the ledger before its durable attempt has been receipted.
+            if let Some(node) = &flow
                 && let Ok(Some(metaflow)) = self.store.metaflow_awake_as(&node.flow_id.0)
             {
-                self.reconcile_typed(&metaflow.address);
+                if announces_user_input {
+                    self.settle_turn_receipts(&metaflow.address);
+                } else if ended > 0
+                    && matches!(
+                        self.codex_turns.standing(thread),
+                        ThreadStanding::LetterAwaited(_)
+                    )
+                {
+                    self.reconcile_typed(&metaflow.address);
+                }
             }
             let after = self.codex_turns.standing(thread);
             let rested = readings.iter().any(|reading| reading.rest_reached.0)

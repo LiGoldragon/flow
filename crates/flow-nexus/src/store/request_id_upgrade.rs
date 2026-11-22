@@ -749,7 +749,8 @@ impl SettlesUpgradeNotices for super::FlowStore {
             | signal_flow::DeliveryState::Retryable(_)
             | signal_flow::DeliveryState::Uncertain
             | signal_flow::DeliveryState::Abandoned
-            | signal_flow::DeliveryState::Archived => Ok(false),
+            | signal_flow::DeliveryState::Archived
+            | signal_flow::DeliveryState::InspectionOnly => Ok(false),
         }
     }
 
@@ -768,7 +769,7 @@ impl SettlesUpgradeNotices for super::FlowStore {
             flow_ethos::Message::Soft(flow_ethos::Request::Notice(text)),
             None,
             LogicalDeliveryTransition {
-                task_outcomes: Vec::new(),
+                work_notice: None,
                 purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
                 handover_reminder: None,
                 deliver_call: None,

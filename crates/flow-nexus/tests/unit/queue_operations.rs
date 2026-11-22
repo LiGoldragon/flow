@@ -128,206 +128,6 @@ fn notices(fixture: &NexusFixture, address: &Address) -> Vec<String> {
 }
 
 #[test]
-fn verbose_task_dispatch_stores_the_selection_with_its_logical_request() {
-    use crate::store::logical_delivery::ReadsTaskOutcomeEvidence;
-    use signal_flow::{
-        AbruptTask, AnswerableTask, TerminalOutcome, VerboseTask, VerboseTaskAdmission,
-    };
-
-    let fixture = NexusFixture::new();
-    let address = at("taskOutcomes");
-    asleep(&fixture, &address);
-    let task = AnswerableTask {
-        minutes: flow_ethos::Minutes(30),
-        string: "Read.".into(),
-    };
-    let selected = [TerminalOutcome::Fulfilled, TerminalOutcome::Cancelled];
-    let Output::TaskVerboseSent(VerboseTaskAdmission::Accepted(admission)) =
-        fixture.nexus.dispatch(Input::SendTaskVerbose(VerboseTask {
-            address: address.clone(),
-            abrupt_task: AbruptTask::Soft(task.clone()),
-            terminal_outcome_vector: selected.to_vec(),
-        }))
-    else {
-        panic!("expected typed verbose task admission")
-    };
-    let quiet = admitted(&fixture, &address, SentBy::Unbound, Request::Task(task));
-    let store = &fixture.nexus.store;
-    let logical_id = &queued(&fixture, &address)[0].logical_delivery_id;
-    let selections = store.task_outcome_selection(logical_id);
-    let [selected_row] = selections.as_slice() else {
-        panic!("expected one selection")
-    };
-    assert_eq!(selected_row.terminal_outcome_vector, selected);
-    assert_eq!(
-        queued(&fixture, &address)[0].request_id,
-        admission.request_id
-    );
-    assert!(
-        store
-            .task_outcome_selection(&quiet.logical_delivery_id)
-            .is_empty()
-    );
-}
-
-#[test]
-fn cancel_stages_one_selected_terminal_event_with_the_original_request() {
-    use crate::store::logical_delivery::LogicalDeliveryTransition;
-    use crate::store::logical_delivery::ReadsTaskOutcomeEvidence;
-    use signal_flow::TerminalOutcome;
-
-    let fixture = NexusFixture::new();
-    let sender = at("terminalRequester");
-    let recipient = at("terminalWorker");
-    let sender_flow = flow_ethos::FlowId("terminalRequesterFlow".into());
-    awake_as(&fixture, &sender, &sender_flow);
-    asleep(&fixture, &recipient);
-    let store = &fixture.nexus.store;
-    for (origin, outcomes, expected) in [
-        (Origin::Unbound, vec![], false),
-        (Origin::Unbound, vec![TerminalOutcome::Fulfilled], false),
-        (
-            origin_of(sender_flow),
-            vec![TerminalOutcome::Cancelled],
-            false,
-        ),
-        (
-            Origin::Unbound,
-            vec![TerminalOutcome::Cancelled, TerminalOutcome::Cancelled],
-            true,
-        ),
-    ] {
-        let PrivateSendResponse::SendAccepted(work) = store
-            .accept_logical_delivery_for_with_transition(
-                &recipient,
-                SentBy::Sender(sender.clone()),
-                flow_ethos::Delivery::Queue,
-                Message::Soft(Request::Task(flow_ethos::AnswerableTask {
-                    minutes: flow_ethos::Minutes(30),
-                    string: "Review.".into(),
-                })),
-                None,
-                LogicalDeliveryTransition {
-                    purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
-                    task_outcomes: outcomes,
-                    context_warning: None,
-                    handover_reminder: None,
-                    deliver_call: None,
-                    upgrade_notice: None,
-                },
-            )
-            .unwrap()
-        else {
-            panic!("expected task admission")
-        };
-        assert_eq!(
-            fixture
-                .nexus
-                .dispatch_from(Input::Cancel(work.request_id.clone()), origin.clone()),
-            Output::Cancelled(work.request_id.clone())
-        );
-        assert_eq!(
-            fixture
-                .nexus
-                .dispatch_from(Input::Cancel(work.request_id.clone()), origin),
-            Output::CancelRejected(RequestRejection::UnknownRequest)
-        );
-        let events = store.task_terminal_events(&work.logical_delivery_id);
-        if expected {
-            let [event] = events.as_slice() else {
-                panic!("expected exactly one terminal event")
-            };
-            assert_eq!(event.request_id, work.request_id);
-            assert_eq!(event.logical_delivery_id, work.logical_delivery_id);
-            assert_eq!(event.address, sender);
-            assert_eq!(event.terminal_outcome, TerminalOutcome::Cancelled);
-        } else {
-            assert!(events.is_empty());
-        }
-    }
-    assert!(fixture.typed().is_none());
-}
-
-#[test]
-fn fulfilling_selected_work_preserves_the_explicit_done_and_stages_one_outcome() {
-    use crate::store::logical_delivery::{LogicalDeliveryTransition, ReadsTaskOutcomeEvidence};
-    use signal_flow::TerminalOutcome;
-
-    let fixture = NexusFixture::new();
-    let requester = at("fulfillmentRequester");
-    let worker = at("fulfillmentWorker");
-    asleep(&fixture, &requester);
-    asleep(&fixture, &worker);
-    let store = &fixture.nexus.store;
-    let PrivateSendResponse::SendAccepted(work) = store
-        .accept_logical_delivery_for_with_transition(
-            &worker,
-            SentBy::Sender(requester.clone()),
-            flow_ethos::Delivery::Queue,
-            Message::Soft(Request::Task(flow_ethos::AnswerableTask {
-                minutes: flow_ethos::Minutes(30),
-                string: "Review.".into(),
-            })),
-            None,
-            LogicalDeliveryTransition {
-                purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
-                task_outcomes: vec![TerminalOutcome::Fulfilled],
-                context_warning: None,
-                handover_reminder: None,
-                deliver_call: None,
-                upgrade_notice: None,
-            },
-        )
-        .unwrap()
-    else {
-        panic!("expected task admission")
-    };
-    delivered(&fixture, &worker, &work);
-    let done = Message::Soft(Request::Done(flow_ethos::DonePayload::Answered(
-        flow_ethos::DonePayload_Answered_Data {
-            logical_delivery_id: work.logical_delivery_id.clone(),
-            request_id: work.request_id.clone(),
-            string: "Reviewed, with evidence.".into(),
-        },
-    )));
-    let answer = || {
-        store
-            .accept_logical_delivery(
-                &requester,
-                SentBy::Sender(worker.clone()),
-                flow_ethos::Delivery::Wake,
-                done.clone(),
-                None,
-            )
-            .unwrap()
-    };
-    assert!(matches!(answer(), PrivateSendResponse::SendAccepted(_)));
-    let entries = queued(&fixture, &requester);
-    let [entry] = entries.as_slice() else {
-        panic!("expected one explicit answer")
-    };
-    assert_eq!(entry.message, done);
-    assert_eq!(entry.sent_by, SentBy::Sender(worker.clone()));
-    let events = store.task_terminal_events(&work.logical_delivery_id);
-    let [event] = events.as_slice() else {
-        panic!("expected one terminal event")
-    };
-    assert_eq!(event.request_id, work.request_id);
-    assert_eq!(event.terminal_outcome, TerminalOutcome::Fulfilled);
-    assert_eq!(event.address, requester);
-    assert_eq!(store.reminder(&work.logical_delivery_id.0).unwrap(), None);
-    assert_eq!(
-        answer(),
-        PrivateSendResponse::Refused(signal_flow::Refusal::Unresolved)
-    );
-    assert_eq!(
-        store.task_terminal_events(&work.logical_delivery_id),
-        events
-    );
-    assert!(fixture.typed().is_none());
-}
-
-#[test]
 fn only_the_work_receiver_address_or_its_next_seat_may_complete_work() {
     use crate::store::kept_answer::{AnswerRoute, RoutesAnswers};
 
@@ -344,10 +144,12 @@ fn only_the_work_receiver_address_or_its_next_seat_may_complete_work() {
         &fixture,
         &worker,
         SentBy::Sender(requester.clone()),
-        Request::Task(flow_ethos::AnswerableTask {
-            minutes: flow_ethos::Minutes(30),
-            string: "Review.".into(),
-        }),
+        work_with(flow_ethos::WorkNotificationPolicy::Destinations(vec![
+            flow_ethos::Notified {
+                notification_type: flow_ethos::NotificationType::WorkCancelled,
+                address_vector: vec![requester.clone()],
+            },
+        ])),
     );
     delivered(&fixture, &worker, &work);
     let done = Message::Soft(Request::Done(flow_ethos::DonePayload::Answered(
@@ -395,6 +197,18 @@ fn only_the_work_receiver_address_or_its_next_seat_may_complete_work() {
         PrivateSendResponse::SendAccepted(_)
     ));
     assert_ne!(store.request_binding(&work.request_id).unwrap(), before);
+    use crate::store::work_notices::KeepsWorkNotices as _;
+    let outcome = store.work_outcome(&work.request_id).unwrap().unwrap();
+    assert_eq!(
+        outcome.work_notification.notification_type,
+        flow_ethos::NotificationType::WorkDone
+    );
+    assert_eq!(outcome.work_notification.request_id, work.request_id);
+    assert!(
+        outcome.address_vector.is_empty(),
+        "unlisted WorkDone does not default"
+    );
+    assert_eq!(store.pending_work_notices().unwrap(), vec![]);
     assert_eq!(
         admit_answer(SentBy::Sender(worker)),
         PrivateSendResponse::Refused(signal_flow::Refusal::Unresolved)
@@ -1988,4 +1802,296 @@ fn startup_settles_stranded_attempts_without_waking_their_metaflow() {
             Output::RequestClosed(task.request_id)
         );
     }
+}
+
+fn work_with(policy: flow_ethos::WorkNotificationPolicy) -> Request {
+    Request::Work(flow_ethos::WorkRequest {
+        string: "Read the witness.".into(),
+        work_notification_policy: policy,
+    })
+}
+
+fn set_work_default(fixture: &NexusFixture, kind: flow_ethos::NotificationType, address: &Address) {
+    let change = meta_signal_flow::ConfigurationChange::DefaultNotificationDestination(
+        meta_signal_flow::DefaultNotificationDestination {
+            notification_type: kind,
+            address: address.clone(),
+        },
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(meta_signal_flow::Input::Configure(change.clone())),
+        meta_signal_flow::Output::Configured(change),
+    );
+}
+
+fn work_notices_here(
+    fixture: &NexusFixture,
+    address: &Address,
+) -> Vec<flow_ethos::WorkNotification> {
+    queued(fixture, address)
+        .into_iter()
+        .filter_map(|entry| match entry.message {
+            Message::Soft(Request::WorkNotification(value)) => {
+                assert_eq!(entry.delivery, flow_ethos::Delivery::Queue);
+                assert_eq!(entry.sent_by, SentBy::Flow);
+                Some(value)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn work_notice_uses_defaults_at_commit_and_retains_exact_route_across_recovery() {
+    use crate::store::work_notices::KeepsWorkNotices as _;
+    use crate::work_notices::DeliversWorkNotices as _;
+    use flow_ethos::{NotificationType, WorkNotification, WorkNotificationPolicy};
+
+    let fixture = NexusFixture::new();
+    let store = &fixture.nexus.store;
+    let worker = at("noticeWorker");
+    let sender = at("noticeSender");
+    let original = at("oldDefault");
+    let selected = at("currentDefault");
+    let following = at("laterDefault");
+    for address in [&worker, &sender, &original, &selected, &following] {
+        asleep(&fixture, address);
+    }
+    let default = || {
+        store
+            .accept_logical_delivery(
+                &worker,
+                SentBy::Sender(sender.clone()),
+                flow_ethos::Delivery::Queue,
+                Message::Soft(work_with(WorkNotificationPolicy::Default)),
+                None,
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        default(),
+        PrivateSendResponse::Refused(signal_flow::Refusal::MissingDefaultNotificationDestination(
+            NotificationType::WorkDone
+        ))
+    );
+    set_work_default(&fixture, NotificationType::WorkDone, &original);
+    assert_eq!(
+        default(),
+        PrivateSendResponse::Refused(signal_flow::Refusal::MissingDefaultNotificationDestination(
+            NotificationType::WorkCancelled
+        ))
+    );
+    assert!(queued(&fixture, &worker).is_empty());
+    set_work_default(&fixture, NotificationType::WorkCancelled, &original);
+    let PrivateSendResponse::SendAccepted(work) = default() else {
+        panic!("both configured types, one accepted request");
+    };
+    assert!(store.pending_work_notices().unwrap().is_empty());
+    set_work_default(&fixture, NotificationType::WorkCancelled, &selected);
+    assert_eq!(
+        fixture.nexus.cancel(&work.request_id, &Origin::Unbound),
+        Output::Cancelled(work.request_id.clone()),
+    );
+    set_work_default(&fixture, NotificationType::WorkCancelled, &following);
+    assert_eq!(
+        store
+            .work_outcome(&work.request_id)
+            .unwrap()
+            .unwrap()
+            .address_vector,
+        vec![selected.clone()],
+    );
+    fixture.nexus.deliver_work_notices();
+    fixture.nexus.deliver_work_notices();
+    assert_eq!(
+        work_notices_here(&fixture, &selected),
+        vec![WorkNotification {
+            request_id: work.request_id,
+            notification_type: NotificationType::WorkCancelled,
+            address: sender,
+        }]
+    );
+    assert!(work_notices_here(&fixture, &original).is_empty());
+    assert!(work_notices_here(&fixture, &following).is_empty());
+    assert!(store.pending_work_notices().unwrap().is_empty());
+    assert_eq!(
+        store.metaflow(&selected).unwrap().unwrap().state,
+        State::Asleep
+    );
+    assert!(fixture.typed().is_none());
+}
+
+#[test]
+fn explicit_work_routes_leave_the_acting_sender_silent_and_designer_inspectable() {
+    use crate::store::work_notices::KeepsWorkNotices as _;
+    use crate::work_notices::DeliversWorkNotices as _;
+    use flow_ethos::{NotificationType, Notified, WorkNotificationPolicy};
+
+    let fixture = NexusFixture::new();
+    let worker = at("overrideWorker");
+    let sender = at("overrideSender");
+    let designer = at("overrideDesigner");
+    let cold = at("coldObserver");
+    let sender_flow = flow_ethos::FlowId("overrideSenderFlow".into());
+    awake_as(&fixture, &sender, &sender_flow);
+    for address in [&worker, &designer, &cold] {
+        asleep(&fixture, address);
+    }
+    let designer_policy = meta_signal_flow::ConfigurationChange::DesignerNoticePolicy(
+        meta_signal_flow::DesignerNoticePolicy(vec![designer.clone()]),
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(meta_signal_flow::Input::Configure(designer_policy.clone())),
+        meta_signal_flow::Output::Configured(designer_policy)
+    );
+    let notices = vec![Notified {
+        notification_type: NotificationType::WorkCancelled,
+        address_vector: vec![sender.clone(), designer.clone(), cold.clone(), cold.clone()],
+    }];
+    let store = &fixture.nexus.store;
+    let from_shell = store
+        .accept_logical_delivery(
+            &worker,
+            SentBy::Unbound,
+            flow_ethos::Delivery::Queue,
+            Message::Soft(work_with(WorkNotificationPolicy::Destinations(
+                notices.clone(),
+            ))),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        from_shell,
+        PrivateSendResponse::Refused(signal_flow::Refusal::UnaddressedNotificationSender)
+    );
+    let accepted = admitted(
+        &fixture,
+        &worker,
+        SentBy::Sender(sender.clone()),
+        work_with(WorkNotificationPolicy::Destinations(notices)),
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .cancel(&accepted.request_id, &origin_of(sender_flow)),
+        Output::Cancelled(accepted.request_id.clone())
+    );
+    fixture.nexus.deliver_work_notices();
+    let outcome = store.work_outcome(&accepted.request_id).unwrap().unwrap();
+    assert_eq!(outcome.address_vector, vec![designer.clone(), cold.clone()]);
+    assert_eq!(outcome.work_notification.address, sender);
+    assert_eq!(
+        work_notices_here(&fixture, &cold),
+        vec![outcome.work_notification]
+    );
+    assert!(work_notices_here(&fixture, &sender).is_empty());
+    assert!(work_notices_here(&fixture, &designer).is_empty());
+    assert!(fixture.typed().is_none());
+}
+
+#[test]
+fn quiet_work_accepts_an_unbound_sender_and_emits_no_terminal_notification() {
+    use crate::store::work_notices::KeepsWorkNotices as _;
+    use crate::work_notices::DeliversWorkNotices as _;
+    use flow_ethos::WorkNotificationPolicy;
+
+    let fixture = NexusFixture::new();
+    let worker = at("quietWorker");
+    asleep(&fixture, &worker);
+    let accepted = admitted(
+        &fixture,
+        &worker,
+        SentBy::Unbound,
+        work_with(WorkNotificationPolicy::Quiet),
+    );
+    assert_eq!(
+        fixture.nexus.cancel(&accepted.request_id, &Origin::Unbound),
+        Output::Cancelled(accepted.request_id.clone())
+    );
+    fixture.nexus.deliver_work_notices();
+    assert!(
+        fixture
+            .nexus
+            .store
+            .work_outcome(&accepted.request_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .pending_work_notices()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn configured_designer_inspects_routine_mail_admitted_before_and_after_the_policy() {
+    use crate::store::work_notices::KeepsWorkNotices as _;
+
+    let fixture = NexusFixture::new();
+    let designer = at("designerInspection");
+    asleep(&fixture, &designer);
+    let queued_before = admitted(
+        &fixture,
+        &designer,
+        SentBy::Flow,
+        Request::Notice("Already queued when the policy takes effect.".into()),
+    );
+    let actual_work = admitted(
+        &fixture,
+        &designer,
+        SentBy::Unbound,
+        Request::Order("Actual requested work stays queued.".into()),
+    );
+    let change = meta_signal_flow::ConfigurationChange::DesignerNoticePolicy(
+        meta_signal_flow::DesignerNoticePolicy(vec![designer.clone()]),
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(meta_signal_flow::Input::Configure(change.clone())),
+        meta_signal_flow::Output::Configured(change)
+    );
+    let admitted_after = admitted(
+        &fixture,
+        &designer,
+        SentBy::Flow,
+        Request::Notice("Inspection-only admission.".into()),
+    );
+    assert_eq!(admitted_after.delivery_state, DeliveryState::InspectionOnly);
+
+    let store = &fixture.nexus.store;
+    store
+        .reserve_routine_notices_for_inspection(&designer)
+        .unwrap();
+    store
+        .reserve_routine_notices_for_inspection(&designer)
+        .unwrap();
+    assert_eq!(queued(&fixture, &designer).len(), 1);
+    assert_eq!(
+        queued(&fixture, &designer)[0].logical_delivery_id,
+        actual_work.logical_delivery_id
+    );
+    assert_eq!(
+        store
+            .logical_delivery_snapshot(&queued_before.logical_delivery_id)
+            .unwrap()
+            .unwrap()
+            .delivery_state,
+        DeliveryState::InspectionOnly,
+    );
+    assert!(
+        store
+            .request_binding(&queued_before.request_id)
+            .unwrap()
+            .is_some()
+    );
+    assert!(fixture.typed().is_none());
 }

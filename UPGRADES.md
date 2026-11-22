@@ -1,3 +1,29 @@
+# Notices.2: Work and terminal destinations
+
+Configure one `DefaultNotificationDestination` for `WorkDone` and one for
+`WorkCancelled`, then read them through `ReadDefaultNotificationDestinations`.
+The notified default form refuses a missing type before allocating an ID.
+Both notified forms require a bound sending flow; quiet Work is available
+to a shell. A runtime default change affects outcomes committed after it.
+`ReadWorkOutcome.<request-id>` reads an outcome and its committed destinations.
+
+Engine Memory retains the original request and ID while its outcome and
+notification admissions settle. The selected destinations and pending rows
+commit with the terminal state. A delivered notification is always Soft;
+cold destinations retain it without waking, and a configured Designer keeps
+it for inspection. Explicit Done and Result still carry the caller's own
+words. Cancelling reached work without proven request-exclusive native
+control replies ControlUnavailable and keeps the work and its evidence.
+
+Upgrade from the exact pre-release Flow state using a stopped copy of the
+whole Flow place. The new families are additive; prior Work-less queues and
+receipts must remain readable and retain their IDs. Switch the ordinary
+and meta clients with the daemon: the wire greetings distinguish the new
+contracts from their predecessors. For rollback stop the new writer,
+preserve its cold image for audit, then restore the old daemon, old clients,
+and matching cold predecessor state together. An old daemon opening the
+new store is not the rollback interface.
+
 # Flow 0.60.6: permaflow refresh mode
 
 Take a store copy before activation. Permaflow declaration Memory v9 adds

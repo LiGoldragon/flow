@@ -922,7 +922,9 @@ impl RespondsToSendCalls for RunningNexus {
             },
         };
         let answered = subscription.answer(id, answer.outcome.tool_response());
-        if let SendOutcome::Accepted(accepted) = answer.outcome {
+        if let SendOutcome::Accepted(accepted) = answer.outcome
+            && accepted.send_acceptance.delivery_state == signal_flow::DeliveryState::Queued
+        {
             self.wake_due(accepted.target.0);
         }
         answered
@@ -1107,7 +1109,9 @@ impl ServesLaunchCalls for RunningNexus {
         let answered = responder
             .subscription
             .answer(id, answer.outcome.tool_response());
-        if let SendOutcome::Accepted(accepted) = answer.outcome {
+        if let SendOutcome::Accepted(accepted) = answer.outcome
+            && accepted.send_acceptance.delivery_state == signal_flow::DeliveryState::Queued
+        {
             self.defer_wake(accepted.target.0);
         }
         answered

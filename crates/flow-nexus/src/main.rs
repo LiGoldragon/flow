@@ -184,6 +184,8 @@ fn main() -> ExitCode {
                 eprintln!("flow-nexus: startup retired delivery settlement failed: {error}");
             }
             nexus.recover_wakes();
+            use flow_nexus::work_notices::DeliversWorkNotices as _;
+            nexus.deliver_work_notices();
             nexus.settle_delivery_retirements();
         });
         // Reminders held in Memory are sent as they fall due.

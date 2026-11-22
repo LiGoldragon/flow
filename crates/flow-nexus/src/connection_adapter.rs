@@ -53,6 +53,8 @@ enum PostReplyOperation {
     },
     WakeDue(signal_flow::Address),
     DrainAwake(signal_flow::Address),
+    CompletedWork(Option<signal_flow::Address>),
+    CancelledWork,
     SettleThenBoundExisting(Option<signal_flow::FlowId>),
 }
 
@@ -178,7 +180,10 @@ impl AdaptsFlowConnection for FlowConnectionAdapter<'_> {
                 let address = request.lock.second_address.clone();
                 let answer =
                     nexus.dispatch_metaflow_peer(Input::Deliver(request), caller.process.as_ref());
-                let completion = if matches!(answer.response, Output::SendAccepted(_)) {
+                let completion = if matches!(
+                    &answer.response, Output::SendAccepted(accepted)
+                        if accepted.visible_delivery_state == signal_flow::VisibleDeliveryState::Queued
+                ) {
                     Completion::AfterAnyWrite(PostReplyOperation::WakeDue(address))
                 } else {
                     Completion::NoPostReplyWork
@@ -186,29 +191,28 @@ impl AdaptsFlowConnection for FlowConnectionAdapter<'_> {
                 return answer.response.reply(completion);
             }
             Input::Send(send) => {
+                use signal_flow::{SendableMessage, SendableRequest};
+                let outcome = matches!(
+                    &send.sendable_message,
+                    SendableMessage::Soft(SendableRequest::Done(_))
+                        | SendableMessage::MiddleAbrupt(SendableRequest::Done(_))
+                        | SendableMessage::HardAbrupt(SendableRequest::Done(_))
+                );
                 let answer = nexus.send_request(send, caller.process.as_ref());
-                let completion = match answer.pending {
-                    Some(pending) => {
-                        Completion::AfterAnyWrite(PostReplyOperation::WakeDue(pending.address))
+                let pending = answer.pending.map(|pending| pending.address);
+                let completion = if outcome
+                    && matches!(&answer.response, Output::Sent(_) | Output::SendAccepted(_))
+                {
+                    Completion::AfterAnyWrite(PostReplyOperation::CompletedWork(pending))
+                } else {
+                    match pending {
+                        Some(address) => {
+                            Completion::AfterAnyWrite(PostReplyOperation::WakeDue(address))
+                        }
+                        None => Completion::NoPostReplyWork,
                     }
-                    None => Completion::NoPostReplyWork,
                 };
                 return answer.response.reply(completion);
-            }
-            Input::SendTaskVerbose(send) => {
-                use crate::sending::PresentsTaskAdmission;
-                let answer = nexus.send_task_verbose(send, caller.process.as_ref());
-                let completion = match answer.pending {
-                    Some(pending) => {
-                        Completion::AfterAnyWrite(PostReplyOperation::WakeDue(pending.address))
-                    }
-                    None => Completion::NoPostReplyWork,
-                };
-                let response = answer
-                    .response
-                    .task_admission()
-                    .map_or_else(|refusal| refusal, Output::TaskVerboseSent);
-                return response.reply(completion);
             }
             Input::DeliverAll(address) => {
                 return nexus
@@ -275,7 +279,12 @@ impl AdaptsFlowConnection for FlowConnectionAdapter<'_> {
             }
             query @ Input::Cancel(_) => {
                 let origin = nexus.origin_of_process(caller.process.as_ref());
-                nexus.dispatch_serially(query, origin)
+                let response = nexus.dispatch_serially(query, origin);
+                if matches!(response, Output::Cancelled(_)) {
+                    return response
+                        .reply(Completion::AfterAnyWrite(PostReplyOperation::CancelledWork));
+                }
+                response
             }
             // A Refresh is bound to its caller: a flow of the Address,
             // still current or not, refreshes only itself.
@@ -367,6 +376,18 @@ impl PerformsPostReply for PostReplyOperation {
             }
             Self::WakeDue(address) => nexus.wake_due(address),
             Self::DrainAwake(address) => nexus.drain_awake(&address),
+            Self::CompletedWork(wake) => {
+                use crate::work_notices::DeliversWorkNotices as _;
+                if let Some(address) = wake {
+                    nexus.wake_due(address);
+                }
+                nexus.deliver_work_notices();
+            }
+            Self::CancelledWork => {
+                use crate::work_notices::DeliversWorkNotices as _;
+                nexus.settle_stops_at_confirmation();
+                nexus.deliver_work_notices();
+            }
             Self::SettleThenBoundExisting(bound) => {
                 nexus.settle_stops_at_confirmation();
                 if let Some(flow_id) = bound

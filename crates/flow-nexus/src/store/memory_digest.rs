@@ -157,14 +157,10 @@ impl DigestsMemory for FlowStore {
             lines_ref,
         )?;
         self.digest_table("logical.purposes", logical.purposes, lines_ref)?;
+        self.digest_table("logical.work_outcomes", logical.work_outcomes, lines_ref)?;
         self.digest_table(
-            "logical.outcome_selections",
-            logical.outcome_selections,
-            lines_ref,
-        )?;
-        self.digest_table(
-            "logical.terminal_events",
-            logical.terminal_events,
+            "logical.work_notice_outbox",
+            logical.work_notice_outbox,
             lines_ref,
         )?;
         self.digest_table("logical.request_ids", logical.request_ids, lines_ref)?;

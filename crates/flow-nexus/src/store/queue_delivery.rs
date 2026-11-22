@@ -323,6 +323,11 @@ pub(crate) struct RetainedLogicalRequest {
     pub(crate) entry: flow_ethos::QueueEntry,
 }
 
+pub enum QueueDeparture {
+    Withdrawn,
+    InspectionOnly,
+}
+
 pub trait AccountsQueueDelivery {
     fn delivery_attempts_for(
         &self,
@@ -332,6 +337,10 @@ pub trait AccountsQueueDelivery {
     /// Legacy evidence is intentionally absent: it has no authoritative
     /// logical identity or chronology for answer correlation.
     fn retained_logical_requests(&self) -> Result<Vec<RetainedLogicalRequest>, StoreError>;
+    fn retained_logical_request(
+        &self,
+        id: &signal_flow::LogicalDeliveryId,
+    ) -> Result<Option<RetainedLogicalRequest>, StoreError>;
 
     /// Adds the admission's complete request evidence to the same atomic
     /// commit as its metaflow queue and logical lifecycle records. An
@@ -523,6 +532,15 @@ pub trait AccountsQueueDelivery {
         &self,
         address: &Address,
         id: &str,
+    ) -> Result<Result<(), WithdrawRejected_Data>, StoreError> {
+        self.move_queued(address, id, QueueDeparture::Withdrawn)
+    }
+
+    fn move_queued(
+        &self,
+        address: &Address,
+        id: &str,
+        departure: QueueDeparture,
     ) -> Result<Result<(), WithdrawRejected_Data>, StoreError>;
 }
 
@@ -600,6 +618,27 @@ impl AccountsQueueDelivery for FlowStore {
                 QueueEvidence::Legacy(_) => None,
             })
             .collect())
+    }
+
+    fn retained_logical_request(
+        &self,
+        id: &signal_flow::LogicalDeliveryId,
+    ) -> Result<Option<RetainedLogicalRequest>, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.queue_delivery.requests,
+            RecordKey::new(id.0.clone()),
+        ))?;
+        match rows.records() {
+            [] => Ok(None),
+            [request] => match &request.queue_evidence {
+                QueueEvidence::Logical(entry) => Ok(Some(RetainedLogicalRequest {
+                    address: request.address.clone(),
+                    entry: entry.clone(),
+                })),
+                QueueEvidence::Legacy(_) => Ok(None),
+            },
+            _ => Err(StoreError::StateInvariant),
+        }
     }
 
     fn assert_logical_request(
@@ -1711,10 +1750,11 @@ impl AccountsQueueDelivery for FlowStore {
         Ok(Ok(address))
     }
 
-    fn withdraw_queued(
+    fn move_queued(
         &self,
         address: &Address,
         id: &str,
+        departure: QueueDeparture,
     ) -> Result<Result<(), WithdrawRejected_Data>, StoreError> {
         let Some(mut stored) = self.stored_metaflow(address)? else {
             return Ok(Err(WithdrawRejected_Data::UnknownAddress));
@@ -1732,6 +1772,10 @@ impl AccountsQueueDelivery for FlowStore {
             && matches!(&attempt.queue_evidence,
                 QueueEvidence::Logical(entry) if entry.logical_delivery_id.0 == id)
         {
+            if matches!(departure, QueueDeparture::InspectionOnly) {
+                // A prior native write keeps its actual receipt boundary.
+                return Err(StoreError::StateInvariant);
+            }
             let closed = match attempt.queue_delivery_phase {
                 QueueDeliveryPhase::ReceiptRecorded(_) => self.settle_recorded_delivery(
                     &attempt.queue_attempt_id.0,
@@ -1775,7 +1819,10 @@ impl AccountsQueueDelivery for FlowStore {
         if self.logical_delivery_snapshot(&logical_id)?.is_some() {
             self.commit_logical_transition(
                 &logical_id,
-                DeliveryState::Withdrawn,
+                match departure {
+                    QueueDeparture::Withdrawn => DeliveryState::Withdrawn,
+                    QueueDeparture::InspectionOnly => DeliveryState::InspectionOnly,
+                },
                 crate::generated::transitions::ReceiptTurn::Running,
                 commit,
             )?;

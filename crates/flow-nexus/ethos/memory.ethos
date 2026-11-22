@@ -20,11 +20,11 @@
 Memory
 [ signal_flow:[ LaunchRequestId StartRejection ReplaceRejection FlowId HerdrRoute Process NativeSessionId TranscriptPath BackgroundWork NativePrompt Address ReapStanding HandoverCloseRefusal HandoverOwner Successor ]
   flow_nexus:[ LaunchedRecord ReplacedRecord ]
-  signal_flow:[ LogicalDeliveryId TerminalOutcome Metaflow Lock CallerIdentity LaunchAttempt StoreIdentity OrdinarySocketPath MetaSocketPath FlowType Origin HarnessKind EndpointSelection FlowLifecycle SessionId HerdrPaneId DeliverKey SendAcceptance DeliverySnapshot DeliveryCursor RequestId SentBy VisibleNativeInput Section Touch HerdrPaneBinding LaunchProfile TurnEnd UndecodableFrame Tokens ModelName HandoverGeneration ]
+  signal_flow:[ LogicalDeliveryId Metaflow Lock CallerIdentity LaunchAttempt StoreIdentity OrdinarySocketPath MetaSocketPath FlowType Origin HarnessKind EndpointSelection FlowLifecycle SessionId HerdrPaneId DeliverKey SendAcceptance DeliverySnapshot DeliveryCursor RequestId SentBy VisibleNativeInput Section Touch HerdrPaneBinding LaunchProfile TurnEnd UndecodableFrame Tokens ModelName HandoverGeneration ]
   meta_signal_flow:[ ModelEffort SuccessorRecoveryText ContextWarningLimit ContextUsageProjection WarningBoundary WarningStage HarnessHookEvent ConfigureNexus ConfigureModel ConfigureThreshold ConfigureSendServer ConfigureMetaflow ConfigureHarnessFlags HeartbeatConfig DrawBound TryBound HandoverPoliciesConfiguration HandoverArchiveConfiguration HandoverCountConfiguration Duration RestartRecord SendOutcomeRecord Delivery ProcessId ProcessUserId ProcessStartToken DeliveryId HarnessProfile MetaAspects MessageNexusPath TurnRetentionBound RequestDigest QueueRequestId QueueAttemptId QueueEvidence AbsenceProof Undecided QueueResolutionRecord AbandonmentRecord EveryMinutes ReminderText ]
   :meta_signal_flow:generated:signal:[ Path State ]
   :std:boxed:[ Box ]
-  flow_ethos:[ Minutes SourceRoot CodexEndpoint ] ]
+  flow_ethos:[ Minutes SourceRoot CodexEndpoint NotificationType WorkNotification ] ]
 [ StoredModelEffort.{ ModelEffort }
   LaunchOutcome.[ Started.LaunchedRecord
                   Replaced.ReplacedRecord
@@ -105,8 +105,9 @@ Memory
   ; One protected Address, one row per Address; none by default.
   StoredMetaProtectedAddressConfiguration.{ Address }
   StoredDesignerNoticeAddress.{ Address }
-  TaskOutcomeSelection.{ LogicalDeliveryId Option<Address> Vector<TerminalOutcome> }
-  TaskTerminalEvent.{ LogicalDeliveryId RequestId Address TerminalOutcome }
+  StoredWorkNotificationDefault.{ NotificationType Address }
+  CommittedWorkOutcome.{ LogicalDeliveryId WorkNotification Vector<Address> }
+  PendingWorkNotification.{ LogicalDeliveryId Address }
   StoredHandoverConfiguration.{ HandoverPoliciesConfiguration
                                 HandoverArchiveConfiguration
                                 HandoverCountConfiguration
@@ -204,7 +205,7 @@ Memory
   ; answers, who sent it, whom the reply goes to, and whether it is done.
   SimplifiedReplyBinding.{ FlowId InputDeliveryId.String Source.Address Recipient.Address Completed.Boolean }
   ; Whether a request is still open, or answered by a logical delivery.
-  RequestClosure.[ Open Answered.LogicalDeliveryId ]
+  RequestClosure.[ Open Answered.LogicalDeliveryId Cancelled Closed ]
   ; A request id bound to its logical delivery, keyed by the request id.
   RequestIdBinding.{ RequestId LogicalDeliveryId RequestClosure }
   ; The queue delivery counters: the next request and attempt numbers.

@@ -106,6 +106,7 @@ pub mod turn_ends;
 pub mod undecodable;
 pub mod values;
 pub mod waking;
+pub mod work_notices;
 
 use crate::generated::operation::{Operation, Outcome, Record_Data};
 use binding::{ChecksFlowContainer, ChecksProcessIdentity, VerifiesAdoptedSeat};
@@ -879,17 +880,6 @@ impl signal_flow::Answering for OrdinaryCall<'_> {
         }
     }
 
-    fn send_task_verbose(
-        &self,
-        send: &signal_flow::VerboseTask,
-    ) -> Result<signal_flow::VerboseTaskAdmission, Output> {
-        use crate::sending::PresentsTaskAdmission;
-        self.nexus
-            .send_task_verbose(send.clone(), None)
-            .response
-            .task_admission()
-    }
-
     // An observation streams over a connection; a direct dispatch answers
     // its opening frame once, as a read.
     fn observe_sends(
@@ -1444,6 +1434,29 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
             meta_signal_flow::Output::QueueDeliveryResolved(resolved) => Ok(resolved),
             other => Err(other),
         }
+    }
+
+    fn read_work_outcome(
+        &self,
+        request: &signal_flow::RequestId,
+    ) -> Result<Option<meta_signal_flow::WorkOutcomeRecord>, meta_signal_flow::Output> {
+        use crate::store::work_notices::KeepsWorkNotices as _;
+        self.nexus.store.work_outcome(request).map_err(|_| {
+            meta_signal_flow::Output::ConfigureRefused(
+                meta_signal_flow::ConfigureRefusal::StoreRefused,
+            )
+        })
+    }
+
+    fn read_default_notification_destinations(
+        &self,
+    ) -> Result<meta_signal_flow::DefaultNotificationDestinations, meta_signal_flow::Output> {
+        use crate::store::work_notices::KeepsWorkNotices as _;
+        self.nexus.store.notification_defaults().map_err(|_| {
+            meta_signal_flow::Output::ConfigureRefused(
+                meta_signal_flow::ConfigureRefusal::StoreRefused,
+            )
+        })
     }
 
     fn read_designer_notice_policy(
@@ -2166,6 +2179,8 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         }
         crate::launching::ReconcilesInterruptedLaunches::reconcile_interrupted_launches(nexus);
         nexus.recover_wakes();
+        use crate::work_notices::DeliversWorkNotices as _;
+        nexus.deliver_work_notices();
         Ok(())
     }
     fn hold_permaflow(
@@ -3214,8 +3229,7 @@ impl DispatchesSerially for RunningNexus {
     }
 
     fn dispatch_serially(&self, query: Input, origin: Origin) -> Output {
-        if let Input::SendTaskVerbose(_)
-        | Input::Refresh(_)
+        if let Input::Refresh(_)
         | Input::Replace(_)
         | Input::Restart(_)
         | Input::DeliverAll(_)

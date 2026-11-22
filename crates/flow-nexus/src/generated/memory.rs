@@ -233,19 +233,24 @@ pub struct StoredDesignerNoticeAddress {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct TaskOutcomeSelection {
-    pub logical_delivery_id: signal_flow::LogicalDeliveryId,
-    pub address_option: std::option::Option<signal_flow::Address>,
-    pub terminal_outcome_vector: std::vec::Vec<signal_flow::TerminalOutcome>,
+pub struct StoredWorkNotificationDefault {
+    pub notification_type: flow_ethos::NotificationType,
+    pub address: signal_flow::Address,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct TaskTerminalEvent {
+pub struct CommittedWorkOutcome {
     pub logical_delivery_id: signal_flow::LogicalDeliveryId,
-    pub request_id: signal_flow::RequestId,
+    pub work_notification: flow_ethos::WorkNotification,
+    pub address_vector: std::vec::Vec<signal_flow::Address>,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct PendingWorkNotification {
+    pub logical_delivery_id: signal_flow::LogicalDeliveryId,
     pub address: signal_flow::Address,
-    pub terminal_outcome: signal_flow::TerminalOutcome,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -584,6 +589,8 @@ pub struct SimplifiedReplyBinding {
 pub enum RequestClosure {
     Open,
     Answered(signal_flow::LogicalDeliveryId),
+    Cancelled,
+    Closed,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

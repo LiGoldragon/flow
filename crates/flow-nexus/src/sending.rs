@@ -43,7 +43,7 @@ use protos::{Compactable, Protosizable};
 use signal_flow::{
     Address, CallerIdentity, HarnessKind, HerdrRoute, LaunchProfile, LaunchRequest, Message,
     Output, PrivateSendResponse, Process, Refusal, Request, SendPayloadSize, SendRequest,
-    SendableMessage, SendableRequest, SentBy, StartRejection, Unknown_Data,
+    SendableMessage, SentBy, StartRejection, Unknown_Data,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -224,24 +224,7 @@ impl AnswersCompletedDirectSend for signal_flow::DeliveryState {
 
 pub struct RequestSubmission {
     request: SendRequest,
-    task_outcomes: Vec<signal_flow::TerminalOutcome>,
     digest_text: String,
-}
-
-pub(crate) trait PresentsTaskAdmission {
-    fn task_admission(self) -> Result<signal_flow::VerboseTaskAdmission, Output>;
-}
-
-impl PresentsTaskAdmission for Output {
-    fn task_admission(self) -> Result<signal_flow::VerboseTaskAdmission, Output> {
-        match self {
-            Output::Sent(receipt) => Ok(signal_flow::VerboseTaskAdmission::Sent(receipt)),
-            Output::SendAccepted(acceptance) => {
-                Ok(signal_flow::VerboseTaskAdmission::Accepted(acceptance))
-            }
-            refusal => Err(refusal),
-        }
-    }
 }
 
 pub trait SendsRequests {
@@ -251,35 +234,6 @@ pub trait SendsRequests {
         self.submit_request(
             RequestSubmission {
                 request: send,
-                task_outcomes: Vec::new(),
-                digest_text,
-            },
-            peer,
-        )
-    }
-    fn send_task_verbose(
-        &self,
-        send: signal_flow::VerboseTask,
-        peer: Option<&Process>,
-    ) -> SendAnswer {
-        use signal_flow::AbruptTask;
-        let digest_text = send.datomize(Vec::new()).protosize().compact();
-        let sendable_message = match send.abrupt_task {
-            AbruptTask::HardAbrupt(task) => {
-                SendableMessage::HardAbrupt(SendableRequest::Task(task))
-            }
-            AbruptTask::MiddleAbrupt(task) => {
-                SendableMessage::MiddleAbrupt(SendableRequest::Task(task))
-            }
-            AbruptTask::Soft(task) => SendableMessage::Soft(SendableRequest::Task(task)),
-        };
-        self.submit_request(
-            RequestSubmission {
-                request: SendRequest {
-                    address: send.address,
-                    sendable_message,
-                },
-                task_outcomes: send.terminal_outcome_vector,
                 digest_text,
             },
             peer,
@@ -298,7 +252,6 @@ impl SendsRequests for RunningNexus {
         use sha2::{Digest, Sha256};
         let RequestSubmission {
             request: send,
-            task_outcomes,
             digest_text,
         } = submission;
         let abrupt = !matches!(&send.sendable_message, SendableMessage::Soft(_));
@@ -442,7 +395,7 @@ impl SendsRequests for RunningNexus {
                 message.clone(),
                 None,
                 crate::store::logical_delivery::LogicalDeliveryTransition {
-                    task_outcomes,
+                    work_notice: None,
                     purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
                     handover_reminder: None,
                     deliver_call: None,
@@ -477,11 +430,15 @@ impl SendsRequests for RunningNexus {
             }
             drop(_turn);
             match (admitted, direct_lease) {
-                (Ok(PrivateSendResponse::SendAccepted(acceptance)), Some(lease)) => {
+                (Ok(PrivateSendResponse::SendAccepted(acceptance)), Some(lease))
+                    if acceptance.delivery_state == signal_flow::DeliveryState::Queued =>
+                {
                     self.complete_direct_send(&recipient, acceptance, &lease)
                 }
                 (Ok(private_response), _) => {
-                    let pending = matches!(private_response, PrivateSendResponse::SendAccepted(_))
+                    let pending =
+                        matches!(&private_response, PrivateSendResponse::SendAccepted(acceptance)
+                        if acceptance.delivery_state == signal_flow::DeliveryState::Queued)
                         .then(|| PendingSend { address: recipient });
                     let response =
                         crate::message_projection::ProjectsSendResponse::visible_send_response(

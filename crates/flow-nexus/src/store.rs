@@ -284,6 +284,7 @@ const CONFIGURATION_ONLY_TABLES: &[&str] = &[
     "flow_nexus_meta_handover_configuration",
     OPTIONAL_HARNESS_HOOK_TABLE,
     DESIGNER_NOTICE_TABLE,
+    work_notices::DEFAULT_TABLE,
     OPTIONAL_TURN_RETENTION_TABLE,
 ];
 /// The tables a running store holds, all of them.

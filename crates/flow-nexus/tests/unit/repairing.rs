@@ -529,8 +529,14 @@ fn rebind_flow_preserves_the_receiving_predecessor_while_a_successor_is_unconfir
     use crate::store::metaflow::{ReadsSuccession, Succession};
     let fixture = NexusFixture::new();
     awake_seat(&fixture, vec![]);
-    fixture.register_with(signal_flow::FlowLifecycle::Active);
-    let third = fixture.node().flow_id;
+    let third = fixture.node();
+    let third_id = third.flow_id.clone();
+    fixture
+        .nexus
+        .store
+        .register_flow(third)
+        .expect("the eligible third flow is registered");
+    let third = third_id;
     let address = seat_address();
     let mut successor = staged_refresh_successor(&fixture);
     successor.stage_to_ambiguity(&fixture.nexus);

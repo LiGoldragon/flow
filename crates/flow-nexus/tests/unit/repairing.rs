@@ -523,3 +523,48 @@ fn withdraw_takes_one_request_out_and_closes_its_attempt() {
         MetaResponse::WithdrawRejected(WithdrawRejected_Data::UnknownAddress)
     );
 }
+
+#[test]
+fn rebind_flow_preserves_the_receiving_predecessor_while_a_successor_is_unconfirmed() {
+    use crate::store::metaflow::{ReadsSuccession, Succession};
+    let fixture = NexusFixture::new();
+    awake_seat(&fixture, vec![]);
+    fixture.register_with(signal_flow::FlowLifecycle::Active);
+    let third = fixture.node().flow_id;
+    let address = seat_address();
+    let mut successor = staged_refresh_successor(&fixture);
+    successor.stage_to_ambiguity(&fixture.nexus);
+    let before = stored(&fixture);
+    let State::Awake(raw) = &before.state else {
+        panic!("the acknowledged successor must hold Awake")
+    };
+    assert_ne!(raw.0, CLAUDE_SEAT);
+    assert_ne!(*raw, third);
+    assert_eq!(
+        fixture.nexus.store.succession(&raw.0).unwrap(),
+        Succession::Unconfirmed
+    );
+    assert_eq!(
+        fixture.nexus.store.receiving_flow(&address).unwrap(),
+        Some(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
+    let reply = fixture.nexus.dispatch_meta_serially(
+        MetaQuery::Rebind(Rebind_Data {
+            address: address.clone(),
+            rebinding: Rebinding::Flow(third),
+        }),
+        None,
+    );
+    assert!(
+        matches!(
+            reply,
+            MetaResponse::Refused(meta_signal_flow::Refused_Data::StoreRefused(_))
+        ),
+        "{reply:?}"
+    );
+    assert_eq!(stored(&fixture), before);
+    assert_eq!(
+        fixture.nexus.store.receiving_flow(&address).unwrap(),
+        Some(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+    );
+}

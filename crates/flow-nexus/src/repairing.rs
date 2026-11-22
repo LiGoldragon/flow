@@ -9,6 +9,7 @@ use crate::delivery::lease::LeasesPanes;
 use crate::herdr::{PaneRoute, ReadsHerdrPanes};
 use crate::queue_write_fence::CoordinatesQueueWrites;
 use crate::store::ReadsFlowRows;
+use crate::store::metaflow::ReadsSuccession;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::repair::RepairsMetaflows;
 use meta_signal_flow::{
@@ -81,6 +82,18 @@ impl RepairsFromMeta for RunningNexus {
             Ok(Err(rejection)) => return Output::RebindRejected(rejection),
             Err(error) => return Self::store_refused(error),
         };
+        // An acknowledged, unconfirmed replacement can be the raw Awake
+        // row while its predecessor still receives. Do not change either
+        // binding on that tentative row.
+        match self.store.receiving_flow(&address) {
+            Ok(Some(receiving)) if receiving == flow_id => {}
+            Ok(_) => {
+                return Self::store_refused(format!(
+                    "Address {address:?} has an unconfirmed receiving binding"
+                ));
+            }
+            Err(error) => return Self::store_refused(error),
+        }
         let node = match self.store.flow_node(&flow_id.0) {
             Ok(node) => node,
             Err(error) => return Self::store_refused(error),

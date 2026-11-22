@@ -229,39 +229,100 @@ fn both_harnesses_deliver_every_priority_and_only_hard_interrupts_working() {
 }
 
 #[test]
-fn an_active_codex_queue_uses_native_receipts_without_a_pane_reaction_wait() {
-    use crate::store::RegistersFlowIdentity;
+fn raw_waking_content_keeps_herdr_reaction_observation() {
+    assert_reaction_wait_for_waking(true);
+}
+
+#[test]
+fn prepared_codex_queue_attempt_leaves_receipt_to_the_native_cohort() {
+    assert_reaction_wait_for_waking(false);
+}
+
+fn assert_reaction_wait_for_waking(waits_for_reaction: bool) {
+    use crate::delivery::DeliversMessages as _;
+    use crate::generated::memory::NativeHistoryAnchor;
+    use crate::message_projection::ProjectsQueueEntry as _;
+    use crate::store::RegistersFlowIdentity as _;
+    use crate::store::metaflow::SeedsMetaflow as _;
+    use crate::store::queue_delivery::{AccountsQueueDelivery as _, PrepareQueueDelivery};
+    use crate::waking::HoldsWakingMetaflows as _;
+
     let fixture = NexusFixture::new();
     let mut node = fixture.node();
     node.flow_lifecycle = FlowLifecycle::Active;
+    let flow_id = node.flow_id.clone();
+    let thread_id = node.session_id.clone();
+    let harness_kind = node.harness_kind.clone();
+    assert_eq!(harness_kind, signal_flow::HarnessKind::Codex);
     fixture.nexus.store.register_flow(node).unwrap();
     let mut agent = fixture.current_agent();
     agent["agent_status"] = "idle".into();
     let log = fixture.accept_pane_operations(vec![agent], PromptFixture::Prompted("w1:p3"));
-    let letter = Letter {
-        visible_sender: signal_flow::VisibleSender::Notification,
-        content: Content::Waking(vec![signal_flow::VisibleNativeInput {
-            visible_sender: signal_flow::VisibleSender::Notification,
-            delivered_message: signal_flow::DeliveredMessage::Soft(
-                signal_flow::DeliveredRequest::Order(signal_flow::Order_Data {
-                    request_id: signal_flow::RequestId("id00".into()),
-                    string: "one queued letter".into(),
-                }),
-            ),
-        }]),
+    let address = signal_flow::Address {
+        aspect: signal_flow::Aspect::Mind,
+        topic: flow_ethos::Topic("queueWitness".into()),
+        model: signal_flow::Model::Sol,
     };
-    let result = fixture.deliver("active-codex-queue", Message::Soft(letter));
-    let MetaResponse::MessageTyped(delivery) = result else {
-        panic!("delivery was refused: {result:?}");
+    let entry = signal_flow::QueueEntry {
+        logical_delivery_id: flow_ethos::LogicalDeliveryId("prepared-delivery".into()),
+        request_id: flow_ethos::RequestId("id00".into()),
+        sent_by: signal_flow::SentBy::Unbound,
+        delivery: flow_ethos::Delivery::Wake,
+        message: signal_flow::Message::Soft(signal_flow::Request::Order(
+            "one queued letter".into(),
+        )),
     };
-    assert_eq!(delivery.delivery_grade, DeliveryGrade::Transported);
+    let input = entry.visible_input(&address);
+    let message = Message::Soft(Letter {
+        visible_sender: input.visible_sender.clone(),
+        content: Content::Waking(vec![input]),
+    });
+
+    let result = if waits_for_reaction {
+        fixture.deliver("raw-waking", message)
+    } else {
+        fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+            address: address.clone(),
+            state: flow_ethos::State::Awake(flow_id.clone()),
+            past: flow_ethos::Past(vec![]),
+            queue: flow_ethos::Queue(vec![entry]),
+        });
+        let lease = fixture.nexus.waking.hold(&address).expect("waking lease");
+        let PrepareQueueDelivery::Prepared(attempt) = fixture
+            .nexus
+            .store
+            .prepare_oldest_delivery(
+                &address,
+                &flow_id.0,
+                &thread_id.0,
+                harness_kind,
+                NativeHistoryAnchor::CodexTurns(Some("prior-turn".into())),
+            )
+            .expect("prepare durable queue attempt")
+        else {
+            panic!("no prepared queue attempt");
+        };
+        fixture.nexus.deliver_while_waking(
+            DeliveryRequest {
+                delivery_id: meta_signal_flow::DeliveryId(attempt.queue_attempt_id.0.clone()),
+                flow_id,
+                message,
+            },
+            &lease,
+            &attempt,
+        )
+    };
+    assert!(
+        matches!(result, MetaResponse::MessageTyped(_)),
+        "{result:?}"
+    );
     let log = fs::read_to_string(log).unwrap();
     let prompts: Vec<_> = log
         .lines()
         .filter(|line| line.contains("agent prompt"))
         .collect();
     assert_eq!(prompts.len(), 1, "{log}");
-    assert!(!prompts[0].contains("--wait"), "{log}");
+    assert_eq!(prompts[0].contains("--wait"), waits_for_reaction, "{log}");
 }
 
 #[test]

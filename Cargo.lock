@@ -271,7 +271,7 @@ dependencies = [
  "protos",
  "rkyv",
  "serde_json",
- "signal-flow 0.69.0",
+ "signal-flow 0.71.0",
  "tempfile",
  "translator",
 ]
@@ -306,11 +306,11 @@ dependencies = [
  "ethos-zero 29.0.0",
  "flow-ethos",
  "flow-place",
- "meta-signal-flow 0.92.0",
+ "meta-signal-flow 0.94.0",
  "protos",
  "rkyv",
  "signal",
- "signal-flow 0.69.0",
+ "signal-flow 0.71.0",
  "tempfile",
  "translator",
 ]
@@ -324,7 +324,7 @@ dependencies = [
 
 [[package]]
 name = "flow-nexus"
-version = "0.60.6"
+version = "0.61.0"
 dependencies = [
  "base64",
  "datom-codec",
@@ -337,7 +337,7 @@ dependencies = [
  "flow-place",
  "getrandom",
  "libc",
- "meta-signal-flow 0.92.0",
+ "meta-signal-flow 0.94.0",
  "meta-signal-flow 77.0.0",
  "meta-signal-flow-before-request-ids",
  "notify",
@@ -352,7 +352,7 @@ dependencies = [
  "sha2",
  "signal",
  "signal-curriculum-nexus",
- "signal-flow 0.69.0",
+ "signal-flow 0.71.0",
  "signal-flow 60.0.0",
  "signal-flow-before-request-ids",
  "tempfile",
@@ -551,8 +551,8 @@ dependencies = [
 
 [[package]]
 name = "meta-signal-flow"
-version = "0.92.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=741eeebca64fa0c44c10bd9a85542a1c7997e981#741eeebca64fa0c44c10bd9a85542a1c7997e981"
+version = "0.94.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=baa74c07df71fdb4c327e98e7707fa3e14bea8b4#baa74c07df71fdb4c327e98e7707fa3e14bea8b4"
 dependencies = [
  "datom-codec",
  "ethos-zero 29.0.0",
@@ -560,7 +560,7 @@ dependencies = [
  "protos",
  "rkyv",
  "signal",
- "signal-flow 0.69.0",
+ "signal-flow 0.71.0",
 ]
 
 [[package]]
@@ -974,8 +974,8 @@ dependencies = [
 
 [[package]]
 name = "signal-flow"
-version = "0.69.0"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=da01bb0533a2b2800efcc3a4ceacee8307261fd7#da01bb0533a2b2800efcc3a4ceacee8307261fd7"
+version = "0.71.0"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=c61b5788cccf4cd184418c35ae0f94527cf073e2#c61b5788cccf4cd184418c35ae0f94527cf073e2"
 dependencies = [
  "datom-codec",
  "ethos-zero 27.0.0",

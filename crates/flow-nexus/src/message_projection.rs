@@ -42,6 +42,13 @@ impl ProjectsRefusal for signal_flow::Refusal {
             Refusal::RequestIdDrawsCollided => VisibleRefusal::RequestIdDrawsCollided,
             Refusal::MinutesRefused(value) => VisibleRefusal::MinutesRefused(value.clone()),
             Refusal::PermaflowHeld(value) => VisibleRefusal::PermaflowHeld(value.clone()),
+            Refusal::MissingDefaultNotificationDestination(kind) => {
+                VisibleRefusal::MissingDefaultNotificationDestination(kind.clone())
+            }
+            Refusal::UnaddressedNotificationSender => VisibleRefusal::UnaddressedNotificationSender,
+            Refusal::EmptyNotificationDestinations(kind) => {
+                VisibleRefusal::EmptyNotificationDestinations(kind.clone())
+            }
         }
     }
 }
@@ -64,6 +71,7 @@ impl ProjectsDeliveryState for signal_flow::DeliveryState {
             DeliveryState::Withdrawn => VisibleDeliveryState::Withdrawn,
             DeliveryState::Archived => VisibleDeliveryState::Archived,
             DeliveryState::Abandoned => VisibleDeliveryState::Abandoned,
+            DeliveryState::InspectionOnly => VisibleDeliveryState::InspectionOnly,
         }
     }
 }
@@ -162,6 +170,8 @@ impl ProjectsRequest for Request {
             }
             Request::Notice(value) => VisibleRequest::Notice(value.clone()),
             Request::Task(value) => VisibleRequest::Task(value.clone()),
+            Request::Work(value) => VisibleRequest::Work(value.string.clone()),
+            Request::WorkNotification(value) => VisibleRequest::WorkNotification(value.clone()),
             Request::Done(DonePayload::Answered(value)) => VisibleRequest::Done(
                 VisibleDonePayload::Answered(VisibleDonePayload_Answered_Data {
                     request_id: value.request_id.clone(),
@@ -216,6 +226,11 @@ impl DeliversRequest for Request {
                 request_id: request_id.clone(),
                 string: value.clone(),
             }),
+            Request::Work(value) => DeliveredRequest::Work(signal_flow::Work_Data {
+                request_id: request_id.clone(),
+                string: value.string.clone(),
+            }),
+            Request::WorkNotification(value) => DeliveredRequest::WorkNotification(value.clone()),
             Request::Task(value) => DeliveredRequest::Task(signal_flow::Task_Data {
                 request_id: request_id.clone(),
                 minutes: value.minutes,

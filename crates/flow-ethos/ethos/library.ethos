@@ -34,6 +34,11 @@ Library
                   Historical.String ]
   DonePayload.[ Answered.{ LogicalDeliveryId RequestId String }
                 Historical.{ LogicalDeliveryId String } ]
+  NotificationType.[ WorkDone WorkCancelled ]
+  Notified.{ NotificationType Vector<Address> }
+  WorkNotificationPolicy.[ Quiet Default Destinations.Vector<Notified> ]
+  WorkRequest.{ String WorkNotificationPolicy }
+  WorkNotification.{ RequestId NotificationType Address }
   Request.[ Order.String
             Question.String
             Living.{ Context Verbatim }
@@ -41,7 +46,9 @@ Library
             Notice.String
             Task.AnswerableTask
             Done.DonePayload
-            Reminder.{ RequestId String } ]
+            Reminder.{ RequestId String }
+            Work.WorkRequest
+            WorkNotification ]
   ; A logical delivery keeps one identity across queue retries and native
   ; submission; the id names the living's request, not a delivery attempt.
   LogicalDeliveryId.String

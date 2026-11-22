@@ -222,9 +222,24 @@ impl AnswersCompletedDirectSend for signal_flow::DeliveryState {
     }
 }
 
+pub struct RequestSubmission {
+    request: SendRequest,
+    digest_text: String,
+}
+
 pub trait SendsRequests {
     /// Answers a Send from `peer`, under the dispatch gate.
-    fn send_request(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer;
+    fn send_request(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer {
+        let digest_text = send.datomize(Vec::new()).protosize().compact();
+        self.submit_request(
+            RequestSubmission {
+                request: send,
+                digest_text,
+            },
+            peer,
+        )
+    }
+    fn submit_request(&self, submission: RequestSubmission, peer: Option<&Process>) -> SendAnswer;
     /// Delivers every durable request currently queued at `address`,
     /// whoever asks.
     fn deliver_all(&self, address: Address) -> Output;
@@ -233,11 +248,13 @@ pub trait SendsRequests {
 }
 
 impl SendsRequests for RunningNexus {
-    fn send_request(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer {
+    fn submit_request(&self, submission: RequestSubmission, peer: Option<&Process>) -> SendAnswer {
         use sha2::{Digest, Sha256};
-
+        let RequestSubmission {
+            request: send,
+            digest_text,
+        } = submission;
         let abrupt = !matches!(&send.sendable_message, SendableMessage::Soft(_));
-        let digest_text = send.datomize(Vec::new()).protosize().compact();
         let request_digest = format!("{:x}", Sha256::digest(digest_text.as_bytes()));
         // The sender is read when the Send arrives. A refresh may hold the
         // address until its successor is committed; that transition cannot
@@ -312,8 +329,11 @@ impl SendsRequests for RunningNexus {
             // Address is kept with the request, answered Sent with its id.
             let recipient = {
                 use crate::store::kept_answer::{AnswerRoute, MarksKeptAnswer, RoutesAnswers};
-                match self.store.answer_route(&message) {
+                match self.store.answer_route(&message, &sender) {
                     Ok(AnswerRoute::Unanswering) => send.address.clone(),
+                    Ok(AnswerRoute::Unentitled) => {
+                        return PrivateSendResponse::Refused(Refusal::Unresolved).into();
+                    }
                     Ok(AnswerRoute::To(address)) => {
                         recipient = Some(address.clone());
                         address
@@ -368,12 +388,20 @@ impl SendsRequests for RunningNexus {
             let direct_lease =
                 direct_lease.filter(|_| live.is_some() || message.wakes_sleeping_permaflow());
             let admitted_at = std::time::SystemTime::now();
-            let admitted = self.store.accept_logical_delivery(
+            let admitted = self.store.accept_logical_delivery_for_with_transition(
                 &recipient,
                 sender,
                 delivery.clone(),
                 message.clone(),
                 None,
+                crate::store::logical_delivery::LogicalDeliveryTransition {
+                    work_notice: None,
+                    purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
+                    handover_reminder: None,
+                    deliver_call: None,
+                    upgrade_notice: None,
+                    context_warning: None,
+                },
             );
             // Each admission is logged with its kind, and a Task's
             // Minutes with the deadline its first reminder is due at.
@@ -402,11 +430,15 @@ impl SendsRequests for RunningNexus {
             }
             drop(_turn);
             match (admitted, direct_lease) {
-                (Ok(PrivateSendResponse::SendAccepted(acceptance)), Some(lease)) => {
+                (Ok(PrivateSendResponse::SendAccepted(acceptance)), Some(lease))
+                    if acceptance.delivery_state == signal_flow::DeliveryState::Queued =>
+                {
                     self.complete_direct_send(&recipient, acceptance, &lease)
                 }
                 (Ok(private_response), _) => {
-                    let pending = matches!(private_response, PrivateSendResponse::SendAccepted(_))
+                    let pending =
+                        matches!(&private_response, PrivateSendResponse::SendAccepted(acceptance)
+                        if acceptance.delivery_state == signal_flow::DeliveryState::Queued)
                         .then(|| PendingSend { address: recipient });
                     let response =
                         crate::message_projection::ProjectsSendResponse::visible_send_response(

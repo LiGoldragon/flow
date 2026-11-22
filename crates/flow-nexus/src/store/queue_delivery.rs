@@ -25,13 +25,11 @@ use crate::generated::memory::{Device, Inode, Offset};
 #[cfg(test)]
 use flow_ethos::Request;
 #[cfg(test)]
-use meta_signal_flow::AbsenceProof;
-#[cfg(test)]
 use meta_signal_flow::QueueEvidence_Legacy_Data;
 use meta_signal_flow::{
-    AbandonQueueDeliveryRejected_Data, AbandonmentRecord, QueueDelivery, QueueDeliveryStanding,
-    QueueEvidence, QueueResolutionOutcome, QueueResolutionRecord, ResolveQueueDeliveryRejection,
-    Undecided, WithdrawRejected_Data,
+    AbandonQueueDeliveryRejected_Data, AbandonmentRecord, AbsenceProof, QueueDelivery,
+    QueueDeliveryStanding, QueueEvidence, QueueResolutionOutcome, QueueResolutionRecord,
+    ResolveQueueDeliveryRejection, Undecided, WithdrawRejected_Data,
 };
 use sema_engine::AtomicCommit;
 #[cfg(test)]
@@ -1476,7 +1474,7 @@ impl AccountsQueueDelivery for FlowStore {
         }
         let evidence = attempt.queue_evidence.clone();
         attempt.queue_delivery_phase = QueueDeliveryPhase::Absent(AbsenceRecord {
-            absence_proof: crate::generated::memory::AbsenceProof::HandOverRefused,
+            absence_proof: AbsenceProof::HandOverRefused,
             observation: crate::generated::memory::Observation(
                 "Hold revoked write before input".into(),
             ),
@@ -2322,7 +2320,7 @@ mod tests {
                 .mark_delivery_absent(
                     &old_id,
                     AbsenceRecord {
-                        absence_proof: crate::generated::memory::AbsenceProof::HandOverRefused,
+                        absence_proof: AbsenceProof::HandOverRefused,
                         observation: crate::generated::memory::Observation(
                             "fixture transport refused before native I/O".into()
                         ),

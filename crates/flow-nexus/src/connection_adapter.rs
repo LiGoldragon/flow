@@ -277,9 +277,18 @@ impl AdaptsFlowConnection for FlowConnectionAdapter<'_> {
                 let origin = nexus.origin_of_process(caller.process.as_ref());
                 nexus.dispatch_serially(query, origin)
             }
-            query @ Input::Cancel(_) => {
-                let origin = nexus.origin_of_process(caller.process.as_ref());
-                let response = nexus.dispatch_serially(query, origin);
+            Input::Cancel(request) => {
+                use crate::queue_operations::OperatesOnRequestsAndQueues as _;
+                use crate::sending::IdentifiesSender as _;
+                let sender = caller
+                    .process
+                    .as_ref()
+                    .map(|peer| nexus.sender_of(peer))
+                    .unwrap_or(Ok(signal_flow::SentBy::Unbound));
+                let response = match sender {
+                    Ok(sender) => nexus.cancel_as_sender(&request, sender),
+                    Err(_) => Output::CancelRejected(signal_flow::RequestRejection::StoreRefused),
+                };
                 if matches!(response, Output::Cancelled(_)) {
                     return response
                         .reply(Completion::AfterAnyWrite(PostReplyOperation::CancelledWork));

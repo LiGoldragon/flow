@@ -53,7 +53,7 @@ impl DescribesClosedRequestTable for ClosedRequest {
 /// unreached work; CloseRequest records its caller without sending a prompt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RequestEnding {
-    Cancelled(Option<flow_ethos::FlowId>),
+    Cancelled(Option<signal_flow::Address>),
     Closed(Closer),
 }
 

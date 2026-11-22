@@ -17,7 +17,7 @@ use crate::store::logical_delivery::{
 use crate::store::metaflow::{SleepsMetaflows, TakesLaunchAddress};
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::turn_end::RecordsTurnEnds;
-use crate::store::{ManagesMetaflowState, StoreError};
+use crate::store::{ManagesMetaflowState, NamesPendingReplies, StoreError};
 use crate::waking::{
     DrainsHeldSeats, HoldsWakingMetaflows, PushesAtPriority, RestsEndedAwake, SleepsAndWakesSeats,
 };
@@ -31,6 +31,7 @@ pub trait OperatesOnRequestsAndQueues {
     /// archived with its id and a Task's reminder. Cancelled answers the
     /// caller. Reached work needs scoped worker control to be cancelled.
     fn cancel(&self, request_id: &RequestId, caller: &Origin) -> Output;
+    fn cancel_as_sender(&self, request_id: &RequestId, sender: SentBy) -> Output;
     /// Closes an open request with no answer and tells no one: one still
     /// queued leaves its queue, it is archived with its id and a Task's
     /// reminder, a reminder not yet sent is retired, and `closer`, the
@@ -203,13 +204,28 @@ impl EndsRequests for RunningNexus {
 
 impl OperatesOnRequestsAndQueues for RunningNexus {
     fn cancel(&self, request_id: &RequestId, caller: &Origin) -> Output {
+        let sender = match caller {
+            Origin::Flow(origin) => match self.store.metaflow_awake_as(&origin.flow_id.0) {
+                Ok(Some(metaflow)) => SentBy::Sender(metaflow.address),
+                Ok(None) => self
+                    .store
+                    .launched_address(&origin.flow_id.0)
+                    .map_or(SentBy::Unbound, SentBy::Sender),
+                Err(_) => return Output::CancelRejected(RequestRejection::StoreRefused),
+            },
+            Origin::Unbound => SentBy::Unbound,
+        };
+        self.cancel_as_sender(request_id, sender)
+    }
+
+    fn cancel_as_sender(&self, request_id: &RequestId, sender: SentBy) -> Output {
         let _turn = self
             .dispatch_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let actor = match caller {
-            Origin::Flow(origin) => Some(origin.flow_id.clone()),
-            Origin::Unbound => None,
+        let actor = match sender {
+            SentBy::Sender(address) => Some(address),
+            _ => None,
         };
         match self.end_request(request_id, &RequestEnding::Cancelled(actor)) {
             Ok(()) => Output::Cancelled(request_id.clone()),

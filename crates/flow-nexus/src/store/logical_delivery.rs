@@ -45,7 +45,7 @@ const PURPOSE_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_deliver
 #[derive(Clone, Copy)]
 enum WorkActor<'a> {
     Answerer(&'a SentBy),
-    Canceller(Option<&'a flow_ethos::FlowId>),
+    Canceller(Option<&'a Address>),
 }
 
 trait StagesTerminalWorkOutcome {
@@ -67,13 +67,11 @@ impl StagesTerminalWorkOutcome for FlowStore {
         commit: AtomicCommit,
     ) -> Result<AtomicCommit, StoreError> {
         let actor_address = match actor {
-            WorkActor::Answerer(SentBy::Sender(address)) => Some(address.clone()),
-            WorkActor::Canceller(Some(flow_id)) => self.launched_address(&flow_id.0).or(self
-                .metaflow_awake_as(&flow_id.0)?
-                .map(|metaflow| metaflow.address)),
+            WorkActor::Answerer(SentBy::Sender(address)) => Some(address),
+            WorkActor::Canceller(address) => address,
             _ => None,
         };
-        self.stage_work_outcome(binding, kind, actor_address.as_ref(), commit)
+        self.stage_work_outcome(binding, kind, actor_address, commit)
     }
 }
 

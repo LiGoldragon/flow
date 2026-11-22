@@ -274,6 +274,50 @@ impl DeliversMessages for RunningNexus {
             Ok(target) => target,
             Err(refusal) => return Output::CommandRejected(refusal.into()),
         };
+        let Some(lease) = self.pane_leases.try_hold(&target.route) else {
+            return Output::CommandRejected(CommandRejection::RouteUnavailable);
+        };
+        self.command_under_lease(request, target, lease)
+    }
+}
+
+pub(crate) trait DeliversOwnerCommands {
+    /// Waits on the named pane without owing the Nexus dispatch gate.
+    fn owner_command(&self, request: CommandRequest) -> Output;
+    fn command_under_lease(
+        &self,
+        request: CommandRequest,
+        target: DeliveryTarget,
+        lease: crate::delivery::lease::PaneLease<'_>,
+    ) -> Output;
+}
+
+impl DeliversOwnerCommands for RunningNexus {
+    fn owner_command(&self, request: CommandRequest) -> Output {
+        let original = match self.delivery_target(&request.flow_id.0) {
+            Ok(target) => target,
+            Err(refusal) => return Output::CommandRejected(refusal.into()),
+        };
+        let lease = self.pane_leases.hold(&original.route);
+        let target = match self.delivery_target(&request.flow_id.0) {
+            Ok(target)
+                if target.route == original.route
+                    && target.node.session_id == original.node.session_id =>
+            {
+                target
+            }
+            Ok(_) => return Output::CommandRejected(CommandRejection::RouteUnavailable),
+            Err(refusal) => return Output::CommandRejected(refusal.into()),
+        };
+        self.command_under_lease(request, target, lease)
+    }
+
+    fn command_under_lease(
+        &self,
+        request: CommandRequest,
+        target: DeliveryTarget,
+        _lease: crate::delivery::lease::PaneLease<'_>,
+    ) -> Output {
         // Compaction is an emergency measure: below its model's refresh
         // threshold it is refused before anything reaches the pane.
         if request.harness_command_kind == HarnessCommandKind::Compact {
@@ -285,9 +329,6 @@ impl DeliversMessages for RunningNexus {
                 Err(_) => return Output::CommandRejected(CommandRejection::NotDelivered),
             }
         }
-        let Some(_lease) = self.pane_leases.try_hold(&target.route) else {
-            return Output::CommandRejected(CommandRejection::RouteUnavailable);
-        };
         let agent_state = match self.writable_state(&target) {
             Ok(agent_state) => agent_state,
             Err(refusal) => return Output::CommandRejected(refusal.into()),

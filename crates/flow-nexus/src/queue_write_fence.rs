@@ -126,6 +126,7 @@ impl CoordinatesQueueWrites for QueueWriteFence {
         let mut unstarted = state.unstarted_attempts.iter().cloned().collect::<Vec<_>>();
         unstarted.sort_unstable();
         commit(&unstarted)?;
+        state.unstarted_attempts.clear();
         state.held = true;
         state.generation = state.generation.wrapping_add(1);
         self.changed.notify_all();

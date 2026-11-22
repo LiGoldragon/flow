@@ -1345,7 +1345,8 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
             .machine_control(crate::generated::overriding::Subject::Named(
                 command_request.flow_id.clone(),
             ))?;
-        match self.nexus.command(command_request.clone()) {
+        use crate::delivery::DeliversOwnerCommands;
+        match self.nexus.owner_command(command_request.clone()) {
             meta_signal_flow::Output::Commanded(outcome) => Ok(outcome),
             other => Err(other),
         }
@@ -3288,6 +3289,7 @@ impl DispatchesSerially for RunningNexus {
         | meta_signal_flow::Input::CrystallizeNow(_)
         | meta_signal_flow::Input::Renew(_)
         | meta_signal_flow::Input::Close(_)
+        | meta_signal_flow::Input::Command(_)
         | meta_signal_flow::Input::Deliver(_)
         | meta_signal_flow::Input::Unlock(_)
         | meta_signal_flow::Input::Forget(_)

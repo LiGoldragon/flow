@@ -31,8 +31,15 @@ impl From<&HerdrRoute> for LeasedPane {
 /// The panes currently held, and the wait for one to be let go.
 #[derive(Default)]
 pub struct PaneLeases {
-    held: Mutex<BTreeSet<LeasedPane>>,
+    held: Mutex<PaneLeaseState>,
     released: Condvar,
+}
+
+#[derive(Default)]
+struct PaneLeaseState {
+    occupied: BTreeSet<LeasedPane>,
+    #[cfg(test)]
+    waiting: BTreeSet<LeasedPane>,
 }
 
 /// One held pane. Dropping it lets the pane go.
@@ -54,13 +61,20 @@ impl LeasesPanes for PaneLeases {
             .held
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        while held.contains(&pane) {
+        #[cfg(test)]
+        if held.occupied.contains(&pane) {
+            held.waiting.insert(pane.clone());
+            self.released.notify_all();
+        }
+        while held.occupied.contains(&pane) {
             held = self
                 .released
                 .wait(held)
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
-        held.insert(pane.clone());
+        #[cfg(test)]
+        held.waiting.remove(&pane);
+        held.occupied.insert(pane.clone());
         PaneLease { leases: self, pane }
     }
 
@@ -70,7 +84,8 @@ impl LeasesPanes for PaneLeases {
             .held
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        held.insert(pane.clone())
+        held.occupied
+            .insert(pane.clone())
             .then(|| PaneLease { leases: self, pane })
     }
 }
@@ -81,8 +96,27 @@ impl Drop for PaneLease<'_> {
             .held
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .occupied
             .remove(&self.pane);
         self.leases.released.notify_all();
+    }
+}
+
+#[cfg(test)]
+pub(crate) trait ObservesWaitingPane {
+    fn waiter_registered(&self, route: &HerdrRoute, limit: std::time::Duration) -> bool;
+}
+
+#[cfg(test)]
+impl ObservesWaitingPane for PaneLeases {
+    fn waiter_registered(&self, route: &HerdrRoute, limit: std::time::Duration) -> bool {
+        let pane = LeasedPane::from(route);
+        let held = self.held.lock().unwrap_or_else(|error| error.into_inner());
+        let (held, _) = self
+            .released
+            .wait_timeout_while(held, limit, |state| !state.waiting.contains(&pane))
+            .unwrap_or_else(|error| error.into_inner());
+        held.waiting.contains(&pane)
     }
 }
 

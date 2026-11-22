@@ -1534,6 +1534,7 @@ fn hold_answers_only_after_the_started_direct_writer_settles() {
 
 fn queue_writer_crosses_hold_at(barrier: &str) {
     use crate::DispatchesSerially;
+    use crate::delivery::lease::ObservesWaitingPane;
     use crate::event_wait::AwaitsPath;
     use crate::fixture_executable::{FixtureExecutable, HoldsLatch, InstallsScript, Latch};
     use crate::sending::SendsRequests;
@@ -1604,6 +1605,7 @@ fn queue_writer_crosses_hold_at(barrier: &str) {
             panic!("fixture did not reach {barrier}");
         }
         let queued = stored(fixture, Model::Sol).queue.0[0].clone();
+        let mut pending_command = None;
         if !awake_drain {
             let (command_completed, command_reply) = channel();
             scope.spawn(move || {
@@ -1616,16 +1618,18 @@ fn queue_writer_crosses_hold_at(barrier: &str) {
                 );
                 command_completed.send(reply).unwrap();
             });
-            let response = command_reply.recv_timeout(limit);
-            if !matches!(
-                response,
-                Ok(meta::Output::CommandRejected(
-                    meta::CommandRejection::RouteUnavailable
-                ))
-            ) {
+            let node = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
+            let signal_flow::HerdrRouteSelection::Available(route) = node.herdr_route_selection
+            else {
                 release.release();
-                panic!("same-pane Command held the dispatcher or wrote: {response:?}");
+                panic!("fixture lost its bound pane");
+            };
+            if !fixture.nexus.pane_leases.waiter_registered(&route, limit) {
+                release.release();
+                panic!("same-pane Command did not enter its pane wait");
             }
+            assert!(matches!(command_reply.try_recv(), Err(TryRecvError::Empty)));
+            pending_command = Some(command_reply);
             let another = fixture.nexus.send_request(
                 signal_flow::SendRequest {
                     address: other.clone(),
@@ -1640,6 +1644,12 @@ fn queue_writer_crosses_hold_at(barrier: &str) {
                 signal_flow::Output::SendAccepted(_)
             ));
             assert_eq!(stored(fixture, Model::Astra).queue.0.len(), 1);
+            assert_eq!(
+                fixture
+                    .nexus
+                    .dispatch_meta_serially(meta::Input::HoldPermaflow(other.clone()), None),
+                meta::Output::PermaflowHeld(other.clone()),
+            );
         }
         let changes = fixture.nexus.store.launch_changes.clone();
         let seen = changes.current();
@@ -1652,15 +1662,25 @@ fn queue_writer_crosses_hold_at(barrier: &str) {
             && matches!(fixture.nexus.store.holding().unwrap(), Holding::Held(_));
         let response = if awake_drain {
             let answer = held.recv_timeout(limit);
-            // Read the durable Queued transition before the old writer
-            // can clean up; a restart after Held sees the same queue.
+            // The second Hold sees the same durable transition before the
+            // original preflight returns; it does not stage another change.
             let at_held = fixture
                 .nexus
                 .store
-                .logical_delivery_snapshot(&queued.logical_delivery_id);
+                .logical_delivery_snapshot(&queued.logical_delivery_id)
+                .unwrap();
+            let repeated = matches!(answer, Ok(meta::Output::Held))
+                .then(|| overridden(fixture, meta::Input::Hold));
+            let after_repeat = fixture
+                .nexus
+                .store
+                .logical_delivery_snapshot(&queued.logical_delivery_id)
+                .unwrap();
             release.release();
+            assert_eq!(repeated, Some(meta::Output::Held));
+            assert_eq!(at_held, after_repeat);
             assert_eq!(
-                at_held.unwrap().unwrap().delivery_state,
+                at_held.unwrap().delivery_state,
                 signal_flow::DeliveryState::Queued,
             );
             answer
@@ -1672,6 +1692,14 @@ fn queue_writer_crosses_hold_at(barrier: &str) {
         };
         assert!(committed, "Hold did not commit while the pane was barred");
         assert_eq!(response.unwrap(), meta::Output::Held);
+        if let Some(command) = pending_command {
+            // The manual interrupt ran after A, then declined because
+            // the fixture still showed A idle. It never cut across A.
+            assert_eq!(
+                command.recv_timeout(limit).unwrap(),
+                meta::Output::CommandRejected(meta::CommandRejection::NotDelivered),
+            );
+        }
         let _ = writer.join().unwrap();
         let log = fixture.directory.path().join("herdr-operations.log");
         if awake_drain {

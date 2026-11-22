@@ -229,6 +229,42 @@ fn both_harnesses_deliver_every_priority_and_only_hard_interrupts_working() {
 }
 
 #[test]
+fn an_active_codex_queue_uses_native_receipts_without_a_pane_reaction_wait() {
+    use crate::store::RegistersFlowIdentity;
+    let fixture = NexusFixture::new();
+    let mut node = fixture.node();
+    node.flow_lifecycle = FlowLifecycle::Active;
+    fixture.nexus.store.register_flow(node).unwrap();
+    let mut agent = fixture.current_agent();
+    agent["agent_status"] = "idle".into();
+    let log = fixture.accept_pane_operations(vec![agent], PromptFixture::Prompted("w1:p3"));
+    let letter = Letter {
+        visible_sender: signal_flow::VisibleSender::Notification,
+        content: Content::Waking(vec![signal_flow::VisibleNativeInput {
+            visible_sender: signal_flow::VisibleSender::Notification,
+            delivered_message: signal_flow::DeliveredMessage::Soft(
+                signal_flow::DeliveredRequest::Order(signal_flow::Order_Data {
+                    request_id: signal_flow::RequestId("id00".into()),
+                    string: "one queued letter".into(),
+                }),
+            ),
+        }]),
+    };
+    let result = fixture.deliver("active-codex-queue", Message::Soft(letter));
+    let MetaResponse::MessageTyped(delivery) = result else {
+        panic!("delivery was refused: {result:?}");
+    };
+    assert_eq!(delivery.delivery_grade, DeliveryGrade::Transported);
+    let log = fs::read_to_string(log).unwrap();
+    let prompts: Vec<_> = log
+        .lines()
+        .filter(|line| line.contains("agent prompt"))
+        .collect();
+    assert_eq!(prompts.len(), 1, "{log}");
+    assert!(!prompts[0].contains("--wait"), "{log}");
+}
+
+#[test]
 fn a_blocked_recipient_is_refused_at_every_tier() {
     for message in [
         Message::HardAbrupt(letter("stop")),

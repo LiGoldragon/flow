@@ -705,6 +705,17 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             agent_state = self.nexus.writable_state(self.target)?;
         }
         let observe = matches!(agent_state, AgentState::Idle | AgentState::Done);
+        let (Message::HardAbrupt(letter) | Message::MiddleAbrupt(letter) | Message::Soft(letter)) =
+            &self.request.message;
+        // The active Codex queue has an exact native receipt path. A pane's
+        // lifecycle reaction can arrive late or be absent even when the
+        // prompt took its turn; it does not prove intake. Keep the native
+        // submission witness and the composer safeguards, and let the
+        // durable queue settle the exact cohort without waiting for Herdr.
+        let waits_for_pane_reaction = observe
+            && !(self.target.node.harness_kind == HarnessKind::Codex
+                && self.target.node.flow_lifecycle == FlowLifecycle::Active
+                && matches!(letter.content, meta_signal_flow::Content::Waking(_)));
         let text = self.request.message.pane_text();
         // A resting seat reports taking the text; a working one announces
         // nothing until it takes its input, so only its composer shows the
@@ -714,15 +725,16 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             .flatten();
         // Whether Herdr saw the recipient react; None when what followed
         // the text is not known.
-        let reacted = match self
-            .nexus
-            .herdr
-            .place(&self.target.route, text.as_str(), observe)
-        {
-            Placement::Refused => return self.refuse(DeliveryRejection::NotDelivered),
-            Placement::Uncertain => None,
-            Placement::Placed { observed } => Some(observed),
-        };
+        let reacted =
+            match self
+                .nexus
+                .herdr
+                .place(&self.target.route, text.as_str(), waits_for_pane_reaction)
+            {
+                Placement::Refused => return self.refuse(DeliveryRejection::NotDelivered),
+                Placement::Uncertain => None,
+                Placement::Placed { observed } => Some(observed),
+            };
         let _ = self.step(LeaseStep::Placed);
         if hard {
             let _ = self

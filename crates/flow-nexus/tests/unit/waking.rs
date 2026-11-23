@@ -9055,9 +9055,7 @@ fn witness_pending_claude_rest(writable: PaneBecomesWritable, event_pane: &str, 
                     "data": { "pane": { "pane_id": event_pane } }
                 }),
             };
-            stream
-                .write_all(format!("{event}\n{event}\n").as_bytes())
-                .unwrap();
+            writeln!(stream, "{event}").unwrap();
             stream.shutdown(std::net::Shutdown::Write).unwrap();
             let mut eof = Vec::new();
             stream

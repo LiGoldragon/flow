@@ -110,7 +110,7 @@ use crate::generated::operation::{
 use crate::generated::overriding::HeedsOverrides;
 use crate::generated::starter::ProfilesFreshSeat;
 use crate::herdr::pane::{PaneAgent, WritesPane};
-use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes};
+use crate::herdr::{LocatesNativeTranscripts, PaneOwnership, PanePresence, ReadsHerdrPanes};
 use crate::launching::LaunchesFlows;
 use crate::live::HoldsLiveValue;
 use crate::performing::Performs;
@@ -4445,12 +4445,13 @@ impl WakesInParts for RunningNexus {
                 Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
             }
         };
-        let node = match self.store.flow_node(flow_id) {
-            Ok(Some(node)) if node.session_id.0 == session => self.herdr.refresh_route(node),
+        let stored_node = match self.store.flow_node(flow_id) {
+            Ok(Some(node)) if node.session_id.0 == session => node,
             Ok(Some(_)) => return AtStop::Kept(KeptAtStop::OtherSession),
             Ok(None) => return AtStop::Kept(KeptAtStop::UnknownFlow),
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
+        let mut node = self.herdr.refresh_route(stored_node.clone());
         let continuity = match self.store.continuity(&address) {
             Ok(continuity) => continuity,
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
@@ -4494,7 +4495,20 @@ impl WakesInParts for RunningNexus {
             // refresh due waits for the seat to rest.
             _ if ordered_now || (refresh_due && !warning_policy_configured) => true,
             HarnessKind::Claude => {
-                let pane_agent = self.herdr.pane_agent(&node);
+                let mut pane_agent = self.herdr.pane_agent(&node);
+                // An unwritable pane can still be the exact resting seat.
+                // A delivery route selects writable panes; closing requires
+                // the recorded pane to belong to this native session.
+                if matches!(node.herdr_route_selection, HerdrRouteSelection::Unavailable)
+                    && let observed @ PaneAgent::Present {
+                        agent_state: AgentState::Idle | AgentState::Done,
+                        ready: false,
+                    } = self.herdr.pane_agent(&stored_node)
+                    && self.herdr.pane_ownership(&stored_node) == PaneOwnership::Owned
+                {
+                    node = stored_node;
+                    pane_agent = observed;
+                }
                 if matches!(&pane_agent, PaneAgent::Present { ready: false, .. }) {
                     unwritable_pane = Some(pane_agent.clone());
                 }

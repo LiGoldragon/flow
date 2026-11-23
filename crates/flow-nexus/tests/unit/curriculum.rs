@@ -249,3 +249,197 @@ fn real_numeric_binding_and_exact_span_frames_keep_actual_provenance() {
         assert_eq!(server.join().unwrap(), query);
     }
 }
+
+/// The capsule's pinned producer and registered Field source are served by
+/// a private Curriculum process. Flow uses the shared catalog for explicit
+/// discovery and resolution, and its own composer for each startup target.
+#[test]
+#[ignore = "requires the pinned Curriculum binary and Field source from the flake check"]
+fn the_paired_curriculum_serves_state_on_demand_outside_every_startup() {
+    use crate::context::{ParsesCurriculumIdentity, ResolvesModule};
+    use crate::event_wait::AwaitsDirectory;
+    use crate::generated::emission::{CurriculumExchange, Emittable};
+    use sha2::{Digest, Sha256};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    struct RunningCurriculum(Child);
+    impl Drop for RunningCurriculum {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let temporary = tempfile::tempdir().expect("Curriculum witness directory");
+    let scratch = temporary.path();
+    let field_source = PathBuf::from(std::env::var_os("FLOW_STATE_FIELD_SOURCE").unwrap());
+    let field_revision = std::env::var("FLOW_STATE_FIELD_REVISION").unwrap();
+    let roots = ["psyche-belief", "mind-belief", "field-belief"].map(|name| scratch.join(name));
+    let write = |root: &Path, relative: &str, text: &str| {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    };
+    for (root, revision) in
+        roots
+            .iter()
+            .zip(["a".repeat(40), "b".repeat(40), field_revision.clone()])
+    {
+        write(root, ".git/HEAD", &format!("{revision}\n"));
+    }
+    assert!(
+        Command::new("cp")
+            .args(["-R", "--"])
+            .arg(field_source.join("."))
+            .arg(&roots[2])
+            .status()
+            .expect("copy the locked Field repository")
+            .success()
+    );
+    write(
+        &roots[0],
+        "modules.datom",
+        "[ { { Spirit core Single.0 } spirit/core/0.md } { { Intent main-flow Single.0 } intent/main-flow/0.md } ]",
+    );
+    write(&roots[0], "spirit/core/0.md", "Flow system control.");
+    write(
+        &roots[0],
+        "intent/main-flow/0.md",
+        "Flow seat intent control.",
+    );
+    write(
+        &roots[1],
+        "modules.datom",
+        "[ { { Knowledge control Single.0 } knowledge/control/0.md } ]",
+    );
+    write(
+        &roots[1],
+        "knowledge/control/0.md",
+        "---\ndescription: Flow knowledge control.\ndependencies: []\nplacement: user\n---\nFlow user control.",
+    );
+    write(scratch, "roles.datom", "Roles.{ [] }");
+
+    let runtime = scratch.join("runtime");
+    let socket_directory = runtime.join("curriculum");
+    let socket = socket_directory.join("curriculum.sock");
+    let records = scratch.join("records");
+    fs::create_dir_all(&socket_directory).unwrap();
+    fs::create_dir(&records).unwrap();
+
+    let _child = RunningCurriculum(
+        Command::new(std::env::var_os("FLOW_STATE_CURRICULUM_BIN").unwrap())
+            .env_clear()
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .env("CURRICULUM_CONTEXT_LAYOUT", "2")
+            .env(
+                "CURRICULUM_CONTEXT_REFRESH_PROGRAM",
+                std::env::var_os("FLOW_STATE_REFRESH_PROGRAM").unwrap(),
+            )
+            .env("CURRICULUM_ROLES_FILE", scratch.join("roles.datom"))
+            .env("CURRICULUM_PSYCHES_REPOSITORY_DIR", &roots[0])
+            .env("CURRICULUM_MIND_CONTEXT_DIR", &roots[1])
+            .env("CURRICULUM_FIELD_CONTEXT_DIR", &roots[2])
+            .env("CURRICULUM_RECORDS_DIR", records)
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("start the paired Curriculum Nexus"),
+    );
+    assert!(
+        socket_directory.until_holds(Instant::now() + Duration::from_secs(10), &mut || {
+            socket.exists()
+        }),
+        "the paired Curriculum Nexus did not bind"
+    );
+    let composer = CurriculumComposer::at(socket.to_str().unwrap());
+    let state_name = "state:hosts:0";
+    let state = state_name.curriculum_identity().unwrap();
+    let knowledge = "knowledge:control:0".curriculum_identity().unwrap();
+
+    let CurriculumExchange::Answered(Output::ModulesVerbose(catalog)) =
+        Input::ModulesVerbose.emit(&composer)
+    else {
+        panic!("the shared discovery request must list module descriptions");
+    };
+    let state_listing = catalog
+        .iter()
+        .find(|listed| listed.module.module_identity == state)
+        .expect("State is offered independently of startup selection");
+    assert_eq!(
+        state_listing.description_text.0,
+        "Which of his hosts are away, since when and until when."
+    );
+    assert!(
+        catalog
+            .iter()
+            .any(|row| row.module.module_identity == knowledge)
+    );
+
+    let resolve = |identity| {
+        let CurriculumExchange::Answered(Output::SourcesResolved(mut rows)) =
+            Input::ResolveSources(vec![identity]).emit(&composer)
+        else {
+            panic!("the on-demand request must resolve the module");
+        };
+        assert_eq!(rows.len(), 1);
+        rows.pop().unwrap()
+    };
+    let state_source = resolve(state.clone());
+    assert_eq!(state_source.module_identity, state);
+    assert_eq!(state_source.repository_name.0, "field-belief");
+    assert_eq!(state_source.source_revision.0, field_revision);
+    assert_eq!(state_source.source_relative_path.0, "state/hosts/0.md");
+    let raw = fs::read(field_source.join("state/hosts/0.md")).unwrap();
+    assert_eq!(
+        state_source.source_sha256.0,
+        format!("{:x}", Sha256::digest(raw))
+    );
+    assert!(!state_source.string.trim().is_empty());
+    assert_eq!(resolve(knowledge).string.trim(), "Flow user control.");
+    assert_eq!(
+        composer.resolve_module(&signal_flow::ModuleIdentity(state_name.into())),
+        crate::context::ModuleStanding::Held
+    );
+
+    for aspect in [Aspect::Psyche, Aspect::Mind, Aspect::Field] {
+        let startup = request(
+            Address {
+                aspect,
+                topic: flow_ethos::Topic("stateCheck".into()),
+                model: Model::Sol,
+            },
+            &["spirit:core:0", "intent:main-flow:0"],
+            &["knowledge:control:0"],
+        );
+        let composition = composer
+            .compose_flow_context(&startup)
+            .expect("compose normal selected modules");
+        assert!(VerifiedContext::verified(&startup, &composition).is_ok());
+        assert!(composition.system_text.0.contains("Flow system control."));
+        assert!(
+            composition
+                .system_text
+                .0
+                .contains("Flow seat intent control.")
+        );
+        assert!(composition.user_text.0.contains("Flow user control."));
+        for payload in [&composition.system_text.0, &composition.user_text.0] {
+            assert!(!payload.contains(state_name));
+            for line in state_source
+                .string
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+            {
+                assert!(!payload.contains(line.trim()), "State body entered startup");
+            }
+        }
+        assert!(
+            composition
+                .context_provenance_vector
+                .iter()
+                .all(|row| row.module_identity != state)
+        );
+    }
+}

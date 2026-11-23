@@ -13,6 +13,10 @@
       url = "github:LiGoldragon/Curriculum";
       flake = false;
     };
+    curriculum-state-field = {
+      url = "github:LiGoldragon/field-belief";
+      flake = false;
+    };
     # The shared Place every Nexus starts in and nexus-configure, the tool
     # that compiles it into the place file the Nexus reads at start. Its
     # revision is the one Cargo.lock locks (checks.translator-pin), and it is
@@ -38,6 +42,7 @@
       self,
       base,
       curriculum,
+      curriculum-state-field,
       translator,
       migration-predecessor,
     }:
@@ -395,6 +400,15 @@
               cargoNix = ./nix/curriculum/Cargo.nix;
               crateHashes = ./nix/curriculum/crate-hashes.json;
             };
+            curriculum-state-process =
+              processCheck "curriculum-state-process"
+                "tests::curriculum::the_paired_curriculum_serves_state_on_demand_outside_every_startup"
+                ''
+                  export FLOW_STATE_CURRICULUM_BIN="${curriculumCrates.rootCrate.build}/bin/curriculum-nexus"
+                  export FLOW_STATE_FIELD_SOURCE="${curriculum-state-field}"
+                  export FLOW_STATE_FIELD_REVISION="${curriculum-state-field.rev}"
+                  export FLOW_STATE_REFRESH_PROGRAM="${pkgs.coreutils}/bin/true"
+                '';
             fmt = pkgs.runCommand "flow-fmt" { nativeBuildInputs = [ toolchain ]; } ''
               cp -r ${rustSource} source
               chmod -R u+w source

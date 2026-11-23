@@ -4472,6 +4472,7 @@ impl WakesInParts for RunningNexus {
         // Whether the harness may be closed now: a Claude seat only once its
         // Stop names no background work, since closing it would end that
         // work.
+        let mut unwritable_pane = None;
         let closable = match node.harness_kind {
             // A Codex seat is closed only at its thread's native rest, as
             // its turn ledger shows it: no turn, process or letter open.
@@ -4494,10 +4495,8 @@ impl WakesInParts for RunningNexus {
             _ if ordered_now || (refresh_due && !warning_policy_configured) => true,
             HarnessKind::Claude => {
                 let pane_agent = self.herdr.pane_agent(&node);
-                if !metaflow.queue.0.is_empty()
-                    && matches!(&pane_agent, PaneAgent::Present { ready: false, .. })
-                {
-                    return AtStop::Kept(KeptAtStop::NotResting(pane_agent));
+                if matches!(&pane_agent, PaneAgent::Present { ready: false, .. }) {
+                    unwritable_pane = Some(pane_agent.clone());
                 }
                 let native_resting = matches!(
                     &pane_agent,
@@ -4559,6 +4558,9 @@ impl WakesInParts for RunningNexus {
         // more or sleeps.
         self.queue_simplified_answer(flow_id);
         if !metaflow.queue.0.is_empty() {
+            if let Some(pane_agent) = unwritable_pane {
+                return AtStop::Kept(KeptAtStop::NotResting(pane_agent));
+            }
             return match self.perform(Operation::Drain(address)) {
                 Outcome::Drained(mut typed) if !typed.is_empty() => {
                     AtStop::Drained(typed.remove(0))

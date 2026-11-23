@@ -8937,15 +8937,30 @@ fn a_push_of_a_queue_holding_an_order_wakes_its_asleep_permaflow() {
 
 #[test]
 fn a_pending_claude_rest_drains_on_its_herdr_idle() {
-    witness_pending_claude_rest("w1:p3", true);
+    witness_pending_claude_rest(PaneBecomesWritable::Status, "w1:p3", true);
 }
 
 #[test]
 fn herdr_idle_of_another_pane_leaves_a_pending_claude_queue_intact() {
-    witness_pending_claude_rest("other:p9", false);
+    witness_pending_claude_rest(PaneBecomesWritable::Status, "other:p9", false);
 }
 
-fn witness_pending_claude_rest(event_pane: &str, delivered: bool) {
+#[test]
+fn an_idle_not_ready_claude_stop_drains_after_bound_pane_update_without_another_stop() {
+    witness_pending_claude_rest(PaneBecomesWritable::Update, "w1:p3", true);
+}
+
+#[test]
+fn an_update_of_another_pane_leaves_the_idle_not_ready_rest_queued() {
+    witness_pending_claude_rest(PaneBecomesWritable::Update, "other:p9", false);
+}
+
+enum PaneBecomesWritable {
+    Status,
+    Update,
+}
+
+fn witness_pending_claude_rest(writable: PaneBecomesWritable, event_pane: &str, delivered: bool) {
     use crate::StopsNexus;
     use crate::event_wait::{AwaitsDescriptors, AwaitsPath};
     use crate::fixture_executable::{FixtureExecutable, InstallsScript};
@@ -8963,6 +8978,12 @@ fn witness_pending_claude_rest(event_pane: &str, delivered: bool) {
             signal_flow::Output::SendAccepted(_)
         ));
     }
+    if let PaneBecomesWritable::Update = writable {
+        let mut idle = claude_agent(&fixture);
+        idle["agent_status"] = "idle".into();
+        idle["interactive_ready"] = false.into();
+        fixture.accept_pane_operations(vec![idle], PromptFixture::Prompted("w1:p3"));
+    }
     let rest = claude_stop(&fixture);
     fixture
         .nexus
@@ -8971,7 +8992,7 @@ fn witness_pending_claude_rest(event_pane: &str, delivered: bool) {
     assert_eq!(
         retained.len(),
         2,
-        "the Stop did not drain while Herdr was working"
+        "the Stop kept the original FIFO while the pane was not writable"
     );
     assert!(fixture.typed().is_none());
     let rest_session = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
@@ -9012,27 +9033,30 @@ fn witness_pending_claude_rest(event_pane: &str, delivered: bool) {
             let mut request = String::new();
             BufReader::new(&stream).read_line(&mut request).unwrap();
             assert!(request.contains("pane.agent_status_changed") && request.contains("w1:p3"));
+            assert!(request.contains("pane.updated"));
             writeln!(stream, r#"{{"result":{{"type":"subscription_started"}}}}"#).unwrap();
             assert!(
                 opening_read.as_path().appeared_by(deadline),
                 "subscription precedes the opening readback"
             );
-            // The opening read runs the Working snapshot. After that, make
-            // the target writable even in the foreign-pane case, to make
-            // the addressed readiness event the only distinguishing input.
+            // The opening read sees the prior unwritable pane. Make the
+            // target writable in both arms; only the addressed event differs.
             fixture.accept_pane_operations(
                 vec![claude_agent(&fixture)],
                 PromptFixture::Prompted("w1:p3"),
             );
-            writeln!(
-                stream,
-                "{}",
-                serde_json::json!({
+            let event = match writable {
+                PaneBecomesWritable::Status => serde_json::json!({
                     "event": "pane_agent_status_changed",
                     "data": { "pane_id": event_pane, "agent_status": "idle" }
-                })
-            )
-            .unwrap();
+                }),
+                PaneBecomesWritable::Update => serde_json::json!({
+                    "event": "pane_updated",
+                    "data": { "pane": { "pane_id": event_pane } }
+                }),
+            };
+            writeln!(stream, "{event}").unwrap();
+            writeln!(stream, "{event}").unwrap();
             stream.shutdown(std::net::Shutdown::Write).unwrap();
             let mut eof = Vec::new();
             stream
@@ -9047,8 +9071,26 @@ fn witness_pending_claude_rest(event_pane: &str, delivered: bool) {
                         < typed.find("Second deferred rest.").unwrap()
                 );
                 for entry in &retained {
-                    assert!(typed.contains(&entry.request_id.0));
+                    assert_eq!(typed.matches(&entry.request_id.0).count(), 1);
+                    let delivery = fixture
+                        .nexus
+                        .store
+                        .debug_delivery(&entry.request_id)
+                        .unwrap()
+                        .expect("original request is still recorded");
+                    assert!(matches!(
+                        delivery.delivery_snapshot.delivery_state,
+                        signal_flow::DeliveryState::Delivered(_)
+                    ));
                 }
+                assert_eq!(
+                    fs::read_to_string(fixture.directory.path().join("herdr-operations.log"))
+                        .unwrap()
+                        .lines()
+                        .filter(|line| line.contains("agent prompt"))
+                        .count(),
+                    1
+                );
                 assert!(queue.is_empty());
             } else {
                 assert_eq!(queue, retained);

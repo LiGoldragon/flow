@@ -4494,6 +4494,11 @@ impl WakesInParts for RunningNexus {
             _ if ordered_now || (refresh_due && !warning_policy_configured) => true,
             HarnessKind::Claude => {
                 let pane_agent = self.herdr.pane_agent(&node);
+                if !metaflow.queue.0.is_empty()
+                    && matches!(&pane_agent, PaneAgent::Present { ready: false, .. })
+                {
+                    return AtStop::Kept(KeptAtStop::NotResting(pane_agent));
+                }
                 let native_resting = matches!(
                     &pane_agent,
                     PaneAgent::Present { agent_state, .. } if Self::rests_at(agent_state)

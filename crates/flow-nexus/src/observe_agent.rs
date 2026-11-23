@@ -183,7 +183,12 @@ impl ObservesAgent for RunningNexus {
             .herdr
             .session_socket(&route.herdr_session_name.0)
             .ok_or("Herdr session socket not found")?;
-        let mut events = PaneEvents::subscribe(&socket, &route.herdr_pane_id.0, cancellation)?;
+        let mut events = PaneEvents::subscribe(
+            &socket,
+            &route.herdr_pane_id.0,
+            PaneObservation::AgentStatus,
+            cancellation,
+        )?;
         loop {
             let Some(event) = events.next_event(cancellation)? else {
                 // Herdr closed the subscription: the session is gone. The
@@ -198,6 +203,7 @@ impl ObservesAgent for RunningNexus {
             let agent_state = match event {
                 PaneEvent::Status(status) => Some(status.as_str()).agent_state(),
                 PaneEvent::Gone => AgentState::Gone,
+                PaneEvent::Updated => continue,
             };
             if agent_state == last {
                 continue;
@@ -231,7 +237,13 @@ impl LocatesHerdrSession for HerdrCli {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PaneEvent {
     Status(String),
+    Updated,
     Gone,
+}
+
+pub(crate) enum PaneObservation {
+    AgentStatus,
+    InputReadiness,
 }
 
 /// The observed pane's stream: Herdr's events of it, waited on with its
@@ -245,6 +257,7 @@ pub(crate) trait ReadsPaneEvents: Sized {
     fn subscribe(
         socket: &std::path::Path,
         pane_id: &str,
+        observation: PaneObservation,
         cancellation: &ObservationCancellation,
     ) -> Result<Self, String>;
     /// The next event about this pane; None when Herdr closes the stream,
@@ -260,16 +273,22 @@ impl ReadsPaneEvents for PaneEvents {
     fn subscribe(
         socket: &std::path::Path,
         pane_id: &str,
+        observation: PaneObservation,
         cancellation: &ObservationCancellation,
     ) -> Result<Self, String> {
+        let mut subscriptions = vec![
+            serde_json::json!({"type": "pane.agent_status_changed", "pane_id": pane_id}),
+            serde_json::json!({"type": "pane.closed"}),
+            serde_json::json!({"type": "pane.exited"}),
+        ];
+        if let PaneObservation::InputReadiness = observation {
+            // A managed agent can become interactive without changing status.
+            subscriptions.push(serde_json::json!({"type": "pane.updated"}));
+        }
         let events = HerdrEvents::subscribe(
             socket,
             "flow-nexus:observe-agent",
-            serde_json::json!([
-                {"type": "pane.agent_status_changed", "pane_id": pane_id},
-                {"type": "pane.closed"},
-                {"type": "pane.exited"}
-            ]),
+            serde_json::Value::Array(subscriptions),
             None,
             Some(cancellation),
         )
@@ -315,10 +334,17 @@ impl ReadsPaneEvent for serde_json::Value {
     fn pane_event(&self, pane_id: &str) -> Option<PaneEvent> {
         let event = self;
         let data = event.get("data")?;
+        let kind = event.get("event").and_then(serde_json::Value::as_str)?;
+        if matches!(kind, "pane_updated" | "pane.updated") {
+            return (data
+                .pointer("/pane/pane_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(pane_id))
+            .then_some(PaneEvent::Updated);
+        }
         if data.get("pane_id").and_then(serde_json::Value::as_str) != Some(pane_id) {
             return None;
         }
-        let kind = event.get("event").and_then(serde_json::Value::as_str)?;
         if kind.ends_with("closed") || kind.ends_with("exited") {
             return Some(PaneEvent::Gone);
         }

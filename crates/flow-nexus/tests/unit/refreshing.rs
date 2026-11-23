@@ -1083,6 +1083,124 @@ fn a_launch_ordered_replace_holds_the_metaflow_and_types_nothing_into_its_predec
     );
 }
 
+#[test]
+fn an_idle_unwritable_claude_predecessor_yields_queued_work_to_its_ordered_successor() {
+    use crate::generated::memory::{OrderedLaunch, OrderedReplacement, ReplacementOrder};
+    use crate::generated::transitions::{ReportedEvent, ReportsEvents};
+    use crate::reporting::RecordsReports;
+    use crate::store::ordered_replacement::OrdersReplacements;
+
+    let (mut fixture, profile) =
+        refreshable_with_successor(Continuity::Maintained, Delivery::Queue);
+    let at = seat_address();
+    let startup_entry = stored(&fixture).queue.0.remove(0);
+    assert!(
+        fixture
+            .nexus
+            .store
+            .remove_oldest_queued(&at, &startup_entry)
+            .unwrap()
+    );
+    for body in ["First for the successor.", "Second for the successor."] {
+        let admitted = fixture
+            .nexus
+            .store
+            .accept_logical_delivery(
+                &at,
+                SentBy::Unknown,
+                Delivery::Queue,
+                Message::Soft(Request::Order(body.into())),
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            admitted,
+            signal_flow::PrivateSendResponse::SendAccepted(_)
+        ));
+    }
+    let retained = stored(&fixture).queue.0;
+    fixture.nexus.report_event(ReportedEvent {
+        flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+        event: crate::generated::memory::Event::Working(signal_flow::Tokens(40_000)),
+    });
+    fixture
+        .nexus
+        .store
+        .order_replacement(OrderedReplacement {
+            address: at.clone(),
+            predecessor: crate::generated::memory::Predecessor(CLAUDE_SEAT.into()),
+            replacement_order: ReplacementOrder::Launch(Box::new(OrderedLaunch {
+                launch_profile: profile,
+                origin: Origin::Unbound,
+                prompt_sha256: crate::generated::memory::PromptSha256(String::new()),
+            })),
+        })
+        .unwrap();
+    let mut idle = claude_agent(&fixture);
+    idle["agent_status"] = "idle".into();
+    idle["interactive_ready"] = false.into();
+    fixture.herdr_for_replacement_showing(0, vec![idle]);
+
+    fixture.nexus.after_report(
+        &flow_ethos::FlowId(CLAUDE_SEAT.into()),
+        &super::waking::claude_stop(&fixture),
+    );
+    let successor_id = flow_ethos::FlowId("908786".into());
+    let current = stored(&fixture);
+    assert_eq!(current.state, State::Awake(successor_id.clone()));
+    assert_eq!(current.queue.0, retained);
+    assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped);
+    assert!(
+        fixture
+            .nexus
+            .store
+            .ordered_replacement(&at)
+            .unwrap()
+            .is_none()
+    );
+    assert!(typing_calls(&fixture).is_empty());
+
+    let successor = fixture
+        .nexus
+        .store
+        .flow_node(&successor_id.0)
+        .unwrap()
+        .unwrap();
+    let HerdrRouteSelection::Available(route) = successor.herdr_route_selection else {
+        panic!("ordered successor has no route");
+    };
+    let _codex = accepting_codex_endpoint(&mut fixture, "fixture-model", &successor.session_id.0);
+    let operations = fixture.accept_pane_operations(
+        vec![fixture.successor_agent()],
+        PromptFixture::Prompted(&route.herdr_pane_id.0),
+    );
+    assert_eq!(
+        fixture.nexus.perform(Operation::Drain(at.clone())),
+        Outcome::Drained(retained.clone())
+    );
+    let typed = fixture
+        .typed()
+        .expect("the successor takes the retained cohort");
+    assert!(
+        typed.find("First for the successor.").unwrap()
+            < typed.find("Second for the successor.").unwrap()
+    );
+    for entry in &retained {
+        assert_eq!(typed.matches(&entry.request_id.0).count(), 1);
+    }
+    assert!(stored(&fixture).queue.0.is_empty());
+    let _ = fixture.nexus.perform(Operation::Drain(at));
+    let calls = fs::read_to_string(operations).unwrap();
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|call| call.contains("agent prompt"))
+            .count(),
+        1
+    );
+    assert!(calls.contains(&format!("agent prompt {}", route.herdr_pane_id.0)));
+}
+
 /// The production scheduler's first warning remains durable while an actual
 /// replacement holds the metaflow. A later tick admits no second warning;
 /// the first logical delivery drains once to the successor.

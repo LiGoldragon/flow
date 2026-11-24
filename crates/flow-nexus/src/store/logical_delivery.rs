@@ -259,6 +259,7 @@ pub(crate) struct LogicalDeliveryTables {
     pub(crate) deliver_calls: TableReference<DeliverCall>,
     pub(crate) store_identity: TableReference<StoredStoreIdentity>,
     pub(crate) groups: TableReference<crate::generated::memory::LogicalDeliveryGroup>,
+    pub(crate) cohorts: TableReference<crate::generated::memory::SubmittedDeliveryCohort>,
     pub(crate) write_gate: Mutex<()>,
     pending_answers: std::sync::Arc<PendingAdmissionAnswers>,
 }
@@ -303,6 +304,7 @@ pub(crate) struct LogicalDeliveryDescriptors {
     pub(crate) deliver_calls: TableDescriptor<DeliverCall>,
     pub(crate) store_identity: TableDescriptor<StoredStoreIdentity>,
     pub(crate) groups: TableDescriptor<crate::generated::memory::LogicalDeliveryGroup>,
+    pub(crate) cohorts: TableDescriptor<crate::generated::memory::SubmittedDeliveryCohort>,
 }
 pub(crate) trait DeclaresLogicalDeliveryTables {
     fn descriptors() -> LogicalDeliveryDescriptors;
@@ -315,6 +317,7 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
     fn descriptors() -> LogicalDeliveryDescriptors {
         LogicalDeliveryDescriptors {
             groups: <crate::generated::memory::LogicalDeliveryGroup as super::delivery_group::DescribesDeliveryGroups>::descriptor(),
+            cohorts: <crate::generated::memory::SubmittedDeliveryCohort as super::group_uncertainty::DescribesSubmittedCohorts>::descriptor(),
             counter: TableDescriptor::new(
                 COUNTER_TABLE_NAME,
                 FamilyName::new("flow-nexus-logical-delivery-counter"),
@@ -365,6 +368,7 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
     ) -> Result<LogicalDeliveryTables, StoreError> {
         Ok(LogicalDeliveryTables {
             groups: engine.register_table(descriptors.groups)?,
+            cohorts: engine.register_table(descriptors.cohorts)?,
             counter: engine.register_table(descriptors.counter)?,
             current: engine.register_table(descriptors.current)?,
             events: engine.register_table(descriptors.events)?,

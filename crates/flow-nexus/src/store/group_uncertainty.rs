@@ -9,9 +9,108 @@ use super::queue_delivery::{
     NextRequest, QueueDeliveryAttempt, QueueDeliveryPhase, RequestState, StoredDeliveryRequest,
 };
 use super::*;
+use crate::generated::memory::{SubmittedCohortOrigin, SubmittedDeliveryCohort};
 use flow_ethos::QueueEntry;
 use meta_signal_flow::{QueueAttemptId, QueueEvidence, QueueRequestId};
 use signal_flow::DeliveryState;
+
+impl EngineRecord for SubmittedDeliveryCohort {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.queue_attempt_id_vector[0].0.clone())
+    }
+}
+
+impl MemoryDefinition for SubmittedDeliveryCohort {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-submitted-delivery-cohort-v1")
+    }
+}
+
+pub(super) trait DescribesSubmittedCohorts {
+    const TABLE_NAME: &'static str;
+    const FAMILY_NAME: &'static str;
+    fn descriptor() -> TableDescriptor<SubmittedDeliveryCohort>;
+}
+
+impl DescribesSubmittedCohorts for SubmittedDeliveryCohort {
+    const TABLE_NAME: &'static str = "flow_nexus_submitted_delivery_cohorts";
+    const FAMILY_NAME: &'static str = "flow-nexus-submitted-delivery-cohorts";
+
+    fn descriptor() -> TableDescriptor<SubmittedDeliveryCohort> {
+        TableDescriptor::new(
+            TableName::new(Self::TABLE_NAME),
+            FamilyName::new(Self::FAMILY_NAME),
+            Self::schema_hash(),
+        )
+    }
+}
+
+pub(crate) trait ReadsSubmittedCohorts {
+    fn submitted_cohort(
+        &self,
+        attempt: &QueueDeliveryAttempt,
+    ) -> Result<Option<SubmittedDeliveryCohort>, StoreError>;
+
+    fn submitted_attempts(
+        &self,
+        attempt: &QueueDeliveryAttempt,
+        cohort: SubmittedDeliveryCohort,
+    ) -> Result<Vec<QueueDeliveryAttempt>, StoreError>;
+}
+
+impl ReadsSubmittedCohorts for FlowStore {
+    fn submitted_cohort(
+        &self,
+        attempt: &QueueDeliveryAttempt,
+    ) -> Result<Option<SubmittedDeliveryCohort>, StoreError> {
+        let rows = self
+            .engine
+            .match_records(QueryPlan::all(self.logical_deliveries.cohorts))?;
+        let mut found = rows.records().iter().filter(|cohort| {
+            cohort
+                .queue_attempt_id_vector
+                .contains(&attempt.queue_attempt_id)
+        });
+        let result = found.next().cloned();
+        if found.next().is_some() {
+            return Err(StoreError::StateInvariant);
+        }
+        Ok(result)
+    }
+
+    fn submitted_attempts(
+        &self,
+        attempt: &QueueDeliveryAttempt,
+        cohort: SubmittedDeliveryCohort,
+    ) -> Result<Vec<QueueDeliveryAttempt>, StoreError> {
+        let mut previous_id = None;
+        cohort
+            .queue_attempt_id_vector
+            .into_iter()
+            .map(|id| {
+                let member = self
+                    .queue_delivery_attempt(&id.0)?
+                    .ok_or(StoreError::StateInvariant)?;
+                if member.address != attempt.address
+                    || member.flow_id != attempt.flow_id
+                    || member.thread_id != attempt.thread_id
+                    || member.harness_kind != attempt.harness_kind
+                    || member.native_history_anchor != attempt.native_history_anchor
+                    || !matches!(member.queue_evidence, QueueEvidence::Logical(_))
+                    || previous_id.is_some_and(|previous| previous >= member.native_request_id.0)
+                {
+                    return Err(StoreError::StateInvariant);
+                }
+                previous_id = Some(member.native_request_id.0);
+                Ok(member)
+            })
+            .collect()
+    }
+}
 
 pub(crate) trait StagesUncertainCohorts {
     /// The caller holds the dispatch gate from preparation through native I/O.
@@ -27,6 +126,7 @@ pub(crate) trait StagesUncertainCohorts {
         &self,
         head: &QueueDeliveryAttempt,
         cohort: &[QueueEntry],
+        origin: SubmittedCohortOrigin,
     ) -> Result<Vec<QueueDeliveryAttempt>, StoreError>;
 }
 
@@ -108,6 +208,7 @@ impl StagesUncertainCohorts for FlowStore {
         &self,
         head: &QueueDeliveryAttempt,
         cohort: &[QueueEntry],
+        origin: SubmittedCohortOrigin,
     ) -> Result<Vec<QueueDeliveryAttempt>, StoreError> {
         if cohort.is_empty()
             || head.queue_delivery_phase != QueueDeliveryPhase::Prepared
@@ -280,7 +381,16 @@ impl StagesUncertainCohorts for FlowStore {
             commit = commit.mutate(self.queue_delivery.counter, next_counter);
         }
         metaflow.metaflow.queue.0.drain(..cohort.len());
-        commit = commit.mutate(self.metaflows, metaflow);
+        commit = commit.mutate(self.metaflows, metaflow).assert(
+            self.logical_deliveries.cohorts,
+            SubmittedDeliveryCohort {
+                submitted_cohort_origin: origin,
+                queue_attempt_id_vector: attempts
+                    .iter()
+                    .map(|attempt| attempt.queue_attempt_id.clone())
+                    .collect(),
+            },
+        );
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
         Ok(attempts)
@@ -370,7 +480,7 @@ mod tests {
     fn whole_cohort_is_parked_uncertain_and_stays_out_of_the_queue_after_reopen() {
         let (fixture, store, cohort, head) = Fixture::new();
         let attempts = store
-            .stage_uncertain_cohort(&head, &cohort)
+            .stage_uncertain_cohort(&head, &cohort, SubmittedCohortOrigin::Drain)
             .expect("cohort stages");
         assert_eq!(attempts.len(), cohort.len());
         let mut identities = std::collections::HashSet::new();
@@ -496,7 +606,11 @@ mod tests {
         let before = records();
         let mut mismatched = cohort.clone();
         mismatched.swap(1, 2);
-        assert!(store.stage_uncertain_cohort(&head, &mismatched).is_err());
+        assert!(
+            store
+                .stage_uncertain_cohort(&head, &mismatched, SubmittedCohortOrigin::Drain)
+                .is_err()
+        );
         assert_eq!(records(), before);
     }
     #[test]
@@ -552,7 +666,11 @@ mod tests {
             )
         };
         let before = records();
-        assert!(store.stage_uncertain_cohort(&head, &cohort).is_err());
+        assert!(
+            store
+                .stage_uncertain_cohort(&head, &cohort, SubmittedCohortOrigin::Drain)
+                .is_err()
+        );
         assert_eq!(records(), before);
         assert_eq!(
             store

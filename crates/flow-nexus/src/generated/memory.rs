@@ -20,6 +20,20 @@ pub struct LogicalDeliveryGroup {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct SubmittedDeliveryCohort {
+    pub submitted_cohort_origin: SubmittedCohortOrigin,
+    pub queue_attempt_id_vector: std::vec::Vec<meta_signal_flow::QueueAttemptId>,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum SubmittedCohortOrigin {
+    Startup(signal_flow::LaunchRequestId),
+    Drain,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum LaunchOutcome {
     Started(flow_nexus::LaunchedRecord),
     Replaced(flow_nexus::ReplacedRecord),

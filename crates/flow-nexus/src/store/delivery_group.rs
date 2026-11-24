@@ -45,6 +45,76 @@ impl DescribesDeliveryGroups for LogicalDeliveryGroup {
     }
 }
 
+pub(crate) trait ReadsRecipientProfiles {
+    fn last_recipient_launch_profile(
+        &self,
+        flow_id: &str,
+    ) -> Result<Option<LaunchProfile>, StoreError>;
+    fn recipient_flow_kind(
+        &self,
+        metaflow: &flow_ethos::Metaflow,
+    ) -> Result<Option<signal_flow::FlowKind>, StoreError>;
+}
+
+impl ReadsRecipientProfiles for FlowStore {
+    fn last_recipient_launch_profile(
+        &self,
+        flow_id: &str,
+    ) -> Result<Option<LaunchProfile>, StoreError> {
+        let Some(launch) = self.launch_requests_bound_to(flow_id)?.pop() else {
+            return Ok(None);
+        };
+        self.composable_launch_profile(&launch)
+    }
+
+    fn recipient_flow_kind(
+        &self,
+        metaflow: &flow_ethos::Metaflow,
+    ) -> Result<Option<signal_flow::FlowKind>, StoreError> {
+        use super::metaflow_declaration::ReadsMetaflowDeclarations;
+        let flow_id = match &metaflow.state {
+            flow_ethos::State::Awake(flow_id) => Some(flow_id),
+            flow_ethos::State::Asleep => {
+                if let Some(declared) = self.metaflow_declaration(&metaflow.address)? {
+                    return Ok(Some(declared.flow_kind));
+                }
+                metaflow.past.0.last()
+            }
+            _ => None,
+        };
+        let Some(flow_id) = flow_id else {
+            return Ok(None);
+        };
+        Ok(self
+            .last_recipient_launch_profile(&flow_id.0)?
+            .map(|profile| profile.flow_kind))
+    }
+}
+
+trait AwaitsGroupedReply {
+    fn awaits_group_reply(&self) -> bool;
+}
+
+impl AwaitsGroupedReply for flow_ethos::Request {
+    fn awaits_group_reply(&self) -> bool {
+        matches!(self, Self::Order(_) | Self::Question(_) | Self::Task(_))
+    }
+}
+
+trait RefusesConflictingGroup {
+    fn at_group_position(position: usize) -> Result<Refusal, StoreError>;
+}
+
+impl RefusesConflictingGroup for Refusal {
+    fn at_group_position(position: usize) -> Result<Refusal, StoreError> {
+        Ok(Self::SimplifiedAwaitingMemberConflict(
+            signal_flow::SendSeveralMessagePosition(
+                i64::try_from(position).map_err(|_| StoreError::StateInvariant)?,
+            ),
+        ))
+    }
+}
+
 /// Facts established for one member before admission allocates anything.
 pub(crate) struct PreparedDeliveryGroupMember {
     pub(crate) admission_message: AdmissionMessage,
@@ -120,6 +190,14 @@ impl PreparesDeliveryGroups for FlowStore {
         if !address.topic.0.as_str().is_camel_case_topic() {
             return Ok(Err(Refusal::TopicRefused(address.topic.clone())));
         }
+        let stored = self.stored_metaflow(address)?;
+        let simplified = match &stored {
+            Some(stored) => {
+                self.recipient_flow_kind(&stored.metaflow)?
+                    == Some(signal_flow::FlowKind::Simplified)
+            }
+            None => false,
+        };
         let clock = std::sync::LazyLock::new(|| {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -128,7 +206,8 @@ impl PreparesDeliveryGroups for FlowStore {
         });
         let mut members = Vec::with_capacity(messages.len());
         let mut answered = std::collections::HashSet::new();
-        for sendable in messages {
+        let mut awaiting = false;
+        for (position, sendable) in messages.into_iter().enumerate() {
             let message = match self.resolve_sendable_message(sendable)? {
                 Ok(message) => message,
                 Err(refusal) => return Ok(Err(refusal)),
@@ -155,44 +234,6 @@ impl PreparesDeliveryGroups for FlowStore {
                 }
                 _ => None,
             };
-            let answer_id = match request {
-                Request::Result(flow_ethos::ResultPayload::Answered(answer)) => {
-                    Some(&answer.request_id)
-                }
-                Request::Done(flow_ethos::DonePayload::Answered(answer)) => {
-                    Some(&answer.request_id)
-                }
-                _ => None,
-            };
-            if let Some(id) = answer_id
-                && !answered.insert(id.clone())
-            {
-                return Ok(Err(Refusal::Unresolved));
-            }
-            let delivery = if matches!(message, Message::Soft(_)) {
-                flow_ethos::Delivery::Queue
-            } else {
-                flow_ethos::Delivery::Wake
-            };
-            members.push(PreparedDeliveryGroupMember {
-                admission_message: AdmissionMessage { delivery, message },
-                task_due,
-                answered_binding: None,
-                answered_current: None,
-            });
-        }
-        // The Signal-side checks above keep their original precedence over
-        // recipient lookup. Store-side facts follow it, still in one preflight.
-        let Some(stored) = self.stored_metaflow(address)? else {
-            return Ok(Err(Refusal::Unknown(signal_flow::Unknown_Data::Address(
-                address.clone(),
-            ))));
-        };
-        (*clock).ok_or(StoreError::StateInvariant)?;
-        for member in &mut members {
-            let (Message::HardAbrupt(request)
-            | Message::MiddleAbrupt(request)
-            | Message::Soft(request)) = &member.admission_message.message;
             if let Request::Done(flow_ethos::DonePayload::Answered(done)) = request
                 && self.reminder(&done.logical_delivery_id.0)?.is_none()
             {
@@ -207,7 +248,10 @@ impl PreparesDeliveryGroups for FlowStore {
                 }
                 _ => None,
             };
-            if let Some(id) = answer_id {
+            let (answered_binding, answered_current) = if let Some(id) = answer_id {
+                if !answered.insert(id.clone()) {
+                    return Ok(Err(Refusal::Unresolved));
+                }
                 let binding = self
                     .request_binding(id)?
                     .ok_or(StoreError::StateInvariant)?;
@@ -221,10 +265,34 @@ impl PreparesDeliveryGroups for FlowStore {
                 if current.archived_cursor.0.is_some() {
                     return Err(StoreError::StateInvariant);
                 }
-                member.answered_binding = Some(binding);
-                member.answered_current = Some(current.clone());
+                (Some(binding), Some(current.clone()))
+            } else {
+                (None, None)
+            };
+            if simplified && request.awaits_group_reply() {
+                if awaiting {
+                    return Ok(Err(Refusal::at_group_position(position)?));
+                }
+                awaiting = true;
             }
+            let delivery = if matches!(message, Message::Soft(_)) {
+                flow_ethos::Delivery::Queue
+            } else {
+                flow_ethos::Delivery::Wake
+            };
+            members.push(PreparedDeliveryGroupMember {
+                admission_message: AdmissionMessage { delivery, message },
+                task_due,
+                answered_binding,
+                answered_current,
+            });
         }
+        let Some(stored) = stored else {
+            return Ok(Err(Refusal::Unknown(signal_flow::Unknown_Data::Address(
+                address.clone(),
+            ))));
+        };
+        (*clock).ok_or(StoreError::StateInvariant)?;
         Ok(Ok(PreparedDeliveryGroup { stored, members }))
     }
 }
@@ -443,16 +511,9 @@ impl AnalysesSimplifiedDeliveries for FlowStore {
             let (Message::HardAbrupt(request)
             | Message::MiddleAbrupt(request)
             | Message::Soft(request)) = &entry.message;
-            if matches!(
-                request,
-                Request::Order(_) | Request::Question(_) | Request::Task(_)
-            ) {
+            if request.awaits_group_reply() {
                 if awaiting.is_some() {
-                    return Ok(Err(Refusal::SimplifiedAwaitingMemberConflict(
-                        signal_flow::SendSeveralMessagePosition(
-                            i64::try_from(position).map_err(|_| StoreError::StateInvariant)?,
-                        ),
-                    )));
+                    return Ok(Err(Refusal::at_group_position(position)?));
                 }
                 awaiting = Some(entry);
             }
@@ -1096,7 +1157,13 @@ mod tests {
         else {
             panic!("head prepares after Started")
         };
-        let attempts = store.stage_uncertain_cohort(&head, &prefix).unwrap();
+        let attempts = store
+            .stage_uncertain_cohort(
+                &head,
+                &prefix,
+                crate::generated::memory::SubmittedCohortOrigin::Drain,
+            )
+            .unwrap();
         assert_eq!(attempts.len(), prefix.len());
         assert!(
             store

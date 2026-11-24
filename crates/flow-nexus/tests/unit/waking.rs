@@ -9277,10 +9277,7 @@ fn cutoff_group(
             sender,
             requests
                 .into_iter()
-                .map(|request| crate::generated::operation::AdmissionMessage {
-                    delivery: Delivery::Wake,
-                    message: Message::MiddleAbrupt(request),
-                })
+                .map(|request| super::sendable_message(Message::MiddleAbrupt(request)))
                 .collect(),
         )
         .unwrap()
@@ -9342,12 +9339,10 @@ fn awake_simplified_conflict_fails_whole_group_before_native_input() {
     let fixture = NexusFixture::new();
     active_simplified_claude(&fixture);
     let at = address(Model::Sol);
-    fixture.nexus.store.seed_metaflow(metaflow(
-        Model::Sol,
-        State::Awake(flow_ethos::FlowId("abc123".into())),
-        vec![],
-        vec![],
-    ));
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec![], vec![]));
     let accepted = cutoff_group(
         &fixture,
         &at,
@@ -9358,6 +9353,9 @@ fn awake_simplified_conflict_fails_whole_group_before_native_input() {
             Request::Question("second".into()),
         ],
     );
+    let mut queued = stored(&fixture, Model::Sol);
+    queued.state = State::Awake(flow_ethos::FlowId("abc123".into()));
+    fixture.nexus.store.seed_metaflow(queued);
     assert!(
         matches!(fixture.nexus.drain_all(at.clone()), Outcome::Drained(entries) if entries.is_empty())
     );
@@ -9401,7 +9399,7 @@ fn simplified_startup_binds_nonhead_awaiting_and_advances_past_conflict() {
     fixture
         .nexus
         .store
-        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec![], vec![]));
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: sender.clone(),
         state: State::Asleep,
@@ -9430,6 +9428,9 @@ fn simplified_startup_binds_nonhead_awaiting_and_advances_past_conflict() {
             }),
         ],
     );
+    let mut queued = stored(&fixture, Model::Sol);
+    queued.past.0.push(flow_ethos::FlowId("abc123".into()));
+    fixture.nexus.store.seed_metaflow(queued);
     let world = fixture.fresh_claude_world();
     fixture.nexus.wake_due(at.clone());
     assert_eq!(world.claude_starts(), 1);
@@ -9972,4 +9973,45 @@ fn undeclared_receiver_uses_previous_simplified_profile_at_group_cutoff() {
             )
         );
     }
+}
+
+#[test]
+fn send_several_simplified_admission_refuses_second_awaiting_before_later_member() {
+    use crate::sending::SendsSeveralRequests;
+    use crate::store::memory_digest::DigestsMemory;
+    use signal_flow::{
+        Output, Refusal, SendSeveralMessagePosition, SendSeveralRequest, SendableMessage,
+        SendableRequest,
+    };
+    let fixture = NexusFixture::new();
+    ended_simplified_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let before = fixture.nexus.store.memory_digest().unwrap();
+    let output = fixture.nexus.send_several_requests(
+        SendSeveralRequest {
+            address: at,
+            sendable_message_vector: vec![
+                SendableMessage::Soft(SendableRequest::Notice("context".into())),
+                SendableMessage::Soft(SendableRequest::Order("first awaiting".into())),
+                SendableMessage::Soft(SendableRequest::Question("second awaiting".into())),
+                SendableMessage::Soft(SendableRequest::Task(flow_ethos::AnswerableTask {
+                    minutes: flow_ethos::Minutes(0),
+                    string: "later invalid minutes".into(),
+                })),
+            ],
+        },
+        None,
+    );
+    assert_eq!(
+        output,
+        Output::Refused(Refusal::SimplifiedAwaitingMemberConflict(
+            SendSeveralMessagePosition(2),
+        ))
+    );
+    assert_eq!(fixture.nexus.store.memory_digest().unwrap(), before);
+    assert!(fixture.typed().unwrap_or_default().is_empty());
 }

@@ -103,6 +103,7 @@ use crate::composition::{FreshSeat, JoinsPurpose, RendersQueuedWork};
 use crate::delivery::body::RendersNativeContent;
 use crate::delivery::lease::LeasesPanes;
 use crate::delivery::{DeliversMessages, FindsDeliveryTarget, ReadsLeasedPane};
+use crate::generated::memory::SubmittedCohortOrigin;
 use crate::generated::memory::{Device, Inode, Offset, RefreshCaller};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
@@ -119,12 +120,12 @@ use crate::send_tool::ServesLaunchCalls;
 use crate::store::NamesConfiguredModel;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
-use crate::store::delivery_group::SelectsDeliveryGroups;
+use crate::store::delivery_group::{ReadsRecipientProfiles, SelectsDeliveryGroups};
 use crate::store::effort_configuration::ReadsEffort;
 use crate::store::events::RecordedHarnessEvent;
 use crate::store::events::RecordsHarnessEvents;
 use crate::store::events::{IdentifiesNativeStop, RecordedStop};
-use crate::store::group_uncertainty::StagesUncertainCohorts;
+use crate::store::group_uncertainty::{ReadsSubmittedCohorts, StagesUncertainCohorts};
 use crate::store::handover::HoldsHandovers;
 use crate::store::logical_delivery::{
     RecordsLogicalDeliveries, SimplifiedReplyBinding, SimplifiedReplyStanding,
@@ -3027,7 +3028,10 @@ impl DrainsHeldSeats for RunningNexus {
         // A grouped call crosses the native boundary as one uncertain unit.
         // A crash at any later point leaves every member parked together.
         let attempt = if grouped {
-            match self.store.stage_uncertain_cohort(&attempt, &cohort) {
+            match self
+                .store
+                .stage_uncertain_cohort(&attempt, &cohort, SubmittedCohortOrigin::Drain)
+            {
                 Ok(staged) => match staged.into_iter().next() {
                     Some(head) => head,
                     None => return refused(drained, Failed_Data::StoreRefused),
@@ -3253,19 +3257,32 @@ impl ParksCohort for RunningNexus {
         // A request a launch's first prompt carried is received when that
         // prompt is: the whole batch it carried settles on its receipt.
         if let Some(launch_request_id) = self.startup_launch(attempt) {
+            let run = self.typed_group(attempt);
             return match self.startup_receipt(&attempt.flow_id.0, &launch_request_id) {
-                Some(receipt) if receipt.native_session_id.0 == attempt.thread_id.0 => Ok((
-                    self.typed_group(attempt),
-                    receipt.native_prompt_id.0.clone(),
-                    format!(
-                        "first prompt of launch {launch_request_id}, native prompt {}",
-                        receipt.native_prompt_id.0
-                    ),
-                    SeatAfter::Resting,
-                )),
+                Some(receipt)
+                    if !run.is_empty() && receipt.native_session_id.0 == attempt.thread_id.0 =>
+                {
+                    Ok((
+                        run,
+                        receipt.native_prompt_id.0.clone(),
+                        format!(
+                            "first prompt of launch {launch_request_id}, native prompt {}",
+                            receipt.native_prompt_id.0
+                        ),
+                        SeatAfter::Resting,
+                    ))
+                }
                 // Typed and not yet seen taken: absence is never proven.
                 _ => Err(Undecided::AbsenceUnprovable),
             };
+        }
+        if !matches!(
+            self.store
+                .submitted_cohort(attempt)
+                .map(|cohort| cohort.map(|cohort| cohort.submitted_cohort_origin)),
+            Ok(None | Some(SubmittedCohortOrigin::Drain)),
+        ) {
+            return Err(Undecided::AbsenceUnprovable);
         }
         // One payload may have carried this attempt with the others typed
         // with it: each run of them is looked for, the longest first.
@@ -3353,6 +3370,16 @@ impl ParksCohort for RunningNexus {
     }
 
     fn typed_group(&self, attempt: &QueueDeliveryAttempt) -> Vec<QueueDeliveryAttempt> {
+        match self.store.submitted_cohort(attempt) {
+            Ok(Some(cohort)) => {
+                return self
+                    .store
+                    .submitted_attempts(attempt, cohort)
+                    .unwrap_or_default();
+            }
+            Ok(None) => {}
+            Err(_) => return Vec::new(),
+        }
         let Ok(retained) = self.store.retained_delivery_attempts(&attempt.address) else {
             return vec![attempt.clone()];
         };
@@ -3366,6 +3393,7 @@ impl ParksCohort for RunningNexus {
                         other.queue_evidence,
                         meta_signal_flow::QueueEvidence::Logical(_)
                     )
+                    && matches!(self.store.submitted_cohort(other), Ok(None))
                     && matches!(
                         other.queue_delivery_phase,
                         QueueDeliveryPhase::Prepared
@@ -3528,6 +3556,42 @@ impl ParksCohort for RunningNexus {
         &self,
         attempt: &QueueDeliveryAttempt,
     ) -> Vec<(Vec<QueueDeliveryAttempt>, String)> {
+        match self.store.submitted_cohort(attempt) {
+            Ok(Some(cohort)) => {
+                return self
+                    .store
+                    .submitted_attempts(attempt, cohort)
+                    .ok()
+                    .filter(|run| !run.is_empty())
+                    .map(|run| {
+                        let entries = run
+                            .iter()
+                            .filter_map(|member| match &member.queue_evidence {
+                                meta_signal_flow::QueueEvidence::Logical(entry) => {
+                                    Some(entry.clone())
+                                }
+                                meta_signal_flow::QueueEvidence::Legacy(_) => None,
+                            })
+                            .collect::<Vec<_>>();
+                        let text = entries.prompt_text(&attempt.address);
+                        vec![(run, text)]
+                    })
+                    .unwrap_or_default();
+            }
+            Ok(None) => {
+                // A grouped member still in Prepared has no submitted cohort
+                // to match. Its individual text cannot prove group delivery.
+                if let meta_signal_flow::QueueEvidence::Logical(entry) = &attempt.queue_evidence
+                    && !matches!(
+                        self.store.delivery_group(&entry.logical_delivery_id),
+                        Ok(None)
+                    )
+                {
+                    return Vec::new();
+                }
+            }
+            Err(_) => return Vec::new(),
+        }
         let alone = (vec![attempt.clone()], attempt.prompt_text());
         let group = self.typed_group(attempt);
         if group.len() < 2 {
@@ -3567,7 +3631,13 @@ pub(crate) trait CarriesStartup {
     /// first, as Uncertain attempts of the woken session anchored at its
     /// start. False when the store refused or the batch is not the queue's
     /// head.
-    fn carry_startup(&self, address: &Address, flow_id: &str, startup: &[QueueEntry]) -> bool;
+    fn carry_startup(
+        &self,
+        address: &Address,
+        flow_id: &str,
+        launch_request_id: &str,
+        startup: &[QueueEntry],
+    ) -> bool;
     /// Under the dispatch gate the caller holds, after a wake started flow
     /// `flow_id` and could not record what its first prompt carried: parks
     /// what that prompt carried and the queue still holds, as
@@ -3644,7 +3714,13 @@ impl CarriesStartup for RunningNexus {
             })
     }
 
-    fn carry_startup(&self, address: &Address, flow_id: &str, startup: &[QueueEntry]) -> bool {
+    fn carry_startup(
+        &self,
+        address: &Address,
+        flow_id: &str,
+        launch_request_id: &str,
+        startup: &[QueueEntry],
+    ) -> bool {
         let Some(first) = startup.first() else {
             return true;
         };
@@ -3667,11 +3743,21 @@ impl CarriesStartup for RunningNexus {
             }
             _ => return false,
         };
-        if self.store.contains_delivery_group(startup).unwrap_or(true) {
-            return self
-                .store
-                .stage_uncertain_cohort(&head, startup)
-                .is_ok_and(|attempts| attempts.len() == startup.len());
+        match self.store.contains_delivery_group(startup) {
+            Ok(true) => {
+                return self
+                    .store
+                    .stage_uncertain_cohort(
+                        &head,
+                        startup,
+                        SubmittedCohortOrigin::Startup(signal_flow::LaunchRequestId(
+                            launch_request_id.to_owned(),
+                        )),
+                    )
+                    .is_ok_and(|attempts| attempts.len() == startup.len());
+            }
+            Ok(false) => {}
+            Err(_) => return false,
         }
         if !self
             .store
@@ -3690,7 +3776,11 @@ impl CarriesStartup for RunningNexus {
 
     fn carry_left_queued(&self, address: &Address, flow_id: &str) -> Option<Vec<QueueEntry>> {
         let node = self.store.flow_node(flow_id).ok()??;
-        let profile = self.last_launch_profile(flow_id)?;
+        let launch_request_id = self.store.launch_requests_bound_to(flow_id).ok()?.pop()?;
+        let profile = self
+            .store
+            .composable_launch_profile(&launch_request_id)
+            .ok()??;
         let queue = self.store.metaflow(address).ok()??.queue.0;
         let anchor = node.harness_kind.session_start_anchor();
         let parked = self
@@ -3734,10 +3824,38 @@ impl CarriesStartup for RunningNexus {
             })
             .map(<[QueueEntry]>::to_vec)
             .unwrap_or_default();
-        (left.is_empty() || self.carry_startup(address, flow_id, &left)).then_some(left)
+        (left.is_empty() || self.carry_startup(address, flow_id, &launch_request_id, &left))
+            .then_some(left)
     }
 
     fn startup_launch(&self, attempt: &QueueDeliveryAttempt) -> Option<String> {
+        match self.store.submitted_cohort(attempt).ok()? {
+            Some(cohort) => {
+                return match cohort.submitted_cohort_origin {
+                    SubmittedCohortOrigin::Startup(launch_request_id) => {
+                        let bound = self
+                            .store
+                            .launch_requests_bound_to(&attempt.flow_id.0)
+                            .ok()?;
+                        bound
+                            .contains(&launch_request_id.0)
+                            .then_some(launch_request_id.0)
+                    }
+                    SubmittedCohortOrigin::Drain => None,
+                };
+            }
+            None => {
+                if let meta_signal_flow::QueueEvidence::Logical(entry) = &attempt.queue_evidence
+                    && self
+                        .store
+                        .delivery_group(&entry.logical_delivery_id)
+                        .ok()?
+                        .is_some()
+                {
+                    return None;
+                }
+            }
+        }
         if attempt.native_history_anchor != attempt.harness_kind.session_start_anchor() {
             return None;
         }
@@ -3761,7 +3879,8 @@ impl CarriesStartup for RunningNexus {
                 meta_signal_flow::QueueEvidence::Legacy(_) => None,
             })
             .collect::<Vec<_>>();
-        (!profile.opens_without_prompt()
+        (!carried.is_empty()
+            && !profile.opens_without_prompt()
             && profile
                 .instruction_prompt
                 .0
@@ -3835,7 +3954,7 @@ impl WakesInParts for RunningNexus {
         // its receipt: it leaves the queue, is never typed again, and
         // settles when the receipt is observed (`find_receipt`).
         match receipt {
-            None if has_logical => self.carry_startup(address, flow_id, startup),
+            None if has_logical => self.carry_startup(address, flow_id, launch_request_id, startup),
             receipt => self
                 .store
                 .settle_wake_startup_receipts(
@@ -3902,8 +4021,9 @@ impl WakesInParts for RunningNexus {
             return Err(WakeRefusal::Unplaceable);
         };
         let simplified = fresh.flow_kind() == &signal_flow::FlowKind::Simplified;
-        // The actual wake plan was resolved once off-gate. Only this existing
-        // premark scope owns selection/Cancel cutoff; release before compose.
+        // At the same dispatch cut as declaration edits and cancellation, the
+        // frozen plan must still describe this recipient. Native observations
+        // and composition stay outside this cutoff.
         use crate::store::delivery_group::{AnalysesSimplifiedDeliveries, RefusesDeliveryGroups};
         let (metaflow, startup, startup_text) = {
             let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
@@ -3927,6 +4047,12 @@ impl WakesInParts for RunningNexus {
                     .store
                     .contains_delivery_group(&entries)
                     .map_err(|_| WakeRefusal::StoreUnreadable)?;
+                if grouped
+                    && (current.past != metaflow.past
+                        || self.wake_plan(&current) != WakePlan::Fresh(fresh.clone()))
+                {
+                    return Err(WakeRefusal::Unplaceable);
+                }
                 if simplified && grouped {
                     match self
                         .store
@@ -4082,9 +4208,8 @@ impl WakesInParts for RunningNexus {
     }
 
     fn last_launch_profile(&self, flow_id: &str) -> Option<LaunchProfile> {
-        let launch_request_id = self.store.launch_requests_bound_to(flow_id).ok()?.pop()?;
         self.store
-            .composable_launch_profile(&launch_request_id)
+            .last_recipient_launch_profile(flow_id)
             .ok()
             .flatten()
     }

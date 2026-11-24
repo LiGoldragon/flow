@@ -48,7 +48,7 @@
     }:
     let
       lib = base.inputs.nixpkgs.lib;
-      version = "0.60.7";
+      version = "0.61.0";
       forSystems = function: lib.genAttrs base.lib.systems function;
       # The revision the process checks bind their binaries to, given to the
       # test at run time: the committed revision, or the dirty one a working
@@ -465,14 +465,16 @@
               touch "$out"
             '';
             flow-request-id-immutable-contract-pins =
-              pkgs.runCommand "flow-request-id-immutable-contract-pins" { nativeBuildInputs = [ pkgs.gnugrep ]; }
-                ''
-                  grep -F 'rev = "da01bb0533a2b2800efcc3a4ceacee8307261fd7"' ${./Cargo.toml}
-                  grep -F 'rev = "741eeebca64fa0c44c10bd9a85542a1c7997e981"' ${./Cargo.toml}
-                  grep -F 'signal-flow?rev=da01bb0533a2b2800efcc3a4ceacee8307261fd7#da01bb0533a2b2800efcc3a4ceacee8307261fd7' ${./Cargo.lock}
-                  grep -F 'meta-signal-flow?rev=741eeebca64fa0c44c10bd9a85542a1c7997e981#741eeebca64fa0c44c10bd9a85542a1c7997e981' ${./Cargo.lock}
-                  touch "$out"
-                '';
+              let
+                rejected = import ./nix/current-wire-contract-pin-rejections.nix {
+                  manifest = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+                  lock = builtins.fromTOML (builtins.readFile ./Cargo.lock);
+                };
+              in
+              assert lib.assertMsg (rejected == [ ]) "Flow contracts need matching full Git pins: ${builtins.concatStringsSep ", " rejected}";
+              pkgs.runCommand "flow-request-id-immutable-contract-pins" { } ''
+                touch "$out"
+              '';
 
           };
           # The pinned Curriculum, built per crate on the same base.

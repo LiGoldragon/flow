@@ -469,8 +469,7 @@ fn an_idle_maintained_codex_flow_keeps_its_pane_and_stays_awake() {
 /// its harness is closed, its flow recorded Stopped and its metaflow Asleep
 /// with the flow in Past, its Address and the flow's row and transcript
 /// kept. A metaflow no declaration names is OnDemand.
-#[test]
-fn an_idle_on_demand_claude_flow_closes_its_harness_and_keeps_its_address() {
+fn idle_on_demand_claude_seat() -> NexusFixture {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![claude_agent(&fixture)],
@@ -490,6 +489,13 @@ fn an_idle_on_demand_claude_flow_closes_its_harness_and_keeps_its_address() {
         vec![],
         vec![],
     ));
+
+    fixture
+}
+
+#[test]
+fn an_idle_on_demand_claude_flow_closes_its_harness_and_keeps_its_address() {
+    let fixture = idle_on_demand_claude_seat();
 
     assert_eq!(
         fixture.nexus.settle_stopped(CLAUDE_SEAT),
@@ -517,12 +523,7 @@ fn an_idle_on_demand_claude_flow_closes_its_harness_and_keeps_its_address() {
     assert!(claude_transcript(&fixture).exists(), "its transcript stays");
 }
 
-/// An idle OnDemand Codex flow sleeps once its app-server shows its thread
-/// resting with nothing queued.
-#[test]
-fn an_idle_on_demand_codex_flow_closes_its_harness() {
-    use super::codex_turns::idle;
-    use crate::codex_turns::SettlesRestingCodexSeats;
+fn idle_on_demand_seat() -> NexusFixture {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![fixture.settled_agent()],
@@ -541,6 +542,16 @@ fn an_idle_on_demand_codex_flow_closes_its_harness() {
         vec![],
         vec![],
     ));
+    fixture
+}
+
+/// An idle OnDemand Codex flow sleeps once its app-server shows its thread
+/// resting with nothing queued.
+#[test]
+fn an_idle_on_demand_codex_flow_closes_its_harness() {
+    use super::codex_turns::idle;
+    use crate::codex_turns::SettlesRestingCodexSeats;
+    let fixture = idle_on_demand_seat();
     // Test 4: the thread's rest settles the seat itself; it sleeps.
     let thread = fixture.node().session_id;
     assert_eq!(
@@ -554,6 +565,342 @@ fn an_idle_on_demand_codex_flow_closes_its_harness() {
         slept.past,
         flow_ethos::Past(vec![flow_ethos::FlowId("908786".to_owned())])
     );
+}
+
+fn on_demand_seat_with_barred_composition(
+    mut fixture: NexusFixture,
+) -> (
+    NexusFixture,
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+) {
+    use crate::composition::{FixtureSuccessorRecovery, LaunchComposer, OpensLaunchComposer};
+    use crate::context::{
+        ComposesContext, ContextComposer, ContextRequest, FixtureComposer, ModuleStanding,
+        ResolvesModule,
+    };
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Duration;
+
+    #[derive(Debug)]
+    struct BarredComposer {
+        inner: FixtureComposer,
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl ResolvesModule for BarredComposer {
+        fn resolve_module(&self, identity: &signal_flow::ModuleIdentity) -> ModuleStanding {
+            self.inner.resolve_module(identity)
+        }
+    }
+
+    impl ComposesContext for BarredComposer {
+        fn compose(
+            &self,
+            request: &ContextRequest,
+        ) -> Result<signal_curriculum_nexus::StartupComposition, signal_flow::ContextRefusal>
+        {
+            self.entered.send(()).unwrap();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(15))
+                .unwrap();
+            self.inner.compose(request)
+        }
+    }
+
+    let (entered, composing) = mpsc::channel();
+    let (release_compose, release) = mpsc::channel();
+    fixture.nexus.composer = crate::live::Live::holding(LaunchComposer::with_context(
+        ContextComposer(Arc::new(BarredComposer {
+            inner: FixtureComposer::from(
+                &[
+                    ("spirit:core:0", "Spirit body."),
+                    ("intent:flow:0", "Intent body."),
+                    ("knowledge:main-flow:0", "Main flow body."),
+                ][..],
+            ),
+            entered,
+            release: Mutex::new(release),
+        })),
+        Arc::new(FixtureSuccessorRecovery::default()),
+    ));
+    (fixture, composing, release_compose)
+}
+
+#[test]
+fn automatic_close_lends_dispatch_for_composition_and_native_close() {
+    use crate::codex_turns::SettlesRestingCodexSeats;
+    use crate::event_wait::AwaitsPath;
+    use crate::fixture_executable::{HoldsLatch, Latch};
+    use crate::sending::SendsRequests;
+    use std::time::{Duration, Instant};
+
+    let (fixture, composing, release_compose) =
+        on_demand_seat_with_barred_composition(idle_on_demand_seat());
+    let close_reached = fixture.directory.path().join("close-reached");
+    let close_release = Latch::closed(fixture.directory.path().join("close-release"));
+    let script = fs::read_to_string(&fixture.snapshot_program).unwrap();
+    let arm = "\"pane close\"|\"pane send-keys\"|\"agent wait\") ";
+    assert!(script.contains(arm));
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&script.replacen(
+        arm,
+        &format!(
+            "{arm} if [ \"$3 $4\" = 'pane close' ]; then : > '{}'; : < '{}'; fi; ",
+            close_reached.display(),
+            close_release.path.display(),
+        ),
+        1,
+    ));
+
+    let other = address(Model::Astra);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Astra, State::Asleep, vec![], vec![]));
+    let admits = |recipient, words: &str| {
+        if fixture.nexus.dispatch_gate.try_lock().is_err() {
+            return None;
+        }
+        let answer = fixture.nexus.admit_ordinary_send(
+            signal_flow::SendRequest {
+                address: recipient,
+                sendable_message: super::sendable_message(Message::Soft(Request::Notice(
+                    words.into(),
+                ))),
+            },
+            None,
+        );
+        match answer.response {
+            signal_flow::Output::SendAccepted(accepted) => Some(accepted.request_id),
+            _ => None,
+        }
+    };
+    let thread = fixture.node().session_id;
+    let (compose_admission, close_admission, retained, outcome) = std::thread::scope(|scope| {
+        let stop = scope.spawn(|| {
+            fixture
+                .nexus
+                .codex_events(&thread.0, vec![super::codex_turns::idle()])
+        });
+        let during_compose = composing
+            .recv_timeout(Duration::from_secs(8))
+            .ok()
+            .and_then(|()| admits(other.clone(), "a separate address during composition"));
+        let _ = release_compose.send(());
+        let (during_close, retained) =
+            if close_reached.appeared_by(Instant::now() + Duration::from_secs(8)) {
+                (
+                    admits(other, "a separate address during close"),
+                    admits(
+                        address(Model::Sol),
+                        "keep admission during the started close",
+                    ),
+                )
+            } else {
+                (None, None)
+            };
+        close_release.release();
+        (during_compose, during_close, retained, stop.join().unwrap())
+    });
+
+    let compose_admission = compose_admission.expect("composition held dispatch");
+    let close_admission = close_admission.expect("native close held dispatch");
+    let retained = retained.expect("closing address could not admit while close was started");
+    let ids = |model| {
+        stored(&fixture, model)
+            .queue
+            .0
+            .into_iter()
+            .map(|entry| entry.request_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(Model::Astra), [compose_admission, close_admission]);
+    assert_eq!(outcome, Some(AtStop::Slept(address(Model::Sol))));
+    assert_eq!(stored(&fixture, Model::Sol).state, State::Asleep);
+    assert_eq!(ids(Model::Sol), [retained]);
+    let calls = fs::read_to_string(fixture.directory.path().join("herdr-operations.log")).unwrap();
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| line.contains("pane close w1:p3"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_new_codex_turn_during_composition_prevents_close() {
+    use crate::codex_turns::SettlesRestingCodexSeats;
+    use std::time::Duration;
+
+    let (fixture, composing, release_compose) =
+        on_demand_seat_with_barred_composition(idle_on_demand_seat());
+    let thread = fixture.node().session_id;
+    let (reopened, outcome) = std::thread::scope(|scope| {
+        let stop = scope.spawn(|| {
+            fixture
+                .nexus
+                .codex_events(&thread.0, vec![super::codex_turns::idle()])
+        });
+        let reopened = composing.recv_timeout(Duration::from_secs(8)).is_ok()
+            && fixture.nexus.dispatch_gate.try_lock().is_ok();
+        if reopened {
+            fixture.nexus.codex_events(
+                &thread.0,
+                vec![super::codex_turns::started(super::codex_turns::T1)],
+            );
+        }
+        let _ = release_compose.send(());
+        (reopened, stop.join().unwrap())
+    });
+    assert!(reopened, "composition must allow the fresh Codex event");
+    assert_eq!(outcome, Some(AtStop::Kept(KeptAtStop::ThreadNotResting)));
+    assert!(matches!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(_)
+    ));
+    assert!(!closes(&fixture));
+}
+
+#[test]
+fn a_correlated_claude_prompt_during_composition_prevents_close() {
+    use crate::generated::transitions::{AskedFlow, RecordsTransitions};
+    use crate::store::events::RecordsHarnessEvents;
+    use std::time::Duration;
+
+    let (fixture, composing, release_compose) =
+        on_demand_seat_with_barred_composition(idle_on_demand_claude_seat());
+    let flow_id = flow_ethos::FlowId(CLAUDE_SEAT.into());
+    let (working, outcome) = std::thread::scope(|scope| {
+        let stop = scope.spawn(|| fixture.nexus.settle_stopped(CLAUDE_SEAT));
+        let open = composing.recv_timeout(Duration::from_secs(8)).is_ok()
+            && fixture.nexus.dispatch_gate.try_lock().is_ok();
+        if open {
+            let event = signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
+                native_session_id_option: Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into())),
+                prompt_id_option: Some(signal_flow::PromptId("arrived-while-composing".into())),
+                prompt_sha256: signal_flow::PromptSha256("new-native-prompt".into()),
+            });
+            fixture
+                .nexus
+                .store
+                .record_event(CLAUDE_SEAT, event.clone())
+                .unwrap();
+            fixture.nexus.after_attributed_report(&flow_id, &event);
+        }
+        let working = fixture
+            .nexus
+            .store
+            .state_of(AskedFlow(flow_id.clone()))
+            .unwrap();
+        let _ = release_compose.send(());
+        (working, stop.join().unwrap())
+    });
+    assert_eq!(working, Some(meta_signal_flow::State::Acting));
+    assert_eq!(outcome, AtStop::Kept(KeptAtStop::ClaudePromptArrived));
+    assert!(matches!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(_)
+    ));
+    assert!(!closes(&fixture));
+}
+
+#[test]
+fn a_replayed_or_foreign_claude_prompt_does_not_revoke_rest() {
+    use crate::store::events::RecordsHarnessEvents;
+    use std::time::Duration;
+
+    let (fixture, composing, release_compose) =
+        on_demand_seat_with_barred_composition(idle_on_demand_claude_seat());
+    let prompt = |session: &str, id: &str| {
+        signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
+            native_session_id_option: Some(signal_flow::NativeSessionId(session.into())),
+            prompt_id_option: Some(signal_flow::PromptId(id.into())),
+            prompt_sha256: signal_flow::PromptSha256("already-seen-native-input".into()),
+        })
+    };
+    let old = prompt(CLAUDE_SESSION, "before-the-last-turn-ended");
+    fixture
+        .nexus
+        .store
+        .record_event(CLAUDE_SEAT, old.clone())
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .record_event(CLAUDE_SEAT, claude_stop(&fixture))
+        .unwrap();
+    let (observed, outcome) = std::thread::scope(|scope| {
+        let stop = scope.spawn(|| fixture.nexus.settle_stopped(CLAUDE_SEAT));
+        let observed = composing.recv_timeout(Duration::from_secs(8)).is_ok();
+        if observed {
+            for event in [old, prompt("a-foreign-session", "new-foreign-input")] {
+                fixture
+                    .nexus
+                    .store
+                    .record_event(CLAUDE_SEAT, event)
+                    .unwrap();
+            }
+        }
+        let _ = release_compose.send(());
+        (observed, stop.join().unwrap())
+    });
+    assert!(observed);
+    assert_eq!(outcome, AtStop::Slept(address(Model::Sol)));
+    assert!(closes(&fixture));
+}
+
+#[test]
+fn waking_admission_during_composition_is_handed_to_the_kept_seat_once() {
+    use crate::sending::SendsRequests;
+    use std::time::Duration;
+
+    let (fixture, composing, release_compose) =
+        on_demand_seat_with_barred_composition(idle_on_demand_claude_seat());
+    let recipient = address(Model::Sol);
+    let (accepted, before_release, outcome) = std::thread::scope(|scope| {
+        let stop = scope.spawn(|| fixture.nexus.settle_stopped(CLAUDE_SEAT));
+        let open = composing.recv_timeout(Duration::from_secs(8)).is_ok()
+            && fixture.nexus.dispatch_gate.try_lock().is_ok();
+        let mut accepted = None;
+        if open {
+            let answer = fixture.nexus.admit_ordinary_send(
+                signal_flow::SendRequest {
+                    address: recipient.clone(),
+                    sendable_message: super::sendable_message(Message::MiddleAbrupt(
+                        Request::Order("first accepted while deciding to sleep".into()),
+                    )),
+                },
+                None,
+            );
+            if let signal_flow::Output::SendAccepted(receipt) = &answer.response {
+                accepted = Some(receipt.request_id.clone());
+            }
+            drop(answer);
+            // The reply's wake runs now, while close holds the sole waking lease.
+            fixture.nexus.wake_due(recipient.clone());
+        }
+        let before_release = fixture.typed();
+        let _ = release_compose.send(());
+        (accepted, before_release, stop.join().unwrap())
+    });
+    let accepted = accepted.expect("the same address can admit while composition waits");
+    assert!(before_release.is_none());
+    assert_eq!(outcome, AtStop::Idle);
+    assert!(!closes(&fixture));
+    assert!(matches!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(_)
+    ));
+    let prompts = super::prompts(&fixture.directory.path().join("herdr-operations.log"));
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    assert!(prompts[0].contains(&accepted.0));
 }
 
 /// An Order queued for an idle Awake Claude flow is handed into its live

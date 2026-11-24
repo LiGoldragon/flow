@@ -25,7 +25,7 @@ use sema_engine::{
 };
 use signal_flow::Event;
 use signal_flow::{FlowId, NativeSessionId, NativeStop, TranscriptPath};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 pub(super) const FLOW_EVENT_TABLE_NAME: TableName = TableName::new("flow_nexus_flow_events");
 pub(super) const FLOW_EVENT_FAMILY: &str = "flow-nexus-flow-events";
@@ -177,6 +177,21 @@ pub trait RecordsHarnessEvents {
     fn events(&self, flow_id: &str) -> Result<Option<Vec<RecordedHarnessEvent>>, StoreError>;
 }
 
+/// A native effect may compare event evidence and start before another
+/// report appends. The fence is never held through the native effect.
+pub(crate) trait FencesHarnessEventAppends {
+    fn fence_harness_event_appends(&self) -> MutexGuard<'_, ()>;
+}
+
+impl FencesHarnessEventAppends for FlowStore {
+    fn fence_harness_event_appends(&self) -> MutexGuard<'_, ()> {
+        self.event_tables
+            .append_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 trait ReadsEventRow {
     fn event_row(&self, flow_id: &str) -> Result<Option<FlowEvents>, StoreError>;
 }
@@ -201,11 +216,7 @@ impl ReadsEventRow for FlowStore {
 
 impl RecordsHarnessEvents for FlowStore {
     fn record_event(&self, flow_id: &str, event: Event) -> Result<EventRecording, StoreError> {
-        let _append = self
-            .event_tables
-            .append_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _append = self.fence_harness_event_appends();
         let event = event.recorded();
         let row = self.event_row(flow_id)?;
         if row.is_none() && self.flow(flow_id)?.is_none() {
@@ -242,11 +253,7 @@ impl RecordsHarnessEvents for FlowStore {
     }
 
     fn hold_reserved_flow(&self, flow_id: &str) -> Result<(), StoreError> {
-        let _append = self
-            .event_tables
-            .append_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _append = self.fence_harness_event_appends();
         if self.event_row(flow_id)?.is_none() {
             self.engine.assert(Assertion::new(
                 self.event_tables.events,
@@ -260,11 +267,7 @@ impl RecordsHarnessEvents for FlowStore {
     }
 
     fn release_reserved_flow(&self, flow_id: &str) -> Result<(), StoreError> {
-        let _append = self
-            .event_tables
-            .append_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _append = self.fence_harness_event_appends();
         if self.flow(flow_id)?.is_none() && self.event_row(flow_id)?.is_some() {
             self.engine.retract(Retraction::new(
                 self.event_tables.events,

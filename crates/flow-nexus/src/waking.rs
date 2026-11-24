@@ -125,8 +125,8 @@ use crate::store::NamesConfiguredModel;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
 use crate::store::effort_configuration::ReadsEffort;
-use crate::store::events::RecordedHarnessEvent;
 use crate::store::events::RecordsHarnessEvents;
+use crate::store::events::{FencesHarnessEventAppends, RecordedHarnessEvent};
 use crate::store::events::{IdentifiesNativeStop, RecordedStop};
 use crate::store::handover::HoldsHandovers;
 use crate::store::logical_delivery::{
@@ -620,6 +620,8 @@ pub enum KeptAtStop {
     OtherSession,
     /// After the bounded wait, Herdr does not show the seat resting.
     NotResting(PaneAgent),
+    /// A new prompt reached this Claude session while its close was prepared.
+    ClaudePromptArrived,
     /// A replacement ordered from outside was carried out at the seat's
     /// rest and refused, with the refusal; the order is spent.
     OrderedRefused(Box<Output>),
@@ -1740,6 +1742,206 @@ impl ClassifiesSuccessorCause for SuccessionCause {
             self,
             Self::Refresh | Self::EmergencyRefreshWithoutHandover(_)
         )
+    }
+}
+
+/// One resting OnDemand seat, with the binding and queue observed before
+/// composition. The permaflow effect remains held by settle_native_rest.
+struct RestingSeat<'a> {
+    metaflow: &'a Metaflow,
+    stored: &'a FlowNode,
+    routed: &'a FlowNode,
+    claude_rest: Option<ClaudeRestMarker>,
+}
+
+#[derive(Clone, Copy)]
+enum RestClose {
+    Sleep,
+    Refresh,
+    ForcedRefresh,
+}
+
+trait ClosesRestingSeat {
+    fn claude_rest_marker(
+        &self,
+        node: &FlowNode,
+    ) -> Result<ClaudeRestMarker, crate::store::StoreError>;
+    fn close_rested_seat(
+        &self,
+        seat: RestingSeat<'_>,
+        close: RestClose,
+        dispatch: QueueDispatch<'_>,
+    ) -> AtStop;
+    fn finish_rested_close(
+        &self,
+        seat: &RestingSeat<'_>,
+        close: RestClose,
+        dispatch: &mut QueueDispatch<'_>,
+    ) -> AtStop;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ClaudeRestMarker(usize);
+
+/// A replay has the same native prompt identity and digest. Without a
+/// native identity, equal text can be two distinct submissions.
+#[derive(PartialEq, Eq, Hash)]
+struct IdentifiedClaudePrompt<'a> {
+    identity: &'a str,
+    digest: &'a str,
+}
+
+impl ClosesRestingSeat for RunningNexus {
+    fn claude_rest_marker(
+        &self,
+        node: &FlowNode,
+    ) -> Result<ClaudeRestMarker, crate::store::StoreError> {
+        let events = self
+            .store
+            .events(&node.flow_id.0)?
+            .ok_or(crate::store::StoreError::StateInvariant)?;
+        let mut identified = std::collections::HashSet::new();
+        let mut unidentified = 0;
+        for event in &events {
+            if let RecordedHarnessEvent::PromptSubmitted(prompt) = event
+                && prompt
+                    .native_session_id_option
+                    .as_ref()
+                    .is_some_and(|session| session.0 == node.session_id.0)
+            {
+                if let Some(identity) = prompt.prompt_id_option.as_ref() {
+                    identified.insert(IdentifiedClaudePrompt {
+                        identity: &identity.0,
+                        digest: &prompt.prompt_sha256.0,
+                    });
+                } else {
+                    unidentified += 1;
+                }
+            }
+        }
+        Ok(ClaudeRestMarker(identified.len() + unidentified))
+    }
+
+    fn close_rested_seat(
+        &self,
+        seat: RestingSeat<'_>,
+        close: RestClose,
+        mut dispatch: QueueDispatch<'_>,
+    ) -> AtStop {
+        let address = &seat.metaflow.address;
+        let Some(waking) = self.waking.hold(address) else {
+            return AtStop::Kept(KeptAtStop::Waking);
+        };
+        let result = self.finish_rested_close(&seat, close, &mut dispatch);
+        drop(waking);
+        // A reply may have scheduled its admission while we held the
+        // waking lease. Closing or yielding is the next event for that work.
+        if matches!(self.store.metaflow(address), Ok(Some(current)) if !current.queue.0.is_empty())
+        {
+            self.defer_wake(address.clone());
+        }
+        result
+    }
+
+    fn finish_rested_close(
+        &self,
+        seat: &RestingSeat<'_>,
+        close: RestClose,
+        dispatch: &mut QueueDispatch<'_>,
+    ) -> AtStop {
+        let flow_id = &seat.stored.flow_id.0;
+        let address = &seat.metaflow.address;
+        if matches!(close, RestClose::Refresh | RestClose::ForcedRefresh)
+            && matches!(
+                seat.routed.herdr_route_selection,
+                HerdrRouteSelection::Unavailable
+            )
+        {
+            return AtStop::Kept(KeptAtStop::RefreshUnrouted);
+        }
+        let Some(reservation) = self.queue_writes.reserve() else {
+            return AtStop::Idle;
+        };
+        if let Err(kept) = dispatch.outside(|| self.successor_composes(flow_id, seat.metaflow)) {
+            return AtStop::Kept(match (close, kept) {
+                (RestClose::Sleep, KeptAtStop::RefreshUnplaceable) => KeptAtStop::SleepUnplaceable,
+                (RestClose::Sleep, KeptAtStop::SuccessorUncomposable(outcome)) => {
+                    KeptAtStop::SleepUncomposable(outcome)
+                }
+                (_, kept) => kept,
+            });
+        }
+
+        let HerdrRouteSelection::Available(route) = &seat.routed.herdr_route_selection else {
+            return AtStop::Kept(KeptAtStop::SleepRefused(Box::new(Outcome::Failed(
+                Failed_Data::HerdrRefused,
+            ))));
+        };
+
+        // Acquire the pane lease without blocking dispatch. Once back
+        // under dispatch, a new request, change of binding or policy, or
+        // Hold wins over a close whose native effect has not started.
+        let _pane = dispatch.outside(|| self.pane_leases.hold(route));
+        if !matches!(self.store.metaflow_awake_as(flow_id), Ok(Some(current)) if &current == seat.metaflow)
+            || !matches!(self.store.flow_node(flow_id), Ok(Some(current)) if &current == seat.stored)
+            || !matches!(self.store.continuity(address), Ok(Continuity::OnDemand))
+            || !matches!(
+                self.store.refresh_mode(address),
+                Ok(meta_signal_flow::RefreshMode::Automatic)
+            )
+            || !self
+                .store
+                .ordered_replacement(address)
+                .is_ok_and(|ordered| ordered.is_none_or(|order| order.predecessor.0 != *flow_id))
+            || !matches!(self.store.address_hold(flow_id), Ok(None))
+            || !matches!(
+                crate::store::restart::RecordsRestarts::restart_record(&*self.store, flow_id),
+                Ok(None)
+            )
+            || self.permaflow_held(address.clone())
+            || self.held()
+        {
+            return AtStop::Idle;
+        }
+        if seat.stored.harness_kind == HarnessKind::Codex && !self.codex_resting(flow_id) {
+            return AtStop::Kept(KeptAtStop::ThreadNotResting);
+        }
+        let started = if let Some(marker) = seat.claude_rest {
+            // Report appends before taking dispatch to attribute its
+            // transition. Order the last comparison and native start
+            // against that append, without fencing reports during close.
+            let _reports = self.store.fence_harness_event_appends();
+            match self.claude_rest_marker(seat.stored) {
+                Ok(current) if current == marker => reservation.start(),
+                Ok(_) => return AtStop::Kept(KeptAtStop::ClaudePromptArrived),
+                Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+            }
+        } else {
+            reservation.start()
+        };
+        if !started {
+            return AtStop::Idle;
+        }
+        let closed = dispatch.outside(|| self.perform(Operation::Close(seat.routed.clone())));
+        let result = if closed == Outcome::Closed {
+            self.perform(Operation::Record(Record_Data::Stopped(
+                signal_flow::FlowId(flow_id.to_owned()),
+            )))
+        } else {
+            closed
+        };
+        match (close, result) {
+            (RestClose::Sleep, Outcome::Recorded) => AtStop::Slept(address.clone()),
+            (RestClose::Refresh | RestClose::ForcedRefresh, Outcome::Recorded) => {
+                AtStop::Refreshed(address.clone())
+            }
+            (RestClose::Sleep, outcome) => {
+                AtStop::Kept(KeptAtStop::SleepRefused(Box::new(outcome)))
+            }
+            (RestClose::Refresh | RestClose::ForcedRefresh, outcome) => {
+                AtStop::Kept(KeptAtStop::RefreshRefused(Box::new(outcome)))
+            }
+        }
     }
 }
 
@@ -4670,6 +4872,14 @@ impl WakesInParts for RunningNexus {
             Ok(None) => return AtStop::Kept(KeptAtStop::UnknownFlow),
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
+        // Capture the native prompt marker before reading rest. A report
+        // appends outside dispatch, even while the initial rest is checked.
+        // The explicit forced-refresh policy is selected later.
+        let claude_rest = if stored_node.harness_kind == HarnessKind::Claude {
+            self.claude_rest_marker(&stored_node).map(Some)
+        } else {
+            Ok(None)
+        };
         let mut node = self.herdr.refresh_route(stored_node.clone());
         let continuity = match self.store.continuity(&address) {
             Ok(continuity) => continuity,
@@ -4725,7 +4935,7 @@ impl WakesInParts for RunningNexus {
                     } = self.herdr.pane_agent(&stored_node)
                     && self.herdr.pane_ownership(&stored_node) == PaneOwnership::Owned
                 {
-                    node = stored_node;
+                    node = stored_node.clone();
                     pane_agent = observed;
                 }
                 if matches!(&pane_agent, PaneAgent::Present { ready: false, .. }) {
@@ -4773,18 +4983,26 @@ impl WakesInParts for RunningNexus {
                 self.wake_deferred();
                 return refreshed;
             }
-            if let HerdrRouteSelection::Unavailable = &node.herdr_route_selection {
-                return AtStop::Kept(KeptAtStop::RefreshUnrouted);
-            }
-            // Its successor is composed at its next wake: the seat is
-            // closed only once that successor composes now.
-            if let Err(kept) = self.successor_composes(flow_id, &metaflow) {
-                return AtStop::Kept(kept);
-            }
-            return match self.close_at_rest(flow_id, &node) {
-                Ok(()) => AtStop::Refreshed(address),
-                Err(outcome) => AtStop::Kept(KeptAtStop::RefreshRefused(outcome)),
+            let close = if node.harness_kind == HarnessKind::Claude && !warning_policy_configured {
+                RestClose::ForcedRefresh
+            } else {
+                RestClose::Refresh
             };
+            let claude_rest = match (close, claude_rest) {
+                (RestClose::ForcedRefresh, _) => None,
+                (_, Ok(marker)) => marker,
+                (_, Err(_)) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+            };
+            return self.close_rested_seat(
+                RestingSeat {
+                    metaflow: &metaflow,
+                    stored: &stored_node,
+                    routed: &node,
+                    claude_rest,
+                },
+                close,
+                QueueDispatch::new(&self.dispatch_gate, turn),
+            );
         }
         self.reconcile_typed(&address);
         // A simplified seat's answer is queued before the seat is handed
@@ -4818,17 +5036,21 @@ impl WakesInParts for RunningNexus {
             // Its successor is composed at its next wake: the seat is
             // closed only once that successor composes now.
             // Only its sleep is declined then: no successor was refused.
-            Continuity::OnDemand => match self.successor_composes(flow_id, &metaflow) {
-                Err(KeptAtStop::RefreshUnplaceable) => AtStop::Kept(KeptAtStop::SleepUnplaceable),
-                Err(KeptAtStop::SuccessorUncomposable(outcome)) => {
-                    AtStop::Kept(KeptAtStop::SleepUncomposable(outcome))
-                }
-                Err(kept) => AtStop::Kept(kept),
-                Ok(()) => match self.close_at_rest(flow_id, &node) {
-                    Ok(()) => AtStop::Slept(address),
-                    Err(outcome) => AtStop::Kept(KeptAtStop::SleepRefused(outcome)),
-                },
-            },
+            Continuity::OnDemand => {
+                let Ok(claude_rest) = claude_rest else {
+                    return AtStop::Kept(KeptAtStop::StoreUnreadable);
+                };
+                self.close_rested_seat(
+                    RestingSeat {
+                        metaflow: &metaflow,
+                        stored: &stored_node,
+                        routed: &node,
+                        claude_rest,
+                    },
+                    RestClose::Sleep,
+                    QueueDispatch::new(&self.dispatch_gate, turn),
+                )
+            }
         }
     }
 }

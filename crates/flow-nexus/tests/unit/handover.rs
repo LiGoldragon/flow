@@ -668,9 +668,12 @@ fn a_file_the_nexus_may_not_read_is_unreadable() {
 
 #[test]
 fn an_installed_memory_source_reads_the_live_store_and_ignores_the_file() {
-    use crate::composition::OpensLaunchComposer;
+    use crate::composition::{ComposesInRoot, HandoverRoot, HarnessedProfile, OpensLaunchComposer};
     let mut fixture = NexusFixture::new();
     leave(fixture.directory.path(), "abc123", Left::Text(b"file text"));
+    let flows_root = fixture.directory.path().join("canonical-flows");
+    fs::create_dir_all(flows_root.join("abc123")).unwrap();
+    let crystallization_file = flows_root.join("abc123/crystallization.md");
     let at = address(Model::Sol);
     *fixture.nexus.composer.edit() = fixture
         .nexus
@@ -680,6 +683,7 @@ fn an_installed_memory_source_reads_the_live_store_and_ignores_the_file() {
         .clone()
         .with_handover_source(std::sync::Arc::new(crate::MemoryHandoverSource(
             fixture.nexus.store.clone(),
+            Some(flows_root),
         )));
     fixture
         .nexus
@@ -712,6 +716,61 @@ fn an_installed_memory_source_reads_the_live_store_and_ignores_the_file() {
     );
     assert_eq!(body.0.matches(handover).count(), 1, "{body}", body = body.0);
     assert!(!body.0.contains("file text"), "{body}", body = body.0);
+
+    let crystallization = "# Crystallization\n\n  résumé  \r\n\n";
+    fs::write(&crystallization_file, crystallization).unwrap();
+    let composer = fixture.nexus.composer.current();
+    let profile = launch.launch_profile.clone();
+    let open = [signal_flow::QueueEntry {
+        logical_delivery_id: flow_ethos::LogicalDeliveryId("logical-delivery-open".into()),
+        request_id: flow_ethos::RequestId("open".into()),
+        sent_by: signal_flow::SentBy::Flow,
+        delivery: flow_ethos::Delivery::Queue,
+        message: signal_flow::Message::Soft(Request::Order("Keep open work.".into())),
+    }];
+    let compose = || {
+        composer.compose_in_root(
+            HarnessedProfile {
+                remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
+                harness_kind: signal_flow::HarnessKind::Claude,
+                launch_profile: profile.clone(),
+            },
+            Vec::<signal_flow::LeaveOut>::new(),
+            HandoverRoot::At(fixture.directory.path()),
+            &open,
+        )
+    };
+    let with_file = compose().unwrap();
+    assert_eq!(with_file.system_prompt, launch.system_prompt);
+    let first = with_file.first_prompt_payload.first_prompt_body.0;
+    let succession = format!("{crystallization}{handover}\n\n");
+    assert!(first.starts_with(&succession));
+    assert!(first.ends_with("Soft.Order.{ open «Keep open work.» } } ]"));
+    assert_eq!(first.matches(crystallization).count(), 1);
+    assert!(
+        !with_file
+            .system_prompt
+            .system_prompt_text
+            .0
+            .contains(crystallization)
+    );
+    let file_handover = "# Handover\n  preserve bytes \r\n";
+    fs::write(
+        crystallization_file.with_file_name("handover.md"),
+        file_handover,
+    )
+    .unwrap();
+    let paired = compose().unwrap().first_prompt_payload.first_prompt_body.0;
+    assert!(paired.starts_with(&format!("{crystallization}{file_handover}")));
+    assert!(!paired.contains(handover));
+    fs::write(&crystallization_file, [255]).unwrap();
+    assert!(matches!(
+        compose(),
+        Err(crate::composition::CompositionError::HandoverUnreadable {
+            predecessor,
+            fault: HandoverFault::Unreadable(text),
+        }) if predecessor == "abc123" && text.ends_with("crystallization.md: not UTF-8")
+    ));
 }
 
 /// A predecessor that left no sections in Memory is given the file the
@@ -731,6 +790,7 @@ fn an_installed_memory_source_holding_none_reads_the_predecessor_s_file() {
         .clone()
         .with_handover_source(std::sync::Arc::new(crate::MemoryHandoverSource(
             fixture.nexus.store.clone(),
+            None,
         )));
     let launch = composed(&fixture, "claude-fixture", Some("abc123"), |profile| {
         profile.address = at.clone();
@@ -742,7 +802,7 @@ fn an_installed_memory_source_holding_none_reads_the_predecessor_s_file() {
         "{body}",
         body = body.0
     );
-    let source = crate::MemoryHandoverSource(fixture.nexus.store.clone());
+    let source = crate::MemoryHandoverSource(fixture.nexus.store.clone(), None);
     assert_eq!(
         source.handover(&at, "abc123", Path::new("")),
         Handover::Absent,
@@ -792,7 +852,7 @@ fn memory_source_reads_only_the_last_closed_generation_whatever_the_root() {
             signal_flow::Touch::Unknown,
         )
         .unwrap();
-    let source = crate::MemoryHandoverSource(fixture.nexus.store.clone());
+    let source = crate::MemoryHandoverSource(fixture.nexus.store.clone(), None);
     let root_a = tempfile::tempdir().unwrap();
     let root_b = tempfile::tempdir().unwrap();
     assert_eq!(

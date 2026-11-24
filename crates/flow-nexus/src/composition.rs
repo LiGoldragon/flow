@@ -369,6 +369,19 @@ impl ReadsEmergencyPredecessor for LaunchComposer {
 }
 
 trait ReadsHandover {
+    fn succession_texts(
+        &self,
+        profile: &LaunchProfile,
+        launch_root: HandoverRoot<'_>,
+        recovery: Option<&crate::generated::memory::EmergencyRefreshWithoutHandover_Data>,
+    ) -> Result<(Option<String>, Option<String>), CompositionError>;
+
+    fn crystallization_text(
+        &self,
+        profile: &LaunchProfile,
+        launch_root: HandoverRoot<'_>,
+    ) -> Result<Option<String>, CompositionError>;
+
     fn handover_text(
         &self,
         profile: &LaunchProfile,
@@ -378,6 +391,52 @@ trait ReadsHandover {
 }
 
 impl ReadsHandover for LaunchComposer {
+    fn succession_texts(
+        &self,
+        profile: &LaunchProfile,
+        launch_root: HandoverRoot<'_>,
+        recovery: Option<&crate::generated::memory::EmergencyRefreshWithoutHandover_Data>,
+    ) -> Result<(Option<String>, Option<String>), CompositionError> {
+        let crystallization = self.crystallization_text(profile, launch_root)?;
+        if let (Some(_), Some(predecessor)) = (&crystallization, &profile.flow_id_option) {
+            match self.handover.companion_handover(&predecessor.0) {
+                Handover::Text(text) => return Ok((crystallization, Some(text))),
+                Handover::Absent => (),
+                Handover::Unreadable(fault) => {
+                    return Err(CompositionError::HandoverUnreadable {
+                        predecessor: predecessor.0.clone(),
+                        fault,
+                    });
+                }
+            }
+        }
+        Ok((
+            crystallization,
+            self.handover_text(profile, launch_root, recovery)?,
+        ))
+    }
+
+    fn crystallization_text(
+        &self,
+        profile: &LaunchProfile,
+        launch_root: HandoverRoot<'_>,
+    ) -> Result<Option<String>, CompositionError> {
+        let Some(predecessor) = &profile.flow_id_option else {
+            return Ok(None);
+        };
+        if launch_root == HandoverRoot::Unread {
+            return Ok(None);
+        }
+        match self.handover.crystallization(&predecessor.0) {
+            Handover::Absent => Ok(None),
+            Handover::Text(text) => Ok(Some(text)),
+            Handover::Unreadable(fault) => Err(CompositionError::HandoverUnreadable {
+                predecessor: predecessor.0.clone(),
+                fault,
+            }),
+        }
+    }
+
     /// The text of a successor's handover, placed after the brief in its
     /// first prompt: what the source yields for the launch's predecessor.
     /// None for a launch with no predecessor, for one composed with no
@@ -860,6 +919,38 @@ impl PlacesLast for Vec<String> {
     }
 }
 
+/// A predecessor's crystallization opens the user message. Without one,
+/// the existing handover follows the startup material as before.
+trait PlacesSuccession {
+    fn with_succession(self, crystallization: Option<String>, handover: Option<String>) -> Self;
+}
+
+impl PlacesSuccession for Vec<String> {
+    fn with_succession(
+        mut self,
+        crystallization: Option<String>,
+        handover: Option<String>,
+    ) -> Self {
+        let Some(first) = crystallization else {
+            return match handover {
+                Some(text) => self.placed_last(&text),
+                None => self,
+            };
+        };
+        let mut documents = vec![first];
+        if let Some(text) = handover {
+            documents = documents.placed_last(&text);
+        }
+        if let Some((head, rest)) = self.split_first_mut() {
+            if !head.is_empty() {
+                documents = documents.placed_last(head);
+            }
+            documents.extend(rest.iter().cloned());
+        }
+        documents
+    }
+}
+
 /// Composes a launch that runs in a root.
 pub trait ComposesInRoot {
     /// As [`ComposesLaunch::compose`], for a launch that runs in
@@ -923,15 +1014,15 @@ impl ComposesInRoot for LaunchComposer {
             // instruction remains the first user message; an empty one does
             // not create a context-only startup turn.
             let system_prompt = self.launch_system_prompt(&harnessed, &verified, &segments)?;
-            let handover = if brief.is_empty() && recovery.is_none() {
-                None
+            let has_startup = !brief.is_empty() || recovery.is_some();
+            let (crystallization, handover) = if has_startup {
+                self.succession_texts(&harnessed.launch_profile, launch_root, recovery.as_ref())?
             } else {
-                self.handover_text(&harnessed.launch_profile, launch_root, recovery.as_ref())?
+                (None, None)
             };
-            let brief = match &handover {
-                Some(handover) => vec![brief].placed_last(handover).concat(),
-                None => brief,
-            };
+            let brief = vec![brief]
+                .with_succession(crystallization, handover)
+                .concat();
             let brief = match open_requests.successor_text(&harnessed.launch_profile) {
                 Some(open) if !brief.is_empty() || recovery.is_some() => {
                     vec![brief].placed_last(&open).concat()
@@ -961,12 +1052,11 @@ impl ComposesInRoot for LaunchComposer {
             self.launch_system_prompt(&harnessed, &verified, Vec::<String>::new())?;
         // The handover follows the brief, and the open requests follow the
         // handover, the last piece of the message.
-        let mut pieces = segments.joined_with(&brief);
-        if let Some(handover) =
-            &self.handover_text(&harnessed.launch_profile, launch_root, recovery.as_ref())?
-        {
-            pieces = pieces.placed_last(handover);
-        }
+        let (crystallization, handover) =
+            self.succession_texts(&harnessed.launch_profile, launch_root, recovery.as_ref())?;
+        let mut pieces = segments
+            .joined_with(&brief)
+            .with_succession(crystallization, handover);
         if let Some(open) = open_requests.successor_text(&harnessed.launch_profile) {
             pieces = pieces.placed_last(&open);
         }

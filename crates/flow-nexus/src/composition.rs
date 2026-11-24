@@ -1429,6 +1429,30 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_regular_claude_launch_keeps_an_empty_brief_empty() {
+        let mut profile = fixture_profile();
+        profile.instruction_prompt.0.clear();
+        let composed = fixture_composer()
+            .compose(
+                HarnessedProfile {
+                    remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
+                    harness_kind: HarnessKind::Claude,
+                    launch_profile: profile,
+                },
+                Vec::<LeaveOut>::new(),
+            )
+            .unwrap();
+        assert_eq!(composed.first_prompt_payload.first_prompt_body.0, "");
+        assert!(
+            composed
+                .system_prompt
+                .system_prompt_text
+                .0
+                .contains("Knowledge body.")
+        );
+    }
+
+    #[test]
     fn a_claude_prefix_changes_with_module_bytes_but_not_launch_identity_or_handover() {
         use super::{CLAUDE_SYSTEM_PROMPT_DYNAMIC_BOUNDARY, CarriesFlowId};
 

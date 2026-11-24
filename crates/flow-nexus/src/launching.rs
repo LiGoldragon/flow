@@ -418,6 +418,12 @@ impl LaunchesFlows for RunningNexus {
         }
         // A metaflow an older Nexus left Awake as an ended flow is Asleep.
         self.rest_ended_awake(&profile.address);
+        if self
+            .release_reserved_grouped_launches(&profile.address, Some(&profile.launch_request_id))
+            .is_err()
+        {
+            return persistence();
+        }
         // A seat whose Address it could not take is never launched.
         match self.store.launch_address_refusal(&profile) {
             Ok(None) => {}
@@ -1243,6 +1249,49 @@ impl ObservesLaunch for RunningNexus {
     }
 }
 
+trait ReleasesReservedGroupedLaunches {
+    fn release_reserved_grouped_launches(
+        &self,
+        address: &Address,
+        starting: Option<&signal_flow::LaunchRequestId>,
+    ) -> Result<(), crate::store::StoreError>;
+}
+
+impl ReleasesReservedGroupedLaunches for RunningNexus {
+    fn release_reserved_grouped_launches(
+        &self,
+        address: &Address,
+        starting: Option<&signal_flow::LaunchRequestId>,
+    ) -> Result<(), crate::store::StoreError> {
+        use crate::store::group_uncertainty::ParksGroupedStartups;
+        for launch in self.store.parked_startup_launches(address)? {
+            if Some(&launch) == starting {
+                continue;
+            }
+            let Some(attempt) = self.store.launch_attempt(&launch.0)? else {
+                continue;
+            };
+            // Native intent is durably recorded before even opening a pane.
+            // The Reserved record therefore proves this launch did not act.
+            // Release only that reservation: its frozen cohort stays parked.
+            if attempt.launch_profile.address == *address
+                && attempt.launch_attempt_phase == LaunchAttemptPhase::Reserved
+                && attempt.native_launch_intent_option.is_none()
+                && attempt.native_launch_binding_option.is_none()
+                && attempt.prompt_delivery_intent_option.is_none()
+                && self.store.launch_outcome(&launch.0)?.is_none()
+                && self.perform(Self::settled_as(
+                    &launch.0,
+                    LaunchOutcome::StartRejected(StartRejection::LaunchPersistenceRefused),
+                )) != Outcome::Recorded
+            {
+                return Err(crate::store::StoreError::StateInvariant);
+            }
+        }
+        Ok(())
+    }
+}
+
 impl crate::generated::overriding::ResumesHeldLaunches for RunningNexus {
     fn resume_held_launches<N: crate::generated::overriding::Addressed>(&self, input: N) -> bool {
         use crate::generated::overriding::{HeedsOverrides, ParksHeldLaunches};
@@ -1252,6 +1301,12 @@ impl crate::generated::overriding::ResumesHeldLaunches for RunningNexus {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if self.held() || self.permaflow_held(address.clone()) {
+            return false;
+        }
+        if self
+            .release_reserved_grouped_launches(&address, None)
+            .is_err()
+        {
             return false;
         }
         let Ok(markers) = self.store.held_launches() else {

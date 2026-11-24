@@ -10022,3 +10022,169 @@ fn send_several_simplified_admission_refuses_second_awaiting_before_later_member
     assert_eq!(fixture.nexus.store.memory_digest().unwrap(), before);
     assert!(fixture.typed().unwrap_or_default().is_empty());
 }
+
+#[test]
+fn send_several_refused_start_stays_parked_after_later_ordinary_delivery_and_reopen() {
+    use crate::store::queue_delivery::AccountsQueueDelivery;
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    fixture.claims_flow_ids();
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let sender = address(Model::Astra);
+    let group = cutoff_group(
+        &fixture,
+        &at,
+        SentBy::Sender(sender.clone()),
+        vec![
+            Request::Order("parked group first".into()),
+            Request::Question("parked group second".into()),
+        ],
+    );
+    configure_secondary_model(&fixture, "haiku");
+    let world = fixture.fresh_world("unused");
+    assert!(matches!(
+        fixture.nexus.perform(Operation::Wake(at.clone())),
+        Outcome::Failed(Failed_Data::CompositionRefused(
+            signal_flow::CompositionRefusal::InexactModel
+        ))
+    ));
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
+    let assert_parked = |store: &crate::store::FlowStore| {
+        for member in &group {
+            assert_eq!(
+                store
+                    .logical_delivery_snapshot(&member.logical_delivery_id)
+                    .unwrap()
+                    .unwrap()
+                    .delivery_state,
+                signal_flow::DeliveryState::Uncertain
+            );
+            assert!(
+                store
+                    .delivery_attempts_for(&member.logical_delivery_id.0)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    };
+    assert_parked(&fixture.nexus.store);
+    let signal_flow::PrivateSendResponse::SendAccepted(later) = fixture
+        .nexus
+        .store
+        .accept_logical_delivery(
+            &at,
+            SentBy::Sender(sender),
+            Delivery::Queue,
+            Message::Soft(Request::Order("later ordinary delivery".into())),
+            None,
+        )
+        .unwrap()
+    else {
+        panic!("later ordinary work admitted");
+    };
+    configure_secondary_model(&fixture, "claude-fixture");
+    assert!(matches!(
+        fixture.nexus.perform(Operation::Wake(at.clone())),
+        Outcome::Woken(_)
+    ));
+    let turns = world.user_turns(&fixture);
+    assert_eq!(world.claude_starts(), 1);
+    assert!(
+        turns
+            .iter()
+            .any(|turn| turn.contains("later ordinary delivery"))
+    );
+    assert!(
+        turns
+            .iter()
+            .all(|turn| !turn.contains("parked group first")
+                && !turn.contains("parked group second"))
+    );
+    assert!(matches!(
+        fixture
+            .nexus
+            .store
+            .logical_delivery_snapshot(&later.logical_delivery_id)
+            .unwrap()
+            .unwrap()
+            .delivery_state,
+        signal_flow::DeliveryState::Delivered(_)
+    ));
+    assert_parked(&fixture.nexus.store);
+    let NexusFixture {
+        directory, nexus, ..
+    } = fixture;
+    drop(nexus);
+    let reopened = crate::store::FlowStore::open(&directory.path().join("flow.sema")).unwrap();
+    assert!(reopened.metaflow(&at).unwrap().unwrap().queue.0.is_empty());
+    assert_parked(&reopened);
+}
+
+#[test]
+fn send_several_drain_receipt_candidates_require_exact_full_payload() {
+    use crate::generated::memory::SubmittedCohortOrigin;
+    use crate::store::group_uncertainty::StagesUncertainCohorts;
+    use crate::store::queue_delivery::{
+        AccountsQueueDelivery, NativeHistoryAnchor, PrepareQueueDelivery,
+    };
+    use crate::waking::{CarriesStartup, ParksCohort, ReadsClaudeDelivery};
+    let fixture = NexusFixture::new();
+    let active = active_simplified_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Model::Sol,
+        State::Awake(flow_ethos::FlowId("abc123".into())),
+        vec![],
+        vec![],
+    ));
+    cutoff_group(
+        &fixture,
+        &at,
+        SentBy::Unbound,
+        vec![
+            Request::Notice("context fragment".into()),
+            Request::Order("actual work".into()),
+        ],
+    );
+    let entries = stored(&fixture, Model::Sol).queue.0;
+    let node = fixture.nexus.store.flow_node("abc123").unwrap().unwrap();
+    let anchor = fixture
+        .nexus
+        .claude_delivery_cursor(&node)
+        .expect("bound transcript cursor");
+    let PrepareQueueDelivery::Prepared(head) = fixture
+        .nexus
+        .store
+        .prepare_oldest_delivery(
+            &at,
+            "abc123",
+            &active.session,
+            HarnessKind::Claude,
+            NativeHistoryAnchor::ClaudeTranscript(anchor),
+        )
+        .unwrap()
+    else {
+        panic!("queue head prepared");
+    };
+    let staged = fixture
+        .nexus
+        .store
+        .stage_uncertain_cohort(&head, &entries, SubmittedCohortOrigin::Drain)
+        .unwrap();
+    assert!(fixture.nexus.startup_launch(&staged[0]).is_none());
+    let full = entries.prompt_text(&at);
+    let fragment = entries[..1].prompt_text(&at);
+    assert_ne!(fragment, full);
+    for attempt in &staged {
+        let candidates = fixture.nexus.cohort_runs(attempt);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(&candidates[0].0, &staged);
+        assert_eq!(candidates[0].1, full);
+        assert!(candidates.iter().all(|(_, text)| text != &fragment));
+        assert!(fixture.nexus.find_receipt(attempt).is_err());
+    }
+}

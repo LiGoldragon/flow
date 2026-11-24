@@ -1902,8 +1902,8 @@ rec {
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-flow";
-          rev = "1932391bd55c22f805d52fbc546f38a89b9c9a8d";
-          sha256 = "1nxm0y4r12d9045ma8qx2yrj0mvgz3gzq9mv8lxwxd2mqs245m2f";
+          rev = "3fdc5bf657b090b9ceed9fe59e113a0b1e281471";
+          sha256 = "0k7gq5hy9myc3inh7lkfd1zfqj3qvsyql4d318v51cswcakfdq2h";
         };
         libName = "meta_signal_flow";
         dependencies = [

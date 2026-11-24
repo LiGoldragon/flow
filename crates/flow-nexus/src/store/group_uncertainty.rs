@@ -165,6 +165,11 @@ pub(crate) trait ParksGroupedStartups {
         launch_request_id: &str,
     ) -> Result<Option<ParkedStartupCohort>, StoreError>;
 
+    fn parked_startup_launches(
+        &self,
+        address: &Address,
+    ) -> Result<Vec<signal_flow::LaunchRequestId>, StoreError>;
+
     fn attach_parked_startup(
         &self,
         flow_id: &str,
@@ -264,6 +269,21 @@ impl ParksGroupedStartups for FlowStore {
             [parked] => Ok(Some(parked.clone())),
             _ => Err(StoreError::StateInvariant),
         }
+    }
+
+    fn parked_startup_launches(
+        &self,
+        address: &Address,
+    ) -> Result<Vec<signal_flow::LaunchRequestId>, StoreError> {
+        let rows = self
+            .engine
+            .match_records(QueryPlan::all(self.logical_deliveries.parked_startups))?;
+        Ok(rows
+            .records()
+            .iter()
+            .filter(|row| &row.address == address)
+            .map(|row| row.launch_request_id.clone())
+            .collect())
     }
 
     fn attach_parked_startup(

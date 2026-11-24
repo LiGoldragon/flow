@@ -10564,7 +10564,16 @@ fn send_several_cancel_closes_only_the_named_parked_request_without_editing_rece
         parked.parked_startup_abandonment_vector[0].logical_delivery_id,
         accepted[0].logical_delivery_id
     );
-    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
+    let still_runnable = stored(&fixture, Model::Sol).queue.0;
+    assert!(still_runnable.iter().all(|entry| !selected.contains(entry)));
+    assert!(
+        still_runnable.iter().any(|entry| matches!(
+            &entry.message,
+            Message::Soft(Request::Notice(body))
+                if body == &format!("Request {} was cancelled.", accepted[0].request_id.0)
+        )),
+        "ordinary cancellation notice remains runnable"
+    );
     assert!(fixture.typed().unwrap_or_default().is_empty());
 
     // The exact known native binding can take the serially parked evidence.

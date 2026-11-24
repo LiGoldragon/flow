@@ -17,6 +17,7 @@ use crate::generated::memory::{
 use crate::waking::AnchorsSessionStart;
 use flow_ethos::QueueEntry;
 use meta_signal_flow::{QueueAttemptId, QueueEvidence, QueueRequestId};
+use sema_engine::AtomicCommit;
 use signal_flow::DeliveryState;
 
 impl EngineRecord for SubmittedDeliveryCohort {

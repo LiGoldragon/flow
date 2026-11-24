@@ -186,6 +186,12 @@ fn main() -> ExitCode {
             nexus.recover_wakes();
             nexus.settle_delivery_retirements();
         });
+        // Work outcomes dispatch on their own durable outbox commit,
+        // independently of ordinary connection replies.
+        scope.spawn(|| {
+            use flow_nexus::work_notices::DeliversWorkNotices as _;
+            nexus.serve_work_notices()
+        });
         // Reminders held in Memory are sent as they fall due.
         scope.spawn(|| {
             use flow_nexus::reminding::RemindsCallers;

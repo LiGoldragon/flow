@@ -73,6 +73,8 @@ impl RendersNativeContent for signal_flow::Request {
                 flow_ethos::ResultPayload::Historical(text) => text.clone(),
             },
             signal_flow::Request::Reminder(reminder) => reminder.string.clone(),
+            signal_flow::Request::Work(work) => work.string.clone(),
+            signal_flow::Request::WorkNotification(notice) => notice.native_content(),
             signal_flow::Request::Task(task) => {
                 format!("Task, {} minutes:\n{}", task.minutes.0, task.string)
             }
@@ -84,6 +86,12 @@ impl RendersNativeContent for signal_flow::Request {
                 LivingWords(&living.context, &living.verbatim).text()
             }
         }
+    }
+}
+
+impl RendersNativeContent for flow_ethos::WorkNotification {
+    fn native_content(&self) -> String {
+        self.datomize(Vec::new()).protosize().compact()
     }
 }
 
@@ -107,6 +115,8 @@ impl RendersNativeContent for signal_flow::VisibleRequest {
                 signal_flow::VisibleResultPayload::Answered(result) => result.string.clone(),
                 signal_flow::VisibleResultPayload::Historical(text) => text.clone(),
             },
+            signal_flow::VisibleRequest::Work(text) => text.clone(),
+            signal_flow::VisibleRequest::WorkNotification(notice) => notice.native_content(),
             signal_flow::VisibleRequest::Task(task) => {
                 format!("Task, {} minutes:\n{}", task.minutes.0, task.string)
             }
@@ -136,6 +146,8 @@ impl RendersNativeContent for signal_flow::DeliveredMessage {
                 signal_flow::DeliveredRequest::Result(value) => value.string.clone(),
                 signal_flow::DeliveredRequest::Done(value) => value.string.clone(),
                 signal_flow::DeliveredRequest::Reminder(value) => value.string.clone(),
+                signal_flow::DeliveredRequest::Work(value) => value.string.clone(),
+                signal_flow::DeliveredRequest::WorkNotification(notice) => notice.native_content(),
                 signal_flow::DeliveredRequest::Task(value) => {
                     format!("Task, {} minutes:\n{}", value.minutes.0, value.string)
                 }

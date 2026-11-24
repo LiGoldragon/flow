@@ -2891,6 +2891,14 @@ impl DrainsHeldSeats for RunningNexus {
         // is free for the request now oldest.
         self.reconcile_typed(&address);
         self.queue_simplified_answer(&flow_id.0);
+        use crate::store::work_notices::KeepsWorkNotices as _;
+        if self
+            .store
+            .reserve_routine_notices_for_inspection(&address)
+            .is_err()
+        {
+            return Outcome::Failed(Failed_Data::StoreRefused);
+        }
         let queue = match self.store.metaflow(&address) {
             Ok(Some(metaflow)) => metaflow.queue,
             _ => return Outcome::Failed(Failed_Data::StoreRefused),
@@ -2905,16 +2913,19 @@ impl DrainsHeldSeats for RunningNexus {
                     | signal_flow::Request::Question(_)
                     | signal_flow::Request::Living(_)
                     | signal_flow::Request::Task(_)
+                    | signal_flow::Request::Work(_)
             ) | signal_flow::Message::MiddleAbrupt(
                 signal_flow::Request::Order(_)
                     | signal_flow::Request::Question(_)
                     | signal_flow::Request::Living(_)
                     | signal_flow::Request::Task(_)
+                    | signal_flow::Request::Work(_)
             ) | signal_flow::Message::Soft(
                 signal_flow::Request::Order(_)
                     | signal_flow::Request::Question(_)
                     | signal_flow::Request::Living(_)
                     | signal_flow::Request::Task(_)
+                    | signal_flow::Request::Work(_)
             )
         );
         if response_request
@@ -3769,6 +3780,10 @@ impl WakesInParts for RunningNexus {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             self.rest_ended_awake(address);
+            use crate::store::work_notices::KeepsWorkNotices as _;
+            self.store
+                .reserve_routine_notices_for_inspection(address)
+                .map_err(|_| WakeRefusal::StoreUnreadable)?;
             match self.store.metaflow(address) {
                 Ok(Some(metaflow)) if metaflow.state == flow_ethos::State::Asleep => metaflow,
                 Ok(_) => return Err(WakeRefusal::NotAsleep),

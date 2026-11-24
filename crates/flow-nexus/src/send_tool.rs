@@ -611,8 +611,11 @@ impl HandlesSendCall for RunningNexus {
             // kept with the request.
             let target = {
                 use crate::store::kept_answer::{AnswerRoute, RoutesAnswers};
-                match self.store.answer_route(&message) {
+                match self.store.answer_route(&message, &sender) {
                     Ok(AnswerRoute::Unanswering) => arguments.target.clone(),
+                    Ok(AnswerRoute::Unentitled) => {
+                        return refused_kept(SendRefusal::Unresolved, content_sha256.0);
+                    }
                     Ok(AnswerRoute::To(address)) => crate::generated::send_tool::Target(address),
                     Ok(AnswerRoute::Kept(binding)) => {
                         let request_id = binding.request_id.clone();
@@ -919,7 +922,9 @@ impl RespondsToSendCalls for RunningNexus {
             },
         };
         let answered = subscription.answer(id, answer.outcome.tool_response());
-        if let SendOutcome::Accepted(accepted) = answer.outcome {
+        if let SendOutcome::Accepted(accepted) = answer.outcome
+            && accepted.send_acceptance.delivery_state == signal_flow::DeliveryState::Queued
+        {
             self.wake_due(accepted.target.0);
         }
         answered
@@ -1104,7 +1109,9 @@ impl ServesLaunchCalls for RunningNexus {
         let answered = responder
             .subscription
             .answer(id, answer.outcome.tool_response());
-        if let SendOutcome::Accepted(accepted) = answer.outcome {
+        if let SendOutcome::Accepted(accepted) = answer.outcome
+            && accepted.send_acceptance.delivery_state == signal_flow::DeliveryState::Queued
+        {
             self.defer_wake(accepted.target.0);
         }
         answered

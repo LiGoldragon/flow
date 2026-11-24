@@ -50,8 +50,9 @@ impl WakesSleepingPermaflow for Request {
             | Request::Living(_)
             | Request::Result(_)
             | Request::Task(_)
+            | Request::Work(_)
             | Request::Done(_) => true,
-            Request::Notice(_) | Request::Reminder(_) => false,
+            Request::Notice(_) | Request::Reminder(_) | Request::WorkNotification(_) => false,
         }
     }
 }
@@ -73,6 +74,9 @@ impl WakesSleepingPermaflow for SendableRequest {
             | SendableRequest::Living(_)
             | SendableRequest::Result(_)
             | SendableRequest::Task(_)
+            | SendableRequest::Work(_)
+            | SendableRequest::NotifiedWork(_)
+            | SendableRequest::NotifiedWorkWithDestinations(_)
             | SendableRequest::Done(_) => true,
             SendableRequest::Notice(_) => false,
         }

@@ -8,7 +8,6 @@
 //! the methods here are named for what they do.
 
 use crate::RunningNexus;
-use crate::caller::ResolvesEndedCaller;
 use crate::store::closed_request::{
     Closer, MarksEndedReminder, RecordsClosedRequests, RequestEnding,
 };
@@ -18,7 +17,7 @@ use crate::store::logical_delivery::{
 use crate::store::metaflow::{SleepsMetaflows, TakesLaunchAddress};
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::turn_end::RecordsTurnEnds;
-use crate::store::{ManagesMetaflowState, StoreError};
+use crate::store::{ManagesMetaflowState, NamesPendingReplies, StoreError};
 use crate::waking::{
     DrainsHeldSeats, HoldsWakingMetaflows, PushesAtPriority, RestsEndedAwake, SleepsAndWakesSeats,
 };
@@ -30,8 +29,9 @@ use signal_flow::{
 pub trait OperatesOnRequestsAndQueues {
     /// Closes an open request: one still queued leaves its queue, it is
     /// archived with its id and a Task's reminder. Cancelled answers the
-    /// caller. Only a distinct receiver of reached work gets a Soft Notice.
+    /// caller. Reached work needs scoped worker control to be cancelled.
     fn cancel(&self, request_id: &RequestId, caller: &Origin) -> Output;
+    fn cancel_as_sender(&self, request_id: &RequestId, sender: SentBy) -> Output;
     /// Closes an open request with no answer and tells no one: one still
     /// queued leaves its queue, it is archived with its id and a Task's
     /// reminder, a reminder not yet sent is retired, and `closer`, the
@@ -64,8 +64,6 @@ trait EmptiesQueues {
     /// Takes every request queued for `address` out of its queue, answering
     /// the ids that left. Called under the dispatch gate.
     fn withdraw_all(&self, address: &Address) -> Result<Vec<RequestId>, StoreError>;
-    /// Queues a Soft Notice from Flow for `address`.
-    fn notify(&self, address: &Address, text: String) -> Result<(), StoreError>;
     /// The request ids queued for `address` now.
     fn queued_ids(&self, address: &Address) -> Result<Vec<RequestId>, StoreError>;
 }
@@ -85,18 +83,6 @@ impl EmptiesQueues for RunningNexus {
             }
         }
         Ok(withdrawn)
-    }
-
-    fn notify(&self, address: &Address, text: String) -> Result<(), StoreError> {
-        self.store
-            .accept_logical_delivery(
-                address,
-                SentBy::Flow,
-                flow_ethos::Delivery::Queue,
-                Message::Soft(Request::Notice(text)),
-                None,
-            )
-            .map(|_| ())
     }
 
     fn queued_ids(&self, address: &Address) -> Result<Vec<RequestId>, StoreError> {
@@ -123,14 +109,14 @@ trait EndsRequests {
     /// where it waits; any other request still queued that never reached
     /// its seat leaves its queue, and it is archived with its id and a
     /// Task's reminder. A closed request's closer is recorded in the same
-    /// commit. Returns the receiver if the work reached it. A request
+    /// commit. A request
     /// that takes no answer and reached its recipient is finished, and is
     /// refused Closed.
     fn end_request(
         &self,
         request_id: &RequestId,
         ending: &RequestEnding,
-    ) -> Result<Option<Address>, RequestRejection>;
+    ) -> Result<(), RequestRejection>;
 }
 
 impl EndsRequests for RunningNexus {
@@ -138,7 +124,7 @@ impl EndsRequests for RunningNexus {
         &self,
         request_id: &RequestId,
         ending: &RequestEnding,
-    ) -> Result<Option<Address>, RequestRejection> {
+    ) -> Result<(), RequestRejection> {
         use crate::store::scheduled_reminder::{MarksScheduledReminder, SchedulesReminders};
         // A reminder not yet sent is ended where it waits.
         match self.store.scheduled_reminder(request_id) {
@@ -153,7 +139,7 @@ impl EndsRequests for RunningNexus {
                         commit,
                     )
                     .map_err(|_| RequestRejection::StoreRefused)?;
-                return Ok(None);
+                return Ok(());
             }
             Ok(None) => {}
             Err(_) => return Err(RequestRejection::StoreRefused),
@@ -205,46 +191,46 @@ impl EndsRequests for RunningNexus {
                 return Err(RequestRejection::UnknownRequest);
             }
             Ok(Err(ArchiveRejection::NotYet(hold))) => return Err(RequestRejection::NotYet(hold)),
+            Err(StoreError::RequestControlUnavailable) => {
+                return Err(RequestRejection::ControlUnavailable);
+            }
             Ok(Err(ArchiveRejection::StoreRefused)) | Err(_) => {
                 return Err(RequestRejection::StoreRefused);
             }
         }
-        Ok(reached.then_some(retained.address))
+        Ok(())
     }
 }
 
 impl OperatesOnRequestsAndQueues for RunningNexus {
     fn cancel(&self, request_id: &RequestId, caller: &Origin) -> Output {
-        let notified = {
-            let _turn = self
-                .dispatch_gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let receiver = match self.end_request(request_id, &RequestEnding::Cancelled) {
-                Ok(receiver) => receiver,
-                Err(rejection) => return Output::CancelRejected(rejection),
-            };
-            receiver
-                .filter(|address| match caller {
-                    Origin::Flow(flow) => !self.flow_of_address(&flow.flow_id, address),
-                    Origin::Unbound => true,
-                })
-                .and_then(|address| {
-                    match self.notify(&address, format!("Request {} was cancelled.", request_id.0)) {
-                        Ok(()) => Some(address),
-                        Err(error) => {
-                            eprintln!(
-                                "flow-nexus: a cancellation notice for {address:?} was not queued: {error}"
-                            );
-                            None
-                        }
-                    }
-                })
+        let sender = match caller {
+            Origin::Flow(origin) => match self.store.metaflow_awake_as(&origin.flow_id.0) {
+                Ok(Some(metaflow)) => SentBy::Sender(metaflow.address),
+                Ok(None) => self
+                    .store
+                    .launched_address(&origin.flow_id.0)
+                    .map_or(SentBy::Unbound, SentBy::Sender),
+                Err(_) => return Output::CancelRejected(RequestRejection::StoreRefused),
+            },
+            Origin::Unbound => SentBy::Unbound,
         };
-        if let Some(address) = notified {
-            self.wake_due(address);
+        self.cancel_as_sender(request_id, sender)
+    }
+
+    fn cancel_as_sender(&self, request_id: &RequestId, sender: SentBy) -> Output {
+        let _turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let actor = match sender {
+            SentBy::Sender(address) => Some(address),
+            _ => None,
+        };
+        match self.end_request(request_id, &RequestEnding::Cancelled(actor)) {
+            Ok(()) => Output::Cancelled(request_id.clone()),
+            Err(rejection) => Output::CancelRejected(rejection),
         }
-        Output::Cancelled(request_id.clone())
     }
 
     fn close_request(&self, request_id: &RequestId, closer: Option<&Process>) -> Output {

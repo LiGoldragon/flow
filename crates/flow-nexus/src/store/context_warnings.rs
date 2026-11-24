@@ -414,6 +414,7 @@ impl AdmitsContextWarnings for FlowStore {
             preview.message,
             None,
             LogicalDeliveryTransition {
+                work_notice: None,
                 purpose: crate::heartbeat::DeliveryPurpose::Ordinary,
                 context_warning: Some(observation),
                 handover_reminder: None,

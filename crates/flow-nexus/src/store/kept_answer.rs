@@ -4,7 +4,9 @@
 //! to: its answer is kept with it, the request closed in the same commit,
 //! and `Answer` reads it by the request's id.
 
-use super::logical_delivery::{MintsRequestIds, RequestClosure, RequestIdBinding};
+use super::logical_delivery::{
+    ChecksTaskCompletion, MintsRequestIds, RequestClosure, RequestIdBinding,
+};
 use super::queue_delivery::AccountsQueueDelivery;
 use super::{AnnouncesLaunchChanges, FlowStore, StoreError};
 pub(crate) use crate::generated::memory::KeptAnswer;
@@ -53,6 +55,7 @@ impl DescribesKeptAnswerTable for KeptAnswer {
 pub(crate) enum AnswerRoute {
     /// The message answers no request.
     Unanswering,
+    Unentitled,
     /// The sender of the request it answers.
     To(Address),
     /// The request's sender is no Address: the answer is kept with it.
@@ -74,7 +77,7 @@ impl MarksKeptAnswer for RequestId {
 pub(crate) trait RoutesAnswers {
     /// Where `message` goes when it answers a request: the sender of that
     /// request, or kept with it. The binding is the request's as it stands.
-    fn answer_route(&self, message: &Message) -> Result<AnswerRoute, StoreError>;
+    fn answer_route(&self, message: &Message, actor: &SentBy) -> Result<AnswerRoute, StoreError>;
     /// Keeps `answer`, sent by `answerer`, with the request `binding`
     /// names, and closes that request, a Task's reminder with it, in one
     /// commit.
@@ -89,12 +92,15 @@ pub(crate) trait RoutesAnswers {
 }
 
 impl RoutesAnswers for FlowStore {
-    fn answer_route(&self, message: &Message) -> Result<AnswerRoute, StoreError> {
+    fn answer_route(&self, message: &Message, actor: &SentBy) -> Result<AnswerRoute, StoreError> {
         let request = match message {
             Message::HardAbrupt(request)
             | Message::MiddleAbrupt(request)
             | Message::Soft(request) => request,
         };
+        if !self.permits_completion(message, actor)? {
+            return Ok(AnswerRoute::Unentitled);
+        }
         let answered = match request {
             Request::Result(flow_ethos::ResultPayload::Answered(answer)) => &answer.request_id,
             Request::Done(flow_ethos::DonePayload::Answered(answer)) => &answer.request_id,
@@ -127,6 +133,9 @@ impl RoutesAnswers for FlowStore {
             .write_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.permits_completion(answer, answerer)? {
+            return Err(StoreError::StateInvariant);
+        }
         let request_id = binding.request_id.clone();
         let kept = KeptAnswer {
             request_id: request_id.clone(),

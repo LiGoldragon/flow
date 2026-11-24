@@ -10487,3 +10487,101 @@ fn ordinary_connection_accepts_send_several_and_schedules_one_whole_wake() {
     assert!(prompt.find(&ids[0].0).unwrap() < prompt.find(&ids[1].0).unwrap());
     assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
 }
+
+#[test]
+fn send_several_cancel_closes_only_the_named_parked_request_without_editing_receipt_payload() {
+    use crate::queue_operations::OperatesOnRequestsAndQueues;
+    use crate::store::group_uncertainty::ParksGroupedStartups;
+    use crate::store::queue_delivery::{AccountsQueueDelivery, QueueDeliveryPhase};
+    use crate::waking::{CarriesStartup, ParksCohort};
+    use signal_flow::{DeliveryState, Output};
+
+    let fixture = NexusFixture::new();
+    let active = launched_claude_ended_by(&fixture, |_| true);
+    let launch = active.profile.launch_request_id;
+    let at = address(Model::Sol);
+    let store = &fixture.nexus.store;
+    store.seed_metaflow(metaflow(Model::Sol, State::Asleep, vec![], vec![]));
+    let accepted = cutoff_group(
+        &fixture,
+        &at,
+        SentBy::Unbound,
+        vec![
+            Request::Question("keeper".into()),
+            Request::Question("cancelled".into()),
+        ],
+    );
+    let selected = stored(&fixture, Model::Sol).queue.0;
+    store.park_grouped_startup(&at, &launch, &selected).unwrap();
+    assert_eq!(
+        fixture
+            .nexus
+            .cancel(&accepted[1].request_id, &Origin::Unbound),
+        Output::Cancelled(accepted[1].request_id.clone()),
+    );
+    assert!(
+        store
+            .request_binding(&accepted[0].request_id)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .request_binding(&accepted[1].request_id)
+            .unwrap()
+            .is_none()
+    );
+    for (member, expected) in accepted
+        .iter()
+        .zip([DeliveryState::Uncertain, DeliveryState::Abandoned])
+    {
+        assert_eq!(
+            store
+                .logical_delivery_snapshot(&member.logical_delivery_id)
+                .unwrap()
+                .unwrap()
+                .delivery_state,
+            expected
+        );
+        assert!(
+            store
+                .delivery_attempts_for(&member.logical_delivery_id.0)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let parked = store.parked_grouped_startup(&launch.0).unwrap().unwrap();
+    assert_eq!(parked.queue_entry_vector, selected);
+    assert_eq!(parked.parked_startup_abandonment_vector.len(), 1);
+    assert_eq!(
+        parked.parked_startup_abandonment_vector[0].logical_delivery_id,
+        accepted[1].logical_delivery_id
+    );
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
+    assert!(fixture.typed().unwrap_or_default().is_empty());
+
+    // The exact known native binding can take the serially parked evidence.
+    // The cancelled member's archived attempt still supplies comparison
+    // bytes for the keeper, but is ineligible to settle itself.
+    store.seed_metaflow(metaflow(
+        Model::Sol,
+        State::Awake(flow_ethos::FlowId("abc123".into())),
+        vec![],
+        vec![],
+    ));
+    let attempts = store.attach_parked_startup("abc123", &parked).unwrap();
+    assert!(matches!(
+        attempts[0].queue_delivery_phase,
+        QueueDeliveryPhase::Uncertain(_)
+    ));
+    assert!(matches!(
+        attempts[1].queue_delivery_phase,
+        QueueDeliveryPhase::Abandoned(_)
+    ));
+    assert_eq!(fixture.nexus.startup_launch(&attempts[0]), Some(launch.0));
+    assert_eq!(
+        fixture.nexus.cohort_runs(&attempts[0]),
+        vec![(attempts, selected.prompt_text(&at))]
+    );
+    assert!(fixture.typed().unwrap_or_default().is_empty());
+}

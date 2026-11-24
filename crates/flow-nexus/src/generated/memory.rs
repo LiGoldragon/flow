@@ -38,6 +38,14 @@ pub struct ParkedStartupCohort {
     pub launch_request_id: signal_flow::LaunchRequestId,
     pub address: signal_flow::Address,
     pub queue_entry_vector: std::vec::Vec<signal_flow::QueueEntry>,
+    pub parked_startup_abandonment_vector: std::vec::Vec<ParkedStartupAbandonment>,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ParkedStartupAbandonment {
+    pub logical_delivery_id: signal_flow::LogicalDeliveryId,
+    pub abandonment_record: meta_signal_flow::AbandonmentRecord,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

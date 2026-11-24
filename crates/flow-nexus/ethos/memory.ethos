@@ -29,7 +29,8 @@ Memory
   LogicalDeliveryGroup.{ Address Vector<LogicalDeliveryId> } ; ordered members of one admission
   SubmittedDeliveryCohort.{ SubmittedCohortOrigin Vector<QueueAttemptId> }
   SubmittedCohortOrigin.[ Startup.LaunchRequestId Drain ]
-  ParkedStartupCohort.{ LaunchRequestId Address Vector<QueueEntry> }
+  ParkedStartupCohort.{ LaunchRequestId Address Vector<QueueEntry> Vector<ParkedStartupAbandonment> }
+  ParkedStartupAbandonment.{ LogicalDeliveryId AbandonmentRecord }
   LaunchOutcome.[ Started.LaunchedRecord
                   Replaced.ReplacedRecord
                   StartRejected.StartRejection

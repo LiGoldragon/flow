@@ -3942,6 +3942,15 @@ impl WakesInParts for RunningNexus {
         startup: &[QueueEntry],
         simplified: bool,
     ) -> bool {
+        let parked = match self.store.parked_grouped_startup(launch_request_id) {
+            Ok(Some(parked))
+                if parked.address == *address && parked.queue_entry_vector == startup =>
+            {
+                Some(parked)
+            }
+            Ok(None) => None,
+            _ => return false,
+        };
         let receipt = self.startup_receipt(flow_id, launch_request_id);
         let has_logical = startup.iter().any(|entry| {
             self.store
@@ -3977,6 +3986,12 @@ impl WakesInParts for RunningNexus {
             None
         };
         if let Some(input) = reply_input
+            && parked.as_ref().is_none_or(|parked| {
+                !parked
+                    .parked_startup_abandonment_vector
+                    .iter()
+                    .any(|member| member.logical_delivery_id == input.logical_delivery_id)
+            })
             && let signal_flow::SentBy::Sender(recipient) = &input.sent_by
         {
             let binding = SimplifiedReplyBinding {
@@ -3992,23 +4007,17 @@ impl WakesInParts for RunningNexus {
                 return false;
             }
         }
-        match self.store.parked_grouped_startup(launch_request_id) {
-            Ok(Some(parked))
-                if parked.address == *address && parked.queue_entry_vector == startup =>
-            {
-                let Ok(attempts) = self.store.attach_parked_startup(flow_id, &parked) else {
-                    return false;
-                };
-                let Some(head) = attempts.first() else {
-                    return false;
-                };
-                if receipt.is_some() {
-                    let _ = self.reconcile_delivery(head);
-                }
-                return true;
+        if let Some(parked) = parked {
+            let Ok(attempts) = self.store.attach_parked_startup(flow_id, &parked) else {
+                return false;
+            };
+            let Some(head) = attempts.first() else {
+                return false;
+            };
+            if receipt.is_some() {
+                let _ = self.reconcile_delivery(head);
             }
-            Ok(None) => {}
-            _ => return false,
+            return true;
         }
         // A Started response proves the first prompt was submitted, and the
         // first prompt carried the batch; the receipt proves it was taken.

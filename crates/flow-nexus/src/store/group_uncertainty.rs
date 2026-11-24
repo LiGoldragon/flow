@@ -12,7 +12,7 @@ use super::queue_delivery::{
 };
 use super::*;
 use crate::generated::memory::{
-    ParkedStartupCohort, SubmittedCohortOrigin, SubmittedDeliveryCohort,
+    ParkedStartupAbandonment, ParkedStartupCohort, SubmittedCohortOrigin, SubmittedDeliveryCohort,
 };
 use crate::waking::AnchorsSessionStart;
 use flow_ethos::QueueEntry;
@@ -181,6 +181,13 @@ pub(crate) trait ParksGroupedStartups {
         flow_id: &str,
         parked: &ParkedStartupCohort,
     ) -> Result<Vec<QueueDeliveryAttempt>, StoreError>;
+
+    fn stage_parked_startup_abandonment(
+        &self,
+        retained: &super::queue_delivery::RetainedLogicalRequest,
+        record: &meta_signal_flow::AbandonmentRecord,
+        commit: AtomicCommit,
+    ) -> Result<(AtomicCommit, bool), StoreError>;
 }
 
 impl ParksGroupedStartups for FlowStore {
@@ -255,6 +262,7 @@ impl ParksGroupedStartups for FlowStore {
                     launch_request_id: launch_request_id.clone(),
                     address: address.clone(),
                     queue_entry_vector: entries.to_vec(),
+                    parked_startup_abandonment_vector: Vec::new(),
                 },
             );
         self.engine.commit_atomic(commit)?;
@@ -327,6 +335,64 @@ impl ParksGroupedStartups for FlowStore {
         Ok(held)
     }
 
+    fn stage_parked_startup_abandonment(
+        &self,
+        retained: &super::queue_delivery::RetainedLogicalRequest,
+        record: &meta_signal_flow::AbandonmentRecord,
+        commit: AtomicCommit,
+    ) -> Result<(AtomicCommit, bool), StoreError> {
+        let id = &retained.entry.logical_delivery_id;
+        let rows = self
+            .engine
+            .match_records(QueryPlan::all(self.logical_deliveries.parked_startups))?;
+        let mut matching = rows.records().iter().filter(|row| {
+            row.queue_entry_vector
+                .iter()
+                .any(|entry| &entry.logical_delivery_id == id)
+        });
+        let Some(parked) = matching.next() else {
+            return Ok((commit, false));
+        };
+        if matching.next().is_some()
+            || parked.address != retained.address
+            || parked
+                .queue_entry_vector
+                .iter()
+                .filter(|entry| &entry.logical_delivery_id == id)
+                .ne(std::iter::once(&retained.entry))
+            || parked
+                .parked_startup_abandonment_vector
+                .iter()
+                .any(|old| &old.logical_delivery_id == id)
+        {
+            return Err(StoreError::StateInvariant);
+        }
+        let requests = self.engine.match_records(QueryPlan::key(
+            self.queue_delivery.requests,
+            RecordKey::new(id.0.clone()),
+        ))?;
+        let [request] = requests.records() else {
+            return Err(StoreError::StateInvariant);
+        };
+        if request.address != retained.address
+            || request.request_state != RequestState::Parked
+            || request.queue_evidence != QueueEvidence::Logical(retained.entry.clone())
+        {
+            return Err(StoreError::StateInvariant);
+        }
+        let mut parked = parked.clone();
+        parked
+            .parked_startup_abandonment_vector
+            .push(ParkedStartupAbandonment {
+                logical_delivery_id: id.clone(),
+                abandonment_record: record.clone(),
+            });
+        Ok((
+            commit.mutate(self.logical_deliveries.parked_startups, parked),
+            true,
+        ))
+    }
+
     fn attach_parked_startup(
         &self,
         flow_id: &str,
@@ -361,6 +427,21 @@ impl ParksGroupedStartups for FlowStore {
             || native.native_session_id.0 != node.session_id.0
             || native.harness_kind != node.harness_kind
             || metaflow.metaflow.state != flow_ethos::State::Awake(native.flow_id.clone())
+        {
+            return Err(StoreError::StateInvariant);
+        }
+        let abandoned = parked
+            .parked_startup_abandonment_vector
+            .iter()
+            .map(|row| (&row.logical_delivery_id, &row.abandonment_record))
+            .collect::<std::collections::HashMap<_, _>>();
+        if abandoned.len() != parked.parked_startup_abandonment_vector.len()
+            || abandoned.keys().any(|id| {
+                !parked
+                    .queue_entry_vector
+                    .iter()
+                    .any(|entry| &entry.logical_delivery_id == *id)
+            })
         {
             return Err(StoreError::StateInvariant);
         }
@@ -399,7 +480,10 @@ impl ParksGroupedStartups for FlowStore {
                 native_history_anchor: native.harness_kind.session_start_anchor(),
                 address: parked.address.clone(),
                 queue_evidence: request.queue_evidence.clone(),
-                queue_delivery_phase: QueueDeliveryPhase::Uncertain(None),
+                queue_delivery_phase: match abandoned.get(&entry.logical_delivery_id) {
+                    Some(record) => QueueDeliveryPhase::Abandoned((*record).clone()),
+                    None => QueueDeliveryPhase::Uncertain(None),
+                },
             };
             commit = self.commit_attempt(commit, attempt.clone())?;
             attempts.push(attempt);

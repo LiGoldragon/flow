@@ -1645,6 +1645,13 @@ impl AccountsQueueDelivery for FlowStore {
             commit = self.commit_attempt(commit, attempt)?;
             terminal = Some(DeliveryState::Abandoned);
         }
+        if terminal.is_none() {
+            use super::group_uncertainty::ParksGroupedStartups;
+            let (staged, abandoned) =
+                self.stage_parked_startup_abandonment(retained, &record, commit)?;
+            commit = staged;
+            terminal = abandoned.then_some(DeliveryState::Abandoned);
+        }
         Ok((commit, terminal))
     }
 

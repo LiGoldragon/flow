@@ -783,12 +783,12 @@ mod tests {
             ),
             (
                 SendableRequest::Living(signal_flow::SendableRequest_Living_Data {
-                    context: "context".into(),
-                    verbatim: "living".into(),
+                    context: flow_ethos::Context("context".into()),
+                    verbatim: flow_ethos::Verbatim("living".into()),
                 }),
                 Request::Living(flow_ethos::Living_Data {
-                    context: "context".into(),
-                    verbatim: "living".into(),
+                    context: flow_ethos::Context("context".into()),
+                    verbatim: flow_ethos::Verbatim("living".into()),
                 }),
             ),
             (
@@ -886,8 +886,8 @@ mod tests {
             SendableRequest::Order("order «quoted»\n\tλ".into()),
             SendableRequest::Question(String::new()),
             SendableRequest::Living(signal_flow::SendableRequest_Living_Data {
-                context: "context «nested»".into(),
-                verbatim: "living\nwords".into(),
+                context: flow_ethos::Context("context «nested»".into()),
+                verbatim: flow_ethos::Verbatim("living\nwords".into()),
             }),
             SendableRequest::Notice("notice".into()),
             SendableRequest::Task(flow_ethos::AnswerableTask {

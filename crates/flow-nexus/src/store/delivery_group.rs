@@ -559,7 +559,7 @@ impl RefusesDeliveryGroups for FlowStore {
             .stored_metaflow(address)?
             .ok_or(StoreError::StateInvariant)?;
         if self.oldest_delivery_group(address, &stored.metaflow.queue.0)? != selected
-            || self.outstanding_for(address)?.is_some()
+            || self.outstanding_delivery(address)?.is_some()
         {
             return Err(StoreError::StateInvariant);
         }
@@ -1113,7 +1113,13 @@ mod tests {
         };
         assert!(
             store
-                .settle_wake_startup_receipts(&address(), "started", &prefix, Some(&receipt))
+                .settle_wake_startup_receipts(
+                    &address(),
+                    "started",
+                    &prefix,
+                    Some(&receipt),
+                    crate::generated::transitions::ReceiptTurn::Running
+                )
                 .unwrap()
         );
         assert_eq!(
@@ -1384,7 +1390,9 @@ mod tests {
         );
         assert!(matches!(
             store.archive_request(&survivors[0].request_id.0).unwrap(),
-            Err(signal_flow::ArchiveRejection::NotYet)
+            Err(signal_flow::ArchiveRejection::NotYet(
+                signal_flow::ArchiveHold::DeliveryNotEnded,
+            ))
         ));
         assert_eq!(
             store.metaflow(&address()).unwrap().unwrap().queue.0,
@@ -1587,8 +1595,8 @@ mod tests {
         AdmissionMessage {
             delivery: Delivery::Queue,
             message: Message::Soft(Request::Living(flow_ethos::Living_Data {
-                context: "group context".into(),
-                verbatim: body.into(),
+                context: flow_ethos::Context("group context".into()),
+                verbatim: flow_ethos::Verbatim(body.into()),
             })),
         }
     }

@@ -39,6 +39,8 @@ pub(crate) mod logical_delivery;
 mod memory_bytes;
 #[cfg(test)]
 mod memory_digest;
+#[cfg(test)]
+pub(crate) use memory_digest::DigestsMemory;
 pub(crate) mod metaflow;
 pub(crate) mod metaflow_declaration;
 pub mod metaflow_watch;

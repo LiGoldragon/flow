@@ -9182,7 +9182,7 @@ fn cancelled_send_several_members_leave_ordered_survivors_and_later_work_in_firs
         };
         for index in &cancelled {
             assert_eq!(
-                fixture.nexus.cancel(&ids[*index]),
+                fixture.nexus.cancel(&ids[*index], &Origin::Unbound),
                 Output::Cancelled(ids[*index].clone())
             );
         }
@@ -9254,7 +9254,10 @@ fn all_cancelled_send_several_members_start_no_prompt() {
         panic!("group admitted")
     };
     for id in ids {
-        assert_eq!(fixture.nexus.cancel(&id), Output::Cancelled(id));
+        assert_eq!(
+            fixture.nexus.cancel(&id, &Origin::Unbound),
+            Output::Cancelled(id)
+        );
     }
     let world = fixture.fresh_claude_world();
     fixture.nexus.wake_due(at);
@@ -9423,8 +9426,8 @@ fn simplified_startup_binds_nonhead_awaiting_and_advances_past_conflict() {
             Request::Notice("before actual awaiting".into()),
             Request::Question("actual awaiting".into()),
             Request::Living(flow_ethos::Living_Data {
-                context: "after".into(),
-                verbatim: "context after".into(),
+                context: flow_ethos::Context("after".into()),
+                verbatim: flow_ethos::Verbatim("context after".into()),
             }),
         ],
     );
@@ -9492,8 +9495,8 @@ fn simplified_singleton_living_startup_creates_no_reply_binding() {
         &at,
         SentBy::Sender(address(Model::Astra)),
         vec![Request::Living(flow_ethos::Living_Data {
-            context: "context".into(),
-            verbatim: "no reply awaited".into(),
+            context: flow_ethos::Context("context".into()),
+            verbatim: flow_ethos::Verbatim("no reply awaited".into()),
         })],
     );
     let world = fixture.fresh_claude_world();
@@ -9797,8 +9800,12 @@ fn post_premark_cancel_uses_actual_cancel_and_keeps_frozen_group() {
     // Actual Cancel follows premark serially; no native start barrier or
     // concurrent interleaving is claimed by this fixture.
     assert_eq!(
-        fixture.nexus.cancel(&accepted[1].request_id),
-        signal_flow::Output::CancelRejected(signal_flow::RequestRejection::NotYet)
+        fixture
+            .nexus
+            .cancel(&accepted[1].request_id, &Origin::Unbound),
+        signal_flow::Output::CancelRejected(signal_flow::RequestRejection::NotYet(
+            signal_flow::ArchiveHold::DeliveryNotEnded
+        ))
     );
     assert_eq!(
         fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue.0,
@@ -9978,7 +9985,7 @@ fn undeclared_receiver_uses_previous_simplified_profile_at_group_cutoff() {
 #[test]
 fn send_several_simplified_admission_refuses_second_awaiting_before_later_member() {
     use crate::sending::SendsSeveralRequests;
-    use crate::store::memory_digest::DigestsMemory;
+    use crate::store::DigestsMemory;
     use signal_flow::{
         Output, Refusal, SendSeveralMessagePosition, SendSeveralRequest, SendableMessage,
         SendableRequest,

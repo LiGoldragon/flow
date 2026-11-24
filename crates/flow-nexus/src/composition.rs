@@ -164,6 +164,9 @@ trait ComposesPresentationRole {
     ) -> SystemPrompt;
 }
 
+/// Claude Code splits a system prompt file at this standalone protocol line.
+const CLAUDE_SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
+
 impl ComposesPresentationRole for LaunchComposer {
     fn presentation_prompt(&self, address: &Address) -> Result<Option<String>, CompositionError> {
         if address.aspect != Aspect::Psyche
@@ -187,6 +190,17 @@ impl ComposesPresentationRole for LaunchComposer {
         presentation_prompt: Option<&str>,
     ) -> SystemPrompt {
         let mut text = input_1.system_text();
+        if input_0.harness_kind() == HarnessKind::Claude {
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(&input_1.user_segments().concat());
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(CLAUDE_SYSTEM_PROMPT_DYNAMIC_BOUNDARY);
+            text.push('\n');
+        }
         for segment in input_2.segments() {
             if !text.is_empty() && !text.ends_with('\n') {
                 text.push('\n');
@@ -707,9 +721,8 @@ impl ComposesVerifiedContext for LaunchComposer {
     fn verified_context<N: Profiled>(&self, input: N) -> Result<VerifiedContext, CompositionError> {
         let profile = input.profile();
         profile.validate()?;
-        // A module is placed by its kind: spirit and intent in the system
-        // prompt, every other kind in the first message, whichever list of
-        // the launch names it; each keeps its order.
+        // Curriculum resolves the two placements by module kind, preserving
+        // their order. Claude's launcher joins the verified texts afterward.
         let (system_modules, prompt_modules): (Vec<_>, Vec<_>) = profile
             .system_modules
             .0
@@ -908,7 +921,10 @@ impl ComposesInRoot for LaunchComposer {
             harnessed.brief()
         };
         let recovery = self.emergency_predecessor(&harnessed.launch_profile)?;
-        let mut segments = verified.user_segments();
+        let mut segments = match harnessed.harness_kind {
+            HarnessKind::Claude => Vec::new(),
+            HarnessKind::Codex => verified.user_segments(),
+        };
         // The raw records of the flows the launch remembers follow its
         // prompt modules, as one segment, ahead of the brief.
         let records = verified.records_text();
@@ -953,10 +969,8 @@ impl ComposesInRoot for LaunchComposer {
                 &leave_outs,
             ));
         }
-        // The system prompt holds spirit and intent alone. The rest of the
-        // context and the brief are the first message, split into as many
-        // prompts as it takes when it does not fit one, sent one right after
-        // another, so the start is one model call.
+        // The first message carries the user-placed context, records and
+        // brief. Claude's modules are already in its system prompt.
         let system_prompt =
             self.launch_system_prompt(&harnessed, &verified, Vec::<String>::new())?;
         // The handover follows the brief, and the open requests follow the
@@ -1133,8 +1147,8 @@ pub(crate) mod tests {
     use crate::context::FixtureComposer;
     use crate::handover::{Handover, YieldsHandover};
     use signal_flow::{
-        Address, Aspect, CompositionRefusal, ContextRefusal, HarnessKind, LaunchProfile, LeaveOut,
-        Model, Remembering,
+        Address, Aspect, ComposedLaunch, CompositionRefusal, ContextRefusal, HarnessKind,
+        LaunchProfile, LeaveOut, Model, Remembering,
     };
     use std::path::Path;
     use std::sync::Arc;
@@ -1229,7 +1243,7 @@ pub(crate) mod tests {
                         flow_ethos::FlowId("36b71b".into()),
                         flow_ethos::FlowId("e3c8c1".into()),
                     ]),
-                    harness_kind: HarnessKind::Claude,
+                    harness_kind: HarnessKind::Codex,
                     launch_profile: fixture_profile(),
                 },
                 Vec::<LeaveOut>::new(),
@@ -1252,7 +1266,7 @@ pub(crate) mod tests {
             .compose(
                 HarnessedProfile {
                     remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
-                    harness_kind: HarnessKind::Claude,
+                    harness_kind: HarnessKind::Codex,
                     launch_profile: fixture_profile(),
                 },
                 Vec::<LeaveOut>::new(),
@@ -1390,7 +1404,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_claude_message_is_the_user_context_then_the_brief_in_one_part() {
+    fn a_claude_message_carries_the_brief_after_system_modules() {
         let profile = fixture_profile();
         let harness = HarnessKind::Claude;
         let composed = fixture_composer()
@@ -1404,14 +1418,7 @@ pub(crate) mod tests {
             )
             .unwrap();
         let body = &composed.first_prompt_payload.first_prompt_body;
-        assert!(body.0.starts_with("These are your skills, given here; do not reload them.\n\nModule IDs: knowledge:main-flow:0, knowledge:flow:0\n"));
-        assert!(body.0.contains("\n<!-- module: knowledge:flow:0 -->\nKnowledge body.\n<!-- end-module: knowledge:flow:0 -->\n"));
-        assert!(
-            body.0
-                .ends_with("<!-- end-module: knowledge:flow:0 -->\n\nCarry the bounded task.")
-        );
-        assert_eq!(body.0.matches("Main flow body.").count(), 1);
-        assert!(!body.0.contains("Spirit body."));
+        assert_eq!(body.0, "Carry the bounded task.");
         assert_eq!(composed.first_prompt_payload.prompt_part_vector.len(), 1);
         assert_eq!(
             composed.first_prompt_payload.prompt_part_vector[0]
@@ -1419,7 +1426,92 @@ pub(crate) mod tests {
                 .0,
             body.0
         );
-        assert!(!body.0.contains("Skill tool") && !body.0.contains("/knowledge:main-flow:0"));
+    }
+
+    #[test]
+    fn a_claude_prefix_changes_with_module_bytes_but_not_launch_identity_or_handover() {
+        use super::{CLAUDE_SYSTEM_PROMPT_DYNAMIC_BOUNDARY, CarriesFlowId};
+
+        let compose = |address, handover: &str, knowledge: &str| {
+            let mut profile = fixture_profile();
+            profile.address = address;
+            // Mix kinds in the declaration; preserve Curriculum's verified
+            // system and user order rather than sorting modules a second time.
+            profile.system_modules.0.swap(0, 1);
+            profile
+                .system_modules
+                .0
+                .insert(0, profile.prompt_modules.0.remove(0));
+            let composer = LaunchComposer::with_context(
+                crate::context::ContextComposer(Arc::new(FixtureComposer::from(
+                    &[
+                        ("spirit:core:0", "Spirit body."),
+                        ("intent:flow:0", "Intent body."),
+                        ("knowledge:main-flow:0", "Main flow body."),
+                        ("knowledge:flow:0", knowledge),
+                    ][..],
+                ))),
+                Arc::new(crate::composition::FixtureSuccessorRecovery::default()),
+            )
+            .with_handover_source(Arc::new(RecoveryHandoverFixture {
+                value: Handover::Text(handover.into()),
+            }));
+            composer
+                .compose_in_root(
+                    HarnessedProfile {
+                        remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
+                        harness_kind: HarnessKind::Claude,
+                        launch_profile: profile,
+                    },
+                    Vec::<LeaveOut>::new(),
+                    HandoverRoot::At(Path::new("/fixture")),
+                    &[],
+                )
+                .unwrap()
+        };
+        let split = |launch: &ComposedLaunch| {
+            let (prefix, suffix) = launch
+                .system_prompt
+                .system_prompt_text
+                .0
+                .split_once(&format!("\n{CLAUDE_SYSTEM_PROMPT_DYNAMIC_BOUNDARY}\n"))
+                .expect("a standalone Claude boundary");
+            (prefix.to_owned(), suffix.to_owned())
+        };
+        let address = fixture_profile().address;
+        let first = compose(address.clone(), "Earlier handover.", "Knowledge body.");
+        let second = compose(
+            Address {
+                topic: flow_ethos::Topic("nextFlow".into()),
+                ..address.clone()
+            },
+            "Later handover.",
+            "Knowledge body.",
+        )
+        .carrying_flow_id("new-id");
+        let changed = compose(address, "Earlier handover.", "Changed module body.");
+        let (prefix, suffix) = split(&first);
+        let (next_prefix, next_suffix) = split(&second);
+        assert_eq!(prefix.as_bytes(), next_prefix.as_bytes());
+        assert_ne!(prefix.as_bytes(), split(&changed).0.as_bytes());
+        assert!(suffix.contains("Flow ID: pending\n"));
+        assert!(next_suffix.contains("nextFlow") && next_suffix.contains("Flow ID: new-id\n"));
+        let system_modules = prefix
+            .find("Module IDs: intent:flow:0, spirit:core:0\n")
+            .unwrap();
+        let user_modules = prefix
+            .find("Module IDs: knowledge:main-flow:0, knowledge:flow:0\n")
+            .unwrap();
+        assert!(system_modules < user_modules);
+        assert!(prefix.ends_with("Knowledge body.\n<!-- end-module: knowledge:flow:0 -->"));
+        assert_eq!(
+            first.first_prompt_payload.first_prompt_body.0,
+            "Carry the bounded task.\n\nEarlier handover."
+        );
+        assert_eq!(
+            second.first_prompt_payload.first_prompt_body.0,
+            "Carry the bounded task.\n\nLater handover."
+        );
     }
 
     #[test]
@@ -1472,7 +1564,7 @@ pub(crate) mod tests {
         let carried = composed.carrying_flow_id("a1b2c3");
         let system = &carried.system_prompt.system_prompt_text;
         assert!(system.0.ends_with(
-            "<!-- end-module: intent:flow:0 -->\n\nMetaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: 836818\n"
+            "<!-- end-module: knowledge:flow:0 -->\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__\n\nMetaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: 836818\n"
         ));
         assert_eq!(carried.first_prompt_payload, composed.first_prompt_payload);
         // A launch with no predecessor and no memory gains the section.
@@ -1493,7 +1585,7 @@ pub(crate) mod tests {
         assert!(
             bare.system_prompt
                 .system_prompt_text
-                .0.ends_with("<!-- end-module: intent:flow:0 -->\n\nMetaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\n")
+                .0.ends_with("<!-- end-module: knowledge:flow:0 -->\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__\n\nMetaflow: { Field flow Sol }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\n")
         );
         assert!(!system.0.contains("This flow belongs to metaflow"));
     }
@@ -1661,6 +1753,20 @@ pub(crate) mod tests {
                 .unwrap();
             let system = &composed.system_prompt.system_prompt_text;
             let parts = &composed.first_prompt_payload.prompt_part_vector;
+            if harness == HarnessKind::Claude {
+                assert_eq!(parts.len(), 1);
+                assert_eq!(parts[0].prompt_part_text.0, "Carry the bounded task.");
+                for name in &names {
+                    assert_eq!(
+                        system
+                            .0
+                            .matches(&format!("<!-- module: {name} -->"))
+                            .count(),
+                        1
+                    );
+                }
+                continue;
+            }
             assert!(parts.len() > 1, "{harness:?}: sent in parts");
             for (index, part) in parts.iter().enumerate() {
                 assert!(harness.fits_one_message(&part.prompt_part_text.0));
@@ -1840,7 +1946,7 @@ pub(crate) mod tests {
             .compose(
                 HarnessedProfile {
                     remembered_flows: crate::generated::starter::RememberedFlows(Vec::new()),
-                    harness_kind: HarnessKind::Claude,
+                    harness_kind: HarnessKind::Codex,
                     launch_profile: profile,
                 },
                 Vec::<LeaveOut>::new(),
@@ -1999,10 +2105,10 @@ pub(crate) mod tests {
                     Vec::<LeaveOut>::new(),
                 )
                 .unwrap();
-            let body = &composed.first_prompt_payload.first_prompt_body.0;
-            assert!(body.contains(wanted));
-            assert!(!body.contains(other));
-            assert!(body.contains(identity));
+            let system = &composed.system_prompt.system_prompt_text.0;
+            assert!(system.contains(wanted));
+            assert!(!system.contains(other));
+            assert!(system.contains(identity));
         }
     }
 

@@ -1532,19 +1532,10 @@ fn a_fresh_wake_composes_modules_and_queued_work_in_the_first_prompt() {
     // The same full module text a Start of these identities carries, with
     // the fixed queue batch in that first prompt.
     let body = composed.first_prompt_payload.first_prompt_body;
-    assert!(
-        body.0
-            .starts_with("These are your skills, given here; do not reload them.")
-    );
-    assert!(body.0.contains("Main flow body.") && body.0.contains("Knowledge body."));
-    assert!(
-        composed
-            .system_prompt
-            .system_prompt_text
-            .0
-            .contains("Spirit body.")
-    );
-    assert!(body.0.contains(&text));
+    let system = composed.system_prompt.system_prompt_text.0;
+    assert!(system.contains("Spirit body."));
+    assert!(system.contains("Main flow body.") && system.contains("Knowledge body."));
+    assert_eq!(body.0, text);
     assert!(!body.0.contains("seat"));
 }
 

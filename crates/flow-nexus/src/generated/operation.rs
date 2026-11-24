@@ -14,6 +14,13 @@ pub struct LaunchReservation {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct AdmissionMessage {
+    pub delivery: flow_ethos::Delivery,
+    pub message: flow_ethos::Message,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct HarnessArguments(pub std::vec::Vec<String>);
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -172,6 +179,14 @@ pub struct Submit_Data {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct AdmitDeliveryGroup_Data {
+    pub address: signal_flow::Address,
+    pub sent_by: signal_flow::SentBy,
+    pub sendable_message_vector: std::vec::Vec<signal_flow::SendableMessage>,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Operation {
     Compose(signal_flow::LaunchProfile),
     Reserve(LaunchReservation),
@@ -189,6 +204,7 @@ pub enum Operation {
     Close(signal_flow::FlowNode),
     Discard(signal_flow::HerdrPaneBinding),
     Release(signal_flow::FlowId),
+    AdmitDeliveryGroup(AdmitDeliveryGroup_Data),
     Wake(signal_flow::Address),
     Drain(signal_flow::Address),
 }
@@ -239,6 +255,8 @@ pub enum Outcome {
     Submitted(signal_flow::PromptDeliveryResult),
     Closed,
     Released,
+    DeliveryGroupAdmitted(std::vec::Vec<signal_flow::SendAcceptance>),
+    DeliveryGroupRefused(signal_flow::Refusal),
     Woken(signal_flow::FlowId),
     Drained(std::vec::Vec<signal_flow::QueueEntry>),
     AwaitingReceipt(signal_flow::LogicalDeliveryId),

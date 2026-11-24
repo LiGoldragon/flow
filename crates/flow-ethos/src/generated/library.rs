@@ -419,3 +419,12 @@ pub struct Nexus {
     pub message_nexus_binary_option: std::option::Option<MessageNexusBinary>,
     pub lease: Lease,
 }
+#[rustfmt::skip]
+pub trait FixedWidth {
+    const WIDTH: i64;
+}
+#[rustfmt::skip]
+const _: () = {
+    fn assert_requestid_fixedwidth<T: FixedWidth>() {}
+    let _ = assert_requestid_fixedwidth::<RequestId>;
+};

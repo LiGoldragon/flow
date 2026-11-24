@@ -9773,10 +9773,9 @@ fn regular_admission_meeting_simplified_wake_fails_without_starting_native_seat(
 }
 
 #[test]
-fn post_premark_cancel_uses_actual_cancel_and_keeps_frozen_group() {
-    use crate::queue_operations::OperatesOnRequestsAndQueues;
+fn send_several_post_premark_park_keeps_original_group_and_runnable_suffix() {
     use crate::store::delivery_group::SelectsDeliveryGroups;
-    use crate::store::group_uncertainty::StagesUncertainCohorts;
+    use crate::store::group_uncertainty::ParksGroupedStartups;
     let fixture = NexusFixture::new();
     let at = address(Model::Sol);
     fixture
@@ -9809,34 +9808,23 @@ fn post_premark_cancel_uses_actual_cancel_and_keeps_frozen_group() {
         .store
         .oldest_delivery_group(&at, &queue)
         .unwrap();
-    let frozen_text = selected.prompt_text(&at);
-    {
-        let _turn = fixture
-            .nexus
-            .dispatch_gate
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        fixture
-            .nexus
-            .store
-            .mark_startup_uncertain(&at, &selected)
-            .unwrap();
-    }
-    // Actual Cancel follows premark serially; no native start barrier or
-    // concurrent interleaving is claimed by this fixture.
-    assert_eq!(
-        fixture
-            .nexus
-            .cancel(&accepted[1].request_id, &Origin::Unbound),
-        signal_flow::Output::CancelRejected(signal_flow::RequestRejection::NotYet(
-            signal_flow::ArchiveHold::DeliveryNotEnded
-        ))
-    );
+    let launch = signal_flow::LaunchRequestId("frozen-group".into());
+    fixture
+        .nexus
+        .store
+        .park_grouped_startup(&at, &launch, &selected)
+        .unwrap();
+    let parked = fixture
+        .nexus
+        .store
+        .parked_grouped_startup(&launch.0)
+        .unwrap()
+        .unwrap();
+    assert_eq!(parked.queue_entry_vector, selected);
     assert_eq!(
         fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue.0,
-        queue
+        queue[selected.len()..]
     );
-    assert_eq!(selected.prompt_text(&at), frozen_text);
     assert_eq!(
         fixture
             .nexus
@@ -9861,7 +9849,7 @@ fn post_premark_cancel_uses_actual_cancel_and_keeps_frozen_group() {
 }
 
 #[test]
-fn simplified_admission_meeting_regular_wake_delivers_all_awaiting() {
+fn simplified_admission_meeting_regular_wake_delivers_context_and_awaiting() {
     use crate::store::logical_delivery::SimplifiedReplyStanding;
     use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
     let mut fixture = NexusFixture::new();
@@ -9892,7 +9880,7 @@ fn simplified_admission_meeting_regular_wake_delivers_all_awaiting() {
         &at,
         SentBy::Sender(address(Model::Astra)),
         vec![
-            Request::Order("reverse first".into()),
+            Request::Notice("reverse first".into()),
             Request::Question("reverse second".into()),
         ],
     );
@@ -10087,6 +10075,7 @@ fn send_several_parks_a_refused_start(boundary: FreshGroupRefusal) {
     match boundary {
         FreshGroupRefusal::Composition => configure_secondary_model(&fixture, "haiku"),
         FreshGroupRefusal::Native => {
+            configure_secondary_model(&fixture, "claude-fixture");
             fs::write(world.state.join("fresh-claude-refused-once"), "").unwrap();
         }
     }

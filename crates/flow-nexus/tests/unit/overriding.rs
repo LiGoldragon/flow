@@ -1934,3 +1934,410 @@ fn unrelated_dispatch_progresses_while_a_direct_herdr_prompt_is_barred() {
         );
     });
 }
+
+#[test]
+fn ordinary_send_replies_before_its_own_barred_herdr_prompt() {
+    use super::GreetsOrdinarySocket;
+    use crate::event_wait::AwaitsPath;
+    use crate::fixture_executable::{FixtureExecutable, HoldsLatch, InstallsScript, Latch};
+    use crate::{CarriesSignalFrames, Connection, ServesConnection};
+    use std::os::unix::net::UnixStream;
+    use std::time::{Duration, Instant};
+
+    let fixture = NexusFixture::new();
+    resting_seat(&fixture);
+    let recipient = address(Model::Sol);
+    let reaches = fixture.directory.path().join("own-prompt-reached");
+    let release = Latch::closed(fixture.directory.path().join("own-prompt-release"));
+    let script = std::fs::read_to_string(&fixture.snapshot_program).unwrap();
+    let arm = "\"agent prompt\") ";
+    assert!(script.contains(arm));
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&script.replacen(
+        arm,
+        &format!(
+            "{arm} if [ ! -e '{}' ]; then : > '{}'; : < '{}'; fi; ",
+            reaches.display(),
+            reaches.display(),
+            release.path.display()
+        ),
+        1,
+    ));
+
+    let (peer, mut client) = UnixStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    std::thread::scope(|scope| {
+        let fixture = &fixture;
+        let server = scope.spawn(move || {
+            Connection::accepted(peer)
+                .unwrap()
+                .serve_ordinary(&fixture.nexus)
+        });
+        client.greet_ordinary();
+        client
+            .write_query(&signal_flow::Input::Send(signal_flow::SendRequest {
+                address: recipient.clone(),
+                sendable_message: super::sendable_message(Message::MiddleAbrupt(Request::Order(
+                    "reply before own prompt".into(),
+                ))),
+            }))
+            .unwrap();
+        let reached = reaches.appeared_by(Instant::now() + Duration::from_secs(15));
+        let reply = if reached {
+            Some(client.read_response())
+        } else {
+            None
+        };
+        let following = if matches!(reply, Some(Ok(signal_flow::Output::SendAccepted(_)))) {
+            let (peer, mut caller) = UnixStream::pair().unwrap();
+            caller
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let worker = scope.spawn(move || {
+                Connection::accepted(peer)
+                    .unwrap()
+                    .serve_ordinary(&fixture.nexus)
+            });
+            caller.greet_ordinary();
+            caller
+                .write_query(&signal_flow::Input::Send(signal_flow::SendRequest {
+                    address: recipient.clone(),
+                    sendable_message: super::sendable_message(Message::MiddleAbrupt(
+                        Request::Order("same recipient behind barred prompt".into()),
+                    )),
+                }))
+                .unwrap();
+            let second = caller.read_response();
+            drop(caller);
+            Some((second, worker))
+        } else {
+            None
+        };
+        release.release();
+        let Some(Ok(signal_flow::Output::SendAccepted(accepted))) = reply else {
+            panic!("no durable admission before the Herdr barrier released: {reply:?}");
+        };
+        assert_eq!(
+            accepted.visible_delivery_state,
+            signal_flow::VisibleDeliveryState::Queued
+        );
+        let Some((Ok(signal_flow::Output::SendAccepted(second)), second_worker)) = following else {
+            panic!("same-recipient Send did not answer before the earlier write was released");
+        };
+        assert_eq!(
+            second.visible_delivery_state,
+            signal_flow::VisibleDeliveryState::Queued
+        );
+        assert_ne!(second.request_id, accepted.request_id);
+        assert!(second.delivery_cursor > accepted.delivery_cursor);
+        assert!(server.join().unwrap().is_ok());
+        assert!(second_worker.join().unwrap().is_ok());
+        let prompts = super::prompts(&fixture.directory.path().join("herdr-operations.log"));
+        assert!(prompts[0].contains(&accepted.request_id.0));
+        assert_eq!(
+            prompts
+                .iter()
+                .filter(|prompt| prompt.contains(&accepted.request_id.0))
+                .count(),
+            1
+        );
+        assert!(
+            prompts
+                .iter()
+                .filter(|prompt| prompt.contains(&second.request_id.0))
+                .count()
+                <= 1
+        );
+    });
+}
+
+#[test]
+fn a_reply_left_unwritten_fences_only_its_recipient_and_reopens_in_order() {
+    use crate::sending::SendsRequests;
+    use crate::store::logical_delivery::HoldsAdmissionAnswers;
+    use signal_flow::SendRequest;
+
+    let mut fixture = NexusFixture::new();
+    resting_seat(&fixture);
+    let recipient = address(Model::Sol);
+    let unrelated = address(Model::Astra);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Astra, State::Asleep, vec![], vec![]));
+
+    let older = fixture.nexus.admit_ordinary_send(
+        SendRequest {
+            address: recipient.clone(),
+            sendable_message: super::sendable_message(Message::MiddleAbrupt(Request::Order(
+                "oldest, reply unwritten".into(),
+            ))),
+        },
+        None,
+    );
+    let signal_flow::Output::SendAccepted(oldest) = &older.response else {
+        panic!("expected durable admission before writing its reply");
+    };
+    let oldest_id = oldest.request_id.clone();
+    assert!(fixture.nexus.store.pane_input_waits_for_reply(&oldest_id));
+
+    // Retain the first connection's post-reply work without running it. A
+    // following reply has completed and its wake is now allowed to run.
+    let newer = fixture.nexus.admit_ordinary_send(
+        SendRequest {
+            address: recipient.clone(),
+            sendable_message: super::sendable_message(Message::MiddleAbrupt(Request::Order(
+                "second, behind first".into(),
+            ))),
+        },
+        None,
+    );
+    let signal_flow::Output::SendAccepted(following) = &newer.response else {
+        panic!("the second reply should not wait for the first");
+    };
+    let following_id = following.request_id.clone();
+    drop(newer);
+    fixture.nexus.wake_due(recipient.clone());
+    assert!(fixture.typed().is_none());
+
+    let independent = fixture.nexus.admit_ordinary_send(
+        SendRequest {
+            address: unrelated,
+            sendable_message: super::sendable_message(Message::Soft(Request::Notice(
+                "independent recipient".into(),
+            ))),
+        },
+        None,
+    );
+    let signal_flow::Output::SendAccepted(accepted) = &independent.response else {
+        panic!("an unrelated admission should not wait");
+    };
+    assert_eq!(
+        accepted.visible_delivery_state,
+        signal_flow::VisibleDeliveryState::Queued
+    );
+    drop(independent);
+    let ids = |fixture: &NexusFixture| {
+        stored(fixture, Model::Sol)
+            .queue
+            .0
+            .into_iter()
+            .map(|entry| entry.request_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&fixture), [oldest_id.clone(), following_id.clone()]);
+
+    // Drop the Nexus's in-memory store while the old adapter still hasn't
+    // written a reply or executed post-reply work.
+    fixture.restarted();
+    assert!(!fixture.nexus.store.pane_input_waits_for_reply(&oldest_id));
+    assert_eq!(ids(&fixture), [oldest_id.clone(), following_id.clone()]);
+    fixture.nexus.recover_wakes();
+    drop(older);
+    let prompts = super::prompts(&fixture.directory.path().join("herdr-operations.log"));
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    let first = prompts[0].find(&oldest_id.0).expect("oldest recovered");
+    let second = prompts[0].find(&following_id.0).expect("following recovered");
+    assert!(first < second);
+}
+
+#[test]
+fn held_socket_admissions_survive_disconnect_and_reopen_with_the_same_receipt_ids() {
+    use super::GreetsOrdinarySocket;
+    use super::waking::CLAUDE_SESSION;
+    use crate::composition::RendersQueuedWork;
+    use crate::waking::ReconcilesQueueDelivery;
+    use crate::{CarriesSignalFrames, Connection, ServesConnection};
+    use flow_native::DigestsPrompt;
+    use signal_flow::{Input, Output, SendRequest, VisibleDeliveryState};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let mut fixture = NexusFixture::new();
+    resting_seat(&fixture);
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::PromptedUnrecorded("w1:p3"),
+    );
+    let address = address(Model::Sol);
+    assert_eq!(
+        overridden(&fixture, meta::Input::HoldPermaflow(address.clone())),
+        meta::Output::PermaflowHeld(address.clone())
+    );
+
+    let send = |message: Message, read_reply: bool| {
+        let (peer, mut client) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        std::thread::scope(|scope| {
+            let fixture = &fixture;
+            let server = scope.spawn(move || {
+                Connection::accepted(peer)
+                    .unwrap()
+                    .serve_ordinary(&fixture.nexus)
+            });
+            client.greet_ordinary();
+            client
+                .write_query(&Input::Send(SendRequest {
+                    address: address.clone(),
+                    sendable_message: super::sendable_message(message),
+                }))
+                .unwrap();
+            let response = read_reply.then(|| client.read_response().unwrap());
+            drop(client);
+            let _ = server.join().unwrap();
+            response
+        })
+    };
+
+    let Some(Output::SendAccepted(first)) = send(
+        Message::MiddleAbrupt(Request::Order("retained first socket input".into())),
+        true,
+    ) else {
+        panic!("held send must answer admission");
+    };
+    assert_eq!(first.visible_delivery_state, VisibleDeliveryState::Queued);
+    send(
+        Message::MiddleAbrupt(Request::Order("retained disconnected socket input".into())),
+        false,
+    );
+    let before = stored(&fixture, Model::Sol);
+    assert_eq!(before.queue.0.len(), 2);
+    assert_eq!(before.queue.0[0].request_id, first.request_id);
+    assert!(fixture.typed().is_none());
+    fixture.restarted();
+    fixture.nexus.recover_wakes();
+    assert_eq!(stored(&fixture, Model::Sol), before);
+
+    assert_eq!(
+        overridden(&fixture, meta::Input::ReleasePermaflow(address.clone())),
+        meta::Output::PermaflowReleased(address.clone())
+    );
+    let body = before.queue.0.prompt_text(&address);
+    append_main_rows(
+        &fixture,
+        &[serde_json::json!({
+            "type":"user", "sessionId": CLAUDE_SESSION, "uuid":"held-socket-user",
+            "message":{"content":format!("\n\n<pasted_content id=\"04ef\">\n{body}\n</pasted_content id=\"04ef\">\n")}
+        })],
+    );
+    fixture.nexus.settle_submitted_prompt(
+        CLAUDE_SEAT,
+        &signal_flow::NativePrompt {
+            native_session_id_option: Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into())),
+            prompt_id_option: Some(signal_flow::PromptId("exact-held-input".into())),
+            prompt_sha256: signal_flow::PromptSha256(body.prompt_sha256()),
+        },
+    );
+
+    let (peer, mut observer) = UnixStream::pair().unwrap();
+    observer
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            Connection::accepted(peer)
+                .unwrap()
+                .serve_ordinary(&fixture.nexus)
+        });
+        observer.greet_ordinary();
+        observer.write_query(&Input::ObserveSends(None)).unwrap();
+        let Output::SendsObserved(observed) = observer.read_response().unwrap() else {
+            panic!("expected observer snapshot")
+        };
+        for entry in &before.queue.0 {
+            let matching = observed
+                .visible_delivery_snapshot_vector
+                .iter()
+                .filter(|item| item.request_id == entry.request_id)
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1, "{matching:?}");
+            assert!(
+                matches!(
+                    matching[0].visible_delivery_state,
+                    VisibleDeliveryState::Delivered
+                ),
+                "{matching:?}"
+            );
+            assert!(matching[0].delivery_cursor > first.delivery_cursor);
+        }
+        drop(observer);
+        // Closing the live observation can race its next socket write.
+        let _ = server.join().unwrap();
+    });
+    fixture.nexus.recover_wakes();
+    let prompts = super::prompts(&fixture.directory.path().join("herdr-operations.log"));
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    assert!(
+        before
+            .queue
+            .0
+            .iter()
+            .all(|entry| prompts[0].contains(&entry.request_id.0))
+    );
+}
+
+#[test]
+fn socket_admission_stays_accepted_when_herdr_refuses_before_input() {
+    use super::GreetsOrdinarySocket;
+    use crate::{CarriesSignalFrames, Connection, ServesConnection};
+    use signal_flow::{DeliveryState, Input, Output, SendRequest, VisibleDeliveryState};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let fixture = NexusFixture::new();
+    resting_seat(&fixture);
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::RefusedBeforeInput("agent_not_found"),
+    );
+    let (peer, mut client) = UnixStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let acceptance = std::thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            Connection::accepted(peer)
+                .unwrap()
+                .serve_ordinary(&fixture.nexus)
+        });
+        client.greet_ordinary();
+        client
+            .write_query(&Input::Send(SendRequest {
+                address: address(Model::Sol),
+                sendable_message: super::sendable_message(Message::MiddleAbrupt(Request::Order(
+                    "do not lose this ID".into(),
+                ))),
+            }))
+            .unwrap();
+        let Output::SendAccepted(accepted) = client.read_response().unwrap() else {
+            panic!("expected durable acceptance")
+        };
+        assert!(server.join().unwrap().is_ok());
+        accepted
+    });
+    assert_eq!(
+        acceptance.visible_delivery_state,
+        VisibleDeliveryState::Queued
+    );
+    let queued = stored(&fixture, Model::Sol).queue.0;
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].request_id, acceptance.request_id);
+    let state = fixture
+        .nexus
+        .store
+        .logical_delivery_snapshot(&queued[0].logical_delivery_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        state.delivery_state,
+        DeliveryState::Retryable(signal_flow::RetryCause::HistoryAbsent)
+    );
+    assert!(state.delivery_cursor > acceptance.delivery_cursor);
+    assert!(fixture.typed().is_none());
+}

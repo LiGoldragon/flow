@@ -25,6 +25,9 @@ The wire contracts are independent repositories:
   stands (`MetaflowChanged`) and the Address of each no longer listed
   (`MetaflowGone`); `Metaflows` stays the one-shot read.
   Nothing on the ordinary socket writes into a pane.
+  Ordinary `Send` returns `SendAccepted` when the request is durably
+  admitted. Keep its request ID and cursor. Read delivery through
+  `ObserveSends`, matching that ID; delivery is a later observation.
 - `meta-signal-flow` defines `Configure`, reset-credit consumption, the
   override panel at its root (`SetState`, `CrystallizeNow`, `Renew`,
   `Close`, `Deliver`, `Unlock`, `Forget`, `Hold`, `Resume`), and the pane

@@ -130,7 +130,8 @@ use crate::store::events::RecordsHarnessEvents;
 use crate::store::events::{IdentifiesNativeStop, RecordedStop};
 use crate::store::handover::HoldsHandovers;
 use crate::store::logical_delivery::{
-    RecordsLogicalDeliveries, SimplifiedReplyBinding, SimplifiedReplyStanding,
+    HoldsAdmissionAnswers, RecordsLogicalDeliveries, SimplifiedReplyBinding,
+    SimplifiedReplyStanding,
 };
 use crate::store::metaflow::{PreparesDeclaredMetaflow, SleepsMetaflows};
 use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
@@ -727,6 +728,8 @@ pub enum WakeRefusal {
     NotAsleep,
     /// Nothing is queued for it.
     NothingQueued,
+    /// A caller's durable reply is still being written.
+    AdmissionReplyPending,
     /// A pane still runs the last flow's native session.
     SessionLive,
     /// Herdr could not be read to see whether the session runs.
@@ -753,7 +756,7 @@ impl AnswersWakeRefusal for WakeRefusal {
         match self {
             Self::StoreUnreadable | Self::AwakeNotRecorded => Failed_Data::StoreRefused,
             Self::NotAsleep => Failed_Data::NotAsleep,
-            Self::NothingQueued => Failed_Data::NothingQueued,
+            Self::NothingQueued | Self::AdmissionReplyPending => Failed_Data::NothingQueued,
             Self::SessionLive => Failed_Data::ConflictingBinding,
             Self::FreshNotStarted(failure) => failure.clone(),
             Self::StartRejected(rejection) => match rejection {
@@ -1847,6 +1850,11 @@ impl SleepsAndWakesSeats for RunningNexus {
                 return;
             };
             if metaflow.queue.0.is_empty()
+                || metaflow
+                    .queue
+                    .0
+                    .first()
+                    .is_some_and(|entry| self.store.pane_input_waits_for_reply(&entry.request_id))
                 || self.waking.is_waking(address)
                 || !matches!(self.store.address_hold(&flow_id.0), Ok(None))
                 || !matches!(
@@ -2002,6 +2010,14 @@ impl SleepsAndWakesSeats for RunningNexus {
 
     fn wake_is_due(&self, metaflow: &Metaflow) -> bool {
         if self.permaflow_held(metaflow.address.clone()) {
+            return false;
+        }
+        if metaflow
+            .queue
+            .0
+            .iter()
+            .any(|entry| self.store.pane_input_waits_for_reply(&entry.request_id))
+        {
             return false;
         }
 
@@ -2993,6 +3009,9 @@ impl DrainsHeldSeats for RunningNexus {
         let Some(oldest) = queue.0.first().cloned() else {
             return Outcome::Drained(drained);
         };
+        if self.store.pane_input_waits_for_reply(&oldest.request_id) {
+            return Outcome::WaitingForTurn(oldest.logical_delivery_id);
+        }
         let response_request = matches!(
             &oldest.message,
             signal_flow::Message::HardAbrupt(
@@ -3040,7 +3059,11 @@ impl DrainsHeldSeats for RunningNexus {
         let cohort: Vec<QueueEntry> = if simplified {
             vec![oldest.clone()]
         } else {
-            queue.0
+            queue
+                .0
+                .into_iter()
+                .take_while(|entry| !self.store.pane_input_waits_for_reply(&entry.request_id))
+                .collect()
         };
         let refused = |drained: Vec<QueueEntry>, failure| {
             if drained.is_empty() {
@@ -3978,6 +4001,14 @@ impl WakesInParts for RunningNexus {
             });
         if metaflow.queue.0.is_empty() && !owed {
             return Err(WakeRefusal::NothingQueued);
+        }
+        if metaflow
+            .queue
+            .0
+            .iter()
+            .any(|entry| self.store.pane_input_waits_for_reply(&entry.request_id))
+        {
+            return Err(WakeRefusal::AdmissionReplyPending);
         }
         let plan = self.wake_plan(&metaflow);
         let simplified = matches!(

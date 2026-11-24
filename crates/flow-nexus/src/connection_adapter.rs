@@ -52,6 +52,10 @@ enum PostReplyOperation {
         acts: bool,
     },
     WakeDue(signal_flow::Address),
+    SendAdmitted(
+        crate::sending::PendingSend,
+        Option<crate::store::logical_delivery::PendingAnswerHold>,
+    ),
     DrainAwake(signal_flow::Address),
     SettleThenBoundExisting(Option<signal_flow::FlowId>),
 }
@@ -186,11 +190,12 @@ impl AdaptsFlowConnection for FlowConnectionAdapter<'_> {
                 return answer.response.reply(completion);
             }
             Input::Send(send) => {
-                let answer = nexus.send_request(send, caller.process.as_ref());
+                let answer = nexus.admit_ordinary_send(send, caller.process.as_ref());
                 let completion = match answer.pending {
-                    Some(pending) => {
-                        Completion::AfterAnyWrite(PostReplyOperation::WakeDue(pending.address))
-                    }
+                    Some(pending) => Completion::AfterAnyWrite(PostReplyOperation::SendAdmitted(
+                        pending,
+                        answer._pending_answer,
+                    )),
                     None => Completion::NoPostReplyWork,
                 };
                 return answer.response.reply(completion);
@@ -351,6 +356,11 @@ impl PerformsPostReply for PostReplyOperation {
                 }
             }
             Self::WakeDue(address) => nexus.wake_due(address),
+            Self::SendAdmitted(pending, answer) => {
+                drop(answer);
+                drop(pending.pane_input);
+                nexus.wake_due(pending.address);
+            }
             Self::DrainAwake(address) => nexus.drain_awake(&address),
             Self::SettleThenBoundExisting(bound) => {
                 nexus.settle_stops_at_confirmation();

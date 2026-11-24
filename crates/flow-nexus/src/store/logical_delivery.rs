@@ -257,6 +257,7 @@ pub(crate) struct LogicalDeliveryTables {
     pub(crate) store_identity: TableReference<StoredStoreIdentity>,
     pub(crate) write_gate: Mutex<()>,
     pending_answers: std::sync::Arc<PendingAdmissionAnswers>,
+    pending_pane_inputs: std::sync::Arc<PendingAdmissionAnswers>,
 }
 
 #[derive(Default)]
@@ -368,6 +369,7 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
             store_identity: engine.register_table(descriptors.store_identity)?,
             write_gate: Mutex::new(()),
             pending_answers: Default::default(),
+            pending_pane_inputs: Default::default(),
         })
     }
 }
@@ -375,29 +377,59 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
 pub(crate) trait HoldsAdmissionAnswers {
     fn hold_admission_answer(&self, request_id: &flow_ethos::RequestId) -> PendingAnswerHold;
     fn admission_answer_is_pending(&self, request_id: &flow_ethos::RequestId) -> bool;
+    fn reserve_pane_input_until_reply(
+        &self,
+        request_id: &flow_ethos::RequestId,
+    ) -> PendingAnswerHold;
+    fn pane_input_waits_for_reply(&self, request_id: &flow_ethos::RequestId) -> bool;
 }
 
 impl HoldsAdmissionAnswers for FlowStore {
     fn hold_admission_answer(&self, request_id: &flow_ethos::RequestId) -> PendingAnswerHold {
-        let pending = self.logical_deliveries.pending_answers.clone();
-        *pending
+        self.logical_deliveries.pending_answers.reserve(request_id)
+    }
+
+    fn admission_answer_is_pending(&self, request_id: &flow_ethos::RequestId) -> bool {
+        self.logical_deliveries.pending_answers.held(request_id)
+    }
+
+    fn reserve_pane_input_until_reply(
+        &self,
+        request_id: &flow_ethos::RequestId,
+    ) -> PendingAnswerHold {
+        self.logical_deliveries
+            .pending_pane_inputs
+            .reserve(request_id)
+    }
+
+    fn pane_input_waits_for_reply(&self, request_id: &flow_ethos::RequestId) -> bool {
+        self.logical_deliveries.pending_pane_inputs.held(request_id)
+    }
+}
+
+trait ReservesPendingAdmissions {
+    fn reserve(&self, request_id: &flow_ethos::RequestId) -> PendingAnswerHold;
+    fn held(&self, request_id: &flow_ethos::RequestId) -> bool;
+}
+
+impl ReservesPendingAdmissions for std::sync::Arc<PendingAdmissionAnswers> {
+    fn reserve(&self, request_id: &flow_ethos::RequestId) -> PendingAnswerHold {
+        *self
             .request_ids
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|error| error.into_inner())
             .entry(request_id.clone())
             .or_default() += 1;
         PendingAnswerHold {
-            pending,
+            pending: self.clone(),
             request_id: request_id.clone(),
         }
     }
 
-    fn admission_answer_is_pending(&self, request_id: &flow_ethos::RequestId) -> bool {
-        self.logical_deliveries
-            .pending_answers
-            .request_ids
+    fn held(&self, request_id: &flow_ethos::RequestId) -> bool {
+        self.request_ids
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|error| error.into_inner())
             .contains_key(request_id)
     }
 }

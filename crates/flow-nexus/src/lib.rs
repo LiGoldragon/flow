@@ -892,7 +892,11 @@ impl signal_flow::Answering for OrdinaryCall<'_> {
         &self,
         send_request: &signal_flow::SendRequest,
     ) -> Result<signal_flow::VisibleSendReceipt, Output> {
-        match self.nexus.send_request(send_request.clone(), None).response {
+        match self
+            .nexus
+            .admit_ordinary_send(send_request.clone(), None)
+            .response
+        {
             Output::Sent(receipt) => Ok(receipt),
             other => Err(other),
         }

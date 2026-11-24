@@ -18,6 +18,7 @@ use crate::binding::{ReadsProcessIdentity, VerifiesAdoptedSeat};
 use crate::caller::{AuthenticatesProcessAuthority, ProcessAuthority};
 use crate::composition::JoinsPurpose;
 use crate::generated::operation::{Failed_Data, Operation, Outcome};
+use crate::generated::overriding::HeedsOverrides;
 use crate::harness_command::{
     HarnessCommandResources, RehearsesHarnessResources, RendersShellCommand,
 };
@@ -35,9 +36,11 @@ use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::{ExistingSeatAdoption, NamesConfiguredModel, RegistersExistingFlow};
+#[cfg(test)]
+use crate::waking::HoldsSoftForIdle;
 use crate::waking::{
-    HoldsSoftForIdle, HoldsWakingMetaflows, PerformsWakeAndDrain, ReconcilesQueueDelivery,
-    RestsEndedAwake, SleepsAndWakesSeats,
+    HoldsWakingMetaflows, PerformsWakeAndDrain, ReconcilesQueueDelivery, RestsEndedAwake,
+    SleepsAndWakesSeats,
 };
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
@@ -171,6 +174,7 @@ impl MintsId for str {
 /// What a Send answers.
 pub struct PendingSend {
     pub address: Address,
+    pub(crate) pane_input: Option<crate::store::logical_delivery::PendingAnswerHold>,
 }
 
 pub struct SendAnswer {
@@ -224,8 +228,12 @@ impl AnswersCompletedDirectSend for signal_flow::DeliveryState {
 }
 
 pub trait SendsRequests {
-    /// Answers a Send from `peer`, under the dispatch gate.
+    /// In-process call that can observe delivery before returning.
+    #[cfg(test)]
     fn send_request(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer;
+    /// Replies to the ordinary connection at durable admission. Its reply
+    /// completion owns notification of wake/drain, not the caller's wait.
+    fn admit_ordinary_send(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer;
     /// Delivers every durable request currently queued at `address`,
     /// whoever asks.
     fn deliver_all(&self, address: Address) -> Output;
@@ -234,7 +242,99 @@ pub trait SendsRequests {
 }
 
 impl SendsRequests for RunningNexus {
+    #[cfg(test)]
     fn send_request(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer {
+        self.answer_send(send, peer, SendResponseBoundary::NativeDelivery)
+    }
+
+    fn admit_ordinary_send(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer {
+        self.answer_send(send, peer, SendResponseBoundary::Admission)
+    }
+
+    fn live_awake_flow(&self, address: &Address) -> Option<String> {
+        let metaflow = self.store.metaflow(address).ok()??;
+        let flow_ethos::State::Awake(flow_id) = metaflow.state else {
+            return None;
+        };
+        (self
+            .store
+            .flow_is_live(&flow_id.0)
+            .ok()
+            .filter(|live| *live)
+            .map(|_| flow_id))
+        .map(|value| value.0)
+    }
+
+    fn deliver_all(&self, address: Address) -> Output {
+        let turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.rest_ended_awake(&address);
+        let asleep = match self.store.metaflow(&address) {
+            Ok(Some(metaflow)) => {
+                if metaflow.queue.0.is_empty() {
+                    return Output::Drained(signal_flow::VisibleDrainOutcome {
+                        address: address.clone(),
+                        visible_drain_state: signal_flow::VisibleDrainState::Delivered,
+                    });
+                }
+                metaflow.state == flow_ethos::State::Asleep
+            }
+            Ok(None) => {
+                return Output::Refused(Refusal::Unknown(Unknown_Data::Address(address)));
+            }
+            Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
+        };
+        if let Err(error) = self.store.force_queue_wake(&address) {
+            return Output::Refused(Refusal::Store(error.to_string()));
+        }
+        if !asleep {
+            self.drain_all(address.clone());
+        }
+        drop(turn);
+        if asleep {
+            self.wake_due(address.clone());
+        }
+        match self.store.metaflow(&address) {
+            Ok(Some(metaflow)) if metaflow.queue.0.is_empty() => {
+                Output::Drained(signal_flow::VisibleDrainOutcome {
+                    address: address.clone(),
+                    visible_drain_state: signal_flow::VisibleDrainState::Delivered,
+                })
+            }
+            Ok(Some(_metaflow)) => Output::Drained(signal_flow::VisibleDrainOutcome {
+                address: address.clone(),
+                visible_drain_state: signal_flow::VisibleDrainState::Held,
+            }),
+            Ok(None) => Output::Refused(Refusal::Unknown(Unknown_Data::Address(address))),
+            Err(error) => Output::Refused(Refusal::Store(error.to_string())),
+        }
+    }
+}
+
+enum SendResponseBoundary {
+    Admission,
+    #[cfg(test)]
+    NativeDelivery,
+}
+
+trait AnswersSend {
+    fn answer_send(
+        &self,
+        send: SendRequest,
+        peer: Option<&Process>,
+        boundary: SendResponseBoundary,
+    ) -> SendAnswer;
+}
+
+impl AnswersSend for RunningNexus {
+    fn answer_send(
+        &self,
+        send: SendRequest,
+        peer: Option<&Process>,
+        boundary: SendResponseBoundary,
+    ) -> SendAnswer {
         use sha2::{Digest, Sha256};
 
         let abrupt = !matches!(&send.sendable_message, SendableMessage::Soft(_));
@@ -348,26 +448,51 @@ impl SendsRequests for RunningNexus {
             // to a seat in its turn is queued for the seat's idle event.
             // A held Nexus delivers nothing on its own: the request is
             // queued, and handed over once it resumes.
-            let live = self.live_awake_flow(&recipient);
-            let direct_requested = !crate::generated::overriding::HeedsOverrides::permaflow_held(
-                self,
-                recipient.clone(),
-            ) && !crate::generated::overriding::HeedsOverrides::held(self)
-                && (abrupt || live.as_ref().is_some_and(|flow_id| self.rests_now(flow_id)));
-            let direct_lease = if direct_requested {
-                match self.direct_send_lease(&recipient) {
-                    Ok(lease) => lease,
-                    Err(refusal) => return (*refusal).into(),
+            let direct_lease = match boundary {
+                SendResponseBoundary::Admission => {
+                    use crate::store::metaflow::PreparesDeclaredMetaflow;
+                    match self.store.prepare_declared_metaflow(&recipient) {
+                        Ok(false)
+                            if abrupt
+                                && !self.held()
+                                && !self.permaflow_held(recipient.clone()) =>
+                        {
+                            return PrivateSendResponse::Failed(
+                                signal_flow::SendFailure::Unadmitted(
+                                    signal_flow::SendFailureReason::RecipientUnavailable(
+                                        recipient.clone(),
+                                    ),
+                                ),
+                            )
+                            .into();
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            return PrivateSendResponse::Refused(Refusal::Store(error.to_string()))
+                                .into();
+                        }
+                    }
+                    None::<crate::waking::WakingLease>
                 }
-            } else {
-                None
+                #[cfg(test)]
+                SendResponseBoundary::NativeDelivery => {
+                    let live = self.live_awake_flow(&recipient);
+                    let requested = !crate::generated::overriding::HeedsOverrides::permaflow_held(
+                        self,
+                        recipient.clone(),
+                    ) && !crate::generated::overriding::HeedsOverrides::held(self)
+                        && (abrupt || live.as_ref().is_some_and(|flow_id| self.rests_now(flow_id)));
+                    if requested {
+                        match self.direct_send_lease(&recipient) {
+                            Ok(lease) => lease
+                                .filter(|_| live.is_some() || message.wakes_sleeping_permaflow()),
+                            Err(refusal) => return (*refusal).into(),
+                        }
+                    } else {
+                        None
+                    }
+                }
             };
-            // A recipient with no live flow is started by the direct call only
-            // for a request whose kind wakes it: a Notice is queued for the
-            // next waking. A Soft request that wakes it is answered queued and
-            // woken after its answer (`wake_is_due`).
-            let direct_lease =
-                direct_lease.filter(|_| live.is_some() || message.wakes_sleeping_permaflow());
             let admitted_at = std::time::SystemTime::now();
             let admitted = self.store.accept_logical_delivery(
                 &recipient,
@@ -378,9 +503,16 @@ impl SendsRequests for RunningNexus {
             );
             // Each admission is logged with its kind, and a Task's
             // Minutes with the deadline its first reminder is due at.
+            let mut pane_input = None;
             if let Ok(PrivateSendResponse::SendAccepted(acceptance)) = &admitted {
                 use crate::store::logical_delivery::HoldsAdmissionAnswers;
                 pending_answer = Some(self.store.hold_admission_answer(&acceptance.request_id));
+                if matches!(boundary, SendResponseBoundary::Admission) {
+                    pane_input = Some(
+                        self.store
+                            .reserve_pane_input_until_reply(&acceptance.request_id),
+                    );
+                }
                 use crate::admission::{Admission, LogsAdmission};
                 use crate::store::reminder::RecordsReminders;
                 let (Message::HardAbrupt(request)
@@ -402,13 +534,19 @@ impl SendsRequests for RunningNexus {
                 );
             }
             drop(_turn);
-            match (admitted, direct_lease) {
-                (Ok(PrivateSendResponse::SendAccepted(acceptance)), Some(lease)) => {
-                    self.complete_direct_send(&recipient, acceptance, &lease)
-                }
-                (Ok(private_response), _) => {
+            match (admitted, direct_lease, boundary) {
+                #[cfg(test)]
+                (
+                    Ok(PrivateSendResponse::SendAccepted(acceptance)),
+                    Some(lease),
+                    SendResponseBoundary::NativeDelivery,
+                ) => self.complete_direct_send(&recipient, acceptance, &lease),
+                (Ok(private_response), _, _) => {
                     let pending = matches!(private_response, PrivateSendResponse::SendAccepted(_))
-                        .then(|| PendingSend { address: recipient });
+                        .then(|| PendingSend {
+                            address: recipient,
+                            pane_input,
+                        });
                     let response =
                         crate::message_projection::ProjectsSendResponse::visible_send_response(
                             &private_response,
@@ -420,7 +558,7 @@ impl SendsRequests for RunningNexus {
                         _pending_answer: None,
                     }
                 }
-                (Err(error), _) => {
+                (Err(error), _, _) => {
                     PrivateSendResponse::Refused(Refusal::Store(error.to_string())).into()
                 }
             }
@@ -450,67 +588,6 @@ impl SendsRequests for RunningNexus {
                 // turn an admitted request into a false admission refusal.
                 answer
             }
-        }
-    }
-
-    fn live_awake_flow(&self, address: &Address) -> Option<String> {
-        let metaflow = self.store.metaflow(address).ok()??;
-        let flow_ethos::State::Awake(flow_id) = metaflow.state else {
-            return None;
-        };
-        (self
-            .store
-            .flow_is_live(&flow_id.0)
-            .ok()
-            .filter(|live| *live)
-            .map(|_| flow_id))
-        .map(|value| value.0)
-    }
-
-    fn deliver_all(&self, address: Address) -> Output {
-        let turn = self
-            .dispatch_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.rest_ended_awake(&address);
-        let asleep = match self.store.metaflow(&address) {
-            Ok(Some(metaflow)) => {
-                if metaflow.queue.0.is_empty() {
-                    return Output::Drained(signal_flow::VisibleDrainOutcome {
-                        address: address.clone(),
-                        visible_drain_state: signal_flow::VisibleDrainState::Delivered,
-                    });
-                }
-                metaflow.state == flow_ethos::State::Asleep
-            }
-            Ok(None) => {
-                return Output::Refused(Refusal::Unknown(Unknown_Data::Address(address)));
-            }
-            Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
-        };
-        if let Err(error) = self.store.force_queue_wake(&address) {
-            return Output::Refused(Refusal::Store(error.to_string()));
-        }
-        if !asleep {
-            self.drain_all(address.clone());
-        }
-        drop(turn);
-        if asleep {
-            self.wake_due(address.clone());
-        }
-        match self.store.metaflow(&address) {
-            Ok(Some(metaflow)) if metaflow.queue.0.is_empty() => {
-                Output::Drained(signal_flow::VisibleDrainOutcome {
-                    address: address.clone(),
-                    visible_drain_state: signal_flow::VisibleDrainState::Delivered,
-                })
-            }
-            Ok(Some(_metaflow)) => Output::Drained(signal_flow::VisibleDrainOutcome {
-                address: address.clone(),
-                visible_drain_state: signal_flow::VisibleDrainState::Held,
-            }),
-            Ok(None) => Output::Refused(Refusal::Unknown(Unknown_Data::Address(address))),
-            Err(error) => Output::Refused(Refusal::Store(error.to_string())),
         }
     }
 }
@@ -1411,6 +1488,7 @@ impl CompletesDirectSends for RunningNexus {
                 private_response,
                 pending: Some(PendingSend {
                     address: address.clone(),
+                    pane_input: None,
                 }),
                 _pending_answer: None,
             };
@@ -1500,6 +1578,7 @@ impl CompletesDirectSends for RunningNexus {
                             private_response,
                             pending: Some(PendingSend {
                                 address: address.clone(),
+                                pane_input: None,
                             }),
                             _pending_answer: None,
                         }

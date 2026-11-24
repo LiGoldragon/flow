@@ -1,15 +1,20 @@
 //! Atomic accounting for a cohort submitted as one native input.
 
+use super::attempt_membership::KeepsAttemptMemberships;
 use super::logical_delivery::{
     AllocatesLogicalCursor, CurrentLogicalDelivery, LogicalDeliveryCounter, LogicalDeliveryEvent,
-    NextCursor,
+    NextCursor, StagesLogicalTransitions,
 };
 use super::queue_delivery::{
     AccountsQueueDelivery, COUNTER_KEY, EndsQueueDeliveryPhase, NativeRequestId, NextAttempt,
-    NextRequest, QueueDeliveryAttempt, QueueDeliveryPhase, RequestState, StoredDeliveryRequest,
+    NextRequest, QueueDeliveryAttempt, QueueDeliveryPhase, RequestState, ReservesAttempts,
+    StoredDeliveryRequest,
 };
 use super::*;
-use crate::generated::memory::{SubmittedCohortOrigin, SubmittedDeliveryCohort};
+use crate::generated::memory::{
+    ParkedStartupCohort, SubmittedCohortOrigin, SubmittedDeliveryCohort,
+};
+use crate::waking::AnchorsSessionStart;
 use flow_ethos::QueueEntry;
 use meta_signal_flow::{QueueAttemptId, QueueEvidence, QueueRequestId};
 use signal_flow::DeliveryState;
@@ -112,10 +117,258 @@ impl ReadsSubmittedCohorts for FlowStore {
     }
 }
 
+impl EngineRecord for ParkedStartupCohort {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.launch_request_id.0.clone())
+    }
+}
+
+impl MemoryDefinition for ParkedStartupCohort {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-parked-startup-cohort-v1")
+    }
+}
+
+pub(super) trait DescribesParkedStartups {
+    const TABLE_NAME: &'static str;
+    const FAMILY_NAME: &'static str;
+    fn descriptor() -> TableDescriptor<ParkedStartupCohort>;
+}
+
+impl DescribesParkedStartups for ParkedStartupCohort {
+    const TABLE_NAME: &'static str = "flow_nexus_parked_startup_cohorts";
+    const FAMILY_NAME: &'static str = "flow-nexus-parked-startup-cohorts";
+
+    fn descriptor() -> TableDescriptor<ParkedStartupCohort> {
+        TableDescriptor::new(
+            TableName::new(Self::TABLE_NAME),
+            FamilyName::new(Self::FAMILY_NAME),
+            Self::schema_hash(),
+        )
+    }
+}
+
+pub(crate) trait ParksGroupedStartups {
+    fn park_grouped_startup(
+        &self,
+        address: &Address,
+        launch_request_id: &signal_flow::LaunchRequestId,
+        entries: &[QueueEntry],
+    ) -> Result<(), StoreError>;
+
+    fn parked_grouped_startup(
+        &self,
+        launch_request_id: &str,
+    ) -> Result<Option<ParkedStartupCohort>, StoreError>;
+
+    fn attach_parked_startup(
+        &self,
+        flow_id: &str,
+        parked: &ParkedStartupCohort,
+    ) -> Result<Vec<QueueDeliveryAttempt>, StoreError>;
+}
+
+impl ParksGroupedStartups for FlowStore {
+    fn park_grouped_startup(
+        &self,
+        address: &Address,
+        launch_request_id: &signal_flow::LaunchRequestId,
+        entries: &[QueueEntry],
+    ) -> Result<(), StoreError> {
+        use super::delivery_group::SelectsDeliveryGroups;
+        let _guard = self
+            .logical_deliveries
+            .write_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(mut stored) = self.stored_metaflow(address)? else {
+            return Err(StoreError::StateInvariant);
+        };
+        if stored.metaflow.state != flow_ethos::State::Asleep
+            || !stored.metaflow.queue.0.starts_with(entries)
+            || !self.contains_delivery_group(entries)?
+        {
+            return Err(StoreError::StateInvariant);
+        }
+        let mut ids = Vec::with_capacity(entries.len());
+        let mut commit = self.engine.begin_atomic_commit();
+        let mut held = std::collections::HashSet::new();
+        for entry in entries {
+            if !held.insert(entry.logical_delivery_id.clone()) {
+                return Err(StoreError::StateInvariant);
+            }
+            let key = RecordKey::new(entry.logical_delivery_id.0.clone());
+            let rows = self
+                .engine
+                .match_records(QueryPlan::key(self.logical_deliveries.current, key.clone()))?;
+            let [current] = rows.records() else {
+                return Err(StoreError::StateInvariant);
+            };
+            if current.archived_cursor.0.is_some()
+                || current.delivery_snapshot.address != *address
+                || !matches!(
+                    current.delivery_snapshot.delivery_state,
+                    DeliveryState::Queued | DeliveryState::Retryable(_)
+                )
+            {
+                return Err(StoreError::StateInvariant);
+            }
+            let rows = self
+                .engine
+                .match_records(QueryPlan::key(self.queue_delivery.requests, key))?;
+            let [request] = rows.records() else {
+                return Err(StoreError::StateInvariant);
+            };
+            if request.address != *address
+                || request.request_state != RequestState::Queued
+                || request.queue_evidence != QueueEvidence::Logical(entry.clone())
+            {
+                return Err(StoreError::StateInvariant);
+            }
+            let mut request = request.clone();
+            request.request_state = RequestState::Parked;
+            commit = commit.mutate(self.queue_delivery.requests, request);
+            ids.push(entry.logical_delivery_id.clone());
+        }
+        stored.metaflow.queue.0.drain(..entries.len());
+        let commit = self
+            .stage_logical_transitions(&ids, &[DeliveryState::Uncertain], commit)?
+            .mutate(self.metaflows, stored)
+            .assert(
+                self.logical_deliveries.parked_startups,
+                ParkedStartupCohort {
+                    launch_request_id: launch_request_id.clone(),
+                    address: address.clone(),
+                    queue_entry_vector: entries.to_vec(),
+                },
+            );
+        self.engine.commit_atomic(commit)?;
+        self.launch_changes.announce();
+        Ok(())
+    }
+
+    fn parked_grouped_startup(
+        &self,
+        launch_request_id: &str,
+    ) -> Result<Option<ParkedStartupCohort>, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.logical_deliveries.parked_startups,
+            RecordKey::new(launch_request_id),
+        ))?;
+        match rows.records() {
+            [] => Ok(None),
+            [parked] => Ok(Some(parked.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
+    fn attach_parked_startup(
+        &self,
+        flow_id: &str,
+        parked: &ParkedStartupCohort,
+    ) -> Result<Vec<QueueDeliveryAttempt>, StoreError> {
+        let _guard = self
+            .logical_deliveries
+            .write_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if parked.queue_entry_vector.is_empty()
+            || self
+                .parked_grouped_startup(&parked.launch_request_id.0)?
+                .as_ref()
+                != Some(parked)
+        {
+            return Err(StoreError::StateInvariant);
+        }
+        let launch = self
+            .launch_attempt(&parked.launch_request_id.0)?
+            .ok_or(StoreError::StateInvariant)?;
+        let native = launch
+            .native_launch_binding_option
+            .ok_or(StoreError::StateInvariant)?;
+        let node = self.flow_node(flow_id)?.ok_or(StoreError::StateInvariant)?;
+        let metaflow = self
+            .stored_metaflow(&parked.address)?
+            .ok_or(StoreError::StateInvariant)?;
+        if launch.launch_profile.address != parked.address
+            || native.launch_request_id != parked.launch_request_id
+            || native.flow_id.0 != flow_id
+            || native.native_session_id.0 != node.session_id.0
+            || native.harness_kind != node.harness_kind
+            || metaflow.metaflow.state != flow_ethos::State::Awake(native.flow_id.clone())
+        {
+            return Err(StoreError::StateInvariant);
+        }
+        let reservation = self.reserve_attempts(
+            i64::try_from(parked.queue_entry_vector.len())
+                .map_err(|_| StoreError::StateInvariant)?,
+        )?;
+        let first = reservation.first_attempt;
+        let mut commit = self.write_reservation(self.engine.begin_atomic_commit(), reservation);
+        let mut attempts = Vec::with_capacity(parked.queue_entry_vector.len());
+        for (index, entry) in parked.queue_entry_vector.iter().enumerate() {
+            let request_id = QueueRequestId(entry.logical_delivery_id.0.clone());
+            let rows = self.engine.match_records(QueryPlan::key(
+                self.queue_delivery.requests,
+                RecordKey::new(request_id.0.clone()),
+            ))?;
+            let [request] = rows.records() else {
+                return Err(StoreError::StateInvariant);
+            };
+            if request.address != parked.address
+                || request.request_state != RequestState::Parked
+                || request.queue_evidence != QueueEvidence::Logical(entry.clone())
+            {
+                return Err(StoreError::StateInvariant);
+            }
+            let id = first
+                .checked_add(i64::try_from(index).map_err(|_| StoreError::StateInvariant)?)
+                .ok_or(StoreError::StateInvariant)?;
+            let attempt = QueueDeliveryAttempt {
+                queue_request_id: request_id,
+                queue_attempt_id: QueueAttemptId(format!("queue-attempt-{id:016x}")),
+                native_request_id: NativeRequestId(id),
+                flow_id: native.flow_id.clone(),
+                thread_id: crate::generated::memory::ThreadId(native.native_session_id.0.clone()),
+                harness_kind: native.harness_kind.clone(),
+                native_history_anchor: native.harness_kind.session_start_anchor(),
+                address: parked.address.clone(),
+                queue_evidence: request.queue_evidence.clone(),
+                queue_delivery_phase: QueueDeliveryPhase::Uncertain(None),
+            };
+            commit = self.commit_attempt(commit, attempt.clone())?;
+            attempts.push(attempt);
+        }
+        self.engine.commit_atomic(
+            commit
+                .retract(self.logical_deliveries.parked_startups, parked.record_key())
+                .assert(
+                    self.logical_deliveries.cohorts,
+                    SubmittedDeliveryCohort {
+                        submitted_cohort_origin: SubmittedCohortOrigin::Startup(
+                            parked.launch_request_id.clone(),
+                        ),
+                        queue_attempt_id_vector: attempts
+                            .iter()
+                            .map(|attempt| attempt.queue_attempt_id.clone())
+                            .collect(),
+                    },
+                ),
+        )?;
+        self.launch_changes.announce();
+        Ok(attempts)
+    }
+}
+
 pub(crate) trait StagesUncertainCohorts {
     /// The caller holds the dispatch gate from preparation through native I/O.
     /// Every member is parked before that I/O; recovery therefore retains the
     /// uncertainty of the whole submitted input without submitting its suffix.
+    #[cfg(test)]
     fn mark_startup_uncertain(
         &self,
         address: &Address,
@@ -131,6 +384,7 @@ pub(crate) trait StagesUncertainCohorts {
 }
 
 impl StagesUncertainCohorts for FlowStore {
+    #[cfg(test)]
     fn mark_startup_uncertain(
         &self,
         address: &Address,
@@ -312,11 +566,7 @@ impl StagesUncertainCohorts for FlowStore {
                 attempt.queue_evidence = evidence;
             }
             attempt.queue_delivery_phase = QueueDeliveryPhase::Uncertain(None);
-            commit = if index == 0 {
-                commit.mutate(self.queue_delivery.attempts, attempt.clone())
-            } else {
-                commit.assert(self.queue_delivery.attempts, attempt.clone())
-            };
+            commit = self.commit_attempt(commit, attempt.clone())?;
             attempts.push(attempt);
 
             let current_rows = self.engine.match_records(QueryPlan::key(

@@ -125,7 +125,9 @@ use crate::store::effort_configuration::ReadsEffort;
 use crate::store::events::RecordedHarnessEvent;
 use crate::store::events::RecordsHarnessEvents;
 use crate::store::events::{IdentifiesNativeStop, RecordedStop};
-use crate::store::group_uncertainty::{ReadsSubmittedCohorts, StagesUncertainCohorts};
+use crate::store::group_uncertainty::{
+    ParksGroupedStartups, ReadsSubmittedCohorts, StagesUncertainCohorts,
+};
 use crate::store::handover::HoldsHandovers;
 use crate::store::logical_delivery::{
     RecordsLogicalDeliveries, SimplifiedReplyBinding, SimplifiedReplyStanding,
@@ -909,6 +911,7 @@ pub(crate) trait WakesInParts {
         metaflow: &Metaflow,
         fresh: FreshContext,
         text: &str,
+        launch_request_id: signal_flow::LaunchRequestId,
     ) -> Result<FreshStarted, FreshRefusal>;
     fn settle_startup(
         &self,
@@ -3505,6 +3508,32 @@ impl ParksCohort for RunningNexus {
                 })) => flow_id,
                 _ => continue,
             };
+            // A parked startup can mature only into this seat's known
+            // launch. This path reads receipt evidence and submits no prompt.
+            {
+                let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+                let parked = self
+                    .store
+                    .launch_requests_bound_to(&flow_id.0)
+                    .ok()
+                    .and_then(|mut launches| {
+                        let launch = launches.pop()?;
+                        let parked = self.store.parked_grouped_startup(&launch).ok()??;
+                        let profile = self.store.composable_launch_profile(&launch).ok()??;
+                        Some((launch, parked, profile.flow_kind))
+                    });
+                if let Some((launch, parked, kind)) = parked
+                    && parked.address == *address
+                {
+                    let _ = self.settle_startup(
+                        address,
+                        &flow_id.0,
+                        &launch,
+                        &parked.queue_entry_vector,
+                        kind == signal_flow::FlowKind::Simplified,
+                    );
+                }
+            }
             let mut covered = HashSet::new();
             for attempt in self.typed(address, &flow_id.0) {
                 if !covered.insert(attempt.queue_attempt_id.0.clone()) {
@@ -3781,6 +3810,21 @@ impl CarriesStartup for RunningNexus {
             .store
             .composable_launch_profile(&launch_request_id)
             .ok()??;
+        if let Some(parked) = self.store.parked_grouped_startup(&launch_request_id).ok()? {
+            if parked.address != *address {
+                return None;
+            }
+            let startup = parked.queue_entry_vector;
+            return self
+                .settle_startup(
+                    address,
+                    flow_id,
+                    &launch_request_id,
+                    &startup,
+                    profile.flow_kind == signal_flow::FlowKind::Simplified,
+                )
+                .then_some(startup);
+        }
         let queue = self.store.metaflow(address).ok()??.queue.0;
         let anchor = node.harness_kind.session_start_anchor();
         let parked = self
@@ -3948,6 +3992,24 @@ impl WakesInParts for RunningNexus {
                 return false;
             }
         }
+        match self.store.parked_grouped_startup(launch_request_id) {
+            Ok(Some(parked))
+                if parked.address == *address && parked.queue_entry_vector == startup =>
+            {
+                let Ok(attempts) = self.store.attach_parked_startup(flow_id, &parked) else {
+                    return false;
+                };
+                let Some(head) = attempts.first() else {
+                    return false;
+                };
+                if receipt.is_some() {
+                    let _ = self.reconcile_delivery(head);
+                }
+                return true;
+            }
+            Ok(None) => {}
+            _ => return false,
+        }
         // A Started response proves the first prompt was submitted, and the
         // first prompt carried the batch; the receipt proves it was taken.
         // A receipt not yet observed leaves the batch typed input awaiting
@@ -4021,6 +4083,14 @@ impl WakesInParts for RunningNexus {
             return Err(WakeRefusal::Unplaceable);
         };
         let simplified = fresh.flow_kind() == &signal_flow::FlowKind::Simplified;
+        let launch_request_id = signal_flow::LaunchRequestId(format!(
+            "wake-{}-{}",
+            metaflow.past.0.len(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or_default()
+        ));
         // At the same dispatch cut as declaration edits and cancellation, the
         // frozen plan must still describe this recipient. Native observations
         // and composition stay outside this cutoff.
@@ -4076,13 +4146,13 @@ impl WakesInParts for RunningNexus {
                 let startup_text = entries.prompt_text(address);
                 if grouped {
                     self.store
-                        .mark_startup_uncertain(address, &entries)
+                        .park_grouped_startup(address, &launch_request_id, &entries)
                         .map_err(|_| WakeRefusal::StoreUnreadable)?;
                 }
                 break (current, flow_ethos::Queue(entries), startup_text);
             }
         };
-        let started = match self.start_fresh(&metaflow, fresh, &startup_text) {
+        let started = match self.start_fresh(&metaflow, fresh, &startup_text, launch_request_id) {
             Ok(started) => started,
             Err(FreshRefusal::Failed(failure)) => {
                 return Err(WakeRefusal::FreshNotStarted(failure));
@@ -4158,6 +4228,7 @@ impl WakesInParts for RunningNexus {
         metaflow: &Metaflow,
         fresh: FreshContext,
         text: &str,
+        launch_request_id: signal_flow::LaunchRequestId,
     ) -> Result<FreshStarted, FreshRefusal> {
         let address = &metaflow.address;
         // The seat's model is the one configured for its Model.
@@ -4172,17 +4243,9 @@ impl WakesInParts for RunningNexus {
             }
             Err(_) => return Err(FreshRefusal::Failed(Failed_Data::StoreRefused)),
         };
-        let launch_request_id = format!(
-            "wake-{}-{}",
-            metaflow.past.0.len(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_nanos())
-                .unwrap_or_default()
-        );
         let seat = FreshSeat {
             address: address.clone(),
-            launch_request_id: launch_request_id.clone(),
+            launch_request_id: launch_request_id.0.clone(),
             model_name: model,
             effort: self
                 .store
@@ -4203,7 +4266,7 @@ impl WakesInParts for RunningNexus {
         profile.flow_id_option = metaflow.past.0.last().cloned();
         self.start_unbound(profile).map(|flow_id| FreshStarted {
             flow_id,
-            launch_request_id,
+            launch_request_id: launch_request_id.0,
         })
     }
 

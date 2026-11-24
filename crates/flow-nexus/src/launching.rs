@@ -287,8 +287,13 @@ impl LaunchesFlows for RunningNexus {
         if let Some(outcome) = outcome {
             return outcome.response(&self.store);
         }
+        use crate::store::group_uncertainty::ParksGroupedStartups;
         let resumable = existing.as_ref().is_some_and(|attempt| {
             attempt.launch_attempt_phase == LaunchAttemptPhase::Reserved
+                && matches!(
+                    self.store.parked_grouped_startup(&launch_request_id.0),
+                    Ok(None)
+                )
                 && !self.permaflow_held(profile.address.clone())
                 && self
                     .store
@@ -1252,7 +1257,15 @@ impl crate::generated::overriding::ResumesHeldLaunches for RunningNexus {
         let Ok(markers) = self.store.held_launches() else {
             return false;
         };
+        use crate::store::group_uncertainty::ParksGroupedStartups;
         for marker in markers {
+            if !matches!(
+                self.store
+                    .parked_grouped_startup(&marker.launch_request_id.0),
+                Ok(None)
+            ) {
+                continue;
+            }
             let Ok(Some(attempt)) = self.store.launch_attempt(&marker.launch_request_id.0) else {
                 continue;
             };

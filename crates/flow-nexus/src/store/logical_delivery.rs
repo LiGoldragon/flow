@@ -260,6 +260,7 @@ pub(crate) struct LogicalDeliveryTables {
     pub(crate) store_identity: TableReference<StoredStoreIdentity>,
     pub(crate) groups: TableReference<crate::generated::memory::LogicalDeliveryGroup>,
     pub(crate) cohorts: TableReference<crate::generated::memory::SubmittedDeliveryCohort>,
+    pub(crate) parked_startups: TableReference<crate::generated::memory::ParkedStartupCohort>,
     pub(crate) write_gate: Mutex<()>,
     pending_answers: std::sync::Arc<PendingAdmissionAnswers>,
 }
@@ -305,6 +306,7 @@ pub(crate) struct LogicalDeliveryDescriptors {
     pub(crate) store_identity: TableDescriptor<StoredStoreIdentity>,
     pub(crate) groups: TableDescriptor<crate::generated::memory::LogicalDeliveryGroup>,
     pub(crate) cohorts: TableDescriptor<crate::generated::memory::SubmittedDeliveryCohort>,
+    pub(crate) parked_startups: TableDescriptor<crate::generated::memory::ParkedStartupCohort>,
 }
 pub(crate) trait DeclaresLogicalDeliveryTables {
     fn descriptors() -> LogicalDeliveryDescriptors;
@@ -318,6 +320,7 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
         LogicalDeliveryDescriptors {
             groups: <crate::generated::memory::LogicalDeliveryGroup as super::delivery_group::DescribesDeliveryGroups>::descriptor(),
             cohorts: <crate::generated::memory::SubmittedDeliveryCohort as super::group_uncertainty::DescribesSubmittedCohorts>::descriptor(),
+            parked_startups: <crate::generated::memory::ParkedStartupCohort as super::group_uncertainty::DescribesParkedStartups>::descriptor(),
             counter: TableDescriptor::new(
                 COUNTER_TABLE_NAME,
                 FamilyName::new("flow-nexus-logical-delivery-counter"),
@@ -369,6 +372,7 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
         Ok(LogicalDeliveryTables {
             groups: engine.register_table(descriptors.groups)?,
             cohorts: engine.register_table(descriptors.cohorts)?,
+            parked_startups: engine.register_table(descriptors.parked_startups)?,
             counter: engine.register_table(descriptors.counter)?,
             current: engine.register_table(descriptors.current)?,
             events: engine.register_table(descriptors.events)?,

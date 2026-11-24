@@ -86,13 +86,13 @@ impl CommitsAttemptState for FlowStore {
 
 /// The attempt numbers one commit takes, each with its request number, and
 /// the counter as it stands after them.
-struct AttemptReservation {
-    first_attempt: i64,
+pub(super) struct AttemptReservation {
+    pub(super) first_attempt: i64,
     counter: DeliveryCounter,
     counter_exists: bool,
 }
 
-trait ReservesAttempts {
+pub(super) trait ReservesAttempts {
     /// Reserves `count` consecutive attempt numbers from the stored counter.
     fn reserve_attempts(&self, count: i64) -> Result<AttemptReservation, StoreError>;
     /// Writes the counter `reservation` leaves into `commit`.

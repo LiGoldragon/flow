@@ -34,6 +34,14 @@ pub enum SubmittedCohortOrigin {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ParkedStartupCohort {
+    pub launch_request_id: signal_flow::LaunchRequestId,
+    pub address: signal_flow::Address,
+    pub queue_entry_vector: std::vec::Vec<signal_flow::QueueEntry>,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum LaunchOutcome {
     Started(flow_nexus::LaunchedRecord),
     Replaced(flow_nexus::ReplacedRecord),

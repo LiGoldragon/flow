@@ -4563,6 +4563,11 @@ case "$*" in
       esac
       prev=$a
     done
+    if [ "$harness" = claude ] && [ -z "$resumed" ] && [ -f "$S/fresh-claude-refused-once" ]; then
+      rm -f "$S/fresh-claude-refused-once"
+      printf '%s\n' '{{"id":"cli:agent:start","error":{{"code":"agent_start_failed","message":"fixture refused fresh start before input"}}}}'
+      exit 1
+    fi
     # A resume HOLD_START holds is held until RELEASE_START, START_HELD
     # telling the test it is held; RESUME_REFUSED refuses it.
     if [ -n "$resumed" ] && [ -f "$S/hold-start" ]; then
@@ -9190,7 +9195,7 @@ fn cancelled_send_several_members_leave_ordered_survivors_and_later_work_in_firs
             fixture.nexus.send_several_requests(
                 SendSeveralRequest {
                     address: at.clone(),
-                    sendable_message_vector: vec![SendableMessage::Soft(SendableRequest::Notice(
+                    sendable_message_vector: vec![SendableMessage::Soft(SendableRequest::Order(
                         "cancel-group-later".into()
                     ))]
                 },
@@ -9607,7 +9612,15 @@ fn awake_simplified_group_binds_actual_nonhead_awaiting_input() {
         vec![],
         vec![],
     ));
+    let node = fixture.nexus.store.flow_node("abc123").unwrap().unwrap();
+    let HerdrRouteSelection::Available(route) = node.herdr_route_selection else {
+        panic!("fixture route");
+    };
     let mut agent = fixture.settled_agent();
+    agent["name"] = serde_json::json!(route.herdr_agent_name.0);
+    agent["workspace_id"] = serde_json::json!(route.herdr_workspace_id.0);
+    agent["terminal_id"] = serde_json::json!(route.herdr_terminal_id.0);
+    agent["pane_id"] = serde_json::json!(route.herdr_pane_id.0);
     agent["agent"] = serde_json::Value::String("claude".into());
     agent["agent_session"] = serde_json::json!({ "source":"herdr:claude", "agent":"claude", "kind":"id", "value":launched.session });
     fixture.accept_pane_operations(vec![agent], PromptFixture::PromptedUnrecorded("w1:p3"));
@@ -9764,7 +9777,7 @@ fn post_premark_cancel_uses_actual_cancel_and_keeps_frozen_group() {
         SentBy::Unbound,
         vec![
             Request::Notice("context".into()),
-            Request::Order("awaiting".into()),
+            Request::Question("awaiting".into()),
         ],
     );
     cutoff_group(
@@ -9925,7 +9938,7 @@ fn undeclared_receiver_uses_previous_simplified_profile_at_group_cutoff() {
     fixture
         .nexus
         .store
-        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec![], vec![]));
     assert!(
         fixture
             .nexus
@@ -9934,13 +9947,6 @@ fn undeclared_receiver_uses_previous_simplified_profile_at_group_cutoff() {
             .unwrap()
             .is_none()
     );
-    let sleeping = fixture.nexus.store.metaflow(&at).unwrap().unwrap();
-    let WakePlan::Fresh(fresh) = fixture.nexus.wake_plan(&sleeping) else {
-        panic!("previous profile supplies ordinary wake evidence");
-    };
-    assert_eq!(fresh.flow_kind, signal_flow::FlowKind::Simplified);
-    assert_eq!(fresh.system_modules, launched.profile.system_modules);
-    assert_eq!(fresh.prompt_modules, launched.profile.prompt_modules);
     let accepted = cutoff_group(
         &fixture,
         &at,
@@ -9950,6 +9956,16 @@ fn undeclared_receiver_uses_previous_simplified_profile_at_group_cutoff() {
             Request::Question("fallback second".into()),
         ],
     );
+    let mut queued = stored(&fixture, Model::Sol);
+    queued.past.0.push(flow_ethos::FlowId("abc123".into()));
+    fixture.nexus.store.seed_metaflow(queued);
+    let sleeping = fixture.nexus.store.metaflow(&at).unwrap().unwrap();
+    let WakePlan::Fresh(fresh) = fixture.nexus.wake_plan(&sleeping) else {
+        panic!("previous profile supplies ordinary wake evidence");
+    };
+    assert_eq!(fresh.flow_kind, signal_flow::FlowKind::Simplified);
+    assert_eq!(fresh.system_modules, launched.profile.system_modules);
+    assert_eq!(fresh.prompt_modules, launched.profile.prompt_modules);
     let world = fixture.fresh_claude_world();
     fixture.nexus.wake_due(at.clone());
     assert_eq!(world.claude_starts(), 0);
@@ -10025,6 +10041,17 @@ fn send_several_simplified_admission_refuses_second_awaiting_before_later_member
 
 #[test]
 fn send_several_refused_start_stays_parked_after_later_ordinary_delivery_and_reopen() {
+    for boundary in [FreshGroupRefusal::Composition, FreshGroupRefusal::Native] {
+        send_several_parks_a_refused_start(boundary);
+    }
+}
+
+enum FreshGroupRefusal {
+    Composition,
+    Native,
+}
+
+fn send_several_parks_a_refused_start(boundary: FreshGroupRefusal) {
     use crate::store::queue_delivery::AccountsQueueDelivery;
     let mut fixture = NexusFixture::new();
     ended_claude(&fixture);
@@ -10044,14 +10071,33 @@ fn send_several_refused_start_stays_parked_after_later_ordinary_delivery_and_reo
             Request::Question("parked group second".into()),
         ],
     );
-    configure_secondary_model(&fixture, "haiku");
     let world = fixture.fresh_world("unused");
-    assert!(matches!(
-        fixture.nexus.perform(Operation::Wake(at.clone())),
-        Outcome::Failed(Failed_Data::CompositionRefused(
-            signal_flow::CompositionRefusal::InexactModel
-        ))
-    ));
+    match boundary {
+        FreshGroupRefusal::Composition => configure_secondary_model(&fixture, "haiku"),
+        FreshGroupRefusal::Native => {
+            fs::write(world.state.join("fresh-claude-refused-once"), "").unwrap();
+        }
+    }
+    let refused = fixture.nexus.perform(Operation::Wake(at.clone()));
+    match boundary {
+        FreshGroupRefusal::Composition => assert!(
+            matches!(
+                refused,
+                Outcome::Failed(Failed_Data::CompositionRefused(
+                    signal_flow::CompositionRefusal::InexactModel
+                ))
+            ),
+            "{refused:?}"
+        ),
+        FreshGroupRefusal::Native => assert!(
+            matches!(
+                refused,
+                Outcome::Failed(Failed_Data::SpawnRefused(_))
+                    | Outcome::Failed(Failed_Data::LaunchRefused(_))
+            ),
+            "{refused:?}"
+        ),
+    }
     assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
     let assert_parked = |store: &crate::store::FlowStore| {
         for member in &group {
@@ -10092,7 +10138,13 @@ fn send_several_refused_start_stays_parked_after_later_ordinary_delivery_and_reo
         Outcome::Woken(_)
     ));
     let turns = world.user_turns(&fixture);
-    assert_eq!(world.claude_starts(), 1);
+    assert_eq!(
+        world.claude_starts(),
+        match boundary {
+            FreshGroupRefusal::Composition => 1,
+            FreshGroupRefusal::Native => 2,
+        }
+    );
     assert!(
         turns
             .iter()
@@ -10187,4 +10239,123 @@ fn send_several_drain_receipt_candidates_require_exact_full_payload() {
         assert!(candidates.iter().all(|(_, text)| text != &fragment));
         assert!(fixture.nexus.find_receipt(attempt).is_err());
     }
+}
+
+#[test]
+fn send_several_reserved_start_reopens_and_releases_for_later_ordinary_work() {
+    use crate::generated::operation::LaunchReservation;
+    use crate::store::group_uncertainty::ParksGroupedStartups;
+    use crate::store::{ReadsLaunchAttempt, RecordsLaunchOutcome};
+    let mut fixture = NexusFixture::new();
+    let previous = ended_claude(&fixture);
+    fixture.claims_flow_ids();
+    let at = address(Model::Sol);
+    let launch = signal_flow::LaunchRequestId("reserved-parked-group".into());
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    cutoff_group(
+        &fixture,
+        &at,
+        SentBy::Unbound,
+        vec![
+            Request::Order("held group first".into()),
+            Request::Question("held group second".into()),
+        ],
+    );
+    let queued = stored(&fixture, Model::Sol).queue.0;
+    fixture
+        .nexus
+        .store
+        .park_grouped_startup(&at, &launch, &queued)
+        .unwrap();
+    let mut profile = previous.profile;
+    profile.launch_request_id = launch.clone();
+    profile.instruction_prompt = signal_flow::InstructionPrompt(queued.prompt_text(&at));
+    let Outcome::Composed(composed) = fixture.nexus.perform(Operation::Compose(profile)) else {
+        panic!("fixture reserved prompt composes");
+    };
+    assert!(matches!(
+        fixture
+            .nexus
+            .perform(Operation::ParkLaunch(LaunchReservation {
+                composed_launch: composed,
+                origin: Origin::Unbound,
+            })),
+        Outcome::Reserved(_)
+    ));
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .launch_attempt(&launch.0)
+            .unwrap()
+            .unwrap()
+            .launch_attempt_phase,
+        signal_flow::LaunchAttemptPhase::Reserved
+    );
+    let donor = NexusFixture::new();
+    drop(std::mem::replace(
+        &mut fixture.nexus.store,
+        donor.nexus.store.clone(),
+    ));
+    fixture.nexus.store = std::sync::Arc::new(
+        crate::store::FlowStore::open(&fixture.directory.path().join("flow.sema")).unwrap(),
+    );
+    let signal_flow::PrivateSendResponse::SendAccepted(later) = fixture
+        .nexus
+        .store
+        .accept_logical_delivery(
+            &at,
+            SentBy::Unbound,
+            Delivery::Queue,
+            Message::Soft(Request::Order("ordinary after reservation".into())),
+            None,
+        )
+        .unwrap()
+    else {
+        panic!("later request admitted");
+    };
+    let world = fixture.fresh_claude_world();
+    assert!(matches!(
+        fixture.nexus.perform(Operation::Wake(at.clone())),
+        Outcome::Woken(_)
+    ));
+    assert_eq!(world.claude_starts(), 1);
+    let turns = world.user_turns(&fixture);
+    assert!(
+        turns
+            .iter()
+            .any(|turn| turn.contains("ordinary after reservation"))
+    );
+    assert!(
+        turns
+            .iter()
+            .all(|turn| !turn.contains("held group first") && !turn.contains("held group second"))
+    );
+    assert!(matches!(
+        fixture.nexus.store.launch_outcome(&launch.0).unwrap(),
+        Some(crate::store::LaunchOutcome::StartRejected(_))
+    ));
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .parked_grouped_startup(&launch.0)
+            .unwrap()
+            .unwrap()
+            .queue_entry_vector,
+        queued,
+    );
+    assert!(matches!(
+        fixture
+            .nexus
+            .store
+            .logical_delivery_snapshot(&later.logical_delivery_id)
+            .unwrap()
+            .unwrap()
+            .delivery_state,
+        signal_flow::DeliveryState::Delivered(_)
+    ));
 }

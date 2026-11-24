@@ -634,6 +634,8 @@ impl HoldsOpenRequests for FlowStore {
     }
 
     fn open_requests(&self, address: &Address) -> Result<Vec<QueueEntry>, StoreError> {
+        use super::group_uncertainty::ParksGroupedStartups;
+        let held = self.groups_held_from_successor_prompt(address)?;
         let mut open = Vec::new();
         for retained in self.retained_logical_requests()? {
             if retained.address != *address
@@ -651,6 +653,21 @@ impl HoldsOpenRequests for FlowStore {
                         && binding.request_closure == RequestClosure::Open
                 });
             if bound_open && self.delivered_to_be_answered(&retained.entry.logical_delivery_id)? {
+                // A successor may carry an ordinary uncertain request. A
+                // grouped payload freezes its exact input for one native
+                // submission; it may enter another prompt only after arrival.
+                if held.contains(&retained.entry.logical_delivery_id)
+                    && !self
+                        .logical_delivery_snapshot(&retained.entry.logical_delivery_id)?
+                        .is_some_and(|snapshot| {
+                            matches!(
+                                snapshot.delivery_state,
+                                DeliveryState::Delivered(_) | DeliveryState::Read
+                            )
+                        })
+                {
+                    continue;
+                }
                 open.push(retained.entry);
             }
         }

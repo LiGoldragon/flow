@@ -80,7 +80,6 @@ impl ReadsRecipientProfiles for FlowStore {
                 }
                 metaflow.past.0.last()
             }
-            _ => None,
         };
         let Some(flow_id) = flow_id else {
             return Ok(None);
@@ -1013,7 +1012,7 @@ mod tests {
     #[test]
     fn current_store_without_group_family_reopens_with_existing_archives_unchanged() {
         let (fixture, store) = Fixture::new();
-        let accepted = admit(&store, vec![order("preexisting ordinary request")]);
+        let accepted = admit_plain(&store, order("preexisting ordinary request"));
         assert!(
             store
                 .engine

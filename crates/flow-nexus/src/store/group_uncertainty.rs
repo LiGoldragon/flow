@@ -170,6 +170,12 @@ pub(crate) trait ParksGroupedStartups {
         address: &Address,
     ) -> Result<Vec<signal_flow::LaunchRequestId>, StoreError>;
 
+    /// The frozen members whose native application is not yet evidenced.
+    fn groups_held_from_successor_prompt(
+        &self,
+        address: &Address,
+    ) -> Result<std::collections::HashSet<signal_flow::LogicalDeliveryId>, StoreError>;
+
     fn attach_parked_startup(
         &self,
         flow_id: &str,
@@ -284,6 +290,41 @@ impl ParksGroupedStartups for FlowStore {
             .filter(|row| &row.address == address)
             .map(|row| row.launch_request_id.clone())
             .collect())
+    }
+
+    fn groups_held_from_successor_prompt(
+        &self,
+        address: &Address,
+    ) -> Result<std::collections::HashSet<signal_flow::LogicalDeliveryId>, StoreError> {
+        let parked = self
+            .engine
+            .match_records(QueryPlan::all(self.logical_deliveries.parked_startups))?;
+        let mut held = parked
+            .records()
+            .iter()
+            .filter(|row| row.address == *address)
+            .flat_map(|row| {
+                row.queue_entry_vector
+                    .iter()
+                    .map(|entry| entry.logical_delivery_id.clone())
+            })
+            .collect::<std::collections::HashSet<_>>();
+        let attached = self
+            .engine
+            .match_records(QueryPlan::all(self.logical_deliveries.cohorts))?;
+        for cohort in attached.records() {
+            for id in &cohort.queue_attempt_id_vector {
+                let attempt = self
+                    .queue_delivery_attempt(&id.0)?
+                    .ok_or(StoreError::StateInvariant)?;
+                if attempt.address == *address
+                    && let QueueEvidence::Logical(entry) = attempt.queue_evidence
+                {
+                    held.insert(entry.logical_delivery_id);
+                }
+            }
+        }
+        Ok(held)
     }
 
     fn attach_parked_startup(

@@ -1147,6 +1147,13 @@ fn send_several_is_one_ordered_uncertain_prompt_and_never_retyped() {
             .count(),
         1
     );
+    append_main_rows(
+        &fixture,
+        &[serde_json::json!({
+            "type": "user", "sessionId": CLAUDE_SESSION, "uuid": "several-receipt",
+            "message": { "content": payload }
+        })],
+    );
     report(
         &fixture,
         submitted(CLAUDE_SESSION, "several-receipt", &payload),

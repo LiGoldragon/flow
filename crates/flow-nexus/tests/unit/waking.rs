@@ -10507,33 +10507,39 @@ fn send_several_cancel_closes_only_the_named_parked_request_without_editing_rece
         &at,
         SentBy::Unbound,
         vec![
-            Request::Question("keeper".into()),
             Request::Question("cancelled".into()),
+            Request::Question("keeper".into()),
         ],
     );
     let selected = stored(&fixture, Model::Sol).queue.0;
     store.park_grouped_startup(&at, &launch, &selected).unwrap();
     assert_eq!(
+        fixture.nexus.close_request(&accepted[0].request_id, None),
+        Output::CloseRequestRejected(signal_flow::RequestRejection::NotYet(
+            signal_flow::ArchiveHold::DeliveryNotEnded,
+        )),
+    );
+    assert_eq!(
         fixture
             .nexus
-            .cancel(&accepted[1].request_id, &Origin::Unbound),
-        Output::Cancelled(accepted[1].request_id.clone()),
-    );
-    assert!(
-        store
-            .request_binding(&accepted[0].request_id)
-            .unwrap()
-            .is_some()
+            .cancel(&accepted[0].request_id, &Origin::Unbound),
+        Output::Cancelled(accepted[0].request_id.clone()),
     );
     assert!(
         store
             .request_binding(&accepted[1].request_id)
             .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .request_binding(&accepted[0].request_id)
+            .unwrap()
             .is_none()
     );
     for (member, expected) in accepted
         .iter()
-        .zip([DeliveryState::Uncertain, DeliveryState::Abandoned])
+        .zip([DeliveryState::Abandoned, DeliveryState::Uncertain])
     {
         assert_eq!(
             store
@@ -10555,7 +10561,7 @@ fn send_several_cancel_closes_only_the_named_parked_request_without_editing_rece
     assert_eq!(parked.parked_startup_abandonment_vector.len(), 1);
     assert_eq!(
         parked.parked_startup_abandonment_vector[0].logical_delivery_id,
-        accepted[1].logical_delivery_id
+        accepted[0].logical_delivery_id
     );
     assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
     assert!(fixture.typed().unwrap_or_default().is_empty());
@@ -10571,16 +10577,16 @@ fn send_several_cancel_closes_only_the_named_parked_request_without_editing_rece
     ));
     let attempts = store.attach_parked_startup("abc123", &parked).unwrap();
     assert!(matches!(
-        attempts[0].queue_delivery_phase,
+        attempts[1].queue_delivery_phase,
         QueueDeliveryPhase::Uncertain(_)
     ));
     assert!(matches!(
-        attempts[1].queue_delivery_phase,
+        attempts[0].queue_delivery_phase,
         QueueDeliveryPhase::Abandoned(_)
     ));
-    assert_eq!(fixture.nexus.startup_launch(&attempts[0]), Some(launch.0));
+    assert_eq!(fixture.nexus.startup_launch(&attempts[1]), Some(launch.0));
     assert_eq!(
-        fixture.nexus.cohort_runs(&attempts[0]),
+        fixture.nexus.cohort_runs(&attempts[1]),
         vec![(attempts, selected.prompt_text(&at))]
     );
     assert!(fixture.typed().unwrap_or_default().is_empty());

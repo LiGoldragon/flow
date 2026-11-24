@@ -5,6 +5,7 @@
 //! into its typed, durable records.
 
 use crate::store::delivery::RegistersDeliveryTables;
+use crate::store::delivery_group::DescribesDeliveryGroups;
 #[cfg(test)]
 use crate::test_faults;
 pub(crate) mod address_hold;
@@ -16,10 +17,12 @@ pub(crate) mod context_warnings;
 pub(crate) mod counters;
 mod created_pane;
 pub mod delivery;
+pub(crate) mod delivery_group;
 pub(crate) mod effort_configuration;
 pub(crate) mod effort_upgrade;
 mod event_upgrade;
 pub mod events;
+pub(crate) mod group_uncertainty;
 pub(crate) mod handover;
 pub(crate) mod handover_configuration;
 pub(crate) mod handover_reminders;
@@ -191,6 +194,8 @@ const META_PROTECTED_ADDRESS_CONFIGURATION_SCHEMA: &str =
 /// The families 0.53.1 added. A store 0.53.0 wrote holds every other
 /// family and none of these; it is opened, and each is registered empty.
 const ADDED_IN_0531: &[&str] = &["flow_nexus_meta_protected_address_configuration"];
+const OPTIONAL_DELIVERY_GROUP_TABLE: &str =
+    <crate::generated::memory::LogicalDeliveryGroup as DescribesDeliveryGroups>::TABLE_NAME;
 const OPTIONAL_HANDOVER_TABLE: &str = "flow_nexus_meta_handover_configuration";
 const OPTIONAL_HANDOVER_RUNTIME_TABLE: &str = "flow_nexus_handovers";
 const OPTIONAL_HANDOVER_REMINDER_TABLE: &str = "flow_nexus_handover_reminders";
@@ -2730,6 +2735,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&logical_delivery_descriptors.events)
                 .with_family(&logical_delivery_descriptors.simplified_replies)
                 .with_family(&logical_delivery_descriptors.purposes)
+                .with_family(&logical_delivery_descriptors.groups)
                 .with_family(&heartbeat_standing_descriptor)
                 .with_family(&restart_descriptor)
                 .with_family(&seat_birth_descriptor)
@@ -3686,6 +3692,7 @@ impl AppliesFlowQuery for FlowStore {
             | Input::ArchiveRequest(_)
             | Input::Release(_)
             | Input::Send(_)
+            | Input::SendSeveral(_)
             | Input::DeliverAll(_)
             | Input::BindSeat(_)
             | Input::Adopt(_)
@@ -3768,6 +3775,7 @@ impl ReservesPendingStart for FlowStore {
             | Input::ArchiveRequest(_)
             | Input::Release(_)
             | Input::Send(_)
+            | Input::SendSeveral(_)
             | Input::DeliverAll(_)
             | Input::Launch(_)
             | Input::BindSeat(_)
@@ -5734,6 +5742,12 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                 "flow-nexus-logical-delivery-purpose",
                 "flow-nexus-logical-delivery-purpose-v2",
             ),
+            OPTIONAL_DELIVERY_GROUP_TABLE => {
+                return Some((
+                    <crate::generated::memory::LogicalDeliveryGroup as DescribesDeliveryGroups>::FAMILY_NAME,
+                    crate::generated::memory::LogicalDeliveryGroup::schema_hash(),
+                ));
+            }
             "flow_nexus_request_ids" => ("flow-nexus-request-id", "flow-nexus-request-id-v1"),
             "flow_nexus_deliver_calls" => ("flow-nexus-deliver-call", "flow-nexus-deliver-call-v1"),
             "flow_nexus_store_identity" => {
@@ -6049,6 +6063,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                     || name == context_warnings::HOOK_TABLE
                     || name == context_warnings::PROGRESS_TABLE
                     || *name == RETIRED_LEAVE_OUT_TABLE
+                    || *name == OPTIONAL_DELIVERY_GROUP_TABLE
                     || *name == OPTIONAL_HANDOVER_TABLE
                     || *name == OPTIONAL_HANDOVER_RUNTIME_TABLE
                     || *name == OPTIONAL_REQUEST_ID_TABLE
@@ -6061,6 +6076,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
             }) && tables.iter().all(|name| {
                 actual.contains(*name)
                     || ADDED_IN_0531.contains(name)
+                    || *name == OPTIONAL_DELIVERY_GROUP_TABLE
                     || *name == OPTIONAL_HANDOVER_TABLE
                     || *name == OPTIONAL_HANDOVER_RUNTIME_TABLE
                     || *name == OPTIONAL_HANDOVER_REMINDER_TABLE

@@ -143,6 +143,7 @@ impl DigestsMemory for FlowStore {
         self.digest_table("send_outcomes.counter", outcomes.counter, lines_ref)?;
         self.digest_table("send_outcomes.outcomes", outcomes.outcomes, lines_ref)?;
         let logical = &self.logical_deliveries;
+        self.digest_table("logical.groups", logical.groups, lines_ref)?;
         self.digest_table("logical.counter", logical.counter, lines_ref)?;
         self.digest_table("logical.current", logical.current, lines_ref)?;
         self.digest_table("logical.events", logical.events, lines_ref)?;

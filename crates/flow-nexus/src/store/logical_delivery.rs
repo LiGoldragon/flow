@@ -3,6 +3,7 @@
 //! a materialized view used for sender-filtered reconnect snapshots.
 
 use super::ManagesMetaflowState;
+use super::delivery_group::{PreparedDeliveryGroup, SelectsDeliveryGroups};
 use super::handover::HoldsHandovers;
 use super::handover_reminders::SchedulesHandoverReminders;
 use super::metaflow::SleepsMetaflows;
@@ -21,13 +22,15 @@ use crate::generated::send_tool::{
     Target, ToolCallKey,
 };
 use datom_codec::Datomizable;
-use flow_ethos::{Delivery, Message, QueueEntry};
+use flow_ethos::{Delivery, FixedWidth, Message, QueueEntry};
 use protos::{Compactable, Protosizable};
 use sema_engine::AtomicCommit;
 use signal_flow::{
     Address, DeliverySnapshot, DeliveryState, Lock, LogicalDeliveryId, NativeReceipt, Refusal,
     Request, SendAcceptance, SendObservation, SentBy, Unknown_Data,
 };
+
+pub(super) const REQUEST_ID_SPACE: usize = 36usize.pow(flow_ethos::RequestId::WIDTH as u32);
 
 const COUNTER_KEY: &str = "counter";
 const COUNTER_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_counter");
@@ -55,8 +58,8 @@ impl DrawsRequestId for SystemRequestIdDrawer {
         const ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
         // 252 is the greatest multiple of 36 representable by one byte.  The
         // rejection keeps every base36 character equiprobable.
-        let mut id = String::with_capacity(4);
-        while id.len() < 4 {
+        let mut id = String::with_capacity(flow_ethos::RequestId::WIDTH as usize);
+        while id.len() < flow_ethos::RequestId::WIDTH as usize {
             let mut byte = [0_u8; 1];
             getrandom::fill(&mut byte).map_err(|_| StoreError::StateInvariant)?;
             if byte[0] < 252 {
@@ -171,9 +174,9 @@ pub(crate) struct VerifiedDeliveryLock {
     pub(crate) now: i64,
 }
 
-struct LogicalCursorAllocation {
-    cursor: i64,
-    existing: bool,
+pub(super) struct LogicalCursorAllocation {
+    pub(super) cursor: i64,
+    pub(super) existing: bool,
 }
 
 impl EngineRecord for LogicalDeliveryCounter {
@@ -255,6 +258,7 @@ pub(crate) struct LogicalDeliveryTables {
     pub(crate) request_ids: TableReference<RequestIdBinding>,
     pub(crate) deliver_calls: TableReference<DeliverCall>,
     pub(crate) store_identity: TableReference<StoredStoreIdentity>,
+    pub(crate) groups: TableReference<crate::generated::memory::LogicalDeliveryGroup>,
     pub(crate) write_gate: Mutex<()>,
     pending_answers: std::sync::Arc<PendingAdmissionAnswers>,
 }
@@ -298,6 +302,7 @@ pub(crate) struct LogicalDeliveryDescriptors {
     pub(crate) request_ids: TableDescriptor<RequestIdBinding>,
     pub(crate) deliver_calls: TableDescriptor<DeliverCall>,
     pub(crate) store_identity: TableDescriptor<StoredStoreIdentity>,
+    pub(crate) groups: TableDescriptor<crate::generated::memory::LogicalDeliveryGroup>,
 }
 pub(crate) trait DeclaresLogicalDeliveryTables {
     fn descriptors() -> LogicalDeliveryDescriptors;
@@ -309,6 +314,7 @@ pub(crate) trait DeclaresLogicalDeliveryTables {
 impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
     fn descriptors() -> LogicalDeliveryDescriptors {
         LogicalDeliveryDescriptors {
+            groups: <crate::generated::memory::LogicalDeliveryGroup as super::delivery_group::DescribesDeliveryGroups>::descriptor(),
             counter: TableDescriptor::new(
                 COUNTER_TABLE_NAME,
                 FamilyName::new("flow-nexus-logical-delivery-counter"),
@@ -358,6 +364,7 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
         descriptors: LogicalDeliveryDescriptors,
     ) -> Result<LogicalDeliveryTables, StoreError> {
         Ok(LogicalDeliveryTables {
+            groups: engine.register_table(descriptors.groups)?,
             counter: engine.register_table(descriptors.counter)?,
             current: engine.register_table(descriptors.current)?,
             events: engine.register_table(descriptors.events)?,
@@ -412,6 +419,13 @@ pub(crate) struct LogicalDeliveryTransition {
     pub(crate) upgrade_notice: Option<crate::store::request_id_upgrade::UpgradeNoticeAdmission>,
 }
 
+/// The requested capability is retained independently of member count.
+/// This abstraction does not yet change persisted grouping behavior.
+pub(crate) enum RequestedDeliveryAdmission {
+    Send(crate::generated::operation::AdmissionMessage),
+    SendSeveral(PreparedDeliveryGroup),
+}
+
 #[derive(Clone)]
 pub(crate) struct DeliverCallSpec {
     pub key: signal_flow::DeliverKey,
@@ -421,6 +435,15 @@ pub(crate) struct DeliverCallSpec {
 
 pub(crate) trait MintsRequestIds {
     fn mint_request_id(&self) -> Result<Result<flow_ethos::RequestId, Refusal>, StoreError>;
+    fn mint_request_id_excluding(
+        &self,
+        excluded: &std::collections::HashSet<flow_ethos::RequestId>,
+    ) -> Result<Result<flow_ethos::RequestId, Refusal>, StoreError>;
+    fn mint_request_id_with_exclusions(
+        &self,
+        held_count: usize,
+        excluded: &std::collections::HashSet<flow_ethos::RequestId>,
+    ) -> Result<Result<flow_ethos::RequestId, Refusal>, StoreError>;
     fn mint_request_id_with_held_count(
         &self,
         held_count: usize,
@@ -495,15 +518,36 @@ impl MintsRequestIds for FlowStore {
             .match_records(QueryPlan::all(self.logical_deliveries.request_ids))?;
         self.mint_request_id_with_held_count(held.records().len())
     }
+    fn mint_request_id_excluding(
+        &self,
+        excluded: &std::collections::HashSet<flow_ethos::RequestId>,
+    ) -> Result<Result<flow_ethos::RequestId, Refusal>, StoreError> {
+        let held = self
+            .engine
+            .match_records(QueryPlan::all(self.logical_deliveries.request_ids))?;
+        self.mint_request_id_with_exclusions(
+            held.records()
+                .len()
+                .checked_add(excluded.len())
+                .ok_or(StoreError::StateInvariant)?,
+            excluded,
+        )
+    }
     fn mint_request_id_with_held_count(
         &self,
         held_count: usize,
     ) -> Result<Result<flow_ethos::RequestId, Refusal>, StoreError> {
-        const SPACE: usize = 36usize.pow(4);
-        if held_count == SPACE {
+        self.mint_request_id_with_exclusions(held_count, &std::collections::HashSet::new())
+    }
+    fn mint_request_id_with_exclusions(
+        &self,
+        held_count: usize,
+        excluded: &std::collections::HashSet<flow_ethos::RequestId>,
+    ) -> Result<Result<flow_ethos::RequestId, Refusal>, StoreError> {
+        if held_count == REQUEST_ID_SPACE {
             return Ok(Err(Refusal::RequestIdSpaceFull));
         }
-        if held_count > SPACE {
+        if held_count > REQUEST_ID_SPACE {
             return Err(StoreError::StateInvariant);
         }
         let draws = self.request_id_draws()?;
@@ -521,7 +565,7 @@ impl MintsRequestIds for FlowStore {
                 self.logical_deliveries.request_ids,
                 RecordKey::new(id.clone().0),
             ))?;
-            if exists.records().is_empty() {
+            if exists.records().is_empty() && !excluded.contains(&id) {
                 return Ok(Ok(id));
             }
         }
@@ -704,6 +748,14 @@ pub(crate) trait RecordsLogicalDeliveries {
         message: Message,
         reminder: crate::store::handover_reminders::HandoverReminder,
     ) -> Result<signal_flow::PrivateSendResponse, StoreError>;
+    fn accept_requested_delivery_admission(
+        &self,
+        address: &Address,
+        sent_by: SentBy,
+        requested: RequestedDeliveryAdmission,
+        held_lock: Option<VerifiedDeliveryLock>,
+        transition: LogicalDeliveryTransition,
+    ) -> Result<Result<Vec<SendAcceptance>, Refusal>, StoreError>;
     fn accept_logical_delivery_for_with_transition(
         &self,
         address: &Address,
@@ -1266,6 +1318,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             return Ok(false);
         }
 
+        let grouped = self.contains_delivery_group(startup)?;
         let allocation = self.allocate_logical_cursor()?;
         let mut next_cursor = allocation.cursor;
         let mut changed = false;
@@ -1308,7 +1361,9 @@ impl RecordsLogicalDeliveries for FlowStore {
             if !matches!(
                 current.delivery_snapshot.delivery_state,
                 DeliveryState::Queued | DeliveryState::Retryable(_)
-            ) {
+            ) && !(grouped
+                && current.delivery_snapshot.delivery_state == DeliveryState::Uncertain)
+            {
                 return Err(StoreError::StateInvariant);
             }
             let mut snapshot = current.delivery_snapshot.clone();
@@ -2046,18 +2101,61 @@ impl RecordsLogicalDeliveries for FlowStore {
         held_lock: Option<VerifiedDeliveryLock>,
         transition: LogicalDeliveryTransition,
     ) -> Result<signal_flow::PrivateSendResponse, StoreError> {
-        let _guard = self
-            .logical_deliveries
-            .write_gate
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        Ok(
+            match self.accept_requested_delivery_admission(
+                address,
+                sent_by,
+                RequestedDeliveryAdmission::Send(crate::generated::operation::AdmissionMessage {
+                    delivery,
+                    message,
+                }),
+                held_lock,
+                transition,
+            )? {
+                Ok(mut accepted) => signal_flow::PrivateSendResponse::SendAccepted(
+                    accepted.pop().ok_or(StoreError::StateInvariant)?,
+                ),
+                Err(refusal) => signal_flow::PrivateSendResponse::Refused(refusal),
+            },
+        )
+    }
+    fn accept_requested_delivery_admission(
+        &self,
+        address: &Address,
+        sent_by: SentBy,
+        requested: RequestedDeliveryAdmission,
+        held_lock: Option<VerifiedDeliveryLock>,
+        transition: LogicalDeliveryTransition,
+    ) -> Result<Result<Vec<SendAcceptance>, Refusal>, StoreError> {
+        let group_messages;
+        let messages = match &requested {
+            RequestedDeliveryAdmission::Send(message) => std::slice::from_ref(message),
+            RequestedDeliveryAdmission::SendSeveral(prepared) => {
+                group_messages = prepared
+                    .members
+                    .iter()
+                    .map(|member| member.admission_message.clone())
+                    .collect::<Vec<_>>();
+                group_messages.as_slice()
+            }
+        };
+        // A prepared group keeps both gates from its sole preflight through
+        // this commit; plain Send takes its existing gates here.
+        let _guard = matches!(&requested, RequestedDeliveryAdmission::Send(_)).then(|| {
+            self.logical_deliveries
+                .write_gate
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+        });
         // Reminder admission follows the global order logical -> handover.
         // Keep/Drop takes only the handover gate, so its mutation cannot race
         // the green check and the atomic Notice/state commit below.
-        let _handover_guard = self
-            .handover_write_gate
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _handover_guard =
+            matches!(&requested, RequestedDeliveryAdmission::Send(_)).then(|| {
+                self.handover_write_gate
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+            });
         let LogicalDeliveryTransition {
             purpose,
             handover_reminder,
@@ -2080,15 +2178,9 @@ impl RecordsLogicalDeliveries for FlowStore {
                 .context_warning_policy(&expected.model_name.0)?
                 .is_some()
             {
-                return Ok(signal_flow::PrivateSendResponse::Refused(
-                    Refusal::Unresolved,
-                ));
+                return Ok(Err(Refusal::Unresolved));
             }
-            let stale = || {
-                signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(Unknown_Data::Address(
-                    address.clone(),
-                )))
-            };
+            let stale = || Err(Refusal::Unknown(Unknown_Data::Address(address.clone())));
             let Some(live) = self.handover_memory(&expected.address)? else {
                 return Ok(stale());
             };
@@ -2113,10 +2205,16 @@ impl RecordsLogicalDeliveries for FlowStore {
                 return Ok(stale());
             }
         }
-        let Some(mut stored) = self.stored_metaflow(address)? else {
-            return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(
-                Unknown_Data::Address(address.clone()),
-            )));
+        let mut stored = match &requested {
+            RequestedDeliveryAdmission::SendSeveral(prepared) => prepared.stored.clone(),
+            RequestedDeliveryAdmission::Send(_) => {
+                let Some(stored) = self.stored_metaflow(address)? else {
+                    return Ok(Err(Refusal::Unknown(Unknown_Data::Address(
+                        address.clone(),
+                    ))));
+                };
+                stored
+            }
         };
         // Dispatch is held by the observation caller. These store gates then
         // keep the live policy/progress judgment and admission one transition.
@@ -2125,233 +2223,297 @@ impl RecordsLogicalDeliveries for FlowStore {
                 use super::context_warnings::PreparesContextWarningAdmission;
                 let Some(prepared) = self.prepare_context_warning(&stored.metaflow, observation)?
                 else {
-                    return Ok(signal_flow::PrivateSendResponse::Refused(
-                        Refusal::Unresolved,
-                    ));
+                    return Ok(Err(Refusal::Unresolved));
                 };
                 Some(prepared)
             }
             None => None,
         };
-        let message = warning
-            .as_ref()
-            .map_or(message, |prepared| prepared.message.clone());
-        let request = match &message {
-            Message::HardAbrupt(request)
-            | Message::MiddleAbrupt(request)
-            | Message::Soft(request) => request.clone(),
-        };
-        if let Request::Done(flow_ethos::DonePayload::Answered(done)) = &request
-            && self.reminder(&done.logical_delivery_id.0)?.is_none()
-        {
-            return Ok(signal_flow::PrivateSendResponse::Refused(
-                Refusal::Unresolved,
-            ));
-        }
-        // Flow owns the Minutes rule at admission: above zero, and every
-        // deadline its reminders reach, computed with checked arithmetic,
-        // inside the clock. No policy maximum exists.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_secs() as i64)
-            .unwrap_or(0);
-        let task_due = match &request {
-            Request::Task(task) => {
-                use super::reminder::RulesMinutes;
-                match task.minutes.0.ruled_interval(now) {
-                    Ok(interval) => Some(now + interval),
-                    Err(refusal) => {
-                        return Ok(signal_flow::PrivateSendResponse::Refused(
-                            Refusal::MinutesRefused(refusal),
-                        ));
-                    }
-                }
-            }
-            _ => None,
-        };
-        let task_sender = sent_by.clone();
         let lock = if let Some(held) = held_lock {
             let Some(existing) = self.stored_metaflow_lock(address)? else {
-                return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(
-                    Unknown_Data::Lock(held.lock),
-                )));
+                return Ok(Err(Refusal::Unknown(Unknown_Data::Lock(held.lock))));
             };
             if existing.lock != held.lock {
-                return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Unknown(
-                    Unknown_Data::Lock(held.lock),
-                )));
+                return Ok(Err(Refusal::Unknown(Unknown_Data::Lock(held.lock))));
             }
             if held.lock.until <= flow_ethos::generated::library::Until(held.now) {
-                return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Lapsed));
+                return Ok(Err(Refusal::Lapsed));
             }
             Some(held.lock)
         } else {
             None
         };
-        let request_id = match self.mint_request_id()? {
-            Ok(value) => value,
-            Err(refusal) => return Ok(signal_flow::PrivateSendResponse::Refused(refusal)),
-        };
-        let answered_binding = match &request {
-            Request::Result(flow_ethos::ResultPayload::Answered(answered)) => Some(
-                self.request_binding(&answered.request_id)?
-                    .ok_or(StoreError::StateInvariant)?,
-            ),
-            Request::Done(flow_ethos::DonePayload::Answered(answered)) => Some(
-                self.request_binding(&answered.request_id)?
-                    .ok_or(StoreError::StateInvariant)?,
-            ),
-            _ => None,
-        };
-        let answered_uncertain = match &answered_binding {
-            Some(binding) => self
-                .logical_delivery_snapshot(&binding.logical_delivery_id)?
-                .is_some_and(|snapshot| snapshot.delivery_state == DeliveryState::Uncertain),
-            None => false,
-        };
         let allocation = self.allocate_logical_cursor()?;
-        let next = allocation.cursor;
-        let create = !allocation.existing;
-        let id = format!("logical-delivery-{next:020}");
-        let entry = QueueEntry {
-            logical_delivery_id: flow_ethos::LogicalDeliveryId(id.clone()),
-            request_id: request_id.clone(),
-            sent_by: sent_by.clone(),
-            delivery,
-            message,
-        };
-        stored.metaflow.queue.0.push(entry.clone());
-        let snapshot = DeliverySnapshot {
-            delivery_cursor: signal_flow::DeliveryCursor(next),
-            logical_delivery_id: signal_flow::LogicalDeliveryId(id.clone()),
-            request_id: request_id.clone(),
-            sent_by,
-            address: stored.metaflow.address.clone(),
-            delivery_state: DeliveryState::Queued,
-        };
-        let next_counter = LogicalDeliveryCounter {
-            next_cursor: NextCursor(
-                next.checked_add(if answered_uncertain { 2 } else { 1 })
-                    .ok_or(StoreError::StateInvariant)?,
-            ),
-        };
-        // The recipient's metaflow row is written once, after the answered
-        // request is settled: an answer to an Uncertain request of the same
-        // Address takes that request out of this row's queue first.
-        let commit = self.engine.begin_atomic_commit();
-        let commit = if create {
-            commit.assert(self.logical_deliveries.counter, next_counter)
-        } else {
-            commit.mutate(self.logical_deliveries.counter, next_counter)
-        };
-        let commit = commit
-            .assert(
-                self.logical_deliveries.current,
-                CurrentLogicalDelivery {
-                    delivery_snapshot: snapshot.clone(),
-                    archived_cursor: crate::generated::memory::ArchivedCursor(None),
-                    delivery_admission: admission,
-                },
-            )
-            .assert(
-                self.logical_deliveries.events,
-                LogicalDeliveryEvent {
-                    delivery_snapshot: snapshot.clone(),
-                },
-            )
-            .assert(
-                self.logical_deliveries.purposes,
-                LogicalDeliveryPurpose {
-                    logical_delivery_id: flow_ethos::LogicalDeliveryId(id.clone()),
-                    address: address.clone(),
-                    delivery_purpose: purpose.clone(),
-                },
-            )
-            .assert(
-                self.logical_deliveries.request_ids,
-                RequestIdBinding {
-                    request_id: request_id.clone(),
-                    logical_delivery_id: signal_flow::LogicalDeliveryId(id.clone()),
-                    request_closure: RequestClosure::Open,
-                },
-            );
-        let commit = if let Some(call) = deliver_call {
-            commit.assert(
-                self.logical_deliveries.deliver_calls,
-                DeliverCall {
-                    deliver_key: call.key,
-                    sender: crate::generated::memory::Sender(call.sender),
-                    request_digest: meta_signal_flow::RequestDigest(call.digest),
-                    send_acceptance: SendAcceptance {
-                        logical_delivery_id: signal_flow::LogicalDeliveryId(id.clone()),
-                        request_id: request_id.clone(),
-                        delivery_cursor: signal_flow::DeliveryCursor(next),
-                        delivery_state: DeliveryState::Queued,
-                    },
-                },
-            )
-        } else {
-            commit
-        };
-        let commit = self.assert_logical_request(address, entry, commit);
-        let commit = if let Some(mut binding) = answered_binding {
-            let rows = self.engine.match_records(QueryPlan::key(
-                self.logical_deliveries.current,
-                RecordKey::new(binding.logical_delivery_id.clone().0),
-            ))?;
-            let [current] = rows.records() else {
-                return Err(StoreError::StateInvariant);
+        let mut next = allocation.cursor;
+        let mut commit = self.engine.begin_atomic_commit();
+        let mut accepted = Vec::new();
+        let mut selected_ids = std::collections::HashSet::new();
+        let mut answered_ids = std::collections::HashSet::new();
+        for (position, crate::generated::operation::AdmissionMessage { delivery, message }) in
+            messages.iter().cloned().enumerate()
+        {
+            let prepared_member = match &requested {
+                RequestedDeliveryAdmission::Send(_) => None,
+                RequestedDeliveryAdmission::SendSeveral(prepared) => Some(
+                    prepared
+                        .members
+                        .get(position)
+                        .ok_or(StoreError::StateInvariant)?,
+                ),
             };
-            if current.archived_cursor.0.is_some() {
-                return Err(StoreError::StateInvariant);
-            }
-            let answered_logical_id = binding.logical_delivery_id.clone();
-            binding.request_closure =
-                RequestClosure::Answered(signal_flow::LogicalDeliveryId(id.clone()));
-            let commit = commit.mutate(self.logical_deliveries.request_ids, binding);
-            if answered_uncertain {
-                let mut read = current.clone();
-                read.delivery_snapshot.delivery_cursor = signal_flow::DeliveryCursor(next + 1);
-                read.delivery_snapshot.delivery_state = DeliveryState::Read;
-                self.read_uncertain_delivery(&answered_logical_id.0, &id, &mut stored, commit)?
-                    .mutate(self.logical_deliveries.current, read.clone())
-                    .assert(
-                        self.logical_deliveries.events,
-                        LogicalDeliveryEvent {
-                            delivery_snapshot: read.delivery_snapshot,
-                        },
-                    )
-            } else {
-                commit
-            }
-        } else {
-            commit
-        };
-        let commit = commit.mutate(self.metaflows, stored);
-        let commit = match &request {
-            Request::Task(task) => {
-                let (reminded, due) = match &task_sender {
-                    SentBy::Sender(sender) => (sender.clone(), task_due),
-                    _ => (address.clone(), None),
-                };
-                commit.assert(
-                    self.reminders,
-                    super::reminder::Reminder {
-                        logical_delivery_id: flow_ethos::LogicalDeliveryId(id.clone()),
-                        address: reminded,
-                        recipient: crate::generated::memory::Recipient(address.clone()),
-                        minutes: task.minutes,
-                        due_option: due.map(crate::generated::memory::Due),
-                        sent: crate::generated::memory::Sent(0),
+            let message = warning
+                .as_ref()
+                .map_or(message, |prepared| prepared.message.clone());
+            let request = match &message {
+                Message::HardAbrupt(request)
+                | Message::MiddleAbrupt(request)
+                | Message::Soft(request) => request.clone(),
+            };
+            let task_due = match prepared_member {
+                Some(prepared) => prepared.task_due,
+                None => {
+                    if let Request::Done(flow_ethos::DonePayload::Answered(done)) = &request
+                        && self.reminder(&done.logical_delivery_id.0)?.is_none()
+                    {
+                        return Ok(Err(Refusal::Unresolved));
+                    }
+                    // Flow owns the Minutes rule at admission: above zero, and every
+                    // deadline its reminders reach, computed with checked arithmetic,
+                    // inside the clock. No policy maximum exists.
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|elapsed| elapsed.as_secs() as i64)
+                        .unwrap_or(0);
+                    match &request {
+                        Request::Task(task) => {
+                            use super::reminder::RulesMinutes;
+                            match task.minutes.0.ruled_interval(now) {
+                                Ok(interval) => Some(now + interval),
+                                Err(refusal) => {
+                                    return Ok(Err(Refusal::MinutesRefused(refusal)));
+                                }
+                            }
+                        }
+                        _ => None,
+                    }
+                }
+            };
+            let task_sender = sent_by.clone();
+            let request_id = match self.mint_request_id_excluding(&selected_ids)? {
+                Ok(value) => value,
+                Err(refusal) => return Ok(Err(refusal)),
+            };
+            selected_ids.insert(request_id.clone());
+            let answered_binding = match prepared_member {
+                Some(prepared) => prepared.answered_binding.clone(),
+                None => {
+                    let binding = match &request {
+                        Request::Result(flow_ethos::ResultPayload::Answered(answered)) => Some(
+                            self.request_binding(&answered.request_id)?
+                                .ok_or(StoreError::StateInvariant)?,
+                        ),
+                        Request::Done(flow_ethos::DonePayload::Answered(answered)) => Some(
+                            self.request_binding(&answered.request_id)?
+                                .ok_or(StoreError::StateInvariant)?,
+                        ),
+                        _ => None,
+                    };
+                    if let Some(binding) = &binding
+                        && !answered_ids.insert(binding.request_id.clone())
+                    {
+                        return Ok(Err(Refusal::Unresolved));
+                    }
+                    binding
+                }
+            };
+            let answered_uncertain = match prepared_member {
+                Some(prepared) => prepared.answered_current.as_ref().is_some_and(|current| {
+                    current.delivery_snapshot.delivery_state == DeliveryState::Uncertain
+                }),
+                None => match &answered_binding {
+                    Some(binding) => self
+                        .logical_delivery_snapshot(&binding.logical_delivery_id)?
+                        .is_some_and(|snapshot| {
+                            snapshot.delivery_state == DeliveryState::Uncertain
+                        }),
+                    None => false,
+                },
+            };
+            let id = format!("logical-delivery-{next:020}");
+            let entry = QueueEntry {
+                logical_delivery_id: flow_ethos::LogicalDeliveryId(id.clone()),
+                request_id: request_id.clone(),
+                sent_by: sent_by.clone(),
+                delivery,
+                message,
+            };
+            stored.metaflow.queue.0.push(entry.clone());
+            let snapshot = DeliverySnapshot {
+                delivery_cursor: signal_flow::DeliveryCursor(next),
+                logical_delivery_id: signal_flow::LogicalDeliveryId(id.clone()),
+                request_id: request_id.clone(),
+                sent_by: sent_by.clone(),
+                address: stored.metaflow.address.clone(),
+                delivery_state: DeliveryState::Queued,
+            };
+            commit = commit
+                .assert(
+                    self.logical_deliveries.current,
+                    CurrentLogicalDelivery {
+                        delivery_snapshot: snapshot.clone(),
+                        archived_cursor: crate::generated::memory::ArchivedCursor(None),
+                        delivery_admission: admission.clone(),
                     },
                 )
-            }
-            Request::Done(flow_ethos::DonePayload::Answered(done)) => commit.retract(
-                self.reminders,
-                RecordKey::new(done.logical_delivery_id.clone().0),
-            ),
-            Request::Done(flow_ethos::DonePayload::Historical(_)) => commit,
-            _ => commit,
+                .assert(
+                    self.logical_deliveries.events,
+                    LogicalDeliveryEvent {
+                        delivery_snapshot: snapshot.clone(),
+                    },
+                )
+                .assert(
+                    self.logical_deliveries.purposes,
+                    LogicalDeliveryPurpose {
+                        logical_delivery_id: flow_ethos::LogicalDeliveryId(id.clone()),
+                        address: address.clone(),
+                        delivery_purpose: purpose.clone(),
+                    },
+                )
+                .assert(
+                    self.logical_deliveries.request_ids,
+                    RequestIdBinding {
+                        request_id: request_id.clone(),
+                        logical_delivery_id: signal_flow::LogicalDeliveryId(id.clone()),
+                        request_closure: RequestClosure::Open,
+                    },
+                );
+            commit = if let Some(call) = deliver_call.as_ref() {
+                commit.assert(
+                    self.logical_deliveries.deliver_calls,
+                    DeliverCall {
+                        deliver_key: call.key.clone(),
+                        sender: crate::generated::memory::Sender(call.sender.clone()),
+                        request_digest: meta_signal_flow::RequestDigest(call.digest.clone()),
+                        send_acceptance: SendAcceptance {
+                            logical_delivery_id: signal_flow::LogicalDeliveryId(id.clone()),
+                            request_id: request_id.clone(),
+                            delivery_cursor: signal_flow::DeliveryCursor(next),
+                            delivery_state: DeliveryState::Queued,
+                        },
+                    },
+                )
+            } else {
+                commit
+            };
+            commit = self.assert_logical_request(address, entry, commit);
+            commit = if let Some(mut binding) = answered_binding {
+                let rows;
+                let current = match prepared_member {
+                    Some(prepared) => prepared
+                        .answered_current
+                        .as_ref()
+                        .ok_or(StoreError::StateInvariant)?,
+                    None => {
+                        rows = self.engine.match_records(QueryPlan::key(
+                            self.logical_deliveries.current,
+                            RecordKey::new(binding.logical_delivery_id.clone().0),
+                        ))?;
+                        let [current] = rows.records() else {
+                            return Err(StoreError::StateInvariant);
+                        };
+                        if current.archived_cursor.0.is_some() {
+                            return Err(StoreError::StateInvariant);
+                        }
+                        current
+                    }
+                };
+                let answered_logical_id = binding.logical_delivery_id.clone();
+                binding.request_closure =
+                    RequestClosure::Answered(signal_flow::LogicalDeliveryId(id.clone()));
+                let commit = commit.mutate(self.logical_deliveries.request_ids, binding);
+                if answered_uncertain {
+                    let mut read = current.clone();
+                    read.delivery_snapshot.delivery_cursor = signal_flow::DeliveryCursor(
+                        next.checked_add(1).ok_or(StoreError::StateInvariant)?,
+                    );
+                    read.delivery_snapshot.delivery_state = DeliveryState::Read;
+                    self.read_uncertain_delivery(&answered_logical_id.0, &id, &mut stored, commit)?
+                        .mutate(self.logical_deliveries.current, read.clone())
+                        .assert(
+                            self.logical_deliveries.events,
+                            LogicalDeliveryEvent {
+                                delivery_snapshot: read.delivery_snapshot,
+                            },
+                        )
+                } else {
+                    commit
+                }
+            } else {
+                commit
+            };
+            commit = match &request {
+                Request::Task(task) => {
+                    let (reminded, due) = match &task_sender {
+                        SentBy::Sender(sender) => (sender.clone(), task_due),
+                        _ => (address.clone(), None),
+                    };
+                    commit.assert(
+                        self.reminders,
+                        super::reminder::Reminder {
+                            logical_delivery_id: flow_ethos::LogicalDeliveryId(id.clone()),
+                            address: reminded,
+                            recipient: crate::generated::memory::Recipient(address.clone()),
+                            minutes: task.minutes,
+                            due_option: due.map(crate::generated::memory::Due),
+                            sent: crate::generated::memory::Sent(0),
+                        },
+                    )
+                }
+                Request::Done(flow_ethos::DonePayload::Answered(done)) => commit.retract(
+                    self.reminders,
+                    RecordKey::new(done.logical_delivery_id.clone().0),
+                ),
+                Request::Done(flow_ethos::DonePayload::Historical(_)) => commit,
+                _ => commit,
+            };
+            accepted.push(SendAcceptance {
+                logical_delivery_id: LogicalDeliveryId(id),
+                request_id,
+                delivery_cursor: signal_flow::DeliveryCursor(next),
+                delivery_state: DeliveryState::Queued,
+            });
+            next = next
+                .checked_add(if answered_uncertain { 2 } else { 1 })
+                .ok_or(StoreError::StateInvariant)?;
+        }
+        let next_counter = LogicalDeliveryCounter {
+            next_cursor: NextCursor(next),
+        };
+        let commit = if allocation.existing {
+            commit.mutate(self.logical_deliveries.counter, next_counter)
+        } else {
+            commit.assert(self.logical_deliveries.counter, next_counter)
+        };
+        let commit = commit.mutate(self.metaflows, stored);
+        let id = accepted
+            .last()
+            .ok_or(StoreError::StateInvariant)?
+            .logical_delivery_id
+            .0
+            .clone();
+        let commit = if matches!(&requested, RequestedDeliveryAdmission::SendSeveral(_)) {
+            commit.assert(
+                self.logical_deliveries.groups,
+                crate::generated::memory::LogicalDeliveryGroup {
+                    address: address.clone(),
+                    logical_delivery_id_vector: accepted
+                        .iter()
+                        .map(|value| value.logical_delivery_id.clone())
+                        .collect(),
+                },
+            )
+        } else {
+            commit
         };
         let commit = if let Some(lock) = lock {
             commit.retract(
@@ -2418,14 +2580,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         };
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
-        Ok(signal_flow::PrivateSendResponse::SendAccepted(
-            SendAcceptance {
-                logical_delivery_id: signal_flow::LogicalDeliveryId(id),
-                request_id,
-                delivery_cursor: signal_flow::DeliveryCursor(next),
-                delivery_state: DeliveryState::Queued,
-            },
-        ))
+        Ok(Ok(accepted))
     }
     #[cfg(test)]
     fn transition_logical_delivery(
@@ -2728,7 +2883,7 @@ impl RecordsLogicalDeliveries for FlowStore {
     }
 }
 
-trait AllocatesLogicalCursor {
+pub(super) trait AllocatesLogicalCursor {
     fn allocate_logical_cursor(&self) -> Result<LogicalCursorAllocation, StoreError>;
 }
 

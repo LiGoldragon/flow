@@ -222,6 +222,52 @@ impl AnswersCompletedDirectSend for signal_flow::DeliveryState {
     }
 }
 
+/// Admits a whole ordered call before scheduling its recipient once.
+pub trait SendsSeveralRequests {
+    fn send_several_requests(
+        &self,
+        send: signal_flow::SendSeveralRequest,
+        peer: Option<&Process>,
+    ) -> Output;
+}
+
+impl SendsSeveralRequests for RunningNexus {
+    fn send_several_requests(
+        &self,
+        send: signal_flow::SendSeveralRequest,
+        peer: Option<&Process>,
+    ) -> Output {
+        if send.sendable_message_vector.is_empty() {
+            return Output::SentSeveral(Vec::new());
+        }
+        let observed_sender = match peer {
+            Some(peer) => self.sender_of(peer),
+            None => Ok(SentBy::Unbound),
+        };
+        let sender = match observed_sender {
+            Ok(sender) => sender,
+            Err(output) => return *output,
+        };
+        let _turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match self.perform(Operation::AdmitDeliveryGroup(
+            crate::generated::operation::AdmitDeliveryGroup_Data {
+                address: send.address,
+                sent_by: sender,
+                sendable_message_vector: send.sendable_message_vector,
+            },
+        )) {
+            Outcome::DeliveryGroupAdmitted(accepted) => {
+                Output::SentSeveral(accepted.into_iter().map(|value| value.request_id).collect())
+            }
+            Outcome::DeliveryGroupRefused(refusal) => Output::Refused(refusal),
+            _ => unreachable!("delivery group admission has one typed outcome"),
+        }
+    }
+}
+
 pub trait SendsRequests {
     /// Answers a Send from `peer`, under the dispatch gate.
     fn send_request(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer;

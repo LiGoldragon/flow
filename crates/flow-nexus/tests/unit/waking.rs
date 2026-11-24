@@ -9102,3 +9102,874 @@ fn witness_pending_claude_rest(writable: PaneBecomesWritable, event_pane: &str, 
         result.unwrap();
     });
 }
+
+#[test]
+fn a_simplified_wake_carries_one_whole_send_several_group_in_its_first_prompt() {
+    use crate::sending::SendsSeveralRequests;
+    use signal_flow::{Output, SendSeveralRequest, SendableMessage, SendableRequest};
+    let mut fixture = NexusFixture::new();
+    ended_simplified_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let Output::SentSeveral(ids) = fixture.nexus.send_several_requests(
+        SendSeveralRequest {
+            address: at.clone(),
+            sendable_message_vector: vec![
+                SendableMessage::Soft(SendableRequest::Notice("startup-several-first".into())),
+                SendableMessage::MiddleAbrupt(SendableRequest::Notice(
+                    "startup-several-second".into(),
+                )),
+            ],
+        },
+        None,
+    ) else {
+        panic!("startup group admitted")
+    };
+    let world = fixture.fresh_claude_world();
+    fixture.nexus.wake_due(at.clone());
+    assert_eq!(world.claude_starts(), 1);
+    let prompts = world.user_turns(&fixture);
+    let carried = prompts
+        .iter()
+        .filter(|prompt| prompt.contains("startup-several-first"))
+        .collect::<Vec<_>>();
+    assert_eq!(carried.len(), 1, "one first prompt carries whole group");
+    assert!(carried[0].find("startup-several-first") < carried[0].find("startup-several-second"));
+    assert!(carried[0].find(&ids[0].0) < carried[0].find(&ids[1].0));
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
+    fixture.nexus.wake_due(at);
+    assert_eq!(
+        world.claude_starts(),
+        1,
+        "group never starts a second prompt"
+    );
+}
+
+#[test]
+fn cancelled_send_several_members_leave_ordered_survivors_and_later_work_in_first_prompt() {
+    use crate::queue_operations::OperatesOnRequestsAndQueues;
+    use crate::sending::SendsSeveralRequests;
+    use signal_flow::{Output, SendSeveralRequest, SendableMessage, SendableRequest};
+    for cancelled in [vec![0], vec![1], vec![2], vec![0, 2], vec![0, 1, 2]] {
+        let mut fixture = NexusFixture::new();
+        ended_claude(&fixture);
+        let at = address(Model::Sol);
+        fixture.nexus.store.seed_metaflow(metaflow(
+            Model::Sol,
+            State::Asleep,
+            vec!["abc123"],
+            vec![],
+        ));
+        let bodies = [
+            "cancel-group-first",
+            "cancel-group-middle",
+            "cancel-group-last",
+        ];
+        let Output::SentSeveral(ids) = fixture.nexus.send_several_requests(
+            SendSeveralRequest {
+                address: at.clone(),
+                sendable_message_vector: bodies
+                    .iter()
+                    .map(|body| SendableMessage::Soft(SendableRequest::Order((*body).into())))
+                    .collect(),
+            },
+            None,
+        ) else {
+            panic!("group admitted")
+        };
+        for index in &cancelled {
+            assert_eq!(
+                fixture.nexus.cancel(&ids[*index]),
+                Output::Cancelled(ids[*index].clone())
+            );
+        }
+        assert!(matches!(
+            fixture.nexus.send_several_requests(
+                SendSeveralRequest {
+                    address: at.clone(),
+                    sendable_message_vector: vec![SendableMessage::Soft(SendableRequest::Notice(
+                        "cancel-group-later".into()
+                    ))]
+                },
+                None
+            ),
+            Output::SentSeveral(_)
+        ));
+        let world = fixture.fresh_claude_world();
+        fixture.nexus.wake_due(at.clone());
+        let prompts = world.user_turns(&fixture);
+        let carried = prompts
+            .iter()
+            .filter(|prompt| prompt.contains("cancel-group-later"))
+            .collect::<Vec<_>>();
+        assert_eq!(carried.len(), 1);
+        let mut last_position = None;
+        for (index, body) in bodies.iter().enumerate() {
+            if cancelled.contains(&index) {
+                assert!(!carried[0].contains(body));
+            } else {
+                let position = carried[0].find(body).expect("survivor is in prompt");
+                if let Some(previous) = last_position {
+                    assert!(previous < position);
+                }
+                last_position = Some(position);
+                assert!(carried[0].contains(&ids[index].0));
+            }
+        }
+        if let Some(previous) = last_position {
+            assert!(previous < carried[0].find("cancel-group-later").unwrap());
+        }
+        assert_eq!(world.claude_starts(), 1);
+        assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
+        fixture.nexus.wake_due(at);
+        assert_eq!(world.claude_starts(), 1);
+    }
+}
+
+#[test]
+fn all_cancelled_send_several_members_start_no_prompt() {
+    use crate::queue_operations::OperatesOnRequestsAndQueues;
+    use crate::sending::SendsSeveralRequests;
+    use signal_flow::{Output, SendSeveralRequest, SendableMessage, SendableRequest};
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let Output::SentSeveral(ids) = fixture.nexus.send_several_requests(
+        SendSeveralRequest {
+            address: at.clone(),
+            sendable_message_vector: vec![
+                SendableMessage::Soft(SendableRequest::Order("cancel-all-first".into())),
+                SendableMessage::Soft(SendableRequest::Order("cancel-all-last".into())),
+            ],
+        },
+        None,
+    ) else {
+        panic!("group admitted")
+    };
+    for id in ids {
+        assert_eq!(fixture.nexus.cancel(&id), Output::Cancelled(id));
+    }
+    let world = fixture.fresh_claude_world();
+    fixture.nexus.wake_due(at);
+    assert_eq!(world.claude_starts(), 0);
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
+}
+
+fn cutoff_group(
+    fixture: &NexusFixture,
+    at: &Address,
+    sender: SentBy,
+    requests: Vec<Request>,
+) -> Vec<signal_flow::SendAcceptance> {
+    use crate::store::delivery_group::AdmitsDeliveryGroups;
+    fixture
+        .nexus
+        .store
+        .admit_delivery_group(
+            at,
+            sender,
+            requests
+                .into_iter()
+                .map(|request| crate::generated::operation::AdmissionMessage {
+                    delivery: Delivery::Wake,
+                    message: Message::MiddleAbrupt(request),
+                })
+                .collect(),
+        )
+        .unwrap()
+        .unwrap()
+}
+
+#[test]
+fn a_simplified_context_group_waits_for_prior_incomplete_binding_without_native_input() {
+    use crate::store::logical_delivery::{SimplifiedReplyBinding, SimplifiedReplyStanding};
+    let fixture = NexusFixture::new();
+    active_simplified_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Model::Sol,
+        State::Awake(flow_ethos::FlowId("abc123".into())),
+        vec![],
+        vec![],
+    ));
+    let prior = SimplifiedReplyBinding {
+        flow_id: flow_ethos::FlowId("abc123".into()),
+        input_delivery_id: crate::generated::memory::InputDeliveryId("prior-unreceived".into()),
+        source: crate::generated::memory::Source(at.clone()),
+        recipient: crate::generated::memory::Recipient(address(Model::Astra)),
+        completed: crate::generated::memory::Completed(false),
+    };
+    fixture
+        .nexus
+        .store
+        .bind_simplified_reply(prior.clone())
+        .unwrap();
+    let accepted = cutoff_group(
+        &fixture,
+        &at,
+        SentBy::Sender(address(Model::Astra)),
+        vec![Request::Notice("context only".into())],
+    );
+    let queued = fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue;
+    assert_eq!(
+        fixture.nexus.drain_all(at.clone()),
+        Outcome::WaitingForTurn(accepted[0].logical_delivery_id.clone())
+    );
+    assert_eq!(
+        fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue,
+        queued
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .simplified_reply_receipt("abc123")
+            .unwrap(),
+        SimplifiedReplyStanding::Unreceived(prior)
+    );
+    assert!(fixture.typed().unwrap_or_default().is_empty());
+}
+
+#[test]
+fn awake_simplified_conflict_fails_whole_group_before_native_input() {
+    let fixture = NexusFixture::new();
+    active_simplified_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Model::Sol,
+        State::Awake(flow_ethos::FlowId("abc123".into())),
+        vec![],
+        vec![],
+    ));
+    let accepted = cutoff_group(
+        &fixture,
+        &at,
+        SentBy::Sender(address(Model::Astra)),
+        vec![
+            Request::Notice("context".into()),
+            Request::Order("first".into()),
+            Request::Question("second".into()),
+        ],
+    );
+    assert!(
+        matches!(fixture.nexus.drain_all(at.clone()), Outcome::Drained(entries) if entries.is_empty())
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .metaflow(&at)
+            .unwrap()
+            .unwrap()
+            .queue
+            .0
+            .is_empty()
+    );
+    for member in accepted {
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .logical_delivery_snapshot(&member.logical_delivery_id)
+                .unwrap()
+                .unwrap()
+                .delivery_state,
+            signal_flow::DeliveryState::Failed(
+                signal_flow::Refusal::SimplifiedAwaitingMemberConflict(
+                    signal_flow::SendSeveralMessagePosition(2)
+                )
+            )
+        );
+    }
+    assert!(fixture.typed().unwrap_or_default().is_empty());
+}
+
+#[test]
+fn simplified_startup_binds_nonhead_awaiting_and_advances_past_conflict() {
+    use crate::store::logical_delivery::SimplifiedReplyStanding;
+    let mut fixture = NexusFixture::new();
+    ended_simplified_claude(&fixture);
+    let at = address(Model::Sol);
+    let sender = address(Model::Astra);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: sender.clone(),
+        state: State::Asleep,
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
+    });
+    let conflict = cutoff_group(
+        &fixture,
+        &at,
+        SentBy::Sender(sender.clone()),
+        vec![
+            Request::Order("refused one".into()),
+            Request::Question("refused two".into()),
+        ],
+    );
+    let valid = cutoff_group(
+        &fixture,
+        &at,
+        SentBy::Sender(sender.clone()),
+        vec![
+            Request::Notice("before actual awaiting".into()),
+            Request::Question("actual awaiting".into()),
+            Request::Living(flow_ethos::Living_Data {
+                context: "after".into(),
+                verbatim: "context after".into(),
+            }),
+        ],
+    );
+    let world = fixture.fresh_claude_world();
+    fixture.nexus.wake_due(at.clone());
+    assert_eq!(world.claude_starts(), 1);
+    let turns = world.user_turns(&fixture);
+    assert_eq!(turns.len(), 1);
+    assert!(
+        turns[0].contains("before actual awaiting")
+            && turns[0].contains("actual awaiting")
+            && turns[0].contains("context after")
+    );
+    assert!(!turns[0].contains("refused one") && !turns[0].contains("refused two"));
+    for member in conflict {
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .logical_delivery_snapshot(&member.logical_delivery_id)
+                .unwrap()
+                .unwrap()
+                .delivery_state,
+            signal_flow::DeliveryState::Failed(
+                signal_flow::Refusal::SimplifiedAwaitingMemberConflict(
+                    signal_flow::SendSeveralMessagePosition(1)
+                )
+            )
+        );
+    }
+    let seat = fixture.nexus.store.metaflow(&at).unwrap().unwrap();
+    let flow_id = match &seat.state {
+        State::Awake(id) => id.clone(),
+        State::Asleep => seat.past.0.last().unwrap().clone(),
+    };
+    let standing = fixture
+        .nexus
+        .store
+        .simplified_reply_receipt(&flow_id.0)
+        .unwrap();
+    let binding = match standing {
+        SimplifiedReplyStanding::Received(binding, _)
+        | SimplifiedReplyStanding::Unreceived(binding) => binding,
+        _ => panic!("awaiting input must own exact binding"),
+    };
+    assert_eq!(binding.input_delivery_id.0, valid[1].logical_delivery_id.0);
+    assert_eq!(binding.recipient.0, sender);
+}
+
+#[test]
+fn simplified_singleton_living_startup_creates_no_reply_binding() {
+    use crate::store::logical_delivery::SimplifiedReplyStanding;
+    let mut fixture = NexusFixture::new();
+    ended_simplified_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    cutoff_group(
+        &fixture,
+        &at,
+        SentBy::Sender(address(Model::Astra)),
+        vec![Request::Living(flow_ethos::Living_Data {
+            context: "context".into(),
+            verbatim: "no reply awaited".into(),
+        })],
+    );
+    let world = fixture.fresh_claude_world();
+    fixture.nexus.wake_due(at.clone());
+    assert_eq!(world.claude_starts(), 1);
+    let seat = fixture.nexus.store.metaflow(&at).unwrap().unwrap();
+    let flow_id = match &seat.state {
+        State::Awake(id) => id.clone(),
+        State::Asleep => seat.past.0.last().unwrap().clone(),
+    };
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .simplified_reply_receipt(&flow_id.0)
+            .unwrap(),
+        SimplifiedReplyStanding::NoneOwed
+    );
+    assert!(world.user_turns(&fixture)[0].contains("no reply awaited"));
+}
+
+#[test]
+fn a_simplified_context_group_also_waits_for_received_but_incomplete_binding() {
+    use crate::store::logical_delivery::{SimplifiedReplyBinding, SimplifiedReplyStanding};
+    let fixture = NexusFixture::new();
+    active_simplified_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Model::Sol,
+        State::Awake(flow_ethos::FlowId("abc123".into())),
+        vec![],
+        vec![],
+    ));
+    let signal_flow::PrivateSendResponse::SendAccepted(prior_input) = fixture
+        .nexus
+        .store
+        .accept_logical_delivery(
+            &at,
+            SentBy::Sender(address(Model::Astra)),
+            Delivery::Wake,
+            Message::Soft(Request::Order("prior awaiting".into())),
+            None,
+        )
+        .unwrap()
+    else {
+        panic!("prior input admitted");
+    };
+    fixture
+        .nexus
+        .store
+        .transition_logical_delivery(
+            &prior_input.logical_delivery_id,
+            signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                harness_kind: HarnessKind::Claude,
+                native_session_id: signal_flow::NativeSessionId("prior-session".into()),
+                native_prompt_id: signal_flow::NativePromptId("prior-prompt".into()),
+            }),
+        )
+        .unwrap();
+    // The fixture starts after this prior prompt left its queue, while its
+    // answer is still owed; its receipt/snapshot remain durable.
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Model::Sol,
+        State::Awake(flow_ethos::FlowId("abc123".into())),
+        vec![],
+        vec![],
+    ));
+    let prior = SimplifiedReplyBinding {
+        flow_id: flow_ethos::FlowId("abc123".into()),
+        input_delivery_id: crate::generated::memory::InputDeliveryId(
+            prior_input.logical_delivery_id.0,
+        ),
+        source: crate::generated::memory::Source(at.clone()),
+        recipient: crate::generated::memory::Recipient(address(Model::Astra)),
+        completed: crate::generated::memory::Completed(false),
+    };
+    fixture
+        .nexus
+        .store
+        .bind_simplified_reply(prior.clone())
+        .unwrap();
+    let accepted = cutoff_group(
+        &fixture,
+        &at,
+        SentBy::Sender(address(Model::Astra)),
+        vec![Request::Notice("context only".into())],
+    );
+    assert_eq!(
+        fixture.nexus.drain_all(at),
+        Outcome::WaitingForTurn(accepted[0].logical_delivery_id.clone())
+    );
+    assert!(
+        matches!(fixture.nexus.store.simplified_reply_receipt("abc123").unwrap(), SimplifiedReplyStanding::Received(binding, _) if binding == prior)
+    );
+    assert!(fixture.typed().unwrap_or_default().is_empty());
+}
+
+#[test]
+fn awake_simplified_group_binds_actual_nonhead_awaiting_input() {
+    use crate::store::logical_delivery::SimplifiedReplyStanding;
+    let fixture = NexusFixture::new();
+    let launched = active_simplified_claude(&fixture);
+    let at = address(Model::Sol);
+    let sender = address(Model::Astra);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Model::Sol,
+        State::Awake(flow_ethos::FlowId("abc123".into())),
+        vec![],
+        vec![],
+    ));
+    let mut agent = fixture.settled_agent();
+    agent["agent"] = serde_json::Value::String("claude".into());
+    agent["agent_session"] = serde_json::json!({ "source":"herdr:claude", "agent":"claude", "kind":"id", "value":launched.session });
+    fixture.accept_pane_operations(vec![agent], PromptFixture::PromptedUnrecorded("w1:p3"));
+    let accepted = cutoff_group(
+        &fixture,
+        &at,
+        SentBy::Sender(sender.clone()),
+        vec![
+            Request::Notice("first context".into()),
+            Request::Order("actual awaiting".into()),
+        ],
+    );
+    let _ = fixture.nexus.drain_all(at);
+    let standing = fixture
+        .nexus
+        .store
+        .simplified_reply_receipt("abc123")
+        .unwrap();
+    let binding = match standing {
+        SimplifiedReplyStanding::Received(binding, _)
+        | SimplifiedReplyStanding::Unreceived(binding) => binding,
+        _ => panic!("exact awaiting member must own binding"),
+    };
+    assert_eq!(
+        binding.input_delivery_id.0,
+        accepted[1].logical_delivery_id.0
+    );
+    assert_eq!(binding.recipient.0, sender);
+    let typed = fixture.typed().expect("group typed through fixture pane");
+    assert!(typed.contains("first context") && typed.contains("actual awaiting"));
+}
+
+#[test]
+fn regular_startup_preserves_multiple_awaiting_group_without_simplified_binding() {
+    use crate::store::logical_delivery::SimplifiedReplyStanding;
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    cutoff_group(
+        &fixture,
+        &at,
+        SentBy::Sender(address(Model::Astra)),
+        vec![
+            Request::Order("regular first".into()),
+            Request::Question("regular second".into()),
+        ],
+    );
+    let world = fixture.fresh_claude_world();
+    fixture.nexus.wake_due(at.clone());
+    assert_eq!(world.claude_starts(), 1);
+    let turns = world.user_turns(&fixture);
+    assert_eq!(turns.len(), 1);
+    assert!(turns[0].contains("regular first") && turns[0].contains("regular second"));
+    let seat = fixture.nexus.store.metaflow(&at).unwrap().unwrap();
+    let flow_id = match &seat.state {
+        State::Awake(id) => id.clone(),
+        State::Asleep => seat.past.0.last().unwrap().clone(),
+    };
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .simplified_reply_receipt(&flow_id.0)
+            .unwrap(),
+        SimplifiedReplyStanding::NoneOwed
+    );
+}
+
+#[test]
+fn regular_admission_meeting_simplified_wake_fails_without_starting_native_seat() {
+    use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    let at = address(Model::Sol);
+    maintain(&fixture, at.clone());
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let accepted = cutoff_group(
+        &fixture,
+        &at,
+        SentBy::Sender(address(Model::Astra)),
+        vec![
+            Request::Order("admitted regular first".into()),
+            Request::Question("admitted regular second".into()),
+        ],
+    );
+    let mut declaration = fixture
+        .nexus
+        .store
+        .metaflow_declaration(&at)
+        .unwrap()
+        .unwrap();
+    declaration.flow_kind = signal_flow::FlowKind::Simplified;
+    declaration.tool_set = signal_flow::ToolSet::Explicit(vec![]);
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
+            declaration,
+        ]))
+        .unwrap();
+    let world = fixture.fresh_claude_world();
+    fixture.nexus.wake_due(at.clone());
+    assert_eq!(world.claude_starts(), 0);
+    assert!(
+        fixture
+            .nexus
+            .store
+            .metaflow(&at)
+            .unwrap()
+            .unwrap()
+            .queue
+            .0
+            .is_empty()
+    );
+    for member in accepted {
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .logical_delivery_snapshot(&member.logical_delivery_id)
+                .unwrap()
+                .unwrap()
+                .delivery_state,
+            signal_flow::DeliveryState::Failed(
+                signal_flow::Refusal::SimplifiedAwaitingMemberConflict(
+                    signal_flow::SendSeveralMessagePosition(1)
+                )
+            )
+        );
+    }
+}
+
+#[test]
+fn post_premark_cancel_uses_actual_cancel_and_keeps_frozen_group() {
+    use crate::queue_operations::OperatesOnRequestsAndQueues;
+    use crate::store::delivery_group::SelectsDeliveryGroups;
+    use crate::store::group_uncertainty::StagesUncertainCohorts;
+    let fixture = NexusFixture::new();
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec![], vec![]));
+    let accepted = cutoff_group(
+        &fixture,
+        &at,
+        SentBy::Unbound,
+        vec![
+            Request::Notice("context".into()),
+            Request::Order("awaiting".into()),
+        ],
+    );
+    cutoff_group(
+        &fixture,
+        &at,
+        SentBy::Unbound,
+        vec![Request::Notice("later suffix".into())],
+    );
+    let queue = fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue.0;
+    let group = fixture
+        .nexus
+        .store
+        .delivery_group(&accepted[0].logical_delivery_id)
+        .unwrap();
+    let selected = fixture
+        .nexus
+        .store
+        .oldest_delivery_group(&at, &queue)
+        .unwrap();
+    let frozen_text = selected.prompt_text(&at);
+    {
+        let _turn = fixture
+            .nexus
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        fixture
+            .nexus
+            .store
+            .mark_startup_uncertain(&at, &selected)
+            .unwrap();
+    }
+    // Actual Cancel follows premark serially; no native start barrier or
+    // concurrent interleaving is claimed by this fixture.
+    assert_eq!(
+        fixture.nexus.cancel(&accepted[1].request_id),
+        signal_flow::Output::CancelRejected(signal_flow::RequestRejection::NotYet)
+    );
+    assert_eq!(
+        fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue.0,
+        queue
+    );
+    assert_eq!(selected.prompt_text(&at), frozen_text);
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .delivery_group(&accepted[0].logical_delivery_id)
+            .unwrap(),
+        group
+    );
+    for member in accepted {
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .logical_delivery_snapshot(&member.logical_delivery_id)
+                .unwrap()
+                .unwrap()
+                .delivery_state,
+            signal_flow::DeliveryState::Uncertain
+        );
+    }
+    assert!(fixture.typed().unwrap_or_default().is_empty());
+}
+
+#[test]
+fn simplified_admission_meeting_regular_wake_delivers_all_awaiting() {
+    use crate::store::logical_delivery::SimplifiedReplyStanding;
+    use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
+    let mut fixture = NexusFixture::new();
+    ended_simplified_claude(&fixture);
+    let at = address(Model::Sol);
+    maintain(&fixture, at.clone());
+    let mut declaration = fixture
+        .nexus
+        .store
+        .metaflow_declaration(&at)
+        .unwrap()
+        .unwrap();
+    declaration.flow_kind = signal_flow::FlowKind::Simplified;
+    declaration.tool_set = signal_flow::ToolSet::Explicit(vec![]);
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
+            declaration.clone(),
+        ]))
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let accepted = cutoff_group(
+        &fixture,
+        &at,
+        SentBy::Sender(address(Model::Astra)),
+        vec![
+            Request::Order("reverse first".into()),
+            Request::Question("reverse second".into()),
+        ],
+    );
+    let selected = fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue.0;
+    let expected_text = selected.prompt_text(&at);
+    declaration.flow_kind = signal_flow::FlowKind::Regular;
+    declaration.tool_set = signal_flow::ToolSet::Default;
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
+            declaration,
+        ]))
+        .unwrap();
+    let world = fixture.fresh_claude_world();
+    fixture.nexus.wake_due(at.clone());
+    assert_eq!(world.claude_starts(), 1);
+    let turns = world.user_turns(&fixture);
+    assert_eq!(turns.len(), 1);
+    assert!(turns[0].ends_with(&expected_text));
+    assert!(turns[0].find(&accepted[0].request_id.0) < turns[0].find(&accepted[1].request_id.0));
+    for member in accepted {
+        assert!(!matches!(
+            fixture
+                .nexus
+                .store
+                .logical_delivery_snapshot(&member.logical_delivery_id)
+                .unwrap()
+                .unwrap()
+                .delivery_state,
+            signal_flow::DeliveryState::Failed(_)
+        ));
+    }
+    let seat = fixture.nexus.store.metaflow(&at).unwrap().unwrap();
+    let flow_id = match &seat.state {
+        State::Awake(id) => id.clone(),
+        State::Asleep => seat.past.0.last().unwrap().clone(),
+    };
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .simplified_reply_receipt(&flow_id.0)
+            .unwrap(),
+        SimplifiedReplyStanding::NoneOwed
+    );
+}
+
+#[test]
+fn undeclared_receiver_uses_previous_simplified_profile_at_group_cutoff() {
+    use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
+    let mut fixture = NexusFixture::new();
+    let launched = ended_simplified_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    assert!(
+        fixture
+            .nexus
+            .store
+            .metaflow_declaration(&at)
+            .unwrap()
+            .is_none()
+    );
+    let sleeping = fixture.nexus.store.metaflow(&at).unwrap().unwrap();
+    let WakePlan::Fresh(fresh) = fixture.nexus.wake_plan(&sleeping) else {
+        panic!("previous profile supplies ordinary wake evidence");
+    };
+    assert_eq!(fresh.flow_kind, signal_flow::FlowKind::Simplified);
+    assert_eq!(fresh.system_modules, launched.profile.system_modules);
+    assert_eq!(fresh.prompt_modules, launched.profile.prompt_modules);
+    let accepted = cutoff_group(
+        &fixture,
+        &at,
+        SentBy::Unbound,
+        vec![
+            Request::Order("fallback first".into()),
+            Request::Question("fallback second".into()),
+        ],
+    );
+    let world = fixture.fresh_claude_world();
+    fixture.nexus.wake_due(at.clone());
+    assert_eq!(world.claude_starts(), 0);
+    assert!(
+        fixture
+            .nexus
+            .store
+            .metaflow(&at)
+            .unwrap()
+            .unwrap()
+            .queue
+            .0
+            .is_empty()
+    );
+    for member in accepted {
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .logical_delivery_snapshot(&member.logical_delivery_id)
+                .unwrap()
+                .unwrap()
+                .delivery_state,
+            signal_flow::DeliveryState::Failed(
+                signal_flow::Refusal::SimplifiedAwaitingMemberConflict(
+                    signal_flow::SendSeveralMessagePosition(1)
+                )
+            )
+        );
+    }
+}

@@ -119,10 +119,12 @@ use crate::send_tool::ServesLaunchCalls;
 use crate::store::NamesConfiguredModel;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
+use crate::store::delivery_group::SelectsDeliveryGroups;
 use crate::store::effort_configuration::ReadsEffort;
 use crate::store::events::RecordedHarnessEvent;
 use crate::store::events::RecordsHarnessEvents;
 use crate::store::events::{IdentifiesNativeStop, RecordedStop};
+use crate::store::group_uncertainty::StagesUncertainCohorts;
 use crate::store::handover::HoldsHandovers;
 use crate::store::logical_delivery::{
     RecordsLogicalDeliveries, SimplifiedReplyBinding, SimplifiedReplyStanding,
@@ -561,6 +563,22 @@ pub enum WakePlan {
     /// No declaration or launch of the metaflow names a context to wake it
     /// with, or no Herdr session is configured.
     Unplaceable,
+}
+
+pub(crate) trait ClassifiedByFlowKind {
+    fn flow_kind(&self) -> &signal_flow::FlowKind;
+}
+
+impl ClassifiedByFlowKind for LaunchProfile {
+    fn flow_kind(&self) -> &signal_flow::FlowKind {
+        &self.flow_kind
+    }
+}
+
+impl ClassifiedByFlowKind for FreshContext {
+    fn flow_kind(&self) -> &signal_flow::FlowKind {
+        &self.flow_kind
+    }
 }
 
 pub use crate::generated::starter::FreshContext;
@@ -2802,6 +2820,7 @@ impl PerformsWakeAndDrain for RunningNexus {
     }
 }
 
+/// Callers hold dispatch_gate and the address lease through native input.
 pub(crate) trait DrainsHeldSeats {
     fn drain_held(&self, address: Address, lease: &WakingLease) -> Outcome;
     fn drain_all_held(&self, address: Address, lease: &WakingLease) -> Outcome;
@@ -2891,62 +2910,79 @@ impl DrainsHeldSeats for RunningNexus {
         // is free for the request now oldest.
         self.reconcile_typed(&address);
         self.queue_simplified_answer(&flow_id.0);
-        let queue = match self.store.metaflow(&address) {
-            Ok(Some(metaflow)) => metaflow.queue,
-            _ => return Outcome::Failed(Failed_Data::StoreRefused),
+        // Every production caller owns dispatch through this cutoff and I/O.
+        // Consume the actual active profile once, as ordinary Send does.
+        use crate::store::delivery_group::{AnalysesSimplifiedDeliveries, RefusesDeliveryGroups};
+        let simplified = self
+            .last_launch_profile(&flow_id.0)
+            .is_some_and(|profile| profile.flow_kind() == &signal_flow::FlowKind::Simplified);
+        let (oldest, cohort, grouped, reply_input) = loop {
+            let queue = match self.store.metaflow(&address) {
+                Ok(Some(metaflow)) => metaflow.queue,
+                _ => return Outcome::Failed(Failed_Data::StoreRefused),
+            };
+            let Some(oldest) = queue.0.first().cloned() else {
+                return Outcome::Drained(drained);
+            };
+            let cohort = match if simplified {
+                self.store.oldest_delivery_group(&address, &queue.0)
+            } else {
+                self.store.complete_delivery_groups(&address, &queue.0)
+            } {
+                Ok(cohort) if !cohort.is_empty() => cohort,
+                _ => return Outcome::Failed(Failed_Data::StoreRefused),
+            };
+            let grouped = match self.store.contains_delivery_group(&cohort) {
+                Ok(grouped) => grouped,
+                Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+            };
+            let reply_input = if simplified {
+                match self
+                    .store
+                    .simplified_reply_input_from_frozen(&address, &cohort)
+                {
+                    Ok(Ok(input)) => input.cloned(),
+                    Ok(Err(reason)) if grouped => {
+                        if self
+                            .store
+                            .refuse_delivery_group(&address, &cohort, reason)
+                            .is_err()
+                        {
+                            return Outcome::Failed(Failed_Data::StoreRefused);
+                        }
+                        // A successful refusal removed this NONEMPTY prefix.
+                        continue;
+                    }
+                    _ => return Outcome::Failed(Failed_Data::StoreRefused),
+                }
+            } else {
+                None
+            };
+            break (oldest, cohort, grouped, reply_input);
         };
-        let Some(oldest) = queue.0.first().cloned() else {
-            return Outcome::Drained(drained);
-        };
-        let response_request = matches!(
-            &oldest.message,
-            signal_flow::Message::HardAbrupt(
-                signal_flow::Request::Order(_)
-                    | signal_flow::Request::Question(_)
-                    | signal_flow::Request::Living(_)
-                    | signal_flow::Request::Task(_)
-            ) | signal_flow::Message::MiddleAbrupt(
-                signal_flow::Request::Order(_)
-                    | signal_flow::Request::Question(_)
-                    | signal_flow::Request::Living(_)
-                    | signal_flow::Request::Task(_)
-            ) | signal_flow::Message::Soft(
-                signal_flow::Request::Order(_)
-                    | signal_flow::Request::Question(_)
-                    | signal_flow::Request::Living(_)
-                    | signal_flow::Request::Task(_)
-            )
-        );
-        if response_request
-            && self
-                .last_launch_profile(&flow_id.0)
-                .is_some_and(|profile| profile.flow_kind == signal_flow::FlowKind::Simplified)
-            && let signal_flow::SentBy::Sender(recipient) = &oldest.sent_by
+        if simplified && grouped && reply_input.is_none() {
+            match self.store.simplified_reply_receipt(&flow_id.0) {
+                Ok(SimplifiedReplyStanding::NoneOwed) => {}
+                Ok(_) => return Outcome::WaitingForTurn(oldest.logical_delivery_id),
+                Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+            }
+        }
+        if let Some(input) = reply_input
+            && let signal_flow::SentBy::Sender(recipient) = &input.sent_by
         {
             let binding = SimplifiedReplyBinding {
                 flow_id: flow_id.clone(),
                 input_delivery_id: crate::generated::memory::InputDeliveryId(
-                    oldest.logical_delivery_id.clone().0,
+                    input.logical_delivery_id.0.clone(),
                 ),
                 source: crate::generated::memory::Source(address.clone()),
                 recipient: crate::generated::memory::Recipient(recipient.clone()),
                 completed: crate::generated::memory::Completed(false),
             };
             if self.store.bind_simplified_reply(binding).is_err() {
-                return Outcome::WaitingForTurn(oldest.logical_delivery_id);
+                return Outcome::WaitingForTurn(input.logical_delivery_id);
             }
         }
-        // One injection carries every queued message, oldest first: the
-        // triggering one and all held behind it. A Simplified seat binds its
-        // reply to one input, so it takes its oldest alone.
-        let simplified = self
-            .last_launch_profile(&flow_id.0)
-            .is_some_and(|profile| profile.flow_kind == signal_flow::FlowKind::Simplified);
-        let cohort: Vec<QueueEntry> = if simplified {
-            vec![oldest.clone()]
-        } else {
-            queue.0
-        };
         let refused = |drained: Vec<QueueEntry>, failure| {
             if drained.is_empty() {
                 Outcome::Failed(failure)
@@ -2988,6 +3024,19 @@ impl DrainsHeldSeats for RunningNexus {
                 return refused(drained, Failed_Data::StoreRefused);
             }
         };
+        // A grouped call crosses the native boundary as one uncertain unit.
+        // A crash at any later point leaves every member parked together.
+        let attempt = if grouped {
+            match self.store.stage_uncertain_cohort(&attempt, &cohort) {
+                Ok(staged) => match staged.into_iter().next() {
+                    Some(head) => head,
+                    None => return refused(drained, Failed_Data::StoreRefused),
+                },
+                Err(_) => return refused(drained, Failed_Data::StoreRefused),
+            }
+        } else {
+            attempt
+        };
         let absent = |observation: String| {
             self.store
                 .mark_delivery_absent(
@@ -3012,8 +3061,9 @@ impl DrainsHeldSeats for RunningNexus {
             visible_sender,
             content: meta_signal_flow::Content::Waking(waking),
         };
-        let message = if let Some(pushed) = lease.pushed() {
-            // A Push delivers the whole queue at the priority it names.
+        let message = if !grouped && let Some(pushed) = lease.pushed() {
+            // An ordinary Push uses its requested priority. An atomic group
+            // retains its strongest member priority for its one submission.
             match pushed {
                 signal_flow::Priority::HardAbrupt => meta_signal_flow::Message::HardAbrupt(letter),
                 signal_flow::Priority::MiddleAbrupt => {
@@ -3053,16 +3103,22 @@ impl DrainsHeldSeats for RunningNexus {
                     | meta_signal_flow::DeliveryRejection::ComposerOccupied
                     | meta_signal_flow::DeliveryRejection::NotDelivered));
         if proved_absent {
-            absent(format!("{result:?}"));
+            if !grouped {
+                absent(format!("{result:?}"));
+            }
             return refused(drained, Failed_Data::HerdrRefused);
         }
         // Typed once, never typed again: every message the payload carried
         // leaves the queue as an Uncertain attempt of the same native
         // anchor, and the one receipt of the payload settles them all.
-        let _ = self
-            .store
-            .mark_delivery_uncertain(&attempt.queue_attempt_id.0);
-        let typed = self.park_cohort(&attempt, &cohort);
+        let typed = if grouped {
+            cohort.clone()
+        } else {
+            let _ = self
+                .store
+                .mark_delivery_uncertain(&attempt.queue_attempt_id.0);
+            self.park_cohort(&attempt, &cohort)
+        };
         let _ = self.reconcile_delivery(&attempt);
         // A payload typed into a Codex pane is a letter its thread holds
         // until a user message of exactly its text takes it, whether or not
@@ -3611,6 +3667,12 @@ impl CarriesStartup for RunningNexus {
             }
             _ => return false,
         };
+        if self.store.contains_delivery_group(startup).unwrap_or(true) {
+            return self
+                .store
+                .stage_uncertain_cohort(&head, startup)
+                .is_ok_and(|attempts| attempts.len() == startup.len());
+        }
         if !self
             .store
             .mark_delivery_uncertain(&head.queue_attempt_id.0)
@@ -3725,14 +3787,39 @@ impl WakesInParts for RunningNexus {
                 .flatten()
                 .is_some()
         });
-        if simplified
-            && let Some(oldest) = startup.first()
-            && let signal_flow::SentBy::Sender(recipient) = &oldest.sent_by
+        // startup is the FROZEN submitted payload; do not select its queue
+        // again after premark changed those members to Uncertain.
+        use crate::store::delivery_group::AnalysesSimplifiedDeliveries;
+        let reply_input = if simplified {
+            match startup.first() {
+                Some(first) => match self.store.delivery_group(&first.logical_delivery_id) {
+                    // Preserve ordinary startup's historical first-input rule.
+                    Ok(None) => Some(first),
+                    Ok(Some(_)) => match self
+                        .store
+                        .simplified_reply_input_from_frozen(address, startup)
+                    {
+                        Ok(Ok(Some(input))) => Some(input),
+                        Ok(Ok(None)) => match self.store.simplified_reply_receipt(flow_id) {
+                            Ok(SimplifiedReplyStanding::NoneOwed) => None,
+                            _ => return false,
+                        },
+                        _ => return false,
+                    },
+                    Err(_) => return false,
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
+        if let Some(input) = reply_input
+            && let signal_flow::SentBy::Sender(recipient) = &input.sent_by
         {
             let binding = SimplifiedReplyBinding {
                 flow_id: flow_ethos::FlowId(flow_id.to_owned()),
                 input_delivery_id: crate::generated::memory::InputDeliveryId(
-                    oldest.logical_delivery_id.clone().0,
+                    input.logical_delivery_id.0.clone(),
                 ),
                 source: crate::generated::memory::Source(address.clone()),
                 recipient: crate::generated::memory::Recipient(recipient.clone()),
@@ -3792,21 +3879,6 @@ impl WakesInParts for RunningNexus {
             return Err(WakeRefusal::NothingQueued);
         }
         let plan = self.wake_plan(&metaflow);
-        let simplified = matches!(
-            &plan,
-            WakePlan::Fresh(fresh) if fresh.flow_kind == signal_flow::FlowKind::Simplified
-        );
-        // The wake lease fixes this oldest-first batch. Work admitted while
-        // the native launch settles is appended behind it and cannot enter a
-        // prompt already composed. A Simplified run can owe one answer to
-        // one sender, so its whole selected batch is its oldest request;
-        // the rest remains ordered for the next turn.
-        let startup = if simplified {
-            flow_ethos::Queue(metaflow.queue.0.first().cloned().into_iter().collect())
-        } else {
-            metaflow.queue.clone()
-        };
-        let startup_text = startup.0.prompt_text(&metaflow.address);
         // The last flow's session must not be running still: a seat that
         // flow's harness keeps, as one started by hand would, is never
         // joined by a second flow of the same metaflow.
@@ -3829,14 +3901,70 @@ impl WakesInParts for RunningNexus {
         let WakePlan::Fresh(fresh) = plan else {
             return Err(WakeRefusal::Unplaceable);
         };
+        let simplified = fresh.flow_kind() == &signal_flow::FlowKind::Simplified;
+        // The actual wake plan was resolved once off-gate. Only this existing
+        // premark scope owns selection/Cancel cutoff; release before compose.
+        use crate::store::delivery_group::{AnalysesSimplifiedDeliveries, RefusesDeliveryGroups};
+        let (metaflow, startup, startup_text) = {
+            let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+            loop {
+                let current = match self.store.metaflow(address) {
+                    Ok(Some(current)) if current.state == flow_ethos::State::Asleep => current,
+                    Ok(_) => return Err(WakeRefusal::NotAsleep),
+                    Err(_) => return Err(WakeRefusal::StoreUnreadable),
+                };
+                if current.queue.0.is_empty() && !owed {
+                    return Err(WakeRefusal::NothingQueued);
+                }
+                let entries = (if simplified {
+                    self.store.oldest_delivery_group(address, &current.queue.0)
+                } else {
+                    self.store
+                        .complete_delivery_groups(address, &current.queue.0)
+                })
+                .map_err(|_| WakeRefusal::StoreUnreadable)?;
+                let grouped = self
+                    .store
+                    .contains_delivery_group(&entries)
+                    .map_err(|_| WakeRefusal::StoreUnreadable)?;
+                if simplified && grouped {
+                    match self
+                        .store
+                        .simplified_reply_input_from_frozen(address, &entries)
+                        .map_err(|_| WakeRefusal::StoreUnreadable)?
+                    {
+                        Ok(_) => {}
+                        Err(reason) => {
+                            if entries.is_empty() {
+                                return Err(WakeRefusal::StoreUnreadable);
+                            }
+                            self.store
+                                .refuse_delivery_group(address, &entries, reason)
+                                .map_err(|_| WakeRefusal::StoreUnreadable)?;
+                            // Each iteration committed removal of a NONEMPTY
+                            // whole prefix. Errors return, never retry it.
+                            continue;
+                        }
+                    }
+                }
+                let startup_text = entries.prompt_text(address);
+                if grouped {
+                    self.store
+                        .mark_startup_uncertain(address, &entries)
+                        .map_err(|_| WakeRefusal::StoreUnreadable)?;
+                }
+                break (current, flow_ethos::Queue(entries), startup_text);
+            }
+        };
         let started = match self.start_fresh(&metaflow, fresh, &startup_text) {
             Ok(started) => started,
             Err(FreshRefusal::Failed(failure)) => {
                 return Err(WakeRefusal::FreshNotStarted(failure));
             }
             Err(FreshRefusal::Rejected(rejection)) => {
-                // Nothing was taken: every request stays queued, and its
-                // sender sees why it waits. The next waking request retries.
+                // Ordinary queued work remains retryable. A selected atomic
+                // group stays conservatively Uncertain after the native call;
+                // its complete original prefix remains available as evidence.
                 use crate::store::logical_delivery::RecordsLogicalDeliveries;
                 let _turn = self
                     .dispatch_gate

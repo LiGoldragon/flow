@@ -117,5 +117,5 @@ Library
           Option<MessageNexusPath>
           Option<MessageNexusBinary>
           Lease.Integer } ] ; Lease seconds; 60 before any Nexus payload.
-[]
-[]
+[ FixedWidth.{ [] [] [ WIDTH.Integer ] [] } ]
+[ RequestId.[ FixedWidth ] ]

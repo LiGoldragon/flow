@@ -42,6 +42,9 @@ impl ProjectsRefusal for signal_flow::Refusal {
             Refusal::RequestIdDrawsCollided => VisibleRefusal::RequestIdDrawsCollided,
             Refusal::MinutesRefused(value) => VisibleRefusal::MinutesRefused(value.clone()),
             Refusal::PermaflowHeld(value) => VisibleRefusal::PermaflowHeld(value.clone()),
+            Refusal::SimplifiedAwaitingMemberConflict(position) => {
+                VisibleRefusal::SimplifiedAwaitingMemberConflict(position.clone())
+            }
         }
     }
 }
@@ -240,6 +243,151 @@ impl DeliversRequest for Request {
     }
 }
 
+impl DeliversRequest for signal_flow::SendableRequest {
+    fn delivered_request(&self, request_id: &flow_ethos::RequestId) -> DeliveredRequest {
+        use signal_flow::SendableRequest;
+        match self {
+            SendableRequest::Order(value) => DeliveredRequest::Order(signal_flow::Order_Data {
+                request_id: request_id.clone(),
+                string: value.clone(),
+            }),
+            SendableRequest::Question(value) => {
+                DeliveredRequest::Question(signal_flow::Question_Data {
+                    request_id: request_id.clone(),
+                    string: value.clone(),
+                })
+            }
+            SendableRequest::Living(value) => {
+                DeliveredRequest::Living(signal_flow::DeliveredRequest_Living_Data {
+                    request_id: request_id.clone(),
+                    context: value.context.clone(),
+                    verbatim: value.verbatim.clone(),
+                })
+            }
+            SendableRequest::Notice(value) => DeliveredRequest::Notice(signal_flow::Notice_Data {
+                request_id: request_id.clone(),
+                string: value.clone(),
+            }),
+            SendableRequest::Task(value) => DeliveredRequest::Task(signal_flow::Task_Data {
+                request_id: request_id.clone(),
+                minutes: value.minutes,
+                string: value.string.clone(),
+            }),
+            SendableRequest::Result(value) => {
+                DeliveredRequest::Result(signal_flow::DeliveredRequest_Result_Data {
+                    request_id: value.request_id.clone(),
+                    string: value.string.clone(),
+                })
+            }
+            SendableRequest::Done(value) => {
+                DeliveredRequest::Done(signal_flow::DeliveredRequest_Done_Data {
+                    request_id: value.request_id.clone(),
+                    string: value.string.clone(),
+                })
+            }
+        }
+    }
+}
+
+trait ProjectsVisibleSender {
+    fn visible_sender(&self) -> VisibleSender;
+}
+
+impl ProjectsVisibleSender for SentBy {
+    fn visible_sender(&self) -> VisibleSender {
+        match self {
+            SentBy::Sender(address) => VisibleSender::Sender(address.clone()),
+            SentBy::Unknown => VisibleSender::Unknown,
+            SentBy::Flow => VisibleSender::Notification,
+            SentBy::Unbound => VisibleSender::Unbound,
+        }
+    }
+}
+
+impl ProjectsAdmittedMessage for signal_flow::SendableMessage {
+    fn admitted_input(
+        &self,
+        request_id: &flow_ethos::RequestId,
+        sent_by: &SentBy,
+    ) -> VisibleNativeInput {
+        use signal_flow::SendableMessage;
+        VisibleNativeInput {
+            visible_sender: sent_by.visible_sender(),
+            delivered_message: match self {
+                SendableMessage::HardAbrupt(request) => {
+                    DeliveredMessage::HardAbrupt(request.delivered_request(request_id))
+                }
+                SendableMessage::MiddleAbrupt(request) => {
+                    DeliveredMessage::MiddleAbrupt(request.delivered_request(request_id))
+                }
+                SendableMessage::Soft(request) => {
+                    DeliveredMessage::Soft(request.delivered_request(request_id))
+                }
+            },
+        }
+    }
+}
+
+/// Measures the public group encoding before its request IDs are minted.
+/// The structural projection omits each future ID field; its fixed width
+/// and field separator are counted without constructing an identity.
+pub(crate) trait MeasuresAdmittedMessages {
+    fn admitted_prompt_bytes(&self, sent_by: &SentBy) -> usize;
+}
+
+impl MeasuresAdmittedMessages for [signal_flow::SendableMessage] {
+    fn admitted_prompt_bytes(&self, sent_by: &SentBy) -> usize {
+        use datom_codec::{Datom, Datomizable, Form};
+        use flow_ethos::FixedWidth;
+        use protos::{Compactable, Protosizable};
+        use signal_flow::{SendableMessage, SendableRequest};
+        let mut omitted_bytes = 0;
+        let inputs = self
+            .iter()
+            .map(|message| {
+                let (SendableMessage::HardAbrupt(request)
+                | SendableMessage::MiddleAbrupt(request)
+                | SendableMessage::Soft(request)) = message;
+                let mut message_datom = message.datomize(Vec::new());
+                if !matches!(
+                    request,
+                    SendableRequest::Result(_) | SendableRequest::Done(_)
+                ) {
+                    let Form::Variant(_, priority_body) = &mut message_datom.form else {
+                        unreachable!("a sendable message is a priority variant");
+                    };
+                    let Form::Variant(_, request_body) = &mut priority_body.form else {
+                        unreachable!("a sendable message carries a request variant");
+                    };
+                    if !matches!(
+                        request,
+                        SendableRequest::Living(_) | SendableRequest::Task(_)
+                    ) {
+                        let payload = request_body.as_ref().clone();
+                        request_body.form = Form::Struct(vec![payload]);
+                    }
+                    omitted_bytes += flow_ethos::RequestId::WIDTH as usize + 1;
+                }
+                Datom {
+                    path: Vec::new(),
+                    form: Form::Struct(vec![
+                        sent_by.visible_sender().datomize(Vec::new()),
+                        message_datom,
+                    ]),
+                }
+            })
+            .collect();
+        Datom {
+            path: Vec::new(),
+            form: Form::Vector(inputs),
+        }
+        .protosize()
+        .compact()
+        .len()
+            + omitted_bytes
+    }
+}
+
 pub(crate) trait ProjectsQueueEntry {
     fn visible_input(&self, recipient: &flow_ethos::Address) -> VisibleNativeInput;
 }
@@ -268,12 +416,7 @@ impl ProjectsAdmittedMessage for Message {
         sent_by: &SentBy,
     ) -> VisibleNativeInput {
         VisibleNativeInput {
-            visible_sender: match sent_by {
-                SentBy::Sender(address) => VisibleSender::Sender(address.clone()),
-                SentBy::Unknown => VisibleSender::Unknown,
-                SentBy::Flow => VisibleSender::Notification,
-                SentBy::Unbound => VisibleSender::Unbound,
-            },
+            visible_sender: sent_by.visible_sender(),
             delivered_message: match self {
                 Message::HardAbrupt(request) => {
                     DeliveredMessage::HardAbrupt(request.delivered_request(request_id))
@@ -617,5 +760,182 @@ mod tests {
             private.visible_delivery_state(),
             VisibleDeliveryState::Delivered
         );
+    }
+    #[test]
+    fn sendable_preflight_projection_matches_resolved_projection_for_every_variant_and_priority() {
+        use super::ProjectsAdmittedMessage;
+        use flow_ethos::{Message, Request, SentBy};
+        use signal_flow::{SendableMessage, SendableRequest};
+        let answer_id = flow_ethos::RequestId("abcd".into());
+        let private_id = flow_ethos::LogicalDeliveryId("private-logical-id".into());
+        let task = flow_ethos::AnswerableTask {
+            minutes: flow_ethos::Minutes(1),
+            string: "task".into(),
+        };
+        let cases = vec![
+            (
+                SendableRequest::Order("order".into()),
+                Request::Order("order".into()),
+            ),
+            (
+                SendableRequest::Question("question".into()),
+                Request::Question("question".into()),
+            ),
+            (
+                SendableRequest::Living(signal_flow::SendableRequest_Living_Data {
+                    context: "context".into(),
+                    verbatim: "living".into(),
+                }),
+                Request::Living(flow_ethos::Living_Data {
+                    context: "context".into(),
+                    verbatim: "living".into(),
+                }),
+            ),
+            (
+                SendableRequest::Notice("notice".into()),
+                Request::Notice("notice".into()),
+            ),
+            (SendableRequest::Task(task.clone()), Request::Task(task)),
+            (
+                SendableRequest::Result(signal_flow::SendableRequest_Result_Data {
+                    request_id: answer_id.clone(),
+                    string: "result".into(),
+                }),
+                Request::Result(flow_ethos::ResultPayload::Answered(
+                    flow_ethos::ResultPayload_Answered_Data {
+                        logical_delivery_id: private_id.clone(),
+                        request_id: answer_id.clone(),
+                        string: "result".into(),
+                    },
+                )),
+            ),
+            (
+                SendableRequest::Done(signal_flow::SendableRequest_Done_Data {
+                    request_id: answer_id.clone(),
+                    string: "done".into(),
+                }),
+                Request::Done(flow_ethos::DonePayload::Answered(
+                    flow_ethos::DonePayload_Answered_Data {
+                        logical_delivery_id: private_id,
+                        request_id: answer_id,
+                        string: "done".into(),
+                    },
+                )),
+            ),
+        ];
+        let request_id = flow_ethos::RequestId("0000".into());
+        for (public, private) in cases {
+            let priorities = [
+                (
+                    SendableMessage::HardAbrupt(public.clone()),
+                    Message::HardAbrupt(private.clone()),
+                ),
+                (
+                    SendableMessage::MiddleAbrupt(public.clone()),
+                    Message::MiddleAbrupt(private.clone()),
+                ),
+                (SendableMessage::Soft(public), Message::Soft(private)),
+            ];
+            for (public, private) in priorities {
+                assert_eq!(
+                    public.admitted_input(&request_id, &SentBy::Unbound),
+                    private.admitted_input(&request_id, &SentBy::Unbound)
+                );
+            }
+        }
+    }
+    #[test]
+    fn failed_conflict_projection_retains_typed_original_position() {
+        use super::ProjectsDeliveryState;
+        let private = signal_flow::DeliveryState::Failed(
+            signal_flow::Refusal::SimplifiedAwaitingMemberConflict(
+                signal_flow::SendSeveralMessagePosition(3),
+            ),
+        );
+        assert_eq!(
+            private.visible_delivery_state(),
+            signal_flow::VisibleDeliveryState::Failed(
+                signal_flow::VisibleRefusal::SimplifiedAwaitingMemberConflict(
+                    signal_flow::SendSeveralMessagePosition(3)
+                )
+            )
+        );
+    }
+    #[test]
+    fn group_sizing_matches_encoded_projection_for_every_variant_priority_sender_and_count() {
+        use super::{MeasuresAdmittedMessages, ProjectsAdmittedMessage};
+        use datom_codec::Datomizable;
+        use flow_ethos::{FixedWidth, RequestId, SentBy};
+        use protos::{Compactable, Protosizable};
+        use signal_flow::{SendableMessage, SendableRequest};
+        let minted_id = RequestId("a1b2".into());
+        let answered_id = RequestId("z9y8".into());
+        assert_eq!(minted_id.0.len(), RequestId::WIDTH as usize);
+        let address = signal_flow::Address {
+            aspect: signal_flow::Aspect::Mind,
+            topic: flow_ethos::Topic("sizingFixture".into()),
+            model: signal_flow::Model::Sol,
+        };
+        let senders = [
+            SentBy::Sender(address),
+            SentBy::Unbound,
+            SentBy::Flow,
+            SentBy::Unknown,
+        ];
+        let requests = vec![
+            SendableRequest::Order("order «quoted»\n\tλ".into()),
+            SendableRequest::Question(String::new()),
+            SendableRequest::Living(signal_flow::SendableRequest_Living_Data {
+                context: "context «nested»".into(),
+                verbatim: "living\nwords".into(),
+            }),
+            SendableRequest::Notice("notice".into()),
+            SendableRequest::Task(flow_ethos::AnswerableTask {
+                minutes: flow_ethos::Minutes(17),
+                string: "task".into(),
+            }),
+            SendableRequest::Result(signal_flow::SendableRequest_Result_Data {
+                request_id: answered_id.clone(),
+                string: "result".into(),
+            }),
+            SendableRequest::Done(signal_flow::SendableRequest_Done_Data {
+                request_id: answered_id,
+                string: "done".into(),
+            }),
+        ];
+        let mut mixed = Vec::new();
+        for request in requests {
+            let messages = [
+                SendableMessage::HardAbrupt(request.clone()),
+                SendableMessage::MiddleAbrupt(request.clone()),
+                SendableMessage::Soft(request),
+            ];
+            for message in messages {
+                for sender in &senders {
+                    for count in [0, 1, 2, 5] {
+                        let group = vec![message.clone(); count];
+                        let encoded = group
+                            .iter()
+                            .map(|member| member.admitted_input(&minted_id, sender))
+                            .collect::<Vec<_>>()
+                            .datomize(Vec::new())
+                            .protosize()
+                            .compact();
+                        assert_eq!(group.admitted_prompt_bytes(sender), encoded.len());
+                    }
+                }
+                mixed.push(message);
+            }
+        }
+        for sender in &senders {
+            let encoded = mixed
+                .iter()
+                .map(|member| member.admitted_input(&minted_id, sender))
+                .collect::<Vec<_>>()
+                .datomize(Vec::new())
+                .protosize()
+                .compact();
+            assert_eq!(mixed.admitted_prompt_bytes(sender), encoded.len());
+        }
     }
 }

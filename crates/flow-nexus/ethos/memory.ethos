@@ -26,6 +26,7 @@ Memory
   :std:boxed:[ Box ]
   flow_ethos:[ Minutes SourceRoot CodexEndpoint ] ]
 [ StoredModelEffort.{ ModelEffort }
+  LogicalDeliveryGroup.{ Address Vector<LogicalDeliveryId> } ; ordered members of one admission
   LaunchOutcome.[ Started.LaunchedRecord
                   Replaced.ReplacedRecord
                   StartRejected.StartRejection

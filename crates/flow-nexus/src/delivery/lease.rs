@@ -31,8 +31,15 @@ impl From<&HerdrRoute> for LeasedPane {
 /// The panes currently held, and the wait for one to be let go.
 #[derive(Default)]
 pub struct PaneLeases {
-    held: Mutex<BTreeSet<LeasedPane>>,
+    held: Mutex<PaneLeaseState>,
     released: Condvar,
+}
+
+#[derive(Default)]
+struct PaneLeaseState {
+    occupied: BTreeSet<LeasedPane>,
+    #[cfg(test)]
+    waiting: BTreeSet<LeasedPane>,
 }
 
 /// One held pane. Dropping it lets the pane go.
@@ -44,6 +51,7 @@ pub struct PaneLease<'leases> {
 /// Takes the exclusive hold on a pane, waiting while another write holds it.
 pub trait LeasesPanes {
     fn hold(&self, route: &HerdrRoute) -> PaneLease<'_>;
+    fn try_hold(&self, route: &HerdrRoute) -> Option<PaneLease<'_>>;
 }
 
 impl LeasesPanes for PaneLeases {
@@ -53,14 +61,32 @@ impl LeasesPanes for PaneLeases {
             .held
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        while held.contains(&pane) {
+        #[cfg(test)]
+        if held.occupied.contains(&pane) {
+            held.waiting.insert(pane.clone());
+            self.released.notify_all();
+        }
+        while held.occupied.contains(&pane) {
             held = self
                 .released
                 .wait(held)
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
-        held.insert(pane.clone());
+        #[cfg(test)]
+        held.waiting.remove(&pane);
+        held.occupied.insert(pane.clone());
         PaneLease { leases: self, pane }
+    }
+
+    fn try_hold(&self, route: &HerdrRoute) -> Option<PaneLease<'_>> {
+        let pane = LeasedPane::from(route);
+        let mut held = self
+            .held
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        held.occupied
+            .insert(pane.clone())
+            .then(|| PaneLease { leases: self, pane })
     }
 }
 
@@ -70,8 +96,27 @@ impl Drop for PaneLease<'_> {
             .held
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .occupied
             .remove(&self.pane);
         self.leases.released.notify_all();
+    }
+}
+
+#[cfg(test)]
+pub(crate) trait ObservesWaitingPane {
+    fn waiter_registered(&self, route: &HerdrRoute, limit: std::time::Duration) -> bool;
+}
+
+#[cfg(test)]
+impl ObservesWaitingPane for PaneLeases {
+    fn waiter_registered(&self, route: &HerdrRoute, limit: std::time::Duration) -> bool {
+        let pane = LeasedPane::from(route);
+        let held = self.held.lock().unwrap_or_else(|error| error.into_inner());
+        let (held, _) = self
+            .released
+            .wait_timeout_while(held, limit, |state| !state.waiting.contains(&pane))
+            .unwrap_or_else(|error| error.into_inner());
+        held.waiting.contains(&pane)
     }
 }
 
@@ -124,7 +169,11 @@ mod tests {
     #[test]
     fn a_held_pane_does_not_hold_another() {
         let leases = PaneLeases::default();
-        let _first = leases.hold(&route("w1:p1"));
-        let _second = leases.hold(&route("w1:p2"));
+        let first = leases.hold(&route("w1:p1"));
+        assert!(leases.try_hold(&route("w1:p1")).is_none());
+        let _second = leases.try_hold(&route("w1:p2")).expect("independent pane");
+        assert!(leases.try_hold(&route("w1:p1")).is_none());
+        drop(first);
+        assert!(leases.try_hold(&route("w1:p1")).is_some());
     }
 }

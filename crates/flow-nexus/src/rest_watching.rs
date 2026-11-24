@@ -252,9 +252,12 @@ impl ObservesBoundRest for RunningNexus {
     }
 
     fn drain_bound_rest(&self, rest: &BoundRest) -> bool {
+        use crate::queue_write_fence::{LendsQueueDispatch, QueueDispatch};
+
         let _effect = self.waking.effect(rest.address.clone());
         let completed = {
             let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+            let mut dispatch = QueueDispatch::new(&self.dispatch_gate, _turn);
             if !self.rest_still_bound(rest) || self.stopping.requested() {
                 return true;
             }
@@ -265,7 +268,7 @@ impl ObservesBoundRest for RunningNexus {
                 return false;
             };
             if !matches!(
-                self.herdr.pane_agent(&node),
+                dispatch.outside(|| self.herdr.pane_agent(&node)),
                 PaneAgent::Present {
                     agent_state: AgentState::Idle | AgentState::Done,
                     ready: true,
@@ -273,10 +276,16 @@ impl ObservesBoundRest for RunningNexus {
             ) {
                 return false;
             }
+            if !self.rest_still_bound(rest) || self.stopping.requested() {
+                return true;
+            }
+            if self.held() || self.permaflow_held(rest.address.clone()) {
+                return false;
+            }
             let Some(lease) = self.waking.hold(&rest.address) else {
                 return false;
             };
-            let _outcome = self.drain_all_held(rest.address.clone(), &lease);
+            let _outcome = self.drain_all_held(rest.address.clone(), &lease, Some(&mut dispatch));
             !self.rest_still_bound(rest)
         };
         use crate::send_tool::ServesLaunchCalls;

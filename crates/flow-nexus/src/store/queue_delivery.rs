@@ -25,13 +25,11 @@ use crate::generated::memory::{Device, Inode, Offset};
 #[cfg(test)]
 use flow_ethos::Request;
 #[cfg(test)]
-use meta_signal_flow::AbsenceProof;
-#[cfg(test)]
 use meta_signal_flow::QueueEvidence_Legacy_Data;
 use meta_signal_flow::{
-    AbandonQueueDeliveryRejected_Data, AbandonmentRecord, QueueDelivery, QueueDeliveryStanding,
-    QueueEvidence, QueueResolutionOutcome, QueueResolutionRecord, ResolveQueueDeliveryRejection,
-    Undecided, WithdrawRejected_Data,
+    AbandonQueueDeliveryRejected_Data, AbandonmentRecord, AbsenceProof, QueueDelivery,
+    QueueDeliveryStanding, QueueEvidence, QueueResolutionOutcome, QueueResolutionRecord,
+    ResolveQueueDeliveryRejection, Undecided, WithdrawRejected_Data,
 };
 use sema_engine::AtomicCommit;
 #[cfg(test)]
@@ -50,6 +48,46 @@ impl CarriesLegacySender for Request {
             sent_by,
             request: self,
         })
+    }
+}
+
+pub(super) trait StagesQueueRevocations {
+    fn stage_queue_revocations(
+        &self,
+        attempts: &[String],
+        commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError>;
+}
+
+impl StagesQueueRevocations for FlowStore {
+    fn stage_queue_revocations(
+        &self,
+        attempts: &[String],
+        mut commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError> {
+        use super::logical_delivery::StagesLogicalTransitions;
+        if attempts.is_empty() {
+            return Ok(commit);
+        }
+        let mut requests = Vec::with_capacity(attempts.len());
+        for id in attempts {
+            let Some(mut attempt) = self.queue_delivery_attempt(id)? else {
+                return Err(StoreError::StateInvariant);
+            };
+            if attempt.queue_delivery_phase != QueueDeliveryPhase::Prepared {
+                return Err(StoreError::StateInvariant);
+            }
+            let QueueEvidence::Logical(entry) = &attempt.queue_evidence else {
+                return Err(StoreError::StateInvariant);
+            };
+            requests.push(entry.logical_delivery_id.clone());
+            attempt.queue_delivery_phase = QueueDeliveryPhase::Absent(AbsenceRecord {
+                absence_proof: AbsenceProof::HandOverRefused,
+                observation: crate::generated::memory::Observation(Default::default()),
+            });
+            commit = self.commit_attempt(commit, attempt)?;
+        }
+        self.stage_logical_transitions(&requests, &[DeliveryState::Queued], commit)
     }
 }
 

@@ -200,15 +200,27 @@ impl WritesPane for HerdrCli {
             return PaneAgent::Absent;
         };
         if !self.identity_is_claimed(node) {
+            eprintln!(
+                "flow-nexus: Herdr preflight flow={} claim=unverified",
+                node.flow_id.0
+            );
             return PaneAgent::Unreadable;
         }
         let Some(snapshot) = self.snapshot(route) else {
+            eprintln!(
+                "flow-nexus: Herdr preflight flow={} snapshot=unavailable",
+                node.flow_id.0
+            );
             return PaneAgent::Unreadable;
         };
         let Some(agents) = snapshot
             .pointer("/result/snapshot/agents")
             .and_then(serde_json::Value::as_array)
         else {
+            eprintln!(
+                "flow-nexus: Herdr preflight flow={} snapshot=missing_agents",
+                node.flow_id.0
+            );
             return PaneAgent::Unreadable;
         };
         let Some(agent) = agents
@@ -221,6 +233,10 @@ impl WritesPane for HerdrCli {
                 agent.get("pane_id").and_then(serde_json::Value::as_str)
                     == Some(route.herdr_pane_id.0.as_str())
             });
+            eprintln!(
+                "flow-nexus: Herdr preflight flow={} pane={} matching_binding=false pane_present={pane_reused}",
+                node.flow_id.0, route.herdr_pane_id.0
+            );
             return if pane_reused {
                 PaneAgent::Unreadable
             } else {
@@ -246,7 +262,16 @@ impl WritesPane for HerdrCli {
             }),
         )
         .emit(self);
-        Composer::of(harness_kind).text(reply.printed()?)
+        let rendered = reply.printed();
+        let text = rendered.and_then(|screen| Composer::of(harness_kind).text(screen));
+        if text.is_none() {
+            eprintln!(
+                "flow-nexus: Herdr preflight pane={} read_succeeded={} composer_found=false",
+                route.herdr_pane_id.0,
+                rendered.is_some()
+            );
+        }
+        text
     }
 
     fn press(&self, route: &HerdrRoute, keys: &[String]) -> bool {
@@ -280,9 +305,17 @@ impl WritesPane for HerdrCli {
         )
         .emit(self);
         if matches!(reply, ProcessReply::Unstarted(_)) {
+            eprintln!(
+                "flow-nexus: Herdr emission pane={} operation=prompt result=unstarted",
+                route.herdr_pane_id.0
+            );
             return Placement::Refused;
         }
-        if reply.refused_before_input() {
+        if let Some(code) = reply.before_input_refusal() {
+            eprintln!(
+                "flow-nexus: Herdr emission pane={} operation=prompt result={code}",
+                route.herdr_pane_id.0
+            );
             return Placement::Refused;
         }
         if !reply.prompted_binding(route) {

@@ -338,7 +338,7 @@ trait ReadsPromptReply {
         "empty_agent_prompt",
         "agent_prompt_failed",
     ];
-    fn refused_before_input(&self) -> bool;
+    fn before_input_refusal(&self) -> Option<&'static str>;
     /// Whether Herdr answered `agent_prompted` for the exact binding the
     /// route names. The reply carries that pane's own AgentInfo, so the pane
     /// and terminal it names are the observation itself. The agent's `name`
@@ -359,19 +359,18 @@ impl ReadsPromptReply for ProcessReply {
         }
     }
 
-    fn refused_before_input(&self) -> bool {
+    fn before_input_refusal(&self) -> Option<&'static str> {
         let ProcessReply::Failed(printout) = self else {
-            return false;
+            return None;
         };
         serde_json::from_str::<serde_json::Value>(&printout.stderr.0)
             .ok()
             .and_then(|reply| {
-                reply
+                let code = reply
                     .pointer("/error/code")
-                    .and_then(serde_json::Value::as_str)
-                    .map(|code| Self::BEFORE_INPUT.contains(&code))
+                    .and_then(serde_json::Value::as_str)?;
+                Self::BEFORE_INPUT.into_iter().find(|known| *known == code)
             })
-            .unwrap_or(false)
     }
 
     fn prompted_binding(&self, route: &HerdrRoute) -> bool {

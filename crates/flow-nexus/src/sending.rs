@@ -26,6 +26,7 @@ use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::herdr::launch::ConstructsHarnessCommand;
 use crate::launching::ReadsHarnessArguments;
 use crate::performing::Performs;
+use crate::queue_write_fence::LendsQueueDispatch;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::effort_configuration::ReadsEffort;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
@@ -1377,7 +1378,14 @@ impl CompletesDirectSends for RunningNexus {
             Some(refused @ crate::generated::operation::Outcome::Failed(_)) => refused,
             _ => {
                 let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
-                crate::waking::DrainsHeldSeats::drain_all_held(self, address.clone(), lease)
+                let mut dispatch =
+                    crate::queue_write_fence::QueueDispatch::new(&self.dispatch_gate, _turn);
+                crate::waking::DrainsHeldSeats::drain_all_held(
+                    self,
+                    address.clone(),
+                    lease,
+                    Some(&mut dispatch),
+                )
             }
         };
         // Waiting is a disposition, not a failed attempt: admission already
@@ -1415,8 +1423,10 @@ impl CompletesDirectSends for RunningNexus {
             let seen = changes.current();
             let state = {
                 let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+                let mut dispatch =
+                    crate::queue_write_fence::QueueDispatch::new(&self.dispatch_gate, _turn);
                 if let Some(attempt) = self.carrying_attempt(address, &logical_id.0) {
-                    let _ = self.reconcile_delivery(&attempt);
+                    let _ = self.reconcile_delivery_during_dispatch(&attempt, Some(&mut dispatch));
                 }
                 self.store.logical_delivery_snapshot(&logical_id)
             };
@@ -1540,8 +1550,10 @@ impl CompletesDirectSends for RunningNexus {
             // A native transcript can land without a harness hook. One
             // final correlated reconciliation follows the bounded event
             // wait; timeout alone is never evidence of absence.
+            let mut dispatch =
+                crate::queue_write_fence::QueueDispatch::new(&self.dispatch_gate, _turn);
             if let Some(attempt) = self.carrying_attempt(address, &logical_id.0) {
-                let _ = self.reconcile_delivery(&attempt);
+                let _ = self.reconcile_delivery_during_dispatch(&attempt, Some(&mut dispatch));
             }
             self.store
                 .finish_failed_direct(address, &logical_id.0, &observed)

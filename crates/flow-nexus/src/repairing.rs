@@ -5,8 +5,11 @@
 //! attempt that holds it back.
 
 use crate::RunningNexus;
+use crate::delivery::lease::LeasesPanes;
 use crate::herdr::{PaneRoute, ReadsHerdrPanes};
+use crate::queue_write_fence::CoordinatesQueueWrites;
 use crate::store::ReadsFlowRows;
+use crate::store::metaflow::ReadsSuccession;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::repair::RepairsMetaflows;
 use meta_signal_flow::{
@@ -35,6 +38,29 @@ impl RefusesStore for RunningNexus {
     }
 }
 
+/// A binding-changing override must not strand a prepared cohort in
+/// another pane. The caller holds dispatch throughout the decision.
+pub(crate) trait KeepsActiveQueueWrites {
+    fn keep_active_queue_write(&self, address: &Address) -> Result<(), Output>;
+}
+
+impl KeepsActiveQueueWrites for RunningNexus {
+    fn keep_active_queue_write(&self, address: &Address) -> Result<(), Output> {
+        if let Some(attempt) = self
+            .store
+            .outstanding_delivery(address)
+            .map_err(Self::store_refused)?
+            && self.queue_writes.owns_attempt(&attempt.queue_attempt_id.0)
+        {
+            return Err(Self::store_refused(format!(
+                "Queue attempt {} owns its pane write",
+                attempt.queue_attempt_id.0
+            )));
+        }
+        Ok(())
+    }
+}
+
 impl RepairsFromMeta for RunningNexus {
     fn inspect(&self, address: Address) -> Output {
         match self.store.inspection(&address) {
@@ -48,21 +74,58 @@ impl RepairsFromMeta for RunningNexus {
 
     fn rebind(&self, rebind: Rebind_Data) -> Output {
         let Rebind_Data { address, rebinding } = rebind;
+        if let Err(refusal) = self.keep_active_queue_write(&address) {
+            return refusal;
+        }
+        let flow_id = match self.store.current_flow(&address) {
+            Ok(Ok(flow_id)) => flow_id,
+            Ok(Err(rejection)) => return Output::RebindRejected(rejection),
+            Err(error) => return Self::store_refused(error),
+        };
+        // An acknowledged, unconfirmed replacement can be the raw Awake
+        // row while its predecessor still receives. Do not change either
+        // binding on that tentative row.
+        match self.store.receiving_flow(&address) {
+            Ok(Some(receiving)) if receiving == flow_id => {}
+            Ok(_) => {
+                return Self::store_refused(format!(
+                    "Address {address:?} has an unconfirmed receiving binding"
+                ));
+            }
+            Err(error) => return Self::store_refused(error),
+        }
+        let node = match self.store.flow_node(&flow_id.0) {
+            Ok(node) => node,
+            Err(error) => return Self::store_refused(error),
+        };
+        // Commands confirm and act under the old pane's lease. Rebind
+        // acquires the same lease without waiting under global dispatch.
+        let old_route = node
+            .as_ref()
+            .and_then(|node| match &node.herdr_route_selection {
+                HerdrRouteSelection::Available(route) => Some(route),
+                HerdrRouteSelection::Unavailable => None,
+            });
+        let _binding = match old_route {
+            Some(route) => match self.pane_leases.try_hold(route) {
+                Some(lease) => Some(lease),
+                None => {
+                    return Self::store_refused(format!(
+                        "Pane {} owns an unfinished write",
+                        route.herdr_pane_id.0
+                    ));
+                }
+            },
+            None => None,
+        };
         let rebound = match rebinding {
             Rebinding::Pane(herdr_pane_id) => {
-                let flow_id = match self.store.current_flow(&address) {
-                    Ok(Ok(flow_id)) => flow_id,
-                    Ok(Err(rejection)) => return Output::RebindRejected(rejection),
-                    Err(error) => return Self::store_refused(error),
-                };
-                let node = match self.store.flow_node(&flow_id.0) {
-                    Ok(Some(node)) => node,
-                    Ok(None) => return Output::RebindRejected(RebindRejected_Data::FlowUnknown),
-                    Err(error) => return Self::store_refused(error),
+                let Some(node) = node.as_ref() else {
+                    return Output::RebindRejected(RebindRejected_Data::FlowUnknown);
                 };
                 // The pane is looked for in the Herdr session the flow's
                 // route names.
-                let HerdrRouteSelection::Available(recorded) = &node.herdr_route_selection else {
+                let Some(recorded) = old_route else {
                     return Output::RebindRejected(RebindRejected_Data::PaneAbsent);
                 };
                 let route = match self.herdr.pane_route(
@@ -100,6 +163,12 @@ impl RepairsFromMeta for RunningNexus {
             address,
             logical_delivery_id,
         } = withdraw;
+        if self.queue_writes.owns_request(&logical_delivery_id.0) {
+            return Self::store_refused(format!(
+                "Queue delivery {} owns its pane write",
+                logical_delivery_id.0
+            ));
+        }
         match self.store.withdraw_queued(&address, &logical_delivery_id.0) {
             Ok(Ok(())) => {
                 eprintln!(

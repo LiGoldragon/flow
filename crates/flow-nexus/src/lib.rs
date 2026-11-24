@@ -59,6 +59,7 @@ pub mod model;
 pub mod observation_lifetime;
 pub mod protecting;
 pub mod queue_operations;
+mod queue_write_fence;
 pub mod recovery;
 pub mod reminding;
 pub mod repairing;
@@ -123,6 +124,7 @@ use observe_sends::ObservesLogicalSends;
 use peer::{NamesMetaPeer, ResolvesPeer};
 use performing::Performs;
 use queue_operations::OperatesOnRequestsAndQueues;
+use queue_write_fence::CoordinatesQueueWrites;
 use reporting::RecordsReports;
 use send_tool::ServesLaunchCalls;
 use sending::{BindsSeats, LaunchesDeclared, RehearsesDeclared, SendsRequests};
@@ -162,6 +164,7 @@ pub struct RunningNexus {
     pub composer: Live<LaunchComposer>,
     /// Serializes dispatch; see `dispatch_serially`.
     pub dispatch_gate: Mutex<()>,
+    queue_writes: queue_write_fence::QueueWriteFence,
     /// The exclusive hold on each pane Flow is writing; see
     /// `delivery::lease`.
     pub pane_leases: delivery::lease::PaneLeases,
@@ -611,9 +614,14 @@ impl signal_flow::Answering for OrdinaryCall<'_> {
         };
         match nexus.herdr.pane_presence(&node) {
             herdr::PanePresence::Present | herdr::PanePresence::Bare => {
-                // No write is left half-typed into a pane as it closes.
+                // A write holds its pane through settlement. Refuse a
+                // competing close rather than wait under dispatch.
                 let closed = {
-                    let _lease = nexus.pane_leases.hold(route);
+                    let Some(_lease) = nexus.pane_leases.try_hold(route) else {
+                        return Err(Output::StopRejected(
+                            signal_flow::StopRejection::CloseRefused,
+                        ));
+                    };
                     nexus.perform(Operation::Close(node.clone()))
                 };
                 if closed != Outcome::Closed {
@@ -812,6 +820,17 @@ impl signal_flow::Answering for OrdinaryCall<'_> {
         request_id: &signal_flow::RequestId,
     ) -> Result<signal_flow::RequestId, Output> {
         use crate::store::RecordsLogicalDeliveries;
+        use crate::store::logical_delivery::MintsRequestIds;
+        if let Ok(Some(binding)) = self.nexus.store.request_binding(request_id)
+            && self
+                .nexus
+                .queue_writes
+                .owns_request(&binding.logical_delivery_id.0)
+        {
+            return Err(Output::ArchiveRejected(
+                signal_flow::ArchiveRejection::NotYet(signal_flow::ArchiveHold::AttemptUnfinished),
+            ));
+        }
         match self.nexus.store.archive_request(&request_id.0) {
             Ok(Ok(())) => Ok(request_id.clone()),
             Ok(Err(rejection)) => Err(Output::ArchiveRejected(rejection)),
@@ -1333,7 +1352,8 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
             .machine_control(crate::generated::overriding::Subject::Named(
                 command_request.flow_id.clone(),
             ))?;
-        match self.nexus.command(command_request.clone()) {
+        use crate::delivery::DeliversOwnerCommands;
+        match self.nexus.owner_command(command_request.clone()) {
             meta_signal_flow::Output::Commanded(outcome) => Ok(outcome),
             other => Err(other),
         }
@@ -1443,13 +1463,22 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         use crate::reminding::CountsUnixSeconds;
         use crate::store::queue_delivery::AccountsQueueDelivery;
         use meta_signal_flow::{
-            AbandonmentCause, AbandonmentRecord, Output, QueueDeliveryAbandoned_Data, UnixSeconds,
+            AbandonmentCause, AbandonmentRecord, Output, QueueDeliveryAbandoned_Data, Refused_Data,
+            StoreFailure, UnixSeconds,
         };
         let nexus = self.nexus;
         let resolver = self
             .resolver
             .clone()
             .unwrap_or_else(|| nexus.meta_resolver(None));
+        if nexus.queue_writes.owns_attempt(&request.queue_attempt_id.0) {
+            return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                format!(
+                    "Queue attempt {} owns its pane write",
+                    request.queue_attempt_id.0
+                ),
+            ))));
+        }
         let record = AbandonmentRecord {
             abandonment_cause: AbandonmentCause::Owner(resolver),
             queue_resolution_reason: request.queue_resolution_reason.clone(),
@@ -1885,6 +1914,8 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let seat = nexus.seat_named(Subject::Named(flow_id.clone()))?;
+        use crate::repairing::KeepsActiveQueueWrites;
+        nexus.keep_active_queue_write(&seat.address)?;
         let node = match nexus.store.flow_node(&flow_id.0) {
             Ok(Some(node)) => node,
             Ok(None) => return Err(Output::Refused(Refused_Data::UnknownFlow(flow_id.clone()))),
@@ -1918,7 +1949,11 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
                 )
             {
                 let closed = {
-                    let _lease = nexus.pane_leases.hold(route);
+                    let Some(_lease) = nexus.pane_leases.try_hold(route) else {
+                        return Err(Output::Refused(Refused_Data::CapsuleRefused(
+                            flow_id.clone(),
+                        )));
+                    };
                     nexus.perform(Operation::Close(node.clone()))
                 };
                 if closed != Outcome::Closed {
@@ -2091,27 +2126,33 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
     // the cause Overridden.
     fn hold(&self) -> Result<(), meta_signal_flow::Output> {
         use crate::generated::memory::Moment;
-        use crate::generated::operation::{Operation, Outcome, Record_Data};
         use crate::generated::overriding::{HeedsOverrides, Holding};
-        use crate::performing::Performs;
         use crate::reminding::CountsUnixSeconds;
+        use crate::store::overriding::HoldsQueueWritesDurably;
         use meta_signal_flow::{Output, Refused_Data, StoreFailure};
         let nexus = self.nexus;
+        let _transition = nexus.queue_writes.transition();
+        {
+            let _turn = nexus
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let moment = Moment(std::time::SystemTime::now().seconds_since_epoch());
+            nexus.queue_writes.hold(|unstarted| {
+                nexus
+                    .store
+                    .switch_queue_writes(Holding::Held(moment), unstarted)
+                    .map(|_| ())
+                    .map_err(|error| {
+                        Output::Refused(Refused_Data::StoreRefused(StoreFailure(error.to_string())))
+                    })
+            })?;
+        }
+        nexus.queue_writes.settle_started();
         let _turn = nexus
             .dispatch_gate
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let moment = Moment(std::time::SystemTime::now().seconds_since_epoch());
-        match nexus.perform(Operation::Record(Record_Data::Switched(Holding::Held(
-            moment,
-        )))) {
-            Outcome::Recorded => {}
-            refused => {
-                return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
-                    format!("{refused:?}"),
-                ))));
-            }
-        }
+            .unwrap_or_else(|error| error.into_inner());
         eprintln!("flow-nexus: held by the owner; the Nexus takes no act of its own");
         nexus.record_every_seat().map(|_| ())
     }
@@ -2127,6 +2168,8 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         use meta_signal_flow::{Output, Refused_Data, StoreFailure};
         let nexus = self.nexus;
         {
+            let _transition = nexus.queue_writes.transition();
+            nexus.queue_writes.settle_revoked();
             let _turn = nexus
                 .dispatch_gate
                 .lock()
@@ -2140,6 +2183,7 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
                     ))));
                 }
             }
+            nexus.queue_writes.resume();
             eprintln!("flow-nexus: resumed by the owner; the Nexus acts on its own again");
         }
         crate::launching::ReconcilesInterruptedLaunches::reconcile_interrupted_launches(nexus);
@@ -2231,6 +2275,7 @@ impl OpensRunningNexus for RunningNexus {
             // socket the configuration names.
             composer: Live::holding(configured.composer(store.clone())),
             dispatch_gate: Mutex::new(()),
+            queue_writes: Default::default(),
             pane_leases: delivery::lease::PaneLeases::default(),
             waking: waking::WakingMetaflows::default(),
             stopped_at_confirmation: waking::StoppedAtConfirmation::default(),
@@ -3257,6 +3302,7 @@ impl DispatchesSerially for RunningNexus {
         | meta_signal_flow::Input::CrystallizeNow(_)
         | meta_signal_flow::Input::Renew(_)
         | meta_signal_flow::Input::Close(_)
+        | meta_signal_flow::Input::Command(_)
         | meta_signal_flow::Input::Deliver(_)
         | meta_signal_flow::Input::Unlock(_)
         | meta_signal_flow::Input::Forget(_)
@@ -4387,6 +4433,7 @@ mod tests {
                     Arc::new(crate::composition::FixtureSuccessorRecovery::default()),
                 )),
                 dispatch_gate: std::sync::Mutex::new(()),
+                queue_writes: Default::default(),
                 pane_leases: crate::delivery::lease::PaneLeases::default(),
                 waking: crate::waking::WakingMetaflows::default(),
                 stopped_at_confirmation: crate::waking::StoppedAtConfirmation::default(),
@@ -4459,6 +4506,7 @@ mod tests {
             });
             self.nexus.store = store.into();
             self.nexus.dispatch_gate = std::sync::Mutex::new(());
+            self.nexus.queue_writes = Default::default();
             self.nexus.waking = crate::waking::WakingMetaflows::default();
             self.nexus.stopped_at_confirmation = crate::waking::StoppedAtConfirmation::default();
             self.nexus.refresh_refusals = crate::waking::RefreshRefusals::default();

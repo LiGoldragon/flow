@@ -3012,6 +3012,17 @@ pub trait StopsNexus {
 impl StopsNexus for RunningNexus {
     fn stop(&self, sockets: &[&Path]) {
         self.stopping.request();
+        self.store.launch_changes.announce();
+        self.pending_rests.changes.announce();
+        self.store.reminder_changes.announce();
+        self.store.metaflow_changes.announce();
+        self.store.delivery_retirements.changes.announce();
+        self.configuration_changes.announce();
+        // Each accept loop is blocked in accept; a connection wakes it. A
+        // listener not yet bound sees the request once it binds.
+        for socket in sockets {
+            let _ = UnixStream::connect(socket);
+        }
         {
             let _gate = self
                 .store
@@ -3023,17 +3034,6 @@ impl StopsNexus for RunningNexus {
                     "the Nexus stopped; the retirement observation is incomplete".into(),
                 ),
             );
-        }
-        self.store.launch_changes.announce();
-        self.pending_rests.changes.announce();
-        self.store.reminder_changes.announce();
-        self.store.metaflow_changes.announce();
-        self.store.delivery_retirements.changes.announce();
-        self.configuration_changes.announce();
-        // Each accept loop is blocked in accept; a connection wakes it. A
-        // listener not yet bound sees the request once it binds.
-        for socket in sockets {
-            let _ = UnixStream::connect(socket);
         }
     }
 }
@@ -4961,6 +4961,44 @@ mod tests {
             fixture.nexus.stop(&[socket.as_path()]);
             let _ = serving.join().expect("the accept loop returns");
         });
+    }
+
+    #[test]
+    fn stop_releases_both_listeners_before_waiting_for_a_memory_writer() {
+        use super::{ServesMeta, ServesOrdinary, StopsNexus};
+        use crate::event_wait::AwaitsPath;
+        use std::sync::mpsc;
+        use std::time::Instant;
+
+        let fixture = NexusFixture::new();
+        let ordinary = fixture.directory.path().join("ordinary-stop-order.sock");
+        let meta = fixture.directory.path().join("meta-stop-order.sock");
+        let (ordinary_closed, ordinary_exit) = mpsc::channel();
+        let (meta_closed, meta_exit) = mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let result = fixture.nexus.serve_ordinary(&ordinary);
+                ordinary_closed.send(result).unwrap();
+            });
+            scope.spawn(|| {
+                let result = fixture.nexus.serve_meta(&meta);
+                meta_closed.send(result).unwrap();
+            });
+            let limit = Instant::now() + Duration::from_secs(5);
+            let both_bound = ordinary.appeared_by(limit) && meta.appeared_by(limit);
+            let writer = fixture.nexus.store.handover_write_gate.lock().unwrap();
+            scope.spawn(|| fixture.nexus.stop(&[&ordinary, &meta]));
+            let ordinary_stopped = ordinary_exit.recv_timeout(Duration::from_secs(5));
+            let meta_stopped = meta_exit.recv_timeout(Duration::from_secs(5));
+            drop(writer);
+            assert!(both_bound);
+            assert!(
+                matches!(ordinary_stopped, Ok(Ok(()))),
+                "{ordinary_stopped:?}"
+            );
+            assert!(matches!(meta_stopped, Ok(Ok(()))), "{meta_stopped:?}");
+        });
+        assert!(!ordinary.exists() && !meta.exists());
     }
 
     /// The receipt a refused ordinary greeting is answered with: this

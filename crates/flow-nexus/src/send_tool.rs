@@ -1448,8 +1448,13 @@ impl ServesSendTool for RunningNexus {
     fn serve_send_tool<'scope, 'env>(&'env self, scope: &'scope Scope<'scope, 'env>) {
         let changes = self.store.launch_changes.clone();
         let mut responders = SendToolResponders::default();
-        while !self.stopping.requested() {
+        loop {
+            // Observe the change before checking stop so its wake cannot
+            // be mistaken for a generation this worker already saw.
             let seen = changes.current();
+            if self.stopping.requested() {
+                break;
+            }
             responders.pass(self, scope);
             changes.after(seen);
         }

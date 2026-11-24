@@ -326,8 +326,13 @@ impl RunsHeartbeat for crate::RunningNexus {
         // beat; nothing wakes to look again.
         let mut active: Option<meta_signal_flow::HeartbeatConfig> = None;
         let mut next_beat: Option<std::time::Instant> = None;
-        while !crate::HoldsStopRequest::requested(&self.stopping) {
+        loop {
+            // Observe the change before checking stop so its wake cannot
+            // be mistaken for a generation this worker already saw.
             let seen = self.configuration_changes.current();
+            if crate::HoldsStopRequest::requested(&self.stopping) {
+                break;
+            }
             let configured = self
                 .store
                 .configuration_snapshot()

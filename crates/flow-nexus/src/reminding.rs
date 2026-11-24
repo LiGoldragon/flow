@@ -173,8 +173,13 @@ impl RemindsCallers for RunningNexus {
         // reminder held or closed, a context size, a closed generation, a
         // Configure, the stop) and the earliest due time arriving. The
         // thread blocks on the announcement, bounded by that due time.
-        while !self.stopping.requested() {
+        loop {
+            // Observe the change before checking stop so its wake cannot
+            // be mistaken for a generation this worker already saw.
             let seen = self.store.reminder_changes.current();
+            if self.stopping.requested() {
+                break;
+            }
             // A held Nexus's clocks stand: nothing due is sent until the
             // switch moves, which is announced as a reminder change.
             if crate::generated::overriding::HeedsOverrides::held(self) {

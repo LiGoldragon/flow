@@ -9133,6 +9133,7 @@ fn a_simplified_wake_carries_one_whole_send_several_group_in_its_first_prompt() 
     ) else {
         panic!("startup group admitted")
     };
+    let selected = stored(&fixture, Model::Sol).queue.0;
     let world = fixture.fresh_claude_world();
     fixture.nexus.wake_due(at.clone());
     assert_eq!(world.claude_starts(), 1);
@@ -9145,6 +9146,18 @@ fn a_simplified_wake_carries_one_whole_send_several_group_in_its_first_prompt() 
     assert!(carried[0].find("startup-several-first") < carried[0].find("startup-several-second"));
     assert!(carried[0].find(&ids[0].0) < carried[0].find(&ids[1].0));
     assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
+    for member in &selected {
+        assert!(matches!(
+            fixture
+                .nexus
+                .store
+                .logical_delivery_snapshot(&member.logical_delivery_id)
+                .unwrap()
+                .unwrap()
+                .delivery_state,
+            signal_flow::DeliveryState::Delivered(_)
+        ));
+    }
     fixture.nexus.wake_due(at);
     assert_eq!(
         world.claude_starts(),
@@ -10182,7 +10195,9 @@ fn send_several_drain_receipt_candidates_require_exact_full_payload() {
     use crate::store::queue_delivery::{
         AccountsQueueDelivery, NativeHistoryAnchor, PrepareQueueDelivery,
     };
-    use crate::waking::{CarriesStartup, ParksCohort, ReadsClaudeDelivery};
+    use crate::waking::{
+        CarriesStartup, ParksCohort, ReadsClaudeDelivery, Reconciled, ReconcilesQueueDelivery,
+    };
     let fixture = NexusFixture::new();
     let active = active_simplified_claude(&fixture);
     let at = address(Model::Sol);
@@ -10230,6 +10245,22 @@ fn send_several_drain_receipt_candidates_require_exact_full_payload() {
     let full = entries.prompt_text(&at);
     let fragment = entries[..1].prompt_text(&at);
     assert_ne!(fragment, full);
+    let transcript = fixture
+        .nexus
+        .claude_transcript(&node)
+        .expect("bound transcript");
+    use std::io::Write;
+    let mut transcript = fs::OpenOptions::new()
+        .append(true)
+        .open(transcript)
+        .unwrap();
+    let row = |id: &str, payload: &str| {
+        serde_json::json!({
+            "type": "user", "sessionId": active.session, "uuid": id,
+            "message": { "content": payload },
+        })
+    };
+    writeln!(transcript, "{}", row("only-fragment", &fragment)).unwrap();
     for attempt in &staged {
         let candidates = fixture.nexus.cohort_runs(attempt);
         assert_eq!(candidates.len(), 1);
@@ -10237,6 +10268,23 @@ fn send_several_drain_receipt_candidates_require_exact_full_payload() {
         assert_eq!(candidates[0].1, full);
         assert!(candidates.iter().all(|(_, text)| text != &fragment));
         assert!(fixture.nexus.find_receipt(attempt).is_err());
+    }
+    writeln!(transcript, "{}", row("exact-group", &full)).unwrap();
+    assert!(matches!(
+        fixture.nexus.reconcile_delivery(&staged[1]),
+        Reconciled::Settled(_, _),
+    ));
+    for entry in &entries {
+        assert!(matches!(
+            fixture
+                .nexus
+                .store
+                .logical_delivery_snapshot(&entry.logical_delivery_id)
+                .unwrap()
+                .unwrap()
+                .delivery_state,
+            signal_flow::DeliveryState::Delivered(_)
+        ));
     }
 }
 

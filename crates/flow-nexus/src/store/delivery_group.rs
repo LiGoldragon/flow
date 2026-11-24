@@ -274,11 +274,8 @@ impl PreparesDeliveryGroups for FlowStore {
                 }
                 awaiting = true;
             }
-            let delivery = if matches!(message, Message::Soft(_)) {
-                flow_ethos::Delivery::Queue
-            } else {
-                flow_ethos::Delivery::Wake
-            };
+            use crate::request_waking::WakesSleepingPermaflow;
+            let delivery = message.queued_delivery();
             members.push(PreparedDeliveryGroupMember {
                 admission_message: AdmissionMessage { delivery, message },
                 task_due,

@@ -9124,7 +9124,7 @@ fn a_simplified_wake_carries_one_whole_send_several_group_in_its_first_prompt() 
             address: at.clone(),
             sendable_message_vector: vec![
                 SendableMessage::Soft(SendableRequest::Notice("startup-several-first".into())),
-                SendableMessage::MiddleAbrupt(SendableRequest::Notice(
+                SendableMessage::MiddleAbrupt(SendableRequest::Order(
                     "startup-several-second".into(),
                 )),
             ],
@@ -9618,7 +9618,6 @@ fn awake_simplified_group_binds_actual_nonhead_awaiting_input() {
     };
     let mut agent = fixture.settled_agent();
     agent["name"] = serde_json::json!(route.herdr_agent_name.0);
-    agent["workspace_id"] = serde_json::json!(route.herdr_workspace_id.0);
     agent["terminal_id"] = serde_json::json!(route.herdr_terminal_id.0);
     agent["pane_id"] = serde_json::json!(route.herdr_pane_id.0);
     agent["agent"] = serde_json::Value::String("claude".into());
@@ -10358,4 +10357,43 @@ fn send_several_reserved_start_reopens_and_releases_for_later_ordinary_work() {
             .delivery_state,
         signal_flow::DeliveryState::Delivered(_)
     ));
+}
+
+#[test]
+fn send_several_abrupt_notices_do_not_wake_an_asleep_recipient() {
+    use crate::sending::SendsSeveralRequests;
+    use signal_flow::{SendSeveralRequest, SendableMessage, SendableRequest};
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let world = fixture.fresh_claude_world();
+    assert!(matches!(
+        fixture.nexus.send_several_requests(
+            SendSeveralRequest {
+                address: at.clone(),
+                sendable_message_vector: vec![
+                    SendableMessage::HardAbrupt(SendableRequest::Notice("first notice".into())),
+                    SendableMessage::MiddleAbrupt(SendableRequest::Notice("second notice".into())),
+                ],
+            },
+            None
+        ),
+        signal_flow::Output::SentSeveral(_)
+    ));
+    fixture.nexus.wake_due(at);
+    assert_eq!(world.claude_starts(), 0);
+    let state = stored(&fixture, Model::Sol);
+    assert_eq!(state.state, State::Asleep);
+    assert_eq!(state.queue.0.len(), 2);
+    assert!(
+        state
+            .queue
+            .0
+            .iter()
+            .all(|entry| entry.delivery == Delivery::Queue)
+    );
 }

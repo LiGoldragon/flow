@@ -10434,3 +10434,56 @@ fn send_several_abrupt_notices_do_not_wake_an_asleep_recipient() {
             .all(|entry| entry.delivery == Delivery::Queue)
     );
 }
+
+#[test]
+fn ordinary_connection_accepts_send_several_and_schedules_one_whole_wake() {
+    use super::GreetsOrdinarySocket;
+    use crate::{CarriesSignalFrames, Connection, ServesConnection};
+    use signal_flow::{Input, Output, SendSeveralRequest, SendableMessage, SendableRequest};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let world = fixture.fresh_claude_world();
+    let (peer, mut client) = UnixStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let ids = std::thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            Connection::accepted(peer)
+                .unwrap()
+                .serve_ordinary(&fixture.nexus)
+        });
+        client.greet_ordinary();
+        client
+            .write_query(&Input::SendSeveral(SendSeveralRequest {
+                address: at.clone(),
+                sendable_message_vector: vec![
+                    SendableMessage::Soft(SendableRequest::Notice("connection context".into())),
+                    SendableMessage::MiddleAbrupt(SendableRequest::Order("connection work".into())),
+                ],
+            }))
+            .unwrap();
+        let Output::SentSeveral(ids) = client.read_response().unwrap() else {
+            panic!("ordinary adapter answers the group");
+        };
+        assert!(server.join().unwrap().is_ok());
+        ids
+    });
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+    assert_eq!(world.claude_starts(), 1);
+    let turns = world.user_turns(&fixture);
+    assert_eq!(turns.len(), 1);
+    let prompt = &turns[0];
+    assert!(prompt.find("connection context").unwrap() < prompt.find("connection work").unwrap());
+    assert!(prompt.find(&ids[0].0).unwrap() < prompt.find(&ids[1].0).unwrap());
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
+}

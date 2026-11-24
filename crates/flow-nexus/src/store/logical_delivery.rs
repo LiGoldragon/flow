@@ -1157,7 +1157,9 @@ impl RecordsLogicalDeliveries for FlowStore {
             return Err(StoreError::StateInvariant);
         }
         let (commit, terminal) = match ending {
-            Some(_) => {
+            Some(ending) => {
+                use super::closed_request::RequestEnding;
+                use super::group_uncertainty::ParksGroupedStartups;
                 use crate::reminding::CountsUnixSeconds;
                 use meta_signal_flow::{
                     AbandonmentCause, AbandonmentRecord, QueueResolutionReason, UnixSeconds,
@@ -1167,7 +1169,15 @@ impl RecordsLogicalDeliveries for FlowStore {
                     queue_resolution_reason: QueueResolutionReason("The request ended.".into()),
                     unix_seconds: UnixSeconds(std::time::SystemTime::now().seconds_since_epoch()),
                 };
-                self.stage_request_end(&retained, unfinished, abandoned, commit)?
+                let (commit, terminal) =
+                    self.stage_request_end(&retained, unfinished, abandoned.clone(), commit)?;
+                if terminal.is_none() && matches!(ending, RequestEnding::Cancelled) {
+                    let (commit, held) =
+                        self.stage_parked_startup_abandonment(&retained, &abandoned, commit)?;
+                    (commit, held.then_some(DeliveryState::Abandoned))
+                } else {
+                    (commit, terminal)
+                }
             }
             None => (commit, None),
         };

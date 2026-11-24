@@ -4011,11 +4011,13 @@ impl WakesInParts for RunningNexus {
             let Ok(attempts) = self.store.attach_parked_startup(flow_id, &parked) else {
                 return false;
             };
-            let Some(head) = attempts.first() else {
-                return false;
-            };
-            if receipt.is_some() {
-                let _ = self.reconcile_delivery(head);
+            use crate::store::queue_delivery::EndsQueueDeliveryPhase;
+            if receipt.is_some()
+                && let Some(pending) = attempts
+                    .iter()
+                    .find(|attempt| !attempt.queue_delivery_phase.is_finished())
+            {
+                let _ = self.reconcile_delivery(pending);
             }
             return true;
         }

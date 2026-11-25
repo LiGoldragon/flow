@@ -1,0 +1,19 @@
+[package]
+name = "flow-rewrite"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# The private first slice is not part of the served Flow build.
+[workspace]
+
+[dependencies]
+flow-ethos = { path = "../flow-ethos", default-features = false }
+signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "da01bb0533a2b2800efcc3a4ceacee8307261fd7" }
+rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
+kameo = "=0.22.2"
+sema-engine = { git = "https://github.com/LiGoldragon/memory-engine", rev = "3120626a0b63c94df713041bbaa230d49e07952d" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
+
+[patch."https://github.com/LiGoldragon/flow"]
+flow-ethos = { path = "../flow-ethos" }

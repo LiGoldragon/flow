@@ -8116,6 +8116,15 @@ fn a_fresh_launch_crash_never_retypes_a_possible_submission_or_consumes_the_tail
 
 #[test]
 fn a_durable_launch_receipt_confirms_and_accounts_its_prefix_once_on_reopen() {
+    check_fresh_receipt(false);
+}
+
+#[test]
+fn a_late_fresh_receipt_cannot_relabel_terminal_uncertainty_or_consume_a_suffix() {
+    check_fresh_receipt(true);
+}
+
+fn check_fresh_receipt(late: bool) {
     use crate::herdr::launch::ObservesNativeTargetReceipt;
     use crate::store::RecordsPromptDeliveryResult;
     use crate::store::fresh_launch::TracksFreshLaunches;
@@ -8153,6 +8162,22 @@ fn a_durable_launch_receipt_confirms_and_accounts_its_prefix_once_on_reopen() {
             .unwrap()
     );
     launch.stage_to_ambiguity(&fixture.nexus);
+    let terminal = if late {
+        fixture.restarted();
+        let snapshot = fixture
+            .nexus
+            .store
+            .logical_delivery_snapshot(&first)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            snapshot.delivery_state,
+            signal_flow::DeliveryState::Uncertain
+        );
+        Some(snapshot)
+    } else {
+        None
+    };
     launch.write_receipt();
     let crate::generated::starter::StartupProgress::Received(receipt) = fixture
         .nexus
@@ -8162,6 +8187,22 @@ fn a_durable_launch_receipt_confirms_and_accounts_its_prefix_once_on_reopen() {
     else {
         panic!("conclusive native evidence")
     };
+    for invalid in 0..3 {
+        let mut bad = receipt.clone();
+        match invalid {
+            0 => bad.native_session_id.0.push_str("-foreign"),
+            1 => bad.launch_request_id.0.push_str("-foreign"),
+            _ => bad.prompt_sha256_vector.clear(),
+        }
+        assert!(
+            !fixture
+                .nexus
+                .store
+                .record_prompt_delivery_result(signal_flow::PromptDeliveryResult::Observed(bad))
+                .unwrap()
+        );
+    }
+    assert!(fixture.nexus.store.fresh_cohort(&at).unwrap().is_some());
     fixture
         .nexus
         .store
@@ -8186,9 +8227,16 @@ fn a_durable_launch_receipt_confirms_and_accounts_its_prefix_once_on_reopen() {
         .logical_delivery_snapshot(&first)
         .unwrap()
         .unwrap();
-    assert!(
-        matches!(&delivered.delivery_state,signal_flow::DeliveryState::Delivered(native) if native.native_prompt_id.0==receipt.native_turn_id.0)
-    );
+    if let Some(snapshot) = terminal {
+        assert_eq!(
+            delivered, snapshot,
+            "a late receipt cannot revise a terminal request"
+        );
+    } else {
+        assert!(
+            matches!(&delivered.delivery_state,signal_flow::DeliveryState::Delivered(native) if native.native_prompt_id.0==receipt.native_turn_id.0)
+        );
+    }
     assert!(fixture.nexus.store.fresh_cohort(&at).unwrap().is_none());
     fixture.restarted();
     assert_eq!(
@@ -8200,5 +8248,77 @@ fn a_durable_launch_receipt_confirms_and_accounts_its_prefix_once_on_reopen() {
             .unwrap(),
         delivered,
         "no second settlement/cursor increment"
+    );
+}
+
+#[test]
+fn an_undeclared_parked_fresh_launch_returns_its_unsubmitted_prefix_on_takeover() {
+    use crate::generated::operation::LaunchReservation;
+    use crate::generated::overriding::ParksHeldLaunches;
+    use crate::seat_observation::ObservesCurrentSeats;
+    use crate::store::fresh_launch::TracksFreshLaunches;
+    let mut fixture = NexusFixture::new();
+    let launch = fixture.staged_launch("parked-cut", None);
+    declare_launched(&fixture, &launch.profile);
+    let at = launch.profile.address.clone();
+    fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+        address: at.clone(),
+        state: State::Asleep,
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
+    });
+    assert!(matches!(
+        fixture
+            .nexus
+            .store
+            .accept_logical_delivery(
+                &at,
+                SentBy::Sender(address(Model::Terra)),
+                Delivery::Wake,
+                Message::Soft(Request::Order("park this".into())),
+                None
+            )
+            .unwrap(),
+        signal_flow::PrivateSendResponse::SendAccepted(_)
+    ));
+    let prefix = fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue.0;
+    let id = &launch.profile.launch_request_id;
+    assert!(fixture.nexus.store.claim_fresh(&at, id, &prefix).unwrap());
+    assert!(matches!(
+        fixture
+            .nexus
+            .store
+            .park_held_launch(LaunchReservation {
+                composed_launch: launch.composed,
+                origin: Origin::Unbound
+            })
+            .unwrap(),
+        signal_flow::LaunchAttemptReservation::Reserved(_)
+    ));
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![]))
+        .unwrap();
+    fixture.restarted();
+    assert!(fixture.nexus.store.fresh_cohort(&at).unwrap().is_some());
+    fixture.nexus.observe_takeover().unwrap();
+    assert!(!fixture.nexus.store.marked_held_launch(id.clone()).unwrap());
+    assert!(fixture.nexus.store.fresh_cohort(&at).unwrap().is_none());
+    assert_eq!(
+        fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue.0,
+        prefix
+    );
+    declare_launched(&fixture, &launch.profile);
+    assert!(
+        fixture
+            .nexus
+            .store
+            .claim_fresh(
+                &at,
+                &signal_flow::LaunchRequestId("redeclared".into()),
+                &prefix
+            )
+            .unwrap()
     );
 }

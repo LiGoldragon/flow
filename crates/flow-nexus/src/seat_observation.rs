@@ -21,6 +21,7 @@ impl ObservesCurrentSeats for RunningNexus {
         // Cut addresses cannot regain launch authority as a side effect
         // of takeover. Leave their queues and audit intact.
         use crate::generated::overriding::ParksHeldLaunches;
+        use crate::store::fresh_launch::TracksFreshLaunches;
         use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
         use crate::store::ordered_replacement::OrdersReplacements;
         use crate::store::successor::OwesSuccessors;
@@ -39,6 +40,14 @@ impl ObservesCurrentSeats for RunningNexus {
                         signal_flow::StartRejection::Undeclared,
                     ),
                 )?;
+                // Reopen could not release this prefix while its parked
+                // attempt still owned it. The terminal pre-input refusal
+                // now proves that these exact requests remain retryable.
+                if let Some(claim) = self.store.fresh_cohort(&attempt.launch_profile.address)?
+                    && claim.launch_request_id == held.launch_request_id
+                {
+                    self.store.reconcile_fresh(&claim)?;
+                }
             }
         }
         for intent in self.store.successor_intents()? {

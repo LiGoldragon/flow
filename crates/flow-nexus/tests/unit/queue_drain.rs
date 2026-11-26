@@ -258,6 +258,61 @@ fn a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop() {
 }
 
 #[test]
+fn takeover_reads_the_claude_process_and_transcript_not_herdr_and_recovers_on_source_return() {
+    use crate::generated::memory::{SeatActivity, SeatStanding};
+    use crate::seat_observation::ObservesCurrentSeats;
+    use crate::store::current_seat::{CurrentSeatRead, RecordsCurrentSeats};
+    let fixture = NexusFixture::new();
+    seat(&fixture, vec![from_core("untyped while unobserved")]);
+    // No live harness is consulted. Only the fixture's directory and the
+    // birth of the test's own process stand in for the native session.
+    let records = &fixture.nexus.herdr.claude_sessions.directory;
+    assert!(!records.exists());
+    fixture.nexus.observe_takeover().unwrap();
+    assert!(matches!(
+        fixture.nexus.store.current_seat(CLAUDE_SEAT).unwrap(),
+        CurrentSeatRead::NoRecord
+    ));
+    assert_eq!(typed_count(&fixture, "untyped while unobserved"), 0);
+    let pid = std::process::id();
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+    let start = stat
+        .rsplit_once(") ")
+        .unwrap()
+        .1
+        .split_whitespace()
+        .nth(19)
+        .unwrap();
+    std::fs::create_dir_all(records).unwrap();
+    let record = records.join(format!("{pid}.json"));
+    std::fs::write(
+        &record,
+        serde_json::json!({"sessionId": CLAUDE_SESSION, "pid": pid, "procStart": start})
+            .to_string(),
+    )
+    .unwrap();
+    append_main_rows(&fixture, &[end_turn("current-main-turn")]);
+    fixture.nexus.observe_takeover().unwrap();
+    assert!(
+        matches!(fixture.nexus.store.current_seat(CLAUDE_SEAT).unwrap(), CurrentSeatRead::Known(row) if row.seat_standing == SeatStanding::Alive(SeatActivity::Resting))
+    );
+    append_main_rows(
+        &fixture,
+        &[serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION})],
+    );
+    fixture.nexus.observe_takeover().unwrap();
+    assert!(
+        matches!(fixture.nexus.store.current_seat(CLAUDE_SEAT).unwrap(), CurrentSeatRead::Known(row) if row.seat_standing == SeatStanding::Alive(SeatActivity::Working))
+    );
+    std::fs::remove_file(record).unwrap();
+    fixture.nexus.observe_takeover().unwrap();
+    assert!(
+        matches!(fixture.nexus.store.current_seat(CLAUDE_SEAT).unwrap(), CurrentSeatRead::Known(row) if row.seat_standing == SeatStanding::Ended)
+    );
+    assert_eq!(queue(&fixture).len(), 1);
+}
+
+#[test]
 fn a_missing_observation_preserves_even_an_abrupt_order_without_pane_input() {
     let fixture = NexusFixture::new();
     let first = from_core("held until the source answers");

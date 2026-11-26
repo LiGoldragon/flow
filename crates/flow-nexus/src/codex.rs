@@ -2469,6 +2469,30 @@ mod tests {
     }
 
     #[test]
+    fn authoritative_thread_reads_follow_child_links_across_loaded_pages() {
+        use crate::generated::memory::{SeatActivity, SeatStanding};
+        let _guard = FAKE_PROXY_LOCK.lock().unwrap();
+        let fake = FakeProxy;
+        for (status, expected) in [
+            ("active", SeatActivity::Working),
+            ("idle", SeatActivity::Resting),
+        ] {
+            let frames = [
+                fake.websocket_frame(r#"{"id":1,"result":{}}"#),
+                fake.websocket_frame(r#"{"id":2,"result":{"data":["parent"],"nextCursor":"page2"}}"#),
+                fake.websocket_frame(r#"{"id":2,"result":{"data":["child"],"nextCursor":null}}"#),
+                fake.websocket_frame(&serde_json::json!({"id":3,"result":{"thread":{"id":"child","parentThreadId":"parent","status":{"type":status}}}}).to_string()),
+                fake.websocket_frame(r#"{"id":4,"result":{"thread":{"id":"parent","parentThreadId":null,"status":{"type":"idle"}}}}"#),
+            ];
+            let (_directory, executable) = fake.install(&frames);
+            assert_eq!(
+                adapter_at(executable).thread_standing("parent").unwrap(),
+                SeatStanding::Alive(expected)
+            );
+        }
+    }
+
+    #[test]
     fn takeover_distinguishes_missing_loaded_thread_from_unavailable_and_idle() {
         use crate::generated::memory::{SeatActivity, SeatStanding};
         let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");

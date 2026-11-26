@@ -9207,31 +9207,55 @@ mod tests {
             observer.join().unwrap();
         });
     }
-    /// Reads the store owner's authorized regular-file export. Only the
-    /// private copy under the test tempdir is passed to the store engine.
-    /// No process, service loop, dispatch or live endpoint is started.
-    #[test]
-    #[ignore = "requires the store owner's restricted 0.60.7 snapshot"]
-    fn takeover_of_disposable_store_snapshot_preserves_queues_without_native_sources() {
+    fn disposable_takeover_place(root: &Path) -> crate::place::Place {
+        let runtime = root.join("runtime");
+        let state = root.join("state");
+        fs::create_dir(&runtime).unwrap();
+        fs::create_dir(&state).unwrap();
+        crate::place::Place {
+            place_name: crate::place::PlaceName("proof".into()),
+            runtime: crate::place::Runtime(runtime.to_str().unwrap().into()),
+            state: crate::place::State(state.to_str().unwrap().into()),
+        }
+    }
+
+    /// Only the new private file is opened by the store engine. Open the
+    /// daemon's real configured layout, then substitute unavailable native
+    /// sources before invoking its takeover. No listeners or workers start.
+    fn open_disposable_takeover(snapshot: &Path, root: &Path) -> RunningNexus {
+        use crate::OpensRunningNexus;
+        use crate::place::LaysOutPlace;
+        use std::os::unix::fs::PermissionsExt;
+        assert!(snapshot.is_absolute() && fs::symlink_metadata(snapshot).unwrap().is_file());
+        let place = disposable_takeover_place(root);
+        let destination = place.store();
+        assert!(!destination.exists());
+        fs::copy(snapshot, &destination).expect("copy restricted export to disposable store");
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o600)).unwrap();
+        let mut nexus =
+            RunningNexus::open(&place).expect("production configured opener accepts the copy");
+        let endpoints = nexus.codex_endpoints.edit();
+        endpoints.workspace_root = root.to_path_buf();
+        for endpoint in [&mut endpoints.stable, &mut endpoints.next] {
+            endpoint.client_path = root.join("absent-codex");
+            endpoint.home = root.join("absent-home");
+            endpoint.socket = root.join("absent.sock").to_str().unwrap().into();
+            endpoint.transcript_root = root.join("absent-transcripts");
+        }
+        nexus.herdr = HerdrCli::at(root.join("absent-herdr"), root.join("flows"))
+            .with_codex_endpoints(endpoints.clone())
+            .with_ordinary_socket(&place.ordinary_socket());
+        nexus
+    }
+
+    fn assert_unavailable_takeover(nexus: &RunningNexus) -> usize {
         use crate::seat_observation::ObservesCurrentSeats;
         use crate::store::current_seat::{CurrentSeatRead, RecordsCurrentSeats};
-        use crate::store::logical_delivery::MintsRequestIds;
         use crate::store::{ManagesMetaflowState, ReadsFlowRows};
-        let snapshot =
-            std::env::var_os("FLOW_RECOVERY_STORE_SNAPSHOT").expect("authorized snapshot");
-        let snapshot = Path::new(&snapshot);
-        assert!(snapshot.is_absolute() && fs::symlink_metadata(snapshot).unwrap().is_file());
-        let fixture = NexusFixture::with_store(|destination| {
-            assert!(!destination.exists());
-            fs::copy(snapshot, destination).expect("copy restricted export to disposable store");
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(destination, fs::Permissions::from_mode(0o600)).unwrap();
-        });
-        let store = &fixture.nexus.store;
-        assert_eq!(store.store_identity().unwrap().0, "7551gjk27y7nagmi");
+        let store = &nexus.store;
         let before = store.list_metaflows().unwrap();
         let mut seats = 0;
-        fixture.nexus.observe_takeover().unwrap();
+        nexus.observe_takeover().unwrap();
         for seat in &before {
             if let flow_ethos::State::Awake(id) = &seat.state {
                 assert!(store.flow_node(&id.0).unwrap().is_some());
@@ -9244,6 +9268,46 @@ mod tests {
         }
         assert!(seats > 0, "copy contained no bound seats");
         assert_eq!(before, store.list_metaflows().unwrap());
+        seats
+    }
+
+    #[test]
+    fn a_synthetic_configured_store_copy_uses_the_daemon_takeover_path() {
+        use crate::OpensRunningNexus;
+        use crate::place::LaysOutPlace;
+        use crate::store::logical_delivery::MintsRequestIds;
+        use crate::store::metaflow::SeedsMetaflow;
+        let source = tempfile::tempdir().unwrap();
+        let place = disposable_takeover_place(source.path());
+        let source_identity = {
+            let nexus = RunningNexus::open(&place).unwrap();
+            let node = NexusFixture::new().node();
+            let id = node.flow_id.clone();
+            nexus.store.register_flow(node).unwrap();
+            nexus.store.seed_metaflow(waking::metaflow(
+                Model::Sol,
+                flow_ethos::State::Awake(id),
+                vec![],
+                vec![],
+            ));
+            nexus.store.store_identity().unwrap()
+        };
+        let copy = tempfile::tempdir().unwrap();
+        let nexus = open_disposable_takeover(&place.store(), copy.path());
+        assert_eq!(nexus.store.store_identity().unwrap(), source_identity);
+        assert_eq!(assert_unavailable_takeover(&nexus), 1);
+    }
+
+    #[test]
+    #[ignore = "requires the store owner's restricted 0.60.7 snapshot"]
+    fn takeover_of_disposable_store_snapshot_preserves_queues_without_native_sources() {
+        use crate::store::logical_delivery::MintsRequestIds;
+        let snapshot =
+            std::env::var_os("FLOW_RECOVERY_STORE_SNAPSHOT").expect("authorized snapshot");
+        let scratch = tempfile::tempdir().unwrap();
+        let nexus = open_disposable_takeover(Path::new(&snapshot), scratch.path());
+        assert_eq!(nexus.store.store_identity().unwrap().0, "7551gjk27y7nagmi");
+        let seats = assert_unavailable_takeover(&nexus);
         println!(
             "store 7551gjk27y7nagmi: {seats} bound seats; unavailable sources, no fabricated state; all queues unchanged"
         );

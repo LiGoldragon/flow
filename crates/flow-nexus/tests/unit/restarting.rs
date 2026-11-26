@@ -123,6 +123,28 @@ impl SeatsRestartWorld for NexusFixture {
                 .to_string(),
             )
             .unwrap();
+            // The synthetic harness publishes the same native PID/birth/session
+            // record as a real Claude. Its completed main turn is already in
+            // the launch fixture's own transcript. Herdr idle is not evidence.
+            let registry = &self.nexus.herdr.claude_sessions.directory;
+            assert!(registry.starts_with(self.directory.path()));
+            fs::create_dir_all(registry).unwrap();
+            let pid = pid_in(&fresh.state.join("old-pid"));
+            let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+            let birth = stat
+                .rsplit_once(") ")
+                .unwrap()
+                .1
+                .split_whitespace()
+                .nth(19)
+                .unwrap();
+            fs::write(
+                registry.join(format!("{pid}.json")),
+                serde_json::json!({"sessionId":seat.session,"pid":pid,"procStart":birth})
+                    .to_string(),
+            )
+            .unwrap();
+            crate::seat_observation::ObservesCurrentSeats::observe_takeover(&self.nexus).unwrap();
             await_path(&hook);
         }
         let HerdrRouteSelection::Available(route) = self
@@ -2807,6 +2829,29 @@ fn restart_cutover_two_nexus() {
     );
     let adopted_witness = new.seat_witness(FLOW).expect("adopted witness");
     assert_eq!(adopted_witness.route.herdr_pane_id.0, OLD_PANE);
+
+    // Adoption binds identity, not activity: a displayed idle pane must
+    // not by itself authorize this restart. Observe the fake harness's own
+    // PID/birth and completed native turn at the newly bound Nexus.
+    use crate::seat_observation::ObservesCurrentSeats;
+    use crate::store::current_seat::{RecordsCurrentSeats, SeatDecision};
+    assert!(matches!(
+        new.store.seat_decision(FLOW).unwrap(),
+        SeatDecision::NoRecord
+    ));
+    assert_eq!(
+        new.dispatch(Input::Restart(flow_ethos::FlowId(FLOW.into()))),
+        Output::RestartRefused(signal_flow::RestartRefusal::Busy(flow_ethos::FlowId(
+            FLOW.into()
+        )))
+    );
+    new.observe_returning_source(&new_node(&new));
+    assert!(matches!(
+        new.store.seat_decision(FLOW).unwrap(),
+        SeatDecision::Observed(crate::generated::memory::SeatStanding::Alive(
+            crate::generated::memory::SeatActivity::Resting
+        ))
+    ));
 
     // And restarts it: the same session resumed in w7:p1, its hooks aimed
     // at the new Nexus alone.

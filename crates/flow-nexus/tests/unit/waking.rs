@@ -11,7 +11,6 @@ use crate::generated::operation::Failed_Data;
 use crate::generated::operation::{Operation, Outcome};
 use crate::generated::starter::ProfilesFreshSeat;
 use crate::herdr::launch::ChecksComposedLaunch;
-use crate::herdr::pane::PaneAgent;
 use crate::herdr::reservation::ChoosesNativeSession;
 use crate::live::HoldsLiveValue;
 use crate::performing::Performs;
@@ -1183,34 +1182,32 @@ fn a_flow_that_stopped_while_working_or_awaited_is_kept() {
         vec![],
         vec![],
     ));
+    maintain(&working, address(Model::Sol));
+    working
+        .nexus
+        .store
+        .record_observation(
+            CLAUDE_SEAT,
+            Some(crate::generated::memory::SeatStanding::Alive(
+                crate::generated::memory::SeatActivity::Working,
+            )),
+        )
+        .unwrap();
     assert!(matches!(
         working.nexus.settle_stopped(CLAUDE_SEAT),
-        AtStop::Kept(KeptAtStop::NotResting(PaneAgent::Present {
-            agent_state: signal_flow::AgentState::Working,
-            ..
-        }))
+        AtStop::Kept(KeptAtStop::InTurn)
     ));
     // Its main turn ended while a background agent still runs, as its Stop
     // names: Herdr still shows Working, and the seat, with nothing queued,
     // stays idle in its pane.
     append_main_rows(&working, &[end_turn("main-ended")]);
-    {
-        use crate::store::events::RecordsHarnessEvents;
-        working
-            .nexus
-            .store
-            .record_event(
-                CLAUDE_SEAT,
-                claude_stop_with(
-                    &working,
-                    vec![background_task(
-                        "a1",
-                        signal_flow::BackgroundTaskKind::Subagent,
-                    )],
-                ),
-            )
-            .expect("the Stop recorded");
-    }
+    report_claude_stop(
+        &working,
+        vec![background_task(
+            "a1",
+            signal_flow::BackgroundTaskKind::Subagent,
+        )],
+    );
     assert_eq!(working.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
     assert_eq!(
         stored(&working, Model::Sol).state,
@@ -1231,6 +1228,16 @@ fn a_flow_that_stopped_while_working_or_awaited_is_kept() {
         vec![],
         vec![],
     ));
+    waking
+        .nexus
+        .store
+        .record_observation(
+            "908786",
+            Some(crate::generated::memory::SeatStanding::Alive(
+                crate::generated::memory::SeatActivity::Resting,
+            )),
+        )
+        .unwrap();
     let _lease = waking.nexus.waking.hold(&address(Model::Sol));
     assert_eq!(
         waking.nexus.settle_stopped("908786"),
@@ -3754,51 +3761,15 @@ fn an_unconfirmed_launch_that_fails_or_ends_leaves_no_awake_registration() {
     assert_eq!(fixture.nexus.store.address_hold("908786").unwrap(), None);
 }
 
-/// A Herdr stand-in for the Claude seat in pane w1:p3 that shows it working
-/// until an `agent wait` has run, and resting (`done`) after: Claude runs
-/// its Stop hook while its spinner is still on screen. The wait first
-/// waits, boundedly, for the `released` latch to open. Every call is
-/// logged.
-fn herdr_working_until_waited(
-    fixture: &NexusFixture,
-    released: &crate::fixture_executable::Latch,
-) -> std::path::PathBuf {
-    let log = fixture.directory.path().join("herdr-operations.log");
-    let waited = fixture.directory.path().join("herdr-waited");
-    let snapshot = |status: &str| {
-        let mut agent = claude_agent(fixture);
-        agent["agent_status"] = serde_json::Value::String(status.into());
-        serde_json::json!({
-            "id":"cli:api:snapshot",
-            "result":{"snapshot":{"agents":[agent],"protocol":20,"version":"0.8.2"},
-            "type":"session_snapshot"}
-        })
-    };
-    let body = format!(
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$3 $4\" in\n  \"api snapshot\") if [ -e '{waited}' ]; then printf '%s\\n' '{done}'; else printf '%s\\n' '{working}'; fi ;;\n  \"agent wait\") if timeout 10 sh -c ': < \"$0\"' '{released}'; then echo 'wait released by the closed hook' >> '{log}'; else echo 'wait timed out' >> '{log}'; fi; : > '{waited}' ;;\n  \"pane close\") ;;\n  \"agent read\") printf '%s\\n' '❯ ' ;;\n  *) exit 64 ;;\nesac\n",
-        log = log.display(),
-        waited = waited.display(),
-        released = released.path.display(),
-        done = snapshot("done"),
-        working = snapshot("working"),
-    );
-    FixtureExecutable {
-        path: fixture.snapshot_program.clone(),
-    }
-    .install(&body);
-    log
-}
-
-/// The live defect: a Claude seat's Stop hook runs while Herdr still shows
-/// it working, and it shows done only a moment later, with no event. The
-/// Stop waits, boundedly, for the seat to rest; idle, it keeps its pane.
+/// A native rest stands while Herdr still shows a spinner. No terminal
+/// idle or timer is required to keep a maintained seat resting.
 #[test]
-fn a_seat_herdr_shows_working_at_its_stop_is_idle_once_herdr_shows_it_done() {
+fn a_seat_herdr_shows_working_at_its_native_rest_stays_idle() {
     let fixture = NexusFixture::new();
-    use crate::fixture_executable::{HoldsLatch, Latch};
-    let released = Latch::closed(fixture.directory.path().join("released"));
-    released.release();
-    let log = herdr_working_until_waited(&fixture, &released);
+    fixture.accept_pane_operations(
+        vec![working_claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
     claude_seat(&fixture, 40_000);
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
@@ -3807,18 +3778,12 @@ fn a_seat_herdr_shows_working_at_its_stop_is_idle_once_herdr_shows_it_done() {
         vec![],
     ));
     maintain(&fixture, address(Model::Sol));
-
     assert_eq!(fixture.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
     assert_eq!(
         stored(&fixture, Model::Sol).state,
         State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
     );
-    let calls = fs::read_to_string(log).unwrap();
-    assert!(
-        calls.contains("agent wait w1:p3 --until idle --until done --timeout"),
-        "the Stop waited for the seat to rest: {calls}"
-    );
-    assert!(!calls.contains("pane close"), "the pane is kept: {calls}");
+    assert!(!closes(&fixture));
 }
 
 /// Every early exit names its reason: a seat still working after the wait
@@ -3845,12 +3810,19 @@ fn a_stop_that_leaves_its_seat_names_why() {
         vec![],
         vec![],
     ));
+    fixture
+        .nexus
+        .store
+        .record_observation(
+            CLAUDE_SEAT,
+            Some(crate::generated::memory::SeatStanding::Alive(
+                crate::generated::memory::SeatActivity::Working,
+            )),
+        )
+        .unwrap();
     assert!(matches!(
         fixture.nexus.settle_stopped(CLAUDE_SEAT),
-        AtStop::Kept(KeptAtStop::NotResting(PaneAgent::Present {
-            agent_state: signal_flow::AgentState::Working,
-            ..
-        }))
+        AtStop::Kept(KeptAtStop::InTurn)
     ));
     assert_eq!(
         stored(&fixture, Model::Sol).state,

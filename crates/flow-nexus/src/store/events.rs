@@ -199,8 +199,13 @@ impl ReadsEventRow for FlowStore {
     }
 }
 
-impl RecordsHarnessEvents for FlowStore {
-    fn record_event(&self, flow_id: &str, event: Event) -> Result<EventRecording, StoreError> {
+impl FlowStore {
+    pub(crate) fn record_seat_report(
+        &self,
+        flow_id: &str,
+        event: Event,
+        state_event: Option<super::current_seat::SeatEvent>,
+    ) -> Result<EventRecording, StoreError> {
         let _append = self
             .event_tables
             .append_gate
@@ -211,26 +216,36 @@ impl RecordsHarnessEvents for FlowStore {
         if row.is_none() && self.flow(flow_id)?.is_none() {
             return Ok(EventRecording::UnknownFlow);
         }
-        match row {
+        let _state = self
+            .transitions_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let commit = self.engine.begin_atomic_commit();
+        let commit = match row {
             Some(mut row) => {
                 row.recorded_harness_event_vector.push(event);
-                self.engine.mutate_keyed(KeyedMutation::new(
-                    self.event_tables.events,
-                    RecordKey::new(flow_id),
-                    row,
-                ))?;
+                commit.mutate(self.event_tables.events, row)
             }
-            None => {
-                self.engine.assert(Assertion::new(
-                    self.event_tables.events,
-                    FlowEvents {
-                        flow_id: FlowId(flow_id.into()),
-                        recorded_harness_event_vector: vec![event],
-                    },
-                ))?;
-            }
-        }
+            None => commit.assert(
+                self.event_tables.events,
+                FlowEvents {
+                    flow_id: FlowId(flow_id.into()),
+                    recorded_harness_event_vector: vec![event],
+                },
+            ),
+        };
+        let commit = match state_event {
+            Some(state_event) => self.stage_current_event(commit, flow_id, state_event)?,
+            None => commit,
+        };
+        self.engine.commit_atomic(commit)?;
         Ok(EventRecording::Recorded)
+    }
+}
+
+impl RecordsHarnessEvents for FlowStore {
+    fn record_event(&self, flow_id: &str, event: Event) -> Result<EventRecording, StoreError> {
+        self.record_seat_report(flow_id, event, None)
     }
 
     fn events(&self, flow_id: &str) -> Result<Option<Vec<RecordedHarnessEvent>>, StoreError> {

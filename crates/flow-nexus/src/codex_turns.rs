@@ -923,26 +923,21 @@ impl SettlesRestingCodexSeats for RunningNexus {
     }
 
     fn codex_resting(&self, flow_id: &str) -> bool {
-        matches!(
-            self.store.flow_node(flow_id),
-            Ok(Some(node)) if node.harness_kind == HarnessKind::Codex
-                && !node.session_id.0.is_empty()
-                && self.codex_turns.standing(&node.session_id.0) == ThreadStanding::AtRest
-        )
+        use crate::generated::transitions::{AskedFlow, RecordsTransitions};
+        matches!(self.store.flow_node(flow_id), Ok(Some(node)) if node.harness_kind == HarnessKind::Codex)
+            && matches!(
+                self.store.state_of(AskedFlow(FlowId(flow_id.into()))),
+                Ok(Some(meta_signal_flow::State::Resting))
+            )
     }
 
     fn codex_in_turn(&self, flow_id: &str) -> bool {
-        matches!(
-            self.store.flow_node(flow_id),
-            Ok(Some(node)) if node.harness_kind == HarnessKind::Codex
-                && matches!(
-                    self.codex_turns.standing(&node.session_id.0),
-                    ThreadStanding::Working(_)
-                        | ThreadStanding::LetterAwaited(_)
-                        | ThreadStanding::ItemsRunning(_)
-                        | ThreadStanding::ItemsOrphaned(_)
-                )
-        )
+        use crate::generated::transitions::{AskedFlow, RecordsTransitions};
+        matches!(self.store.flow_node(flow_id), Ok(Some(node)) if node.harness_kind == HarnessKind::Codex)
+            && matches!(
+                self.store.state_of(AskedFlow(FlowId(flow_id.into()))),
+                Ok(Some(meta_signal_flow::State::Acting))
+            )
     }
 
     fn resting_codex_seat(&self, address: &Address) -> Option<FlowId> {

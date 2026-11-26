@@ -445,11 +445,10 @@ fn an_arrival_in_an_ended_turn_keeps_the_state_before() {
     }
 }
 
-/// The state the Nexus decides by is the last transition: the seat rests
-/// once its last transition is Resting, and not once it is Acting,
-/// whatever its transcript shows; an owner's SetState is a transition too.
+/// Native activity alone changes the decision row. Audit entries survive
+/// but cannot manufacture a state in a pre-takeover store.
 #[test]
-fn the_state_decided_by_is_the_last_transition() {
+fn the_current_decision_state_is_not_an_audit_transition() {
     let fixture = NexusFixture::new();
     awake_claude_seat(&fixture);
     append_main_rows(&fixture, &[end_turn("ended-turn")]);
@@ -464,22 +463,43 @@ fn the_state_decided_by_is_the_last_transition() {
             .state_of(AskedFlow(flow_ethos::FlowId(CLAUDE_SEAT.into())))
             .unwrap()
     };
+    fixture
+        .nexus
+        .store
+        .record_observation(CLAUDE_SEAT, None)
+        .unwrap();
     assert_eq!(state(&fixture), None);
     assert!(
         !fixture.nexus.rests_now(CLAUDE_SEAT),
         "a transcript alone is no state"
     );
-    assert_eq!(fixture.nexus.state_now(seat.clone()), meta::State::Acting);
+    assert_eq!(fixture.nexus.state_now(seat.clone()), None);
+    fixture
+        .nexus
+        .store
+        .record_observation(
+            CLAUDE_SEAT,
+            Some(crate::generated::memory::SeatStanding::Alive(
+                crate::generated::memory::SeatActivity::Working,
+            )),
+        )
+        .unwrap();
 
     report_claude_stop(&fixture, vec![]);
     assert_eq!(state(&fixture), Some(meta::State::Resting));
     assert!(fixture.nexus.rests_now(CLAUDE_SEAT));
-    assert_eq!(fixture.nexus.state_now(seat.clone()), meta::State::Resting);
+    assert_eq!(
+        fixture.nexus.state_now(seat.clone()),
+        Some(meta::State::Resting)
+    );
 
     report(&fixture, signal_flow::Event::ToolUsed("Bash".into()));
     assert_eq!(state(&fixture), Some(meta::State::Acting));
     assert!(!fixture.nexus.rests_now(CLAUDE_SEAT));
-    assert_eq!(fixture.nexus.state_now(seat.clone()), meta::State::Acting);
+    assert_eq!(
+        fixture.nexus.state_now(seat.clone()),
+        Some(meta::State::Acting)
+    );
 
     use crate::Dispatches;
     assert_eq!(
@@ -494,8 +514,8 @@ fn the_state_decided_by_is_the_last_transition() {
             state: meta::State::Resting,
         })
     );
-    assert!(fixture.nexus.rests_now(CLAUDE_SEAT));
-    assert_eq!(fixture.nexus.state_now(seat), meta::State::Resting);
+    assert!(!fixture.nexus.rests_now(CLAUDE_SEAT));
+    assert_eq!(fixture.nexus.state_now(seat), Some(meta::State::Acting));
 }
 
 /// The store closed, optionally rewritten as 0.56.2 left it (no

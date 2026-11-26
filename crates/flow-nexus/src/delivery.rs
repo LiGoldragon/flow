@@ -204,12 +204,7 @@ impl ReadsLeasedPane for RunningNexus {
             PaneAgent::Unreadable => {
                 return Err(PaneRefusal::RouteUnavailable);
             }
-            PaneAgent::Absent => {
-                let _ = self.perform(Operation::Record(Record_Data::Exited(
-                    target.node.flow_id.clone(),
-                )));
-                return Err(PaneRefusal::RouteUnavailable);
-            }
+            PaneAgent::Absent => return Err(PaneRefusal::RouteUnavailable),
         };
         if agent_state == AgentState::Blocked {
             return Err(PaneRefusal::RecipientBlocked);

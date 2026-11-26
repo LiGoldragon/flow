@@ -21,11 +21,9 @@
 //! session, and the flow is rebound to that session; its FlowId stays.
 
 use crate::RunningNexus;
-use crate::generated::operation::{
-    Failed_Data, Operation, Outcome, Record_Data, Record_Data_Harness_Data,
-};
+
 use crate::generated::transitions::{ClaudeReport, ReportedEvent, ReportsEvents};
-use crate::performing::Performs;
+
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::events::RecordsHarnessEvents;
 use crate::store::events::{ProjectsHarnessEventMetadata, RecordedHarnessEvent};
@@ -70,17 +68,38 @@ pub trait RecordsReports {
 
 impl RecordsReports for RunningNexus {
     fn report(&self, report: Report_Data) -> Output {
-        let Report_Data { flow_id, event, .. } = report;
-        match self.perform(Operation::Record(Record_Data::Harness(
-            Record_Data_Harness_Data {
-                flow_id: flow_id.clone(),
-                event,
-            },
-        ))) {
-            Outcome::Recorded => Output::Reported,
-            Outcome::Failed(Failed_Data::UnknownFlow) => Output::Refused(
-                signal_flow::Refusal::Unknown(signal_flow::Unknown_Data::FlowId(flow_id)),
-            ),
+        use crate::generated::memory::{Event as StateReport, SeatActivity};
+        use crate::restarting::FencesSeatEvents;
+        use crate::store::current_seat::SeatEvent;
+        use crate::store::events::EventRecording;
+        let Report_Data {
+            flow_id,
+            event,
+            process_option,
+        } = report;
+        let typed = self
+            .report_acts(&flow_id.0, process_option.as_ref())
+            .then(|| {
+                self.claude_event(ClaudeReport {
+                    flow_id: flow_id.clone(),
+                    hook_event: event.clone(),
+                })
+            })
+            .flatten();
+        let state_event = match typed {
+            Some(StateReport::Working(_)) => Some(SeatEvent::Activity(SeatActivity::Working)),
+            Some(StateReport::Idle(_)) => Some(SeatEvent::Activity(SeatActivity::Resting)),
+            Some(StateReport::Ended) => Some(SeatEvent::Ended),
+            _ => None,
+        };
+        match self
+            .store
+            .record_seat_report(&flow_id.0, event, state_event)
+        {
+            Ok(EventRecording::Recorded) => Output::Reported,
+            Ok(EventRecording::UnknownFlow) => Output::Refused(signal_flow::Refusal::Unknown(
+                signal_flow::Unknown_Data::FlowId(flow_id),
+            )),
             // signal-flow 9.0.0 names no persistence refusal for Report, so
             // a store that fails is answered as a flow Flow cannot vouch
             // for, and logged.

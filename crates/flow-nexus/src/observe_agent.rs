@@ -17,7 +17,7 @@ use crate::herdr::events::{HerdrCue, HerdrEvents, SubscribesHerdrEvents};
 use crate::herdr::pane::ReadsAgentStatus;
 use crate::herdr::pane::{PaneAgent, WritesPane};
 use crate::observation_lifetime::{CancelsObservation, ObservationCancellation};
-use crate::store::{NamesLiveFlow, ReadsFlowRows};
+use crate::store::ReadsFlowRows;
 use signal_flow::{
     AgentObservation, AgentState, FlowNode, HerdrRoute, HerdrRouteSelection, Output,
 };
@@ -71,8 +71,10 @@ impl RecordsWitnessedExit for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if !matches!(self.store.flow_node(flow_id), Ok(Some(node)) if node.flow_lifecycle.is_live())
-            {
+            if !matches!(
+                self.store.current_seat(flow_id),
+                Ok(crate::store::current_seat::CurrentSeatRead::Known(_))
+            ) {
                 return;
             }
             if !self.witness_holds(flow_id, witness) {
@@ -124,7 +126,7 @@ trait FindsObservableFlow {
 impl FindsObservableFlow for RunningNexus {
     fn observable(&self, flow_id: &str) -> Option<(FlowNode, HerdrRoute)> {
         let node = self.store.flow_node(flow_id).ok()??;
-        if !node.flow_lifecycle.is_live() {
+        if !self.store.seat_is_alive(flow_id) {
             return None;
         }
         let HerdrRouteSelection::Available(route) = node.herdr_route_selection.clone() else {
@@ -136,13 +138,21 @@ impl FindsObservableFlow for RunningNexus {
 
 impl ObservesAgent for RunningNexus {
     fn agent_observation(&self, flow_id: &str) -> Output {
+        if !matches!(
+            self.store.current_seat(flow_id),
+            Ok(crate::store::current_seat::CurrentSeatRead::Known(_))
+        ) {
+            return AgentState::Unknown.observed_of(flow_id);
+        }
         let Some((node, _)) = self.observable(flow_id) else {
             return AgentState::Gone.observed_of(flow_id);
         };
         let agent_state = match self.herdr.pane_agent(&node) {
             PaneAgent::Present { agent_state, .. } => agent_state,
             PaneAgent::Absent => {
-                self.exited_as_witnessed(flow_id);
+                if node.harness_kind == signal_flow::HarnessKind::Claude {
+                    self.exited_as_witnessed(flow_id);
+                }
                 AgentState::Gone
             }
             PaneAgent::Unreadable => AgentState::Unknown,
@@ -170,7 +180,7 @@ impl ObservesAgent for RunningNexus {
         if last == AgentState::Gone {
             return Ok(());
         }
-        let Some((_, route)) = self.observable(flow_id) else {
+        let Some((node, route)) = self.observable(flow_id) else {
             return send(&AgentState::Gone.observed_of(flow_id));
         };
         // What this subscription watches: a Gone it reads acts only while
@@ -204,7 +214,9 @@ impl ObservesAgent for RunningNexus {
             }
             send(&agent_state.clone().observed_of(flow_id))?;
             if agent_state == AgentState::Gone {
-                self.exited_as_witnessed_by(flow_id, witness.as_ref());
+                if node.harness_kind == signal_flow::HarnessKind::Claude {
+                    self.exited_as_witnessed_by(flow_id, witness.as_ref());
+                }
                 return Ok(());
             }
             last = agent_state;

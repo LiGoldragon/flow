@@ -83,7 +83,7 @@ Library
                        seats.[ Result<Vector<Seat> StoreError> ] ]
   HeedsOverrides.[ held.[ Boolean ]
                    permaflow_held.{ [ Addressed ] [ Boolean ] }
-                   state_now.{ [ Seat ] [ State ] }
+                   state_now.{ [ Seat ] [ Option<State> ] }
                    seat_named.{ [ Subject ] [ Result<Seat MetaOutput> ] }
                    record_override.{ [ Transitioned ] [ Result<Boolean MetaOutput> ] }
                    record_named.{ [ Subject ] [ Result<Boolean MetaOutput> ] }

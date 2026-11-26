@@ -113,7 +113,10 @@ pub trait RemembersOverrides {
 pub trait HeedsOverrides {
     fn held(&self) -> bool;
     fn permaflow_held<N: Addressed>(&self, input: N) -> bool;
-    fn state_now(&self, input: Seat) -> meta_signal_flow::generated::signal::State;
+    fn state_now(
+        &self,
+        input: Seat,
+    ) -> std::option::Option<meta_signal_flow::generated::signal::State>;
     fn seat_named(
         &self,
         input: Subject,

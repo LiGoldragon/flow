@@ -36,8 +36,7 @@ use crate::live::HoldsLiveValue;
 use crate::performing::Performs;
 use crate::reminding::CountsUnixSeconds;
 use crate::store::delivery::{RecordsDeliveries, SelectsHarnessProfile};
-use crate::store::metaflow::SleepsMetaflows;
-use crate::store::{NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows};
+use crate::store::{ReadsFlowRoles, ReadsFlowRows};
 use meta_signal_flow::{Output, Refused_Data, State, StoreFailure};
 use signal_flow::{AgentState, HarnessKind, HerdrRouteSelection};
 
@@ -52,25 +51,9 @@ impl HeedsOverrides for RunningNexus {
         !matches!(self.store.permaflow_held(input), Ok(false))
     }
 
-    fn state_now(&self, seat: Seat) -> State {
-        let live = matches!(
-            self.store.flow_node(&seat.flow_id.0),
-            Ok(Some(node)) if node.flow_lifecycle.is_live()
-        );
-        let awake = matches!(
-            self.store.metaflow(&seat.address),
-            Ok(Some(metaflow)) if metaflow.state == flow_ethos::State::Awake(seat.flow_id.clone())
-        );
-        if !(live && awake) {
-            return State::Asleep;
-        }
-        // The state is the last transition; a live seat that has reported
-        // nothing yet is Acting.
+    fn state_now(&self, seat: Seat) -> Option<State> {
         use crate::generated::transitions::{AskedFlow, RecordsTransitions};
-        match self.store.state_of(AskedFlow(seat.flow_id)) {
-            Ok(Some(state)) => state,
-            Ok(None) | Err(_) => State::Acting,
-        }
+        self.store.state_of(AskedFlow(seat.flow_id)).ok().flatten()
     }
 
     fn seat_named(&self, subject: Subject) -> Result<Seat, Output> {
@@ -99,10 +82,13 @@ impl HeedsOverrides for RunningNexus {
     // transition to record.
     fn record_named(&self, subject: Subject) -> Result<bool, Output> {
         match self.store.seat(subject) {
-            Ok(Some(seat)) => self.record_override(Transitioned {
-                transition: self.state_now(seat.clone()).overridden(),
-                seat,
-            }),
+            Ok(Some(seat)) => match self.state_now(seat.clone()) {
+                Some(state) => self.record_override(Transitioned {
+                    transition: state.overridden(),
+                    seat,
+                }),
+                None => Ok(false),
+            },
             Ok(None) => Ok(false),
             Err(error) => Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
                 error.to_string(),
@@ -115,10 +101,12 @@ impl HeedsOverrides for RunningNexus {
             Output::Refused(Refused_Data::StoreRefused(StoreFailure(error.to_string())))
         })?;
         for seat in seats {
-            self.record_override(Transitioned {
-                transition: self.state_now(seat.clone()).overridden(),
-                seat,
-            })?;
+            if let Some(state) = self.state_now(seat.clone()) {
+                self.record_override(Transitioned {
+                    transition: state.overridden(),
+                    seat,
+                })?;
+            }
         }
         Ok(true)
     }

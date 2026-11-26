@@ -271,6 +271,18 @@ pub(super) fn claude_seat(fixture: &NexusFixture, tokens: i64) {
         .store
         .register_flow(node)
         .expect("Claude seat registered");
+    // This fixture represents a confirmed resting seat; its audit Stop below
+    // is not a substitute for the observed current record.
+    fixture
+        .nexus
+        .store
+        .record_observation(
+            CLAUDE_SEAT,
+            Some(crate::generated::memory::SeatStanding::Alive(
+                crate::generated::memory::SeatActivity::Resting,
+            )),
+        )
+        .unwrap();
     fs::write(
         fixture
             .directory
@@ -7164,6 +7176,16 @@ pub(super) fn codex_seat_in_fresh_world(fixture: &mut NexusFixture) -> FreshWorl
         .store
         .register_flow(node)
         .expect("the Codex seat registered");
+    fixture
+        .nexus
+        .store
+        .record_observation(
+            "abc123",
+            Some(crate::generated::memory::SeatStanding::Alive(
+                crate::generated::memory::SeatActivity::Working,
+            )),
+        )
+        .unwrap();
     fs::write(
         fixture.directory.path().join("flows/.abc123.flow-id"),
         format!(

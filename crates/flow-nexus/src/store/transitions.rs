@@ -220,10 +220,18 @@ impl RecordsTransitions for FlowStore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let id = caused.seat.flow_id.0.clone();
+        // Claude's raw hook and its decision state already committed together.
+        let from_codex = self
+            .flow(&id)?
+            .is_some_and(|row| row.harness_kind == signal_flow::HarnessKind::Codex);
         let event = match &caused.cause {
-            Cause::Reported(Event::Working(_)) => Some(SeatEvent::Activity(SeatActivity::Working)),
-            Cause::Reported(Event::Idle(_)) => Some(SeatEvent::Activity(SeatActivity::Resting)),
-            Cause::Reported(Event::Ended) => Some(SeatEvent::Ended),
+            Cause::Reported(Event::Working(_)) if from_codex => {
+                Some(SeatEvent::Activity(SeatActivity::Working))
+            }
+            Cause::Reported(Event::Idle(_)) if from_codex => {
+                Some(SeatEvent::Activity(SeatActivity::Resting))
+            }
+            Cause::Reported(Event::Ended) if from_codex => Some(SeatEvent::Ended),
             // Only confirm_start commits Started. Audit arrivals and token
             // measurements are not independent authorities on activity.
             _ => None,

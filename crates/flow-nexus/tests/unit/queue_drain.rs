@@ -256,6 +256,39 @@ fn a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop() {
     );
 }
 
+#[test]
+fn a_missing_observation_preserves_even_an_abrupt_order_without_pane_input() {
+    let fixture = NexusFixture::new();
+    let first = from_core("held until the source answers");
+    seat(&fixture, vec![first]);
+    fixture
+        .nexus
+        .store
+        .record_observation(CLAUDE_SEAT, None)
+        .unwrap();
+    let target = address(Model::Sol);
+    let response = fixture.nexus.admit_ordinary_send(
+        signal_flow::SendRequest {
+            address: target.clone(),
+            sendable_message: signal_flow::SendableMessage::MiddleAbrupt(
+                signal_flow::SendableRequest::Order("no-record order".into()),
+            ),
+        },
+        None,
+    );
+    assert!(matches!(response.response, Output::SendAccepted(_)));
+    drop(response);
+    fixture.nexus.wake_due(target.clone());
+    fixture.nexus.drain_awake(&target);
+    assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 2);
+    assert_eq!(typed_count(&fixture, "no-record order"), 0);
+    assert_eq!(typed_count(&fixture, "held until the source answers"), 0);
+    assert!(matches!(
+        fixture.nexus.store.current_seat(CLAUDE_SEAT).unwrap(),
+        crate::store::current_seat::CurrentSeatRead::NoRecord
+    ));
+}
+
 fn await_stalled_writer(release: &std::path::Path) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let entered = release.with_extension("entered");

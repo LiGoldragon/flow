@@ -1700,7 +1700,7 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
                 ))?;
         use crate::delivery::lease::LeasesPanes;
         use crate::generated::memory::RefreshCaller;
-        use crate::generated::operation::{Operation, Record_Data};
+        use crate::generated::operation::Operation;
         use crate::generated::overriding::{
             EntersByOverride, HeedsOverrides, InterruptsRunningTurns, Seat, Transitioned,
         };
@@ -1764,13 +1764,8 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
                 ))));
             }
         };
-        match nexus.herdr.pane_presence(&node) {
-            PanePresence::Present => {}
-            PanePresence::Absent | PanePresence::Bare => {
-                let _ = nexus.perform(Operation::Record(Record_Data::Exited(flow_id)));
-                return unrenewed(RefreshRejection::NotAwake);
-            }
-            PanePresence::Unknown => return unrenewed(RefreshRejection::HerdrUnavailable),
+        if !nexus.store.seat_is_alive(&flow_id.0) {
+            return unrenewed(RefreshRejection::NotAwake);
         }
         // The successor is started and confirmed first, then the old flow
         // is reaped, whatever the metaflow's continuity and whether or not

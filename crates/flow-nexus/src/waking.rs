@@ -1529,7 +1529,7 @@ impl SleepsAndWakesSeats for RunningNexus {
                 })
                 .filter(|flow_id| {
                     matches!(self.store.address_hold(&flow_id.0), Ok(None))
-                        && self.turn_end_recorded(&flow_id.0)
+                        && self.rests_now(&flow_id.0)
                 })
                 .collect::<Vec<_>>()
         };
@@ -2714,6 +2714,9 @@ impl WakesInParts for RunningNexus {
             self.rest_ended_awake(address);
             match self.store.metaflow(address) {
                 Ok(Some(metaflow)) if metaflow.state == flow_ethos::State::Asleep => {
+                    if !self.wake_is_due(&metaflow) {
+                        return Err(WakeRefusal::NothingQueued);
+                    }
                     // A store refusal after a pane write leaves its marker
                     // intact. No fresh prompt may carry that request again.
                     for entry in &metaflow.queue.0 {

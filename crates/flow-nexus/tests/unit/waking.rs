@@ -4059,6 +4059,13 @@ impl BuildsFreshWorld for NexusFixture {
     fn fresh_world(&mut self, codex_title: &str) -> FreshWorld {
         use crate::herdr::ConfiguresHerdrCli;
         let root = self.directory.path().to_path_buf();
+        assert!(
+            self.nexus
+                .herdr
+                .claude_sessions
+                .directory
+                .starts_with(&root)
+        );
         let state = root.join("fresh-world");
         fs::create_dir_all(&state).unwrap();
         let claude_root = root.join("native-transcripts/claude/-home-li-primary");
@@ -4142,6 +4149,10 @@ case "$*" in
       HERDR_PANE_ID="$pane" HERDR_SESSION=fixture-session sh -c 's=$(command -v sleep); env -i "$s" 120 & printf "%s" "$!" > "$0"; sleep 120; :' "$S/hook-pid" --resume "$(cat "$S/session")" < /dev/null > /dev/null 2>&1 &
       printf '%s' "$!" > "$S/pid"
       printf '%s\n' "$!" >> "$S/resumed-pids"
+      p=$!; birth=$(awk '{{print $22}}' "/proc/$p/stat")
+      mkdir -p '{registry}'
+      printf '{{"sessionId":"%s","pid":%s,"procStart":"%s"}}' "$(cat "$S/session")" "$p" "$birth" > '{registry}'/"$p.json"
+
     fi
     # REFUSED_AFTER_START refuses every resume once its harness runs in the
     # pane; REFUSED_AFTER_START_ONCE the next one only.
@@ -4209,6 +4220,7 @@ esac
             submitted = self.submission_report(),
             state = state.display(),
             claude_root = claude_root.display(),
+            registry = self.nexus.herdr.claude_sessions.directory.display(),
         );
         FixtureExecutable {
             path: self.snapshot_program.clone(),

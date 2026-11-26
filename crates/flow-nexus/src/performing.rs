@@ -821,8 +821,37 @@ impl PerformsInParts for RunningNexus {
                 self.store.record_restart(record).recorded()
             }
             Record_Data::Rebound(birth) => {
+                use crate::claude::ReadsClaudeSessions;
+                use crate::restarting::{ExitProof, ProcFs, ProvesExit};
+                use crate::seat_observation::ReadsNativeStanding;
                 use crate::store::restart::RecordsRestarts;
-                self.store.rebind_restarted(birth).recorded()
+                let Ok(Some(record)) = self.store.restart_record(&birth.flow_id.0) else {
+                    return Outcome::Failed(Failed_Data::StoreRefused);
+                };
+                let Ok(Some(node)) = self.store.flow_node(&birth.flow_id.0) else {
+                    return Outcome::Failed(Failed_Data::UnknownFlow);
+                };
+                if node.session_id.0 != record.native_session_id.0
+                    || birth.process.exit_proof(&ProcFs) != ExitProof::Running
+                {
+                    return Outcome::Failed(Failed_Data::StoreRefused);
+                }
+                let named = || {
+                    node.harness_kind != HarnessKind::Claude
+                        || u32::try_from(birth.process.pid.0)
+                            .ok()
+                            .and_then(|pid| self.herdr.claude_sessions.session_of(pid))
+                            .as_deref()
+                            == Some(node.session_id.0.as_str())
+                };
+                let observed = named().then(|| self.read_native_standing(&node)).flatten();
+                if birth.process.exit_proof(&ProcFs) != ExitProof::Running {
+                    return Outcome::Failed(Failed_Data::StoreRefused);
+                }
+                let observed = observed.filter(|_| named());
+                self.store
+                    .rebind_restarted(&record, birth, observed)
+                    .recorded()
             }
             Record_Data::Context(Record_Data_Context_Data { flow_id, tokens }) => {
                 use crate::store::context::RecordsContextSize;

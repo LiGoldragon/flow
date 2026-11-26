@@ -47,6 +47,7 @@ pub(crate) enum SeatDecision {
 
 pub(crate) enum SeatEvent {
     Observed(SeatStanding),
+    NewIncarnation(SeatStanding),
     Started,
     Activity(SeatActivity),
     Ended,
@@ -171,6 +172,7 @@ impl RecordsCurrentSeats for FlowStore {
         use SeatStanding::{Alive, Ended};
         let previous = self.current_seat(id)?;
         let next = match (&previous, event) {
+            (_, SeatEvent::NewIncarnation(standing)) => standing,
             (
                 Known(CurrentSeat {
                     seat_standing: Ended,

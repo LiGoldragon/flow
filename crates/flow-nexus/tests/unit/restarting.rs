@@ -989,7 +989,15 @@ fn born_at_route(fixture: &NexusFixture, process: Process) -> SeatBirth {
         herdr_route: route,
         process,
     };
-    assert!(store.rebind_restarted(birth.clone()).unwrap());
+    assert!(
+        store
+            .rebind_restarted(
+                &store.restart_record(FLOW).unwrap().unwrap(),
+                birth.clone(),
+                None
+            )
+            .unwrap()
+    );
     assert_eq!(record(fixture), None);
     birth
 }
@@ -1314,7 +1322,9 @@ fn restart_nexus_death_each_phase() {
 /// start; a later start hands nothing again.
 #[test]
 fn restart_crash_around_bind_commit_delivers_once() {
-    for committed in [false, true] {
+    use crate::generated::memory::{SeatActivity, SeatStanding};
+    use crate::store::current_seat::{RecordsCurrentSeats, SeatDecision};
+    for (committed, unavailable) in [(false, false), (true, false), (true, true)] {
         let mut fixture = NexusFixture::new();
         let world = fixture.restart_world(false);
         let pane = next_pane("restart-agent");
@@ -1329,12 +1339,24 @@ fn restart_crash_around_bind_commit_delivers_once() {
             )),
         }]);
         fixture.nexus.store.seed_metaflow(queued);
+        fixture
+            .nexus
+            .store
+            .record_observation(FLOW, Some(SeatStanding::Ended))
+            .unwrap();
         left_by_dead_nexus(&fixture, &world, true);
         fixture
             .nexus
             .store
             .record_restart(spawning_record(&world, pane.clone()))
             .unwrap();
+        if unavailable {
+            fs::rename(
+                &fixture.nexus.herdr.claude_sessions.directory,
+                world.fresh.state.join("registry-held"),
+            )
+            .unwrap();
+        }
         if committed {
             let process =
                 FlowStore::process_identity_for_pid(pid_in(&world.fresh.state.join("pid")))
@@ -1357,10 +1379,54 @@ fn restart_crash_around_bind_commit_delivers_once() {
                 Outcome::Recorded
             );
             assert_eq!(record(&fixture), None, "the lock went with the binding");
+            let state = fixture.nexus.store.seat_decision(FLOW).unwrap();
+            if unavailable {
+                assert!(matches!(state, SeatDecision::NoRecord));
+            } else {
+                assert!(matches!(
+                    state,
+                    SeatDecision::Observed(SeatStanding::Alive(SeatActivity::Resting))
+                ));
+            }
+            // A late unproven SessionEnd names the same session, but lacks
+            // the newly recorded birth; it cannot end the successor.
+            assert_eq!(
+                fixture.nexus.report(Report_Data {
+                    flow_id: flow_ethos::FlowId(FLOW.into()),
+                    process_option: None,
+                    event: Event::Ended(Some(signal_flow::NativeSessionId(
+                        world.seat.session.clone()
+                    )))
+                }),
+                Output::Reported
+            );
+            assert!(!matches!(
+                fixture.nexus.store.seat_decision(FLOW).unwrap(),
+                SeatDecision::Observed(SeatStanding::Ended)
+            ));
+        } else {
+            assert!(matches!(
+                fixture.nexus.store.seat_decision(FLOW).unwrap(),
+                SeatDecision::Observed(SeatStanding::Ended)
+            ));
         }
         assert_eq!(received(&world, &fixture, "queued around the commit"), 0);
         fixture.reopen_store();
         fixture.nexus.recover_wakes();
+        if unavailable {
+            assert_eq!(received(&world, &fixture, "queued around the commit"), 0);
+            assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 1);
+            fs::rename(
+                world.fresh.state.join("registry-held"),
+                &fixture.nexus.herdr.claude_sessions.directory,
+            )
+            .unwrap();
+            crate::seat_observation::ObservesCurrentSeats::observe_returning_source(
+                &fixture.nexus,
+                &node(&fixture),
+            );
+            fixture.nexus.wake_due(address(Model::Sol));
+        }
         assert_eq!(
             received(&world, &fixture, "queued around the commit"),
             1,

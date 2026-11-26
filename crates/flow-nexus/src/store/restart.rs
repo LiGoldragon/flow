@@ -13,9 +13,11 @@
 //! seat runs in and the birth of its harness process, by which a late event
 //! of the seat it replaced is told from the seat's own.
 
+use super::current_seat::{CurrentSeatRead, RecordsCurrentSeats, SeatEvent};
+use super::transitions::StagesObservationAudit;
 use super::{AnnouncesLaunchChanges, FlowHerdrRouteRecord, FlowStore, ReadsFlowStore, StoreError};
-use crate::generated::memory::SeatBirth;
 pub(crate) use crate::generated::memory::StoredRestart;
+use crate::generated::memory::{SeatBirth, SeatStanding};
 use meta_signal_flow::{RestartPhase, RestartRecord};
 use sema_engine::{
     AtomicCommit, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan, RecordKey,
@@ -98,7 +100,12 @@ pub(crate) trait RecordsRestarts {
     /// Binds the resumed seat in one write: the flow's route becomes the
     /// birth's, the birth is kept, and the restart record is removed. False,
     /// writing nothing, unless the record is Spawning in the birth's pane.
-    fn rebind_restarted(&self, birth: SeatBirth) -> Result<bool, StoreError>;
+    fn rebind_restarted(
+        &self,
+        expected: &RestartRecord,
+        birth: SeatBirth,
+        observed: Option<SeatStanding>,
+    ) -> Result<bool, StoreError>;
     /// The seat a restart bound for `flow_id`, if one did.
     fn seat_birth(&self, flow_id: &str) -> Result<Option<SeatBirth>, StoreError>;
     /// Adds the removal of `flow_id`'s restart record, when it has one, to
@@ -157,14 +164,28 @@ impl RecordsRestarts for FlowStore {
         Ok(())
     }
 
-    fn rebind_restarted(&self, birth: SeatBirth) -> Result<bool, StoreError> {
+    fn rebind_restarted(
+        &self,
+        expected: &RestartRecord,
+        birth: SeatBirth,
+        observed: Option<SeatStanding>,
+    ) -> Result<bool, StoreError> {
+        let _gate = self
+            .transitions_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let Some(record) = self.restart_record(&birth.flow_id.0)? else {
             return Ok(false);
         };
         let RestartPhase::Spawning(pane) = &record.restart_phase else {
             return Ok(false);
         };
-        if pane.herdr_session_name != birth.herdr_route.herdr_session_name
+        if &record != expected
+            || record.old_seat.process_option.as_ref() == Some(&birth.process)
+            || self
+                .seat_birth(&birth.flow_id.0)?
+                .is_some_and(|previous| previous.process == birth.process)
+            || pane.herdr_session_name != birth.herdr_route.herdr_session_name
             || pane.herdr_pane_id != birth.herdr_route.herdr_pane_id
             || pane.herdr_terminal_id != birth.herdr_route.herdr_terminal_id
         {
@@ -178,6 +199,26 @@ impl RecordsRestarts for FlowStore {
             .engine
             .begin_atomic_commit()
             .retract(self.restarts, RecordKey::new(birth.flow_id.clone().0));
+        // This verified birth, not an ordinary report, can supersede the
+        // predecessor's terminal state. No source answer clears stale state.
+        let id = &birth.flow_id.0;
+        let commit = match observed {
+            Some(standing) => {
+                let commit = self.stage_observation_audit(
+                    commit,
+                    crate::generated::overriding::Seat {
+                        flow_id: birth.flow_id.clone(),
+                        address: record.address.clone(),
+                    },
+                    &standing,
+                )?;
+                self.stage_current_event(commit, id, SeatEvent::NewIncarnation(standing))?
+            }
+            None if matches!(self.current_seat(id)?, CurrentSeatRead::Known(_)) => {
+                commit.retract(self.current_seats, RecordKey::new(id))
+            }
+            None => commit,
+        };
         let commit = match self.herdr_route(&birth.flow_id.0)? {
             Some(_) => commit.mutate(self.herdr_routes, route),
             None => commit.assert(self.herdr_routes, route),

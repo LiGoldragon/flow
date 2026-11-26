@@ -11,6 +11,7 @@ use crate::generated::transitions::{
 };
 use crate::reminding::CountsUnixSeconds;
 use crate::store::context::RecordsContextSize;
+use crate::store::current_seat::RecordsCurrentSeats;
 use meta_signal_flow::State;
 use sema_engine::{QueryPlan, RecordKey};
 use signal_flow::Tokens;
@@ -143,10 +144,19 @@ impl FoldsTransitions for FlowStore {
     }
 }
 
-impl FlowStore {
+pub(super) trait StagesObservationAudit {
+    fn stage_observation_audit(
+        &self,
+        commit: sema_engine::AtomicCommit,
+        seat: Seat,
+        standing: &SeatStanding,
+    ) -> Result<sema_engine::AtomicCommit, StoreError>;
+}
+
+impl StagesObservationAudit for FlowStore {
     /// An observed native state is itself an event, in the same audit as a
     /// report. The caller holds the current-state writer gate across both.
-    pub(super) fn stage_observation_audit(
+    fn stage_observation_audit(
         &self,
         commit: sema_engine::AtomicCommit,
         seat: Seat,

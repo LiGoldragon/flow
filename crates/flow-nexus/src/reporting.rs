@@ -21,6 +21,8 @@
 //! session, and the flow is rebound to that session; its FlowId stays.
 
 use crate::RunningNexus;
+use crate::store::current_seat::RecordsCurrentSeats;
+use crate::store::events::RecordsSeatReports;
 
 use crate::generated::transitions::{ClaudeReport, ReportedEvent, ReportsEvents};
 

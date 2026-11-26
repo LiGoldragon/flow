@@ -8,6 +8,7 @@ use crate::herdr::pane::{PaneAgent, WritesPane};
 use crate::herdr::{PanePresence, ReadsHerdrPanes};
 use crate::live::HoldsLiveValue;
 use crate::store::current_seat::CurrentSeatRead;
+use crate::store::current_seat::RecordsCurrentSeats;
 use crate::store::{ManagesMetaflowState, ReadsFlowRoles, ReadsFlowRows};
 use signal_flow::{AgentState, FlowNode, HarnessKind, HerdrRouteSelection};
 

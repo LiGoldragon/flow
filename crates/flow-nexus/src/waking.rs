@@ -117,6 +117,7 @@ use crate::send_tool::ServesLaunchCalls;
 use crate::store::NamesConfiguredModel;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
+use crate::store::current_seat::RecordsCurrentSeats;
 use crate::store::effort_configuration::ReadsEffort;
 use crate::store::events::RecordedHarnessEvent;
 use crate::store::events::RecordsHarnessEvents;
@@ -135,7 +136,7 @@ use crate::store::ordered_replacement::{
 use crate::store::pending_reap::RecordsPendingReaps;
 use crate::store::queue_delivery::{AccountsQueueDelivery, RequestState};
 use crate::store::successor::{OwesSuccessors, ReadsContinuity, SuccessionCause, SuccessorIntent};
-use crate::store::{ManagesMetaflowState, NamesLiveFlow, ReadsFlowRows, ReadsLaunchAttempt};
+use crate::store::{ManagesMetaflowState, ReadsFlowRows, ReadsLaunchAttempt};
 use meta_signal_flow::Continuity;
 use signal_flow::{
     Address, AgentState, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile,
@@ -1189,18 +1190,8 @@ impl CorrelatesNativeEvents for RunningNexus {
     }
 }
 
-/// Whether a seat rests as closing it needs: its turn has ended and no
-/// work it started is in flight. A Claude seat rests when the last of its
-/// own Stops and submitted prompts is a Stop naming no background work, and
-/// Herdr shows it resting or its transcript records its main turn's end; a
-/// Codex seat when its app-server shows its thread resting and in no turn.
-/// No reading of Herdr stands for the Stop: a seat whose Stop names work in
-/// flight is not resting, and the Stop Claude ends its turn with once that
-/// work has ended is the event of its rest.
+/// A known live resting seat may close.
 pub(crate) trait JudgesClosingRest {
-    /// The flow's own last turn event is a Stop naming no background work.
-
-    /// The flow rests now, by every evidence closing it needs.
     fn rests_for_closing(&self, flow_id: &str) -> bool;
 }
 

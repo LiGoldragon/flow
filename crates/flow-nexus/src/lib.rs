@@ -8,6 +8,7 @@
 use crate::store::ManagesMetaflowState;
 use crate::store::ReadsFlowMemory;
 use crate::store::context::RecordsContextSize;
+use crate::store::current_seat::RecordsCurrentSeats;
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::send_outcome::RecordsSendOutcomes;
 // The generated roots name this crate's types by its name: Operation names

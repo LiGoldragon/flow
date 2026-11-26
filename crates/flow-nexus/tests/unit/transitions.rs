@@ -15,6 +15,7 @@ use crate::generated::overriding::{HeedsOverrides, RemembersOverrides, Seat};
 use crate::generated::transitions::{AskedFlow, RecordsTransitions};
 use crate::reporting::RecordsReports;
 use crate::store::context::RecordsContextSize;
+use crate::store::current_seat::RecordsCurrentSeats;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::SeedsMetaflow;
 use crate::store::{FlowStore, OpensFlowStore, SetsNativeOwnerEnvironmentForTests};

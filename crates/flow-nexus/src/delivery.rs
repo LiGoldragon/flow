@@ -23,6 +23,7 @@
 //! bounded wait.
 
 use crate::delivery::body::ShowsPaneText;
+use crate::store::current_seat::RecordsCurrentSeats;
 pub mod body;
 pub mod lease;
 

@@ -53,6 +53,7 @@ use crate::generated::turn_ledger::{LedgerEvent, ThreadStanding};
 use crate::launching::NamesTopic;
 use crate::live::HoldsLiveValue;
 use crate::sending::{AdmitsSendPayload, MintsId};
+use crate::store::current_seat::RecordsCurrentSeats;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::{NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows};

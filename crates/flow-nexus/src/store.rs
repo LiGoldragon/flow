@@ -4,6 +4,7 @@
 //! owns its single `.sema` store and lowers a closed `signal_flow::Input`
 //! into its typed, durable records.
 
+use crate::store::current_seat::RecordsCurrentSeats;
 use crate::store::delivery::RegistersDeliveryTables;
 #[cfg(test)]
 use crate::test_faults;
@@ -2895,7 +2896,7 @@ impl OpensFlowStore for FlowStore {
         let scheduled_reminders = engine.register_table(
             <scheduled_reminder::ScheduledReminder as scheduled_reminder::DescribesScheduledReminderTable>::descriptor(),
         )?;
-        let current_seats = engine.register_table(current_seat::descriptor())?;
+        let current_seats = engine.register_table(<crate::generated::memory::CurrentSeat as current_seat::DescribesCurrentSeats>::descriptor())?;
         let flow_transitions = engine.register_table(
             <crate::generated::memory::Flow as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
         )?;
@@ -3148,7 +3149,7 @@ impl OpensFlowStore for FlowStore {
         let scheduled_reminders = engine.register_table(
             <scheduled_reminder::ScheduledReminder as scheduled_reminder::DescribesScheduledReminderTable>::descriptor(),
         )?;
-        let current_seats = engine.register_table(current_seat::descriptor())?;
+        let current_seats = engine.register_table(<crate::generated::memory::CurrentSeat as current_seat::DescribesCurrentSeats>::descriptor())?;
         let flow_transitions = engine.register_table(
             <crate::generated::memory::Flow as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
         )?;
@@ -7305,6 +7306,7 @@ impl ReadsFlowMemory for FlowStore {}
 
 #[cfg(test)]
 mod tests {
+    use super::current_seat::RecordsCurrentSeats;
     use super::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
     use crate::store::logical_delivery::{RecordsLogicalDeliveries, SimplifiedReplyBinding};
     use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};

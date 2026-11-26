@@ -15,6 +15,7 @@ use crate::generated::operation::{Failed_Data, Operation, Outcome};
 use crate::performing::Performs;
 use crate::reporting::RecordsReports;
 use crate::sending::SendsRequests;
+use crate::store::current_seat::RecordsCurrentSeats;
 use crate::store::logical_delivery::{RecordsLogicalDeliveries, RecordsQueueWrites};
 use crate::store::metaflow::SeedsMetaflow;
 use crate::store::queue_delivery::{

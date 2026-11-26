@@ -19,9 +19,10 @@
 
 use super::{FlowStore, ReadsFlowStore, StoreError};
 pub use crate::generated::memory::{FlowEvents, RecordedHarnessEvent, RecordedStop};
+use crate::store::current_seat::RecordsCurrentSeats;
 use sema_engine::{
-    Assertion, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryVersion, QueryPlan,
-    RecordKey, Retraction, SchemaHash, TableDescriptor, TableName, TableReference,
+    Assertion, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan, RecordKey,
+    Retraction, SchemaHash, TableDescriptor, TableName, TableReference,
 };
 use signal_flow::Event;
 use signal_flow::{FlowId, NativeSessionId, NativeStop, TranscriptPath};
@@ -199,8 +200,17 @@ impl ReadsEventRow for FlowStore {
     }
 }
 
-impl FlowStore {
-    pub(crate) fn record_seat_report(
+pub(crate) trait RecordsSeatReports {
+    fn record_seat_report(
+        &self,
+        flow_id: &str,
+        event: Event,
+        state_event: Option<super::current_seat::SeatEvent>,
+    ) -> Result<EventRecording, StoreError>;
+}
+
+impl RecordsSeatReports for FlowStore {
+    fn record_seat_report(
         &self,
         flow_id: &str,
         event: Event,

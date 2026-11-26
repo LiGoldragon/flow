@@ -1,5 +1,6 @@
 //! The sole decision state of a flow. No observation is a different result
 //! from an observed end. Opening a store never infers this row from history.
+use super::transitions::StagesObservationAudit;
 use super::{FlowStore, StoreError};
 use crate::generated::memory::{CurrentSeat, SeatActivity, SeatStanding, StateRevision};
 use sema_engine::{
@@ -12,12 +13,18 @@ pub(super) const TABLE: &str = "flow_nexus_current_seats";
 pub(super) const FAMILY: &str = "flow-nexus-current-seat";
 pub(super) const SCHEMA: &str = "flow-nexus-current-seat-v1";
 
-pub(super) fn descriptor() -> TableDescriptor<CurrentSeat> {
-    TableDescriptor::new(
-        TableName::new(TABLE),
-        FamilyName::new(FAMILY),
-        SchemaHash::for_label(SCHEMA),
-    )
+pub(super) trait DescribesCurrentSeats {
+    fn descriptor() -> TableDescriptor<CurrentSeat>;
+}
+
+impl DescribesCurrentSeats for CurrentSeat {
+    fn descriptor() -> TableDescriptor<CurrentSeat> {
+        TableDescriptor::new(
+            TableName::new(TABLE),
+            FamilyName::new(FAMILY),
+            SchemaHash::for_label(SCHEMA),
+        )
+    }
 }
 
 impl EngineRecord for CurrentSeat {
@@ -45,15 +52,38 @@ pub(crate) enum SeatEvent {
     Ended,
 }
 
-impl FlowStore {
-    pub(crate) fn seat_decision(&self, id: &str) -> Result<SeatDecision, StoreError> {
+pub(crate) trait RecordsCurrentSeats {
+    fn seat_decision(&self, id: &str) -> Result<SeatDecision, StoreError>;
+    fn current_seat(&self, id: &str) -> Result<CurrentSeatRead, StoreError>;
+    fn record_observation(
+        &self,
+        id: &str,
+        observation: Option<SeatStanding>,
+    ) -> Result<(), StoreError>;
+    fn establish_observation(&self, id: &str, standing: SeatStanding) -> Result<bool, StoreError>;
+    fn stage_observation(
+        &self,
+        commit: AtomicCommit,
+        id: &str,
+        standing: SeatStanding,
+    ) -> Result<AtomicCommit, StoreError>;
+    fn stage_current_event(
+        &self,
+        commit: AtomicCommit,
+        id: &str,
+        event: SeatEvent,
+    ) -> Result<AtomicCommit, StoreError>;
+}
+
+impl RecordsCurrentSeats for FlowStore {
+    fn seat_decision(&self, id: &str) -> Result<SeatDecision, StoreError> {
         Ok(match self.current_seat(id)? {
             CurrentSeatRead::NoRecord => SeatDecision::NoRecord,
             CurrentSeatRead::Known(row) => SeatDecision::Observed(row.seat_standing),
         })
     }
 
-    pub(crate) fn current_seat(&self, id: &str) -> Result<CurrentSeatRead, StoreError> {
+    fn current_seat(&self, id: &str) -> Result<CurrentSeatRead, StoreError> {
         let rows = self
             .engine
             .match_records(QueryPlan::key(self.current_seats, RecordKey::new(id)))?;
@@ -66,7 +96,7 @@ impl FlowStore {
 
     /// A fresh authoritative observation replaces a prior known state. If the
     /// source cannot answer, remove stale knowledge rather than invent an end.
-    pub(crate) fn record_observation(
+    fn record_observation(
         &self,
         id: &str,
         observation: Option<SeatStanding>,
@@ -92,11 +122,7 @@ impl FlowStore {
 
     /// The source answered after an unavailable takeover. Do not overwrite
     /// a newer event that won the race while this observation was in flight.
-    pub(crate) fn establish_observation(
-        &self,
-        id: &str,
-        standing: SeatStanding,
-    ) -> Result<bool, StoreError> {
+    fn establish_observation(&self, id: &str, standing: SeatStanding) -> Result<bool, StoreError> {
         let _gate = self
             .transitions_gate
             .lock()
@@ -135,7 +161,7 @@ impl FlowStore {
     }
 
     /// Called under transitions_gate and committed with the event source.
-    pub(super) fn stage_current_event(
+    fn stage_current_event(
         &self,
         commit: AtomicCommit,
         id: &str,

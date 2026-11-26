@@ -19,6 +19,7 @@ use crate::performing::Performs;
 use crate::reporting::RecordsReports;
 use crate::store::ManagesMetaflowState;
 use crate::store::context::RecordsContextSize;
+use crate::store::current_seat::RecordsCurrentSeats;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::{

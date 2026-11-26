@@ -79,8 +79,6 @@ pub(crate) enum RefusedWrite {
     /// A Record.Awoken of a metaflow as a flow, with its reassignment.
     MetaflowAwaken,
     /// The forgetting of an Address held only through an ended binding,
-    /// with its reassignment.
-    BindingForget,
     /// The reap supervisor's read of the pending reaps in its next pass.
     PassRead,
     /// The superseding read of the Address's current receiver.

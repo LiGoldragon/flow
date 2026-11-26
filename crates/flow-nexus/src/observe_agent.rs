@@ -18,6 +18,7 @@ use crate::herdr::pane::ReadsAgentStatus;
 use crate::herdr::pane::{PaneAgent, WritesPane};
 use crate::observation_lifetime::{CancelsObservation, ObservationCancellation};
 use crate::store::ReadsFlowRows;
+use crate::store::current_seat::RecordsCurrentSeats;
 use signal_flow::{
     AgentObservation, AgentState, FlowNode, HerdrRoute, HerdrRouteSelection, Output,
 };

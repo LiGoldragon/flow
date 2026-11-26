@@ -167,7 +167,9 @@
             })
           ) (removeAttrs testBuilds untested);
           behaviorChecks = lib.mapAttrs (
-            name: tests: crateCheck name tests (checkEnvironments.${name} or { })
+            name: tests: crateCheck name tests ((checkEnvironments.${name} or { }) // lib.optionalAttrs (name == "flow-nexus") {
+              boundedCases = { seconds = 90; jobs = 6; };
+            })
           ) behaviorBuilds;
           # The binaries of builds copied into one bin directory: the daemon,
           # flow-nexus-daemon, finds flow-hook beside its own resolved
@@ -203,6 +205,16 @@
                   ln -s ${path} "$binaries/"
                 '') (environment.beside or [ ])}
                 cd "$NIX_BUILD_TOP/source"
+                ${if environment ? boundedCases then ''
+                  cases=()
+                  for test in ${tests}/tests/*; do
+                    cp "$test" "$binaries/"
+                    cases+=("$binaries/$(basename "$test")")
+                  done
+                  ${pkgs.python3}/bin/python3 ${./nix/bounded-tests.py} \
+                    --seconds ${toString environment.boundedCases.seconds} \
+                    --jobs ${toString environment.boundedCases.jobs} "''${cases[@]}" | tee "$out"
+                '' else ''
                 passed=0
                 ignored=0
                 for test in ${tests}/tests/*; do
@@ -217,6 +229,7 @@
                   exit 1
                 fi
                 echo "${name}: $passed passed, $ignored ignored" | tee "$out"
+                ''}
               '';
           checkEnvironments = {
             # The approval pipeline's and the handover archive's tests read a

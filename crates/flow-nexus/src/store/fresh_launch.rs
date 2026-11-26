@@ -7,6 +7,7 @@ use crate::generated::memory::{
     Completed, FreshLaunchCohort, InputDeliveryId, Recipient, SimplifiedReplyBinding, Source,
 };
 use flow_ethos::QueueEntry;
+use sema_engine::AtomicCommit;
 use signal_flow::{DeliveryState, NativeReceipt, PromptDeliveryResult};
 pub(super) const TABLE: &str = "flow_nexus_fresh_launch_cohorts";
 pub(super) const FAMILY: &str = "flow-nexus-fresh-launch-cohort";

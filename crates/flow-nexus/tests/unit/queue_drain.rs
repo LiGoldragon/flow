@@ -261,7 +261,7 @@ fn a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop() {
 fn takeover_reads_the_claude_process_and_transcript_not_herdr_and_recovers_on_source_return() {
     use crate::generated::memory::{SeatActivity, SeatStanding};
     use crate::seat_observation::ObservesCurrentSeats;
-    use crate::store::current_seat::{CurrentSeatRead, RecordsCurrentSeats};
+    use crate::store::current_seat::CurrentSeatRead;
     let fixture = NexusFixture::new();
     seat(&fixture, vec![from_core("untyped while unobserved")]);
     // No live harness is consulted. Only the fixture's directory and the

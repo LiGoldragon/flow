@@ -5,7 +5,6 @@
 //! queued work remains durable until native history receipts it.
 
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
-use crate::RunningNexus;
 use crate::composition::{ComposesLaunch, FreshSeat, RendersQueuedWork};
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::generated::operation::Failed_Data;

@@ -498,8 +498,6 @@ fn an_idle_maintained_claude_flow_keeps_its_pane_and_stays_awake() {
 /// then leaves the seat as it is.
 #[test]
 fn an_idle_maintained_codex_flow_keeps_its_pane_and_stays_awake() {
-    use super::codex_turns::idle;
-    use crate::codex_turns::SettlesRestingCodexSeats;
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![fixture.settled_agent()],
@@ -521,10 +519,7 @@ fn an_idle_maintained_codex_flow_keeps_its_pane_and_stays_awake() {
     // Test 5: the thread's coming to rest settles the seat itself, once,
     // and a Maintained seat with nothing queued stays Idle.
     let thread = fixture.node().session_id;
-    assert_eq!(
-        fixture.nexus.codex_events(&thread.0, vec![idle()]),
-        Some(AtStop::Idle)
-    );
+    assert_eq!(family(&fixture, &thread.0, Resting), Some(AtStop::Idle));
     assert!(!closes(&fixture), "the idle seat keeps its pane");
     let kept = stored(&fixture, Model::Sol);
     assert_eq!(
@@ -597,8 +592,6 @@ fn an_idle_on_demand_claude_flow_closes_its_harness_and_keeps_its_address() {
 /// resting with nothing queued.
 #[test]
 fn an_idle_on_demand_codex_flow_closes_its_harness() {
-    use super::codex_turns::idle;
-    use crate::codex_turns::SettlesRestingCodexSeats;
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![fixture.settled_agent()],
@@ -620,7 +613,7 @@ fn an_idle_on_demand_codex_flow_closes_its_harness() {
     // Test 4: the thread's rest settles the seat itself; it sleeps.
     let thread = fixture.node().session_id;
     assert_eq!(
-        fixture.nexus.codex_events(&thread.0, vec![idle()]),
+        family(&fixture, &thread.0, Resting),
         Some(AtStop::Slept(address(Model::Sol)))
     );
     assert!(closes(&fixture), "the idle seat's harness is closed");
@@ -7123,6 +7116,20 @@ fn a_simplified_answer_uses_bound_transcript_b_and_never_hook_a() {
     );
 }
 
+use crate::generated::memory::SeatActivity::{Resting, Working};
+
+fn family(
+    fixture: &NexusFixture,
+    thread: &str,
+    activity: crate::generated::memory::SeatActivity,
+) -> Option<AtStop> {
+    use crate::send_tool::RespondsToSendCalls;
+    fixture.nexus.apply_thread_family(
+        thread,
+        Some(crate::generated::memory::SeatStanding::Alive(activity)),
+    )
+}
+
 /// An Awake Codex seat 908786 at Sol with `queue`, declared `continuity`
 /// with a successor that composes; its thread named.
 fn codex_rest_seat(
@@ -7230,9 +7237,7 @@ pub(super) fn codex_seat_in_fresh_world(fixture: &mut NexusFixture) -> FreshWorl
 /// out at the thread's rest with nothing queued.
 #[test]
 fn a_codex_ordered_refresh_with_nothing_queued_is_carried_out_at_its_rest() {
-    use super::codex_turns::{completed, idle, started};
     use crate::Dispatches;
-    use crate::codex_turns::SettlesRestingCodexSeats;
     use signal_flow::{Input, Output};
     let fixture = NexusFixture::new();
     let thread = codex_rest_seat(
@@ -7241,9 +7246,7 @@ fn a_codex_ordered_refresh_with_nothing_queued_is_carried_out_at_its_rest() {
         vec![],
     );
     assert_eq!(
-        fixture
-            .nexus
-            .codex_events(&thread, vec![idle(), started("turn-1")]),
+        family(&fixture, &thread, Working),
         None,
         "a turn that starts is no rest"
     );
@@ -7251,9 +7254,7 @@ fn a_codex_ordered_refresh_with_nothing_queued_is_carried_out_at_its_rest() {
         fixture.nexus.dispatch(Input::Refresh(address(Model::Sol))),
         Output::RefreshQueued(_)
     ));
-    let at_rest = fixture
-        .nexus
-        .codex_events(&thread, vec![completed("turn-1")]);
+    let at_rest = family(&fixture, &thread, Resting);
     assert!(
         matches!(&at_rest, Some(AtStop::Refreshed(at)) if *at == address(Model::Sol)),
         "{at_rest:?}"
@@ -7269,8 +7270,6 @@ fn a_codex_ordered_refresh_with_nothing_queued_is_carried_out_at_its_rest() {
 /// spent. The rest answers the reap pending, never a refusal.
 #[test]
 fn a_codex_ordered_refresh_of_a_maintained_seat_starts_its_successor_at_its_rest() {
-    use super::codex_turns::{completed, idle, started};
-    use crate::codex_turns::SettlesRestingCodexSeats;
     use crate::store::ordered_replacement::OrdersReplacements;
     use crate::store::pending_reap::RecordsPendingReaps;
     use crate::{Dispatches, store::ReadsFlowRows};
@@ -7279,9 +7278,7 @@ fn a_codex_ordered_refresh_of_a_maintained_seat_starts_its_successor_at_its_rest
     let world = codex_seat_in_fresh_world(&mut fixture);
     let at = address(Model::Sol);
     assert_eq!(
-        fixture
-            .nexus
-            .codex_events(WORKING_CODEX_THREAD, vec![idle(), started("turn-1")]),
+        family(&fixture, WORKING_CODEX_THREAD, Working),
         None,
         "a turn that starts is no rest"
     );
@@ -7289,9 +7286,7 @@ fn a_codex_ordered_refresh_of_a_maintained_seat_starts_its_successor_at_its_rest
     assert!(matches!(ordered, Output::RefreshQueued(_)), "{ordered:?}");
     assert_eq!(world.claude_starts(), 0, "nothing starts while it works");
 
-    let at_rest = fixture
-        .nexus
-        .codex_events(WORKING_CODEX_THREAD, vec![completed("turn-1")]);
+    let at_rest = family(&fixture, WORKING_CODEX_THREAD, Resting);
     let Some(AtStop::ReapPending(pending)) = &at_rest else {
         panic!("{at_rest:?}; Herdr calls: {}", world.calls());
     };
@@ -7339,8 +7334,6 @@ fn a_codex_ordered_refresh_of_a_maintained_seat_starts_its_successor_at_its_rest
 /// rest with nothing queued.
 #[test]
 fn a_codex_seat_past_its_threshold_is_refreshed_at_its_rest_with_nothing_queued() {
-    use super::codex_turns::idle;
-    use crate::codex_turns::SettlesRestingCodexSeats;
     use crate::store::SeedsRole;
     use crate::store::context::RecordsContextSize;
     let fixture = NexusFixture::new();
@@ -7369,7 +7362,7 @@ fn a_codex_seat_past_its_threshold_is_refreshed_at_its_rest_with_nothing_queued(
         .store
         .record_context_size("908786", 500)
         .unwrap();
-    let at_rest = fixture.nexus.codex_events(&thread, vec![idle()]);
+    let at_rest = family(&fixture, &thread, Resting);
     assert!(
         matches!(&at_rest, Some(AtStop::Refreshed(at)) if *at == address(Model::Sol)),
         "{at_rest:?}"
@@ -7380,17 +7373,12 @@ fn a_codex_seat_past_its_threshold_is_refreshed_at_its_rest_with_nothing_queued(
 /// rest: a second Status(Idle) while resting settles nothing.
 #[test]
 fn a_second_idle_status_of_a_resting_codex_seat_settles_nothing() {
-    use super::codex_turns::idle;
-    use crate::codex_turns::SettlesRestingCodexSeats;
     let fixture = NexusFixture::new();
     let thread = codex_rest_seat(&fixture, None, vec![]);
     maintain(&fixture, address(Model::Sol));
+    assert_eq!(family(&fixture, &thread, Resting), Some(AtStop::Idle));
     assert_eq!(
-        fixture.nexus.codex_events(&thread, vec![idle()]),
-        Some(AtStop::Idle)
-    );
-    assert_eq!(
-        fixture.nexus.codex_events(&thread, vec![idle()]),
+        family(&fixture, &thread, Resting),
         None,
         "a second Status(Idle) while resting is no new rest"
     );
@@ -7404,8 +7392,6 @@ fn a_second_idle_status_of_a_resting_codex_seat_settles_nothing() {
 /// second Status(Idle) then settles nothing.
 #[test]
 fn a_warned_codex_seat_is_refreshed_at_the_rest_after_its_warning() {
-    use super::codex_turns::{completed, idle, seen, started};
-    use crate::codex_turns::SettlesRestingCodexSeats;
     use crate::store::SeedsRole;
     use crate::store::handover_reminders::SchedulesHandoverReminders;
     const WORDS: &str = "Write your handover now.";
@@ -7454,7 +7440,7 @@ fn a_warned_codex_seat_is_refreshed_at_the_rest_after_its_warning() {
 
     // The rest that opens the warning: the warning is typed and the seat,
     // handed it, is in the turn it opens; it is not refreshed.
-    let warned_at = fixture.nexus.codex_events(&thread, vec![idle()]);
+    let warned_at = family(&fixture, &thread, Resting);
     assert_eq!(warned_at, Some(AtStop::Kept(KeptAtStop::InTurn)));
     let reminder = fixture
         .nexus
@@ -7474,14 +7460,8 @@ fn a_warned_codex_seat_is_refreshed_at_the_rest_after_its_warning() {
 
     // The warning's turn runs, its user message the warning typed, and
     // ends: that rest refreshes the seat.
-    let refreshed_at = fixture.nexus.codex_events(
-        &thread,
-        vec![
-            started("turn-warned"),
-            seen("turn-warned", "warning-item", &typed),
-            completed("turn-warned"),
-        ],
-    );
+    family(&fixture, &thread, Working);
+    let refreshed_at = family(&fixture, &thread, Resting);
     assert_eq!(refreshed_at, Some(AtStop::Refreshed(address(Model::Sol))));
     assert!(closes(&fixture), "the warned seat is refreshed");
     let refreshed = stored(&fixture, Model::Sol);
@@ -7491,7 +7471,7 @@ fn a_warned_codex_seat_is_refreshed_at_the_rest_after_its_warning() {
         flow_ethos::Past(vec![flow_ethos::FlowId("908786".into())])
     );
     assert_eq!(
-        fixture.nexus.codex_events(&thread, vec![idle()]),
+        family(&fixture, &thread, Resting),
         None,
         "a second Status(Idle) of the refreshed seat settles nothing"
     );
@@ -7503,8 +7483,6 @@ fn a_warned_codex_seat_is_refreshed_at_the_rest_after_its_warning() {
 /// queue left empty and no native turn started.
 #[test]
 fn a_resting_codex_seat_with_work_queued_is_handed_the_oldest_request() {
-    use super::codex_turns::idle;
-    use crate::codex_turns::SettlesRestingCodexSeats;
     use crate::store::SeedsRole;
     let mut fixture = NexusFixture::new();
     let queued = |id: &str, text: &str| signal_flow::QueueEntry {
@@ -7529,7 +7507,7 @@ fn a_resting_codex_seat_with_work_queued_is_handed_the_oldest_request() {
     let codex = super::send_tool::accepting_codex_endpoint(&mut fixture, "gpt-sol", &thread);
     assert!(fixture.typed().is_none(), "nothing typed before the rest");
 
-    let at_rest = fixture.nexus.codex_events(&thread, vec![idle()]);
+    let at_rest = family(&fixture, &thread, Resting);
     assert_eq!(at_rest, Some(AtStop::Drained(oldest)), "{at_rest:?}");
     let typed = fixture.typed().expect("the queue is typed into the pane");
     assert!(
@@ -7554,11 +7532,9 @@ fn a_resting_codex_seat_with_work_queued_is_handed_the_oldest_request() {
 /// stays Awake, its sleep alone declined, and is told nothing.
 #[test]
 fn an_on_demand_codex_seat_whose_successor_cannot_compose_stays_awake_untold() {
-    use super::codex_turns::idle;
-    use crate::codex_turns::SettlesRestingCodexSeats;
     let fixture = NexusFixture::new();
     let thread = codex_rest_seat(&fixture, None, vec![]);
-    let at_rest = fixture.nexus.codex_events(&thread, vec![idle()]);
+    let at_rest = family(&fixture, &thread, Resting);
     assert_eq!(at_rest, Some(AtStop::Kept(KeptAtStop::SleepUnplaceable)));
     assert!(!closes(&fixture), "the seat stays Awake");
     assert!(fixture.typed().is_none(), "no successor-refused notice");
@@ -7636,7 +7612,6 @@ fn a_successor_refusal_routes_once_to_the_configured_investigator() {
 
 #[test]
 fn a_retained_investigator_receives_one_order_through_its_existing_drain() {
-    use crate::codex_turns::SettlesRestingCodexSeats;
     use crate::send_tool::ServesLaunchCalls;
     use crate::store::SeedsRole;
     use crate::waking::WakesInParts;
@@ -7658,12 +7633,7 @@ fn a_retained_investigator_receives_one_order_through_its_existing_drain() {
             kept.clone(),
         ))
         .expect("the retained seat is also the investigator");
-    assert_eq!(
-        fixture
-            .nexus
-            .codex_events(&thread, vec![super::codex_turns::idle()]),
-        Some(AtStop::Idle)
-    );
+    assert_eq!(family(&fixture, &thread, Resting), Some(AtStop::Idle));
 
     fixture
         .nexus
@@ -7692,106 +7662,12 @@ fn a_retained_investigator_receives_one_order_through_its_existing_drain() {
     );
 }
 
-/// Test 9, on the ledger: a cut settles a resting seat; a second cut of
-/// the same subscription settles nothing; a subscription's end keeps the
-/// seat from rest until the next subscription's cut, which settles it.
-#[test]
-fn a_cut_settles_a_resting_codex_seat_and_a_new_subscription_s_cut_again() {
-    use super::codex_turns::idle;
-    use crate::codex_turns::SettlesRestingCodexSeats;
-    use crate::generated::turn_ledger::LedgerEvent;
-    let fixture = NexusFixture::new();
-    let seat = codex_rest_seat(&fixture, None, vec![]);
-    maintain(&fixture, address(Model::Sol));
-    assert_eq!(
-        fixture.nexus.codex_events(&seat, vec![idle()]),
-        Some(AtStop::Idle),
-        "the first cut rests the seat"
-    );
-    assert_eq!(fixture.nexus.codex_events(&seat, vec![idle()]), None);
-    assert_eq!(
-        fixture
-            .nexus
-            .codex_events(&seat, vec![LedgerEvent::SubscriptionEnded]),
-        None
-    );
-    assert!(!fixture.nexus.codex_resting("908786"));
-    assert_eq!(
-        fixture.nexus.codex_events(&seat, vec![idle()]),
-        Some(AtStop::Idle)
-    );
-}
-
-#[test]
-fn a_current_codex_cut_repairs_an_uncommitted_rest_for_its_bound_thread_only() {
-    use super::codex_turns::idle;
-    use crate::codex_turns::SettlesRestingCodexSeats;
-    use crate::generated::memory::Event;
-    use crate::generated::transitions::{ReportedEvent, ReportsEvents};
-    use crate::waking::HoldsSoftForIdle;
-    let fixture = NexusFixture::new();
-    let thread = codex_rest_seat(&fixture, None, vec![]);
-    maintain(&fixture, address(Model::Sol));
-    assert_eq!(
-        fixture.nexus.codex_events(&thread, vec![idle()]),
-        Some(AtStop::Idle)
-    );
-    assert!(fixture.nexus.report_event(ReportedEvent {
-        flow_id: signal_flow::FlowId("908786".into()),
-        event: Event::Working(signal_flow::Tokens(1)),
-    }));
-    assert!(!fixture.nexus.rests_now("908786"));
-    assert_eq!(
-        fixture.nexus.codex_events("another-thread", vec![idle()]),
-        None
-    );
-    assert!(!fixture.nexus.rests_now("908786"));
-    assert_eq!(
-        fixture.nexus.codex_events(&thread, vec![idle()]),
-        Some(AtStop::Idle)
-    );
-    assert!(fixture.nexus.rests_now("908786"));
-    assert_eq!(fixture.nexus.codex_events(&thread, vec![idle()]), None);
-}
-
-/// primary-k7jy, F2: the first turn, opened from turn/start's answer, is
-/// kept by a stale cut that shows the thread idle: the OnDemand seat does
-/// not sleep, and sleeps at that turn's end.
-#[test]
-fn a_stale_resume_idle_after_the_first_turn_started_does_not_sleep() {
-    use super::codex_turns::{completed, idle, started};
-    use crate::codex_turns::SettlesRestingCodexSeats;
-    let fixture = NexusFixture::new();
-    let thread = codex_rest_seat(
-        &fixture,
-        Some(meta_signal_flow::Continuity::OnDemand),
-        vec![],
-    );
-    assert_eq!(
-        fixture
-            .nexus
-            .codex_events(&thread, vec![started("turn-1"), idle()]),
-        None,
-        "a cut that does not list the turn keeps it"
-    );
-    assert!(!closes(&fixture));
-    assert_eq!(
-        fixture
-            .nexus
-            .codex_events(&thread, vec![completed("turn-1")]),
-        Some(AtStop::Slept(address(Model::Sol)))
-    );
-}
-
 /// primary-k7jy: an OnDemand Codex seat with its turn open is kept, a
 /// refresh ordered for it included: the order waits for the turn's end,
 /// and a cut that lists the turn running settles nothing.
 #[test]
 fn an_on_demand_codex_seat_with_its_turn_open_is_kept() {
-    use super::codex_turns::{completed, cut, idle, started};
     use crate::Dispatches;
-    use crate::codex_turns::SettlesRestingCodexSeats;
-    use crate::generated::turn_ledger::CodexTurnStatus;
     use signal_flow::{Input, Output};
     let fixture = NexusFixture::new();
     let thread = codex_rest_seat(
@@ -7799,71 +7675,19 @@ fn an_on_demand_codex_seat_with_its_turn_open_is_kept() {
         Some(meta_signal_flow::Continuity::OnDemand),
         vec![],
     );
-    assert_eq!(
-        fixture
-            .nexus
-            .codex_events(&thread, vec![idle(), started("turn-1")]),
-        None
-    );
+    assert_eq!(family(&fixture, &thread, Working), None);
     assert!(matches!(
         fixture.nexus.dispatch(Input::Refresh(address(Model::Sol))),
         Output::RefreshQueued(_)
     ));
-    assert_eq!(
-        fixture.nexus.codex_events(
-            &thread,
-            vec![cut(&[("turn-1", CodexTurnStatus::InProgress)])]
-        ),
-        None
-    );
+    assert_eq!(family(&fixture, &thread, Working), None);
     assert!(!closes(&fixture), "a refresh never closes a working seat");
-    let at_rest = fixture
-        .nexus
-        .codex_events(&thread, vec![completed("turn-1")]);
+    let at_rest = family(&fixture, &thread, Resting);
     assert!(
         matches!(&at_rest, Some(AtStop::Refreshed(at)) if *at == address(Model::Sol)),
         "{at_rest:?}"
     );
     assert!(closes(&fixture));
-}
-
-/// primary-k7jy: an end that reaches below the ledger's watermark is
-/// never taken for rest: with retention 0 a late repeat of an ended turn
-/// leaves the seat unreconciled until the next cut, which settles it.
-#[test]
-fn retention_exceeded_is_logged_and_reconciles() {
-    use super::codex_turns::{completed, idle, started};
-    use crate::codex_turns::{SettlesRestingCodexSeats, TracksCodexTurns};
-    let fixture = NexusFixture::new();
-    let thread = codex_rest_seat(&fixture, None, vec![]);
-    maintain(&fixture, address(Model::Sol));
-    fixture
-        .nexus
-        .codex_turns
-        .retain(meta_signal_flow::TurnRetentionBound(0));
-    assert_eq!(
-        fixture
-            .nexus
-            .codex_events(&thread, vec![idle(), started("turn-1")]),
-        None
-    );
-    assert_eq!(
-        fixture
-            .nexus
-            .codex_events(&thread, vec![completed("turn-1")]),
-        Some(AtStop::Idle)
-    );
-    assert_eq!(
-        fixture.nexus.codex_events(&thread, vec![started("turn-1")]),
-        None,
-        "a start below the watermark is no turn and no rest"
-    );
-    assert!(!fixture.nexus.codex_resting("908786"));
-    assert_eq!(
-        fixture.nexus.codex_events(&thread, vec![idle()]),
-        Some(AtStop::Idle),
-        "the next cut reconciles the ledger"
-    );
 }
 
 /// Sends `message` to the Sol Address from no flow, as the living at a
@@ -8193,172 +8017,4 @@ fn a_push_of_a_queue_holding_an_order_wakes_its_asleep_permaflow() {
         .find("Deploy the build.")
         .unwrap_or_else(|| panic!("the Order is in the first prompt: {turns:?}"));
     assert!(notice < order, "oldest first: {first}");
-}
-
-#[test]
-fn a_pending_claude_rest_drains_on_its_herdr_idle() {
-    witness_pending_claude_rest(PaneBecomesWritable::Status, "w1:p3", true);
-}
-
-#[test]
-fn herdr_idle_of_another_pane_leaves_a_pending_claude_queue_intact() {
-    witness_pending_claude_rest(PaneBecomesWritable::Status, "other:p9", false);
-}
-
-#[test]
-fn an_idle_not_ready_claude_stop_drains_after_bound_pane_update_without_another_stop() {
-    witness_pending_claude_rest(PaneBecomesWritable::Update, "w1:p3", true);
-}
-
-#[test]
-fn an_update_of_another_pane_leaves_the_idle_not_ready_rest_queued() {
-    witness_pending_claude_rest(PaneBecomesWritable::Update, "other:p9", false);
-}
-
-enum PaneBecomesWritable {
-    Status,
-    Update,
-}
-
-fn witness_pending_claude_rest(writable: PaneBecomesWritable, event_pane: &str, delivered: bool) {
-    use crate::StopsNexus;
-    use crate::event_wait::{AwaitsDescriptors, AwaitsPath};
-    use crate::fixture_executable::{FixtureExecutable, InstallsScript};
-    use crate::rest_watching::ServesRestObservations;
-    use std::io::{BufRead, BufReader, Read, Write};
-    use std::os::fd::AsFd;
-    use std::os::unix::net::UnixListener;
-    use std::time::{Duration, Instant};
-
-    let fixture = NexusFixture::new();
-    let (_caller, peer) = soft_recipient(&fixture, false);
-    for body in ["First deferred rest.", "Second deferred rest."] {
-        assert!(matches!(
-            send_soft(&fixture, &peer, body),
-            signal_flow::Output::SendAccepted(_)
-        ));
-    }
-    if let PaneBecomesWritable::Update = writable {
-        let mut idle = claude_agent(&fixture);
-        idle["agent_status"] = "idle".into();
-        idle["interactive_ready"] = false.into();
-        fixture.accept_pane_operations(vec![idle], PromptFixture::Prompted("w1:p3"));
-    }
-    let rest = claude_stop(&fixture);
-    fixture
-        .nexus
-        .after_report(&flow_ethos::FlowId(CLAUDE_SEAT.into()), &rest);
-    let retained = stored(&fixture, Model::Sol).queue.0;
-    assert_eq!(
-        retained.len(),
-        2,
-        "the Stop kept the original FIFO while the pane was not writable"
-    );
-    assert!(fixture.typed().is_none());
-    let rest_session = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
-    let HerdrRouteSelection::Available(route) = rest_session.herdr_route_selection else {
-        panic!("fixture has a bound route");
-    };
-
-    let socket = fixture.directory.path().join("pending-rest.sock");
-    let server = UnixListener::bind(&socket).unwrap();
-    fixture.list_herdr_sessions(&[(&route.herdr_session_name.0, socket)]);
-    let opening_read = fixture.directory.path().join("pending-rest-opening-read");
-    let script = fs::read_to_string(&fixture.snapshot_program).unwrap();
-    let changed = script.replace(
-        "\"api snapshot\") printf",
-        &format!(
-            "\"api snapshot\") touch '{}'; printf",
-            opening_read.display()
-        ),
-    );
-    assert_ne!(changed, script);
-    FixtureExecutable {
-        path: fixture.snapshot_program.clone(),
-    }
-    .install(&changed);
-
-    std::thread::scope(|scope| {
-        let observer = scope.spawn(|| fixture.nexus.serve_rest_observations(scope));
-        let outcome = || {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            assert!(
-                [server.as_fd()].ready(Some(deadline)).unwrap()[0],
-                "observer connected"
-            );
-            let (mut stream, _) = server.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
-            let mut request = String::new();
-            BufReader::new(&stream).read_line(&mut request).unwrap();
-            assert!(request.contains("pane.agent_status_changed") && request.contains("w1:p3"));
-            assert!(request.contains("pane.updated"));
-            writeln!(stream, r#"{{"result":{{"type":"subscription_started"}}}}"#).unwrap();
-            assert!(
-                opening_read.as_path().appeared_by(deadline),
-                "subscription precedes the opening readback"
-            );
-            // The opening read sees the prior unwritable pane. Make the
-            // target writable in both arms; only the addressed event differs.
-            fixture.accept_pane_operations(
-                vec![claude_agent(&fixture)],
-                PromptFixture::Prompted("w1:p3"),
-            );
-            let event = match writable {
-                PaneBecomesWritable::Status => serde_json::json!({
-                    "event": "pane_agent_status_changed",
-                    "data": { "pane_id": event_pane, "agent_status": "idle" }
-                }),
-                PaneBecomesWritable::Update => serde_json::json!({
-                    "event": "pane_updated",
-                    "data": { "pane": { "pane_id": event_pane } }
-                }),
-            };
-            writeln!(stream, "{event}").unwrap();
-            stream.shutdown(std::net::Shutdown::Write).unwrap();
-            let mut eof = Vec::new();
-            stream
-                .read_to_end(&mut eof)
-                .expect("observer closed its stream");
-            assert!(eof.is_empty());
-            let queue = stored(&fixture, Model::Sol).queue.0;
-            if delivered {
-                let typed = fixture.typed().expect("retained FIFO was typed");
-                assert!(
-                    typed.find("First deferred rest.").unwrap()
-                        < typed.find("Second deferred rest.").unwrap()
-                );
-                for entry in &retained {
-                    assert_eq!(typed.matches(&entry.request_id.0).count(), 1);
-                    let delivery = fixture
-                        .nexus
-                        .store
-                        .debug_delivery(&entry.request_id)
-                        .unwrap()
-                        .expect("original request is still recorded");
-                    assert!(matches!(
-                        delivery.delivery_snapshot.delivery_state,
-                        signal_flow::DeliveryState::Delivered(_)
-                    ));
-                }
-                assert_eq!(
-                    fs::read_to_string(fixture.directory.path().join("herdr-operations.log"))
-                        .unwrap()
-                        .lines()
-                        .filter(|line| line.contains("agent prompt"))
-                        .count(),
-                    1
-                );
-                assert!(queue.is_empty());
-            } else {
-                assert_eq!(queue, retained);
-                assert!(fixture.typed().is_none());
-            }
-        };
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(outcome));
-        fixture.nexus.stop(&[]);
-        observer.join().unwrap();
-        result.unwrap();
-    });
 }

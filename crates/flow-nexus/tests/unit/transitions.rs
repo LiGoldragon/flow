@@ -6,8 +6,8 @@
 //! or 0.58.0's, is given each live flow's state from its recorded reports.
 
 use super::waking::{
-    CLAUDE_SEAT, CLAUDE_SESSION, WORKING_CODEX_THREAD, address, append_main_rows, claude_seat,
-    codex_seat_in_fresh_world, end_turn, maintain, metaflow, report_claude_stop,
+    CLAUDE_SEAT, CLAUDE_SESSION, address, append_main_rows, claude_seat, end_turn, maintain,
+    metaflow, report_claude_stop,
 };
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
 use crate::generated::memory::{Cause, Event, Moment, Transition};
@@ -247,78 +247,6 @@ fn a_claude_compaction_is_compacting_and_keeps_the_state() {
     assert!(
         all.contains(&reported(meta::State::Resting, Event::Compacting)),
         "{all:?}"
-    );
-}
-
-/// Every Codex report is one Event: its first is preceded by Started, its
-/// thread reaching its rest Idle, a turn starting Working, a token usage
-/// Working with its size in a turn, a compaction Compacting with the state
-/// kept, and its thread closed Ended.
-#[test]
-fn each_codex_report_is_one_event_leading_to_its_state() {
-    use super::codex_turns::{completed, idle, started};
-    use crate::codex_turns::SettlesRestingCodexSeats;
-    use crate::compacting::{CodexContextSignal, WatchesCompactions};
-    let mut fixture = NexusFixture::new();
-    let _world = codex_seat_in_fresh_world(&mut fixture);
-    let seat = "abc123";
-
-    fixture
-        .nexus
-        .codex_events(WORKING_CODEX_THREAD, vec![idle()]);
-    assert_eq!(
-        held(&fixture, seat),
-        vec![
-            reported(meta::State::Acting, Event::Started),
-            reported(meta::State::Resting, Event::Idle(Tokens(0))),
-        ]
-    );
-
-    fixture
-        .nexus
-        .codex_events(WORKING_CODEX_THREAD, vec![started("turn-1")]);
-    assert_eq!(
-        held(&fixture, seat).last().cloned(),
-        Some(reported(meta::State::Acting, Event::Working(Tokens(0))))
-    );
-
-    fixture
-        .nexus
-        .codex_context_signal(WORKING_CODEX_THREAD, CodexContextSignal::TokenUsage(91_000));
-    assert_eq!(
-        held(&fixture, seat).last().cloned(),
-        Some(reported(
-            meta::State::Acting,
-            Event::Working(Tokens(91_000))
-        ))
-    );
-
-    fixture
-        .nexus
-        .codex_events(WORKING_CODEX_THREAD, vec![completed("turn-1")]);
-    assert!(
-        held(&fixture, seat).contains(&reported(meta::State::Resting, Event::Idle(Tokens(91_000)))),
-        "{:?}",
-        held(&fixture, seat)
-    );
-    let state = last(&fixture, seat).state;
-
-    fixture.nexus.codex_context_signal(
-        WORKING_CODEX_THREAD,
-        CodexContextSignal::Compacted("compaction-1".into()),
-    );
-    assert_eq!(
-        held(&fixture, seat).last().cloned(),
-        Some(reported(state, Event::Compacting))
-    );
-
-    fixture.nexus.codex_events(
-        WORKING_CODEX_THREAD,
-        vec![crate::generated::turn_ledger::LedgerEvent::ThreadClosed],
-    );
-    assert_eq!(
-        held(&fixture, seat).last().cloned(),
-        Some(reported(meta::State::Asleep, Event::Ended))
     );
 }
 

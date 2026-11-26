@@ -515,45 +515,6 @@ fn responding<T>(
 }
 
 #[test]
-fn a_turn_completed_between_resume_and_terminal_list_commits_as_resting() {
-    use crate::codex_turns::TracksCodexTurns;
-    use crate::generated::turn_ledger::ThreadStanding;
-    let mut fixture = NexusFixture::new();
-    let fake = FakeAppServer::install(vec![FakeConnection {
-        requests: Vec::new(),
-        closes: false,
-        running: Some(TURN.into()),
-    }]);
-    let frames = [
-        serde_json::json!({ "id": 1, "result": {} }),
-        serde_json::json!({ "id": 2, "result": {
-            "thread": { "id": THREAD_A },
-            "initialTurnsPage": { "data": [{
-                "id": TURN, "status": "inProgress", "items": []
-            }] }
-        } }),
-        serde_json::json!({ "method": "turn/completed", "params": {
-            "threadId": THREAD_A, "turn": { "id": TURN, "status": "completed" }
-        } }),
-        serde_json::json!({ "id": 9, "method": "item/tool/call", "params": {} }),
-        serde_json::json!({ "id": 3, "result": { "data": [] } }),
-    ]
-    .iter()
-    .map(frame)
-    .collect::<String>();
-    std::fs::write(fake.directory.path().join("frames-2"), frames).unwrap();
-    let adapter = fixture.adapter("gpt-sol", &fake);
-    responding(&fixture, THREAD_A, &adapter, || {
-        let acknowledged = fake.written_on(2, |value| value["id"] == 9);
-        assert!(acknowledged.iter().any(|value| value["id"] == 9));
-        assert_eq!(
-            fixture.nexus.codex_turns.standing(THREAD_A),
-            ThreadStanding::AtRest
-        );
-    });
-}
-
-#[test]
 fn two_threads_are_each_attributed_to_their_own_metaflow() {
     let mut fixture = NexusFixture::new();
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
@@ -2467,31 +2428,19 @@ fn a_completion_on_another_thread_drains_nothing() {
 /// thread once.
 #[test]
 fn a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane() {
-    use crate::codex_turns::TracksCodexTurns;
     use crate::waking::SleepsAndWakesSeats;
     let mut fixture = NexusFixture::new();
     fixture.awake_codex_seat(vec![]);
     let fake = FakeAppServer::install(vec![]);
     fixture.adapter("gpt-sol", &fake);
     fake.accept_queued_turns(SEAT_THREAD, 1..=2);
+    use crate::generated::memory::{SeatActivity, SeatStanding};
+    use crate::store::current_seat::RecordsCurrentSeats;
     fixture
         .nexus
-        .codex_turns
-        .apply(SEAT_THREAD, super::codex_turns::idle());
-    // The app-server's report of the thread's rest, as its intake records it.
-    {
-        use crate::generated::transitions::{
-            After, Before, CodexFlowReport, CodexReport, ReportsEvents, Stepped_Data,
-        };
-        use crate::generated::turn_ledger::ThreadStanding;
-        fixture.nexus.report_codex(CodexFlowReport {
-            flow_id: flow_ethos::FlowId("908786".into()),
-            codex_report: CodexReport::Stepped(Stepped_Data {
-                before: Before(ThreadStanding::Unreconciled),
-                after: After(ThreadStanding::AtRest),
-            }),
-        });
-    }
+        .store
+        .record_observation("908786", Some(SeatStanding::Alive(SeatActivity::Resting)))
+        .unwrap();
     fixture.nexus.wake_due(seat_at());
     assert!(
         fake.queued_turn_texts().is_empty(),

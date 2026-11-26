@@ -742,6 +742,11 @@ pub(crate) trait RespondsToSendCalls {
     /// not, asks Flow to wake the target whose persisted delivery policy is
     /// Wake. Err when the answer could not be written.
     fn observe_thread_family(&self, thread: &str);
+    fn apply_thread_family(
+        &self,
+        thread: &str,
+        standing: Option<crate::generated::memory::SeatStanding>,
+    ) -> Option<crate::waking::AtStop>;
     fn answer_request(
         &self,
         subscription: &mut ThreadSubscription,
@@ -754,25 +759,47 @@ impl AwaitsAppServerSocket for RunningNexus {}
 impl RespondsToSendCalls for RunningNexus {
     fn observe_thread_family(&self, thread: &str) {
         use crate::seat_observation::ReadsNativeStanding;
+        if let Some(node) = self.codex_flow_on(thread) {
+            self.apply_thread_family(thread, self.read_native_standing(&node));
+        }
+    }
+
+    fn apply_thread_family(
+        &self,
+        thread: &str,
+        standing: Option<crate::generated::memory::SeatStanding>,
+    ) -> Option<crate::waking::AtStop> {
+        use crate::generated::memory::{SeatActivity, SeatStanding};
+        use crate::store::current_seat::CurrentSeatRead;
         use crate::store::metaflow::SleepsMetaflows;
-        let Some(node) = self.codex_flow_on(thread) else {
-            return;
-        };
+        let node = self.codex_flow_on(thread)?;
         if node.flow_lifecycle != signal_flow::FlowLifecycle::Active {
-            return;
+            return None;
         }
-        let observed = self.read_native_standing(&node);
-        if matches!(self.store.current_seat(&node.flow_id.0), Ok(crate::store::current_seat::CurrentSeatRead::Known(row)) if Some(&row.seat_standing) == observed.as_ref())
+        let rest = standing == Some(SeatStanding::Alive(SeatActivity::Resting));
         {
-            return;
+            let _gate = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+            match self.store.current_seat(&node.flow_id.0).ok()? {
+                CurrentSeatRead::Known(row)
+                    if row.seat_standing == SeatStanding::Ended
+                        || standing.as_ref() == Some(&row.seat_standing) =>
+                {
+                    return None;
+                }
+                CurrentSeatRead::NoRecord if standing.is_none() => return None,
+                _ => {}
+            }
+            self.store
+                .record_observation(&node.flow_id.0, standing)
+                .ok()?;
         }
-        if let Err(error) = self.store.record_observation(&node.flow_id.0, observed) {
-            eprintln!("flow-nexus: could not record Codex family for {thread}: {error}");
-            return;
+        if rest {
+            return Some(self.settle_native_rest(&node.flow_id.0, thread));
         }
         if let Ok(Some(seat)) = self.store.metaflow_awake_as(&node.flow_id.0) {
             self.defer_wake(seat.address);
         }
+        None
     }
 
     fn respond_for(

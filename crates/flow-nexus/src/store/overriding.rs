@@ -352,20 +352,6 @@ impl RemembersOverrides for FlowStore {
                 if self.flow(&flow_id.0)?.is_none() {
                     return Ok(None);
                 }
-                if let Some(flow) = self
-                    .engine
-                    .match_records(QueryPlan::key(
-                        self.flow_transitions,
-                        RecordKey::new(flow_id.0.clone()),
-                    ))?
-                    .records()
-                    .first()
-                {
-                    return Ok(Some(Seat {
-                        flow_id,
-                        address: flow.address.clone(),
-                    }));
-                }
                 if let Some(metaflow) = self.metaflow_awake_as(&flow_id.0)? {
                     return Ok(Some(Seat {
                         flow_id,

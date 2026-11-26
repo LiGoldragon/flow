@@ -991,3 +991,21 @@ transcript or thread, and asks for the finding to go to Psyche core
 Opus. A transcript first read in a Nexus's run raises only compactions
 made from ten minutes before the Nexus started, so a deploy raises none made
 before it.
+
+
+### Authoritative seat state
+
+The Nexus keeps one current record per confirmed flow, separate from its
+append-only audit. Reservation does not create a record. Confirmation
+makes the seat alive and working. Its own turn events change its activity;
+an end is terminal. State and its source transition commit together.
+The decision read distinguishes a missing record from a known end.
+A missing record authorizes neither a pane write nor a wake; pending work
+stays queued. Reopening a store does not seed this record from history.
+
+Before serving at takeover the Nexus observes each bound seat against its
+native source. Codex's loaded threads and the matching thread's status,
+or Claude's session process together with its Herdr pane, establish the
+observation. A successful observation of absence establishes an end.
+An unavailable source supplies no state: stale live knowledge must not
+survive that failure. A returning source may establish the missing record.

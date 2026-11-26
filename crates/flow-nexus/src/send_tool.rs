@@ -764,6 +764,11 @@ impl RespondsToSendCalls for RunningNexus {
             // Armed before the look: the socket appearing while this
             // attempt runs is the cue for the next one.
             let watch = Self::socket_watch(adapter, generation, &signals);
+            if let Some(node) = self.codex_flow_on(thread) {
+                crate::seat_observation::ObservesCurrentSeats::observe_returning_source(
+                    self, &node,
+                );
+            }
             match adapter.subscribe_thread(thread, generation, &signals, &inbox, &notes) {
                 Err(SubscriptionEnd::Stopped) => return,
                 // No launch work is served beside a responder of its own.

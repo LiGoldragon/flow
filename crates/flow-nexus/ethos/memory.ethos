@@ -385,6 +385,11 @@ Memory
           Arrived.RequestId
           Crystallized.Onward
           Overridden ]
+  ; Sole current decision record, separate from the audit history.
+  SeatActivity.[ Working Resting ]
+  SeatStanding.[ Alive.SeatActivity Ended ]
+  StateRevision.Integer
+  CurrentSeat.{ FlowId SeatStanding StateRevision }
   ; One transition: the state entered, its cause and its moment.
   Transition.{ State Cause Moment }
   ; A flow's transitions, oldest first, keyed by its FlowId, with the

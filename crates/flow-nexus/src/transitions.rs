@@ -19,15 +19,15 @@ use crate::generated::memory::{Cause, Event, Moment};
 use crate::generated::operation::{Operation, Outcome, Record_Data};
 use crate::generated::overriding::{RemembersOverrides, Subject};
 use crate::generated::transitions::{
-    AskedFlow, Caused, ClaudeReport, CodexFlowReport, CodexReport, RecordsTransitions,
-    ReportedEvent, ReportsEvents, TypesCodexReport,
+    Caused, ClaudeReport, CodexFlowReport, CodexReport, ReportedEvent, ReportsEvents,
+    TypesCodexReport,
 };
 use crate::generated::turn_ledger::ThreadStanding;
 use crate::performing::Performs;
 use crate::reminding::CountsUnixSeconds;
 use crate::store::ReadsFlowRows;
 use crate::store::context::RecordsContextSize;
-use crate::store::events::{RecordedHarnessEvent, RecordsHarnessEvents};
+
 use crate::waking::{CorrelatesNativeEvents, ReadsClaudeDelivery};
 use signal_flow::{HarnessKind, Tokens};
 
@@ -91,29 +91,8 @@ impl ReportsEvents for RunningNexus {
                 .unwrap_or_else(last)
         };
         match hook_event {
-            signal_flow::Event::Started(session) => {
-                // The report is already recorded, last among the flow's
-                // events: an earlier Started naming the same session makes
-                // this one the session going on.
-                let repeated = session.is_some()
-                    && self
-                        .store
-                        .events(&flow_id.0)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|events| {
-                            events.iter().rev().skip(1).any(|earlier| {
-                                matches!(earlier, RecordedHarnessEvent::Started(named) if *named == session)
-                            })
-                        });
-                if !repeated {
-                    Some(Event::Started)
-                } else if self.claude_main_turn_ended(&node) {
-                    Some(Event::Idle(measured()))
-                } else {
-                    Some(Event::Working(measured()))
-                }
-            }
+            // Session attachment is not a confirmed Nexus launch or an activity event.
+            signal_flow::Event::Started(_) => None,
             signal_flow::Event::PromptSubmitted(prompt) => self
                 .correlated_prompt(&flow_id.0, &prompt)
                 .then(|| Event::Working(last())),
@@ -166,32 +145,16 @@ impl ReportsEvents for RunningNexus {
             flow_id,
             codex_report,
         } = report;
-        if matches!(self.store.state_of(AskedFlow(flow_id.clone())), Ok(None)) {
-            self.report_event(ReportedEvent {
-                flow_id: flow_id.clone(),
-                event: Event::Started,
-            });
-        }
         let last = self
             .store
             .context_size(&flow_id.0)
             .ok()
             .flatten()
             .map(Tokens);
-        let event = match &codex_report {
-            // A current native rest also repairs a missing committed rest.
-            // Repeated evidence of a committed rest has no additional effect.
-            CodexReport::Stepped(step)
-                if step.after.0 == ThreadStanding::AtRest
-                    && step.before.0 == ThreadStanding::AtRest
-                    && matches!(
-                        self.store.state_of(AskedFlow(flow_id.clone())),
-                        Ok(Some(meta_signal_flow::State::Acting))
-                    ) =>
-            {
-                Some(Event::Idle(last.unwrap_or(Tokens(0))))
-            }
-            _ => codex_report.codex_event(last),
+        let event = match codex_report {
+            // Token accounting never changes the flow's activity.
+            CodexReport::Measured(_) => None,
+            other => other.codex_event(last),
         };
         match event {
             Some(event) => self.report_event(ReportedEvent { flow_id, event }),

@@ -134,7 +134,22 @@ impl RepairsMetaflows for FlowStore {
         };
         let metaflow = stored.metaflow;
         let flow_node_option = match &metaflow.state {
-            MetaflowState::Awake(flow_id) => self.flow_node(&flow_id.0)?,
+            MetaflowState::Awake(flow_id) => match self.current_seat(&flow_id.0)? {
+                super::current_seat::CurrentSeatRead::NoRecord => None,
+                super::current_seat::CurrentSeatRead::Known(row) => {
+                    self.flow_node(&flow_id.0)?.map(|mut node| {
+                        node.flow_lifecycle = match row.seat_standing {
+                            crate::generated::memory::SeatStanding::Alive(_) => {
+                                signal_flow::FlowLifecycle::Active
+                            }
+                            crate::generated::memory::SeatStanding::Ended => {
+                                signal_flow::FlowLifecycle::Exited
+                            }
+                        };
+                        node
+                    })
+                }
+            },
             MetaflowState::Asleep => None,
         };
         let lock_vector = self

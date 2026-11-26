@@ -18,8 +18,10 @@
 //! the owner's word standing last. Nothing a 0.56.2 or a 0.58.0 store holds
 //! is refused, and no family or schema changes.
 
+use super::current_seat::{CurrentSeatRead, SeatEvent};
 use super::{FlowStore, ReadsFlowStore, StoreError};
 use crate::generated::memory::{Cause, Event, Flow, FlowEvents, Moment, Transition};
+use crate::generated::memory::{SeatActivity, SeatStanding};
 use crate::generated::overriding::{RemembersOverrides, Seat, Subject};
 use crate::generated::transitions::LeadsToState;
 use crate::generated::transitions::{
@@ -200,14 +202,14 @@ pub(crate) trait ReadsRestEpoch {
 
 impl ReadsRestEpoch for FlowStore {
     fn rest_epoch(&self, flow_id: &str) -> Result<Option<usize>, StoreError> {
-        let rows = self.engine.match_records(QueryPlan::key(
-            self.flow_transitions,
-            RecordKey::new(flow_id.to_owned()),
-        ))?;
-        Ok(rows.records().first().and_then(|flow| {
-            matches!(flow.transition_vector.last(), Some(last) if last.state == State::Resting)
-                .then_some(flow.transition_vector.len())
-        }))
+        Ok(match self.current_seat(flow_id)? {
+            CurrentSeatRead::Known(row)
+                if row.seat_standing == SeatStanding::Alive(SeatActivity::Resting) =>
+            {
+                usize::try_from(row.state_revision.0).ok()
+            }
+            _ => None,
+        })
     }
 }
 
@@ -217,6 +219,15 @@ impl RecordsTransitions for FlowStore {
             .transitions_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let id = caused.seat.flow_id.0.clone();
+        let event = match &caused.cause {
+            Cause::Reported(Event::Working(_)) => Some(SeatEvent::Activity(SeatActivity::Working)),
+            Cause::Reported(Event::Idle(_)) => Some(SeatEvent::Activity(SeatActivity::Resting)),
+            Cause::Reported(Event::Ended) => Some(SeatEvent::Ended),
+            // Only confirm_start commits Started. Audit arrivals and token
+            // measurements are not independent authorities on activity.
+            _ => None,
+        };
         let transition = self.fold(vec![caused])?.into_iter().next().map(|write| {
             let transition = match &write {
                 TransitionWrite::Appended(flow) | TransitionWrite::Opened(flow) => {
@@ -233,6 +244,10 @@ impl RecordsTransitions for FlowStore {
             TransitionWrite::Appended(flow) => commit.mutate(self.flow_transitions, flow),
             TransitionWrite::Opened(flow) => commit.assert(self.flow_transitions, flow),
         };
+        let commit = match event {
+            Some(event) => self.stage_current_event(commit, &id, event)?,
+            None => commit,
+        };
         self.engine.commit_atomic(commit)?;
         Ok(transition)
     }
@@ -244,16 +259,14 @@ impl RecordsTransitions for FlowStore {
     }
 
     fn state_of(&self, asked: AskedFlow) -> Result<Option<State>, StoreError> {
-        Ok(self
-            .engine
-            .match_records(QueryPlan::key(
-                self.flow_transitions,
-                RecordKey::new(asked.0.0),
-            ))?
-            .records()
-            .first()
-            .and_then(|flow| flow.transition_vector.last())
-            .map(|last| last.state.clone()))
+        Ok(match self.current_seat(&asked.0.0)? {
+            CurrentSeatRead::NoRecord => None,
+            CurrentSeatRead::Known(row) => Some(match row.seat_standing {
+                SeatStanding::Alive(SeatActivity::Working) => State::Acting,
+                SeatStanding::Alive(SeatActivity::Resting) => State::Resting,
+                SeatStanding::Ended => State::Asleep,
+            }),
+        })
     }
 
     /// Each live flow whose transitions hold no Reported one is given the

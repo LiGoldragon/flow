@@ -154,6 +154,11 @@ fn main() -> ExitCode {
     // A Codex launch the last Nexus left mid-way, its first turn perhaps
     // pending on a send call, is refused and settled before anything is
     // served.
+    if let Err(error) = flow_nexus::seat_observation::ObservesCurrentSeats::observe_takeover(&nexus)
+    {
+        eprintln!("flow-nexus: takeover observation was not committed: {error}");
+        return ExitCode::FAILURE;
+    }
     nexus.reconcile_interrupted_launches();
     if let Err(error) = Readiness::announce_ready() {
         eprintln!("flow-nexus: readiness not announced: {error}");

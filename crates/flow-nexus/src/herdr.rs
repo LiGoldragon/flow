@@ -1357,24 +1357,22 @@ impl ReadsForegroundProcesses for serde_json::Value {
         let foreground = information
             .get("foreground_processes")
             .and_then(serde_json::Value::as_array)?;
-        Some(
-            foreground
-                .iter()
-                .filter_map(|process| {
-                    let process_id = u32::try_from(process.get("pid")?.as_u64()?).ok()?;
-                    let cmdline = fs::read(format!("/proc/{process_id}/cmdline")).ok()?;
-                    let arguments = cmdline
-                        .split(|byte| *byte == 0)
-                        .filter(|argument| !argument.is_empty())
-                        .map(|argument| String::from_utf8_lossy(argument).into_owned())
-                        .collect();
-                    Some(ForegroundProcess {
-                        process_id,
-                        arguments,
-                    })
+        foreground
+            .iter()
+            .map(|process| {
+                let process_id = u32::try_from(process.get("pid")?.as_u64()?).ok()?;
+                let cmdline = fs::read(format!("/proc/{process_id}/cmdline")).ok()?;
+                let arguments = cmdline
+                    .split(|byte| *byte == 0)
+                    .filter(|argument| !argument.is_empty())
+                    .map(|argument| String::from_utf8_lossy(argument).into_owned())
+                    .collect();
+                Some(ForegroundProcess {
+                    process_id,
+                    arguments,
                 })
-                .collect(),
-        )
+            })
+            .collect()
     }
 
     fn foreground_threads_of(&self, route: &HerdrRoute) -> Option<BTreeSet<String>> {

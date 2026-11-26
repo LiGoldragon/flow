@@ -99,18 +99,17 @@
 
 use crate::RunningNexus;
 use crate::claude::{LocatesClaudeTranscript, ReadsClaudeTurns};
-use crate::codex_turns::SettlesRestingCodexSeats;
 use crate::composition::{FreshSeat, JoinsPurpose, RendersQueuedWork};
+use crate::delivery::DeliversMessages;
 use crate::delivery::lease::LeasesPanes;
-use crate::delivery::{DeliversMessages, FindsDeliveryTarget, ReadsLeasedPane};
 use crate::generated::memory::RefreshCaller;
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
 };
 use crate::generated::overriding::HeedsOverrides;
 use crate::generated::starter::ProfilesFreshSeat;
-use crate::herdr::pane::{PaneAgent, WritesPane};
-use crate::herdr::{LocatesNativeTranscripts, PaneOwnership, PanePresence, ReadsHerdrPanes};
+use crate::herdr::pane::PaneAgent;
+use crate::herdr::{LocatesNativeTranscripts, ReadsHerdrPanes};
 use crate::launching::LaunchesFlows;
 use crate::performing::Performs;
 use crate::request_waking::{HoldsWakingRequest, WakesSleepingPermaflow};
@@ -210,13 +209,24 @@ pub trait HoldsSoftForIdle {
         &self,
         requests: &[Queued],
         flow_id: &str,
-    ) -> bool {
-        requests.iter().any(ReadsPriority::abrupt)
-            || (self.due_at_rest(requests) && self.rests_now(flow_id))
-    }
+    ) -> bool;
 }
 
 impl HoldsSoftForIdle for RunningNexus {
+    fn due_now<Queued: ReadsPriority + WakesSleepingPermaflow>(
+        &self,
+        requests: &[Queued],
+        flow_id: &str,
+    ) -> bool {
+        use crate::generated::transitions::{AskedFlow, RecordsTransitions};
+        match self.store.state_of(AskedFlow(FlowId(flow_id.to_owned()))) {
+            Ok(Some(meta_signal_flow::State::Acting)) => requests.iter().any(ReadsPriority::abrupt),
+            Ok(Some(meta_signal_flow::State::Resting)) => {
+                requests.iter().any(ReadsPriority::abrupt) || self.due_at_rest(requests)
+            }
+            _ => false,
+        }
+    }
     // The flow's state is its last transition (`transitions`). A Simplified
     // Claude seat that opened with no prompt has had no turn yet and is
     // ready for its first input.
@@ -225,9 +235,6 @@ impl HoldsSoftForIdle for RunningNexus {
         matches!(
             self.store.state_of(AskedFlow(FlowId(flow_id.to_owned()))),
             Ok(Some(meta_signal_flow::State::Resting))
-        ) || matches!(
-            self.store.flow_node(flow_id),
-            Ok(Some(node)) if self.simplified_first_input_ready(&node)
         )
     }
 }
@@ -454,34 +461,15 @@ impl RestsEndedAwake for RunningNexus {
         let flow_ethos::State::Awake(flow_id) = metaflow.state else {
             return false;
         };
-        let ended = match self.store.flow_node(&flow_id.0) {
-            Ok(Some(node)) => !node.flow_lifecycle.is_live(),
-            // Awake as no flow: a process binding. Its process gone, an
-            // Address held only through bindings is forgotten; one holding
-            // work or a flow's past is rested as an ended flow's would be.
-            Ok(None) => {
-                use crate::store::metaflow::ForgetsEndedBindings;
-                use crate::store::{FlowStore, ReadsFlowMemory};
-                if matches!(
-                    self.store.forget_ended_binding(address, &flow_id.0),
-                    Ok(true)
-                ) {
-                    eprintln!(
-                        "flow-nexus: {:?} {} {:?} held only through ended binding {flow_id} is forgotten",
-                        address.aspect,
-                        address.topic.0,
-                        address.model,
-                        flow_id = flow_id.0
-                    );
-                    return true;
+        let ended = matches!(
+            self.store.current_seat(&flow_id.0),
+            Ok(crate::store::current_seat::CurrentSeatRead::Known(
+                crate::generated::memory::CurrentSeat {
+                    seat_standing: crate::generated::memory::SeatStanding::Ended,
+                    ..
                 }
-                matches!(
-                    self.store.bound_process(address),
-                    Ok(Some(process)) if !FlowStore::process_is_live(&process)
-                )
-            }
-            Err(_) => false,
-        };
+            ))
+        );
         if !ended || !matches!(self.store.address_hold(&flow_id.0), Ok(None)) {
             return false;
         }
@@ -561,16 +549,7 @@ pub trait SettlesStopsAtConfirmation {
 
 impl SettlesStopsAtConfirmation for RunningNexus {
     fn note_stop_at_confirmation(&self, flow_id: &str) {
-        // A Claude flow's own Stop, or the main end_turn its transcript
-        // records, landed before confirmation stands as its turn end; a
-        // Codex flow reports no Stop: its thread's rest, as its app-server's
-        // events showed it, stands for one.
-        let claude_ended = self.turn_end_recorded(flow_id)
-            || matches!(
-                self.store.flow_node(flow_id),
-                Ok(Some(node)) if self.claude_main_turn_ended(&node)
-            );
-        if claude_ended || self.codex_resting(flow_id) {
+        if self.rests_now(flow_id) {
             self.stopped_at_confirmation.note(flow_id);
         }
     }
@@ -1222,32 +1201,14 @@ impl CorrelatesNativeEvents for RunningNexus {
 /// work has ended is the event of its rest.
 pub(crate) trait JudgesClosingRest {
     /// The flow's own last turn event is a Stop naming no background work.
-    fn background_settled(&self, flow_id: &str) -> bool;
+
     /// The flow rests now, by every evidence closing it needs.
     fn rests_for_closing(&self, flow_id: &str) -> bool;
 }
 
 impl JudgesClosingRest for RunningNexus {
-    fn background_settled(&self, flow_id: &str) -> bool {
-        self.last_turn_end(flow_id)
-            .is_some_and(|stop| stop.background_work.0.is_empty())
-    }
-
     fn rests_for_closing(&self, flow_id: &str) -> bool {
-        let Ok(Some(node)) = self.store.flow_node(flow_id) else {
-            return false;
-        };
-        match node.harness_kind {
-            HarnessKind::Codex => !self.codex_in_turn(flow_id) && self.codex_resting(flow_id),
-            HarnessKind::Claude => {
-                self.background_settled(flow_id)
-                    && (self.claude_main_turn_ended(&node)
-                        || matches!(
-                            self.herdr.pane_agent(&self.herdr.refresh_route(node)),
-                            PaneAgent::Present { agent_state, .. } if Self::rests_at(&agent_state)
-                        ))
-            }
-        }
+        self.rests_now(flow_id)
     }
 }
 
@@ -1359,69 +1320,35 @@ impl SleepsAndWakesSeats for RunningNexus {
         if self.held() {
             return;
         }
-        let (flow_id, node, lease) =
+        let lease =
             {
                 let _turn = self
                     .dispatch_gate
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    .unwrap_or_else(|error| error.into_inner());
                 let Ok(Some(metaflow)) = self.store.metaflow(address) else {
                     return;
                 };
-                let flow_ethos::State::Awake(flow_id) = metaflow.state else {
+                let flow_ethos::State::Awake(id) = metaflow.state else {
                     return;
                 };
-                if metaflow.queue.0.is_empty()
+                if !self.due_now(&metaflow.queue.0, &id.0)
                     || metaflow.queue.0.first().is_some_and(|entry| {
                         self.store.pane_input_waits_for_reply(&entry.request_id)
                     })
-                    || self.waking.is_waking(address)
-                    || !matches!(self.store.address_hold(&flow_id.0), Ok(None))
+                    || !matches!(self.store.address_hold(&id.0), Ok(None))
                     || !matches!(
-                        crate::store::restart::RecordsRestarts::restart_record(
-                            &*self.store,
-                            &flow_id.0
-                        ),
+                        crate::store::restart::RecordsRestarts::restart_record(&*self.store, &id.0),
                         Ok(None)
                     )
                 {
                     return;
                 }
-                let Ok(Some(node)) = self.store.flow_node(&flow_id.0) else {
-                    return;
-                };
                 let Some(lease) = self.waking.hold(address) else {
                     return;
                 };
-                (flow_id, node, lease)
+                lease
             };
-        // Herdr I/O is not part of the dispatch turn. The waking lease keeps
-        // other queue hand-overs out until this seat is checked and drained.
-        let presence = self.herdr.pane_presence(&node);
-        {
-            let _turn = self
-                .dispatch_gate
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let Ok(Some(current)) = self.store.metaflow(address) else {
-                return;
-            };
-            if current.state != flow_ethos::State::Awake(flow_id.clone())
-                || !matches!(self.store.flow_node(&flow_id.0), Ok(Some(current))
-                    if current.session_id == node.session_id && current.herdr_route_selection == node.herdr_route_selection)
-            {
-                return;
-            }
-            if matches!(presence, PanePresence::Absent | PanePresence::Bare) {
-                let _ = self.perform(Operation::Record(Record_Data::Exited(flow_id)));
-                return;
-            }
-            // When pressing work is due, the Soft work queued before it
-            // rides along. Only HardAbrupt interrupts a working seat.
-            if !self.due_now(&current.queue.0, &flow_id.0) {
-                return;
-            }
-        }
         self.drain_due_held(address, lease);
         self.wake_deferred();
     }
@@ -1531,6 +1458,22 @@ impl SleepsAndWakesSeats for RunningNexus {
     }
 
     fn wake_is_due(&self, metaflow: &Metaflow) -> bool {
+        if let flow_ethos::State::Asleep = &metaflow.state {
+            let Some(last) = metaflow.past.0.last() else {
+                return false;
+            };
+            if !matches!(
+                self.store.current_seat(&last.0),
+                Ok(crate::store::current_seat::CurrentSeatRead::Known(
+                    crate::generated::memory::CurrentSeat {
+                        seat_standing: crate::generated::memory::SeatStanding::Ended,
+                        ..
+                    }
+                ))
+            ) {
+                return false;
+            }
+        }
         if self.permaflow_held(metaflow.address.clone()) {
             return false;
         }
@@ -1874,21 +1817,9 @@ impl RefreshesMetaflows for RunningNexus {
             }
             Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
         };
-        // The recorded route is read first: a Herdr that cannot be read
-        // shows no pane, and is never taken for one gone.
-        match self.herdr.pane_presence(&node) {
-            PanePresence::Present => {}
-            // A flow whose pane is gone has ended on its own: it is recorded
-            // Exited, which puts the metaflow Asleep.
-            PanePresence::Absent | PanePresence::Bare => {
-                let _ = self.perform(Operation::Record(Record_Data::Exited(flow_id)));
-                return Output::RefreshRejected(RefreshRejection::NotAwake);
-            }
-            PanePresence::Unknown => {
-                return Output::RefreshRejected(RefreshRejection::HerdrUnavailable);
-            }
+        if !self.store.seat_is_alive(&flow_id.0) {
+            return self.queue_refresh(address, &flow_id.0, caller);
         }
-        let node = self.herdr.refresh_route(node);
         // A refresh never closes a working flow, whoever asks: one that does
         // not rest now is refreshed at its idle event.
         if self.permaflow_held(address.clone()) || !self.rests_for_closing(&flow_id.0) {
@@ -2524,6 +2455,9 @@ impl DrainsHeldSeats for RunningNexus {
                 Ok(_) => return Outcome::Failed(Failed_Data::NotAwake),
                 Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
             };
+            if !self.store.seat_is_alive(&flow_id.0) {
+                return Outcome::Drained(Vec::new());
+            }
             let node = match self.store.flow_node(&flow_id.0) {
                 Ok(Some(node)) => node,
                 _ => return Outcome::Failed(Failed_Data::StoreRefused),
@@ -3407,24 +3341,8 @@ impl WakesInParts for RunningNexus {
             .map(|duration| duration.as_secs() as i64)
             .unwrap_or_default();
         self.send_due_handover_reminders(now);
-        // A Codex seat's rest is its app-server's, and a Claude seat whose
-        // transcript records its main turn's end_turn has ended its turn
-        // whatever its screen shows (background agents keep Herdr at
-        // Working). Otherwise Claude runs its Stop hook while its spinner is
-        // still on screen, and Herdr reads its state from the screen: the
-        // seat is given a bounded wait to show resting before the gate is
-        // taken. A seat due a refresh is given the same wait: a refresh
-        // closes only a seat that rests.
-        if let Ok(Some(node)) = self.store.flow_node(flow_id)
-            && let HerdrRouteSelection::Available(route) =
-                &self.herdr.refresh_route(node).herdr_route_selection
-        {
-            let node = self.store.flow_node(flow_id).ok().flatten();
-            if !node.as_ref().is_some_and(|node| {
-                node.harness_kind == HarnessKind::Codex || self.claude_main_turn_ended(node)
-            }) {
-                self.herdr.rested(route);
-            }
+        if !self.rests_now(flow_id) {
+            return AtStop::Kept(KeptAtStop::InTurn);
         }
         let turn = self
             .dispatch_gate
@@ -3502,7 +3420,7 @@ impl WakesInParts for RunningNexus {
             Ok(None) => return AtStop::Kept(KeptAtStop::UnknownFlow),
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
-        let mut node = self.herdr.refresh_route(stored_node.clone());
+        let node = self.herdr.refresh_route(stored_node);
         let continuity = match self.store.continuity(&address) {
             Ok(continuity) => continuity,
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
@@ -3515,78 +3433,10 @@ impl WakesInParts for RunningNexus {
             Ok(order) => order.filter(|order| order.predecessor.0 == flow_id),
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
-        let ordered_now = ordered.as_ref().is_some_and(|order| {
-            matches!(
-                order.replacement_order,
-                ReplacementOrder::Refresh(_) | ReplacementOrder::Restart
-            )
-        });
-        // Whether the harness may be closed now: a Claude seat only once its
-        // Stop names no background work, since closing it would end that
-        // work.
-        let mut unwritable_pane = None;
-        let closable = match node.harness_kind {
-            // A Codex seat is closed only at its thread's native rest, as
-            // its turn ledger shows it: no turn, process or letter open.
-            // A seat due a refresh, or ordered refreshed or restarted, waits
-            // for that rest as any other; work that never ends keeps it
-            // until it is stopped, and nothing interrupts it.
-            HarnessKind::Codex => {
-                if self.codex_in_turn(flow_id) {
-                    return AtStop::Kept(KeptAtStop::InTurn);
-                }
-                if !self.codex_resting(flow_id) {
-                    return AtStop::Kept(KeptAtStop::ThreadNotResting);
-                }
-                // A hand-over recorded since its rest (an Arrival) opened a
-                // turn its thread may not have announced yet.
-                if !self.rests_now(flow_id) {
-                    return AtStop::Kept(KeptAtStop::InTurn);
-                }
-                true
-            }
-            // A Claude seat ordered refreshed or restarted, or due a refresh
-            // while its model has no context-warning policy, is closed at
-            // this idle event whatever it runs; under a warning policy a
-            // refresh due waits for the seat to rest.
-            _ if ordered_now || (refresh_due && !warning_policy_configured) => true,
-            HarnessKind::Claude => {
-                let mut pane_agent = self.herdr.pane_agent(&node);
-                // An unwritable pane can still be the exact resting seat.
-                // A delivery route selects writable panes; closing requires
-                // the recorded pane to belong to this native session.
-                if matches!(node.herdr_route_selection, HerdrRouteSelection::Unavailable)
-                    && let observed @ PaneAgent::Present {
-                        agent_state: AgentState::Idle | AgentState::Done,
-                        ready: false,
-                    } = self.herdr.pane_agent(&stored_node)
-                    && self.herdr.pane_ownership(&stored_node) == PaneOwnership::Owned
-                {
-                    node = stored_node;
-                    pane_agent = observed;
-                }
-                if matches!(&pane_agent, PaneAgent::Present { ready: false, .. }) {
-                    unwritable_pane = Some(pane_agent.clone());
-                }
-                let native_resting = matches!(
-                    &pane_agent,
-                    PaneAgent::Present { agent_state, .. } if Self::rests_at(agent_state)
-                );
-                let claude_main_ready = self.claude_main_turn_ended(&node)
-                    && matches!(
-                        self.delivery_target(flow_id)
-                            .ok()
-                            .and_then(|target| self.writable_state(&target).ok()),
-                        Some(AgentState::Working | AgentState::Idle | AgentState::Done)
-                    );
-                if !native_resting && !claude_main_ready {
-                    return AtStop::Kept(KeptAtStop::NotResting(pane_agent));
-                }
-                // Its turn has ended. A Stop naming work in flight is no
-                // rest: closing the seat would end that work.
-                self.background_settled(flow_id)
-            }
-        };
+        let closable = self.rests_now(flow_id);
+        if !closable {
+            return AtStop::Kept(KeptAtStop::InTurn);
+        }
         if closable && let Some(order) = ordered {
             return self.replace_as_ordered(order, metaflow, node, turn);
         }
@@ -3634,9 +3484,6 @@ impl WakesInParts for RunningNexus {
             _ => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
         if self.due_at_rest(&metaflow.queue.0) {
-            if let Some(pane_agent) = unwritable_pane {
-                return AtStop::Kept(KeptAtStop::NotResting(pane_agent));
-            }
             let Some(lease) = self.waking.hold(&address) else {
                 return AtStop::Kept(KeptAtStop::Waking);
             };

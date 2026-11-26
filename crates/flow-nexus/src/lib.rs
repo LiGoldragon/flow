@@ -93,6 +93,7 @@ pub mod reaping;
 pub mod reporting;
 pub mod request_waking;
 pub mod rest_watching;
+pub mod seat_observation;
 pub mod send_tool;
 pub mod sending;
 pub mod store;

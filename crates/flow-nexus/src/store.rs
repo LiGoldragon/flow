@@ -27,6 +27,7 @@ pub(crate) mod kept_answer;
 pub(crate) mod launch_cleanup;
 pub(crate) mod leave_out_upgrade;
 use effort_configuration::{RegistersModelEfforts, StoredModelEffort};
+pub(crate) mod current_seat;
 mod delivery_attempt_upgrade;
 pub mod delivery_retirement;
 pub(crate) mod living_upgrade;
@@ -343,6 +344,7 @@ const RUNNING_TABLES: &[&str] = &[
     OPTIONAL_PENDING_REAP_TABLE,
     OPTIONAL_PENDING_HANDOVER_TABLE,
     OPTIONAL_TURN_RETENTION_TABLE,
+    current_seat::TABLE,
     OPTIONAL_FLOW_TRANSITIONS_TABLE,
     OPTIONAL_HOLD_TABLE,
     OPTIONAL_PERMAFLOW_HOLD_TABLE,
@@ -1778,6 +1780,7 @@ pub struct FlowStore {
     turn_ends: TableReference<turn_end::TurnEndRecord>,
     kept_answers: TableReference<kept_answer::KeptAnswer>,
     scheduled_reminders: TableReference<scheduled_reminder::ScheduledReminder>,
+    current_seats: TableReference<crate::generated::memory::CurrentSeat>,
     flow_transitions: TableReference<crate::generated::memory::Flow>,
     /// Taken by every write of a flow's transitions (`transitions`).
     transitions_gate: Mutex<()>,
@@ -2892,6 +2895,7 @@ impl OpensFlowStore for FlowStore {
         let scheduled_reminders = engine.register_table(
             <scheduled_reminder::ScheduledReminder as scheduled_reminder::DescribesScheduledReminderTable>::descriptor(),
         )?;
+        let current_seats = engine.register_table(current_seat::descriptor())?;
         let flow_transitions = engine.register_table(
             <crate::generated::memory::Flow as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
         )?;
@@ -2945,6 +2949,7 @@ impl OpensFlowStore for FlowStore {
             turn_ends,
             kept_answers,
             scheduled_reminders,
+            current_seats,
             flow_transitions,
             transitions_gate: Mutex::new(()),
             hold,
@@ -3144,6 +3149,7 @@ impl OpensFlowStore for FlowStore {
         let scheduled_reminders = engine.register_table(
             <scheduled_reminder::ScheduledReminder as scheduled_reminder::DescribesScheduledReminderTable>::descriptor(),
         )?;
+        let current_seats = engine.register_table(current_seat::descriptor())?;
         let flow_transitions = engine.register_table(
             <crate::generated::memory::Flow as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
         )?;
@@ -3197,6 +3203,7 @@ impl OpensFlowStore for FlowStore {
             turn_ends,
             kept_answers,
             scheduled_reminders,
+            current_seats,
             flow_transitions,
             transitions_gate: Mutex::new(()),
             hold,
@@ -5206,7 +5213,7 @@ impl RecordsFlowLifecycle for FlowStore {
         // what it owed there is reassigned in the same commit.
         let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
         let commit = self.ended_at_address(flow_id, commit)?;
-        self.flow_end_committed(commit)?;
+        self.flow_end_committed(flow_id, commit)?;
         Ok(true)
     }
 
@@ -5227,7 +5234,7 @@ impl RecordsFlowLifecycle for FlowStore {
             self.engine.begin_atomic_commit().mutate(self.flows, flow),
         )?;
         let commit = self.ended_at_address(flow_id, commit)?;
-        self.flow_end_committed(commit)?;
+        self.flow_end_committed(flow_id, commit)?;
         Ok(true)
     }
 
@@ -5267,18 +5274,31 @@ impl RecordsFlowLifecycle for FlowStore {
             _ => commit,
         };
         let commit = self.ended_at_address(flow_id, commit)?;
-        self.flow_end_committed(commit)?;
+        self.flow_end_committed(flow_id, commit)?;
         Ok(true)
     }
 }
 
 /// The one commit every end of a flow lands with, and its announcement.
 trait CommitsFlowEnd {
-    fn flow_end_committed(&self, commit: sema_engine::AtomicCommit) -> Result<(), StoreError>;
+    fn flow_end_committed(
+        &self,
+        flow_id: &str,
+        commit: sema_engine::AtomicCommit,
+    ) -> Result<(), StoreError>;
 }
 
 impl CommitsFlowEnd for FlowStore {
-    fn flow_end_committed(&self, commit: sema_engine::AtomicCommit) -> Result<(), StoreError> {
+    fn flow_end_committed(
+        &self,
+        flow_id: &str,
+        commit: sema_engine::AtomicCommit,
+    ) -> Result<(), StoreError> {
+        let _writer = self
+            .transitions_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let commit = self.stage_current_event(commit, flow_id, current_seat::SeatEvent::Ended)?;
         #[cfg(test)]
         {
             use crate::test_faults::{InjectsCrashes, RefusedWrite};
@@ -5450,9 +5470,14 @@ impl WritesFlowStore for FlowStore {
                 }
             }
         }
+        let _state_writer = self
+            .transitions_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut commit = self.engine.begin_atomic_commit();
         let mut written = false;
         if flow.flow_lifecycle == FlowLifecycle::Pending {
+            commit = self.stage_current_event(commit, flow_id, current_seat::SeatEvent::Started)?;
             flow.flow_lifecycle = FlowLifecycle::Active;
             flow.generation = Generation(1);
             commit = commit.mutate(self.flows, flow);
@@ -5681,6 +5706,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                 META_TURN_RETENTION_CONFIGURATION_FAMILY,
                 META_TURN_RETENTION_CONFIGURATION_SCHEMA,
             ),
+            current_seat::TABLE => (current_seat::FAMILY, current_seat::SCHEMA),
             "flow_nexus_flow_transitions" => (
                 overriding::TRANSITIONS_FAMILY,
                 overriding::TRANSITIONS_SCHEMA,
@@ -6075,6 +6101,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                     || *name == OPTIONAL_PENDING_HANDOVER_TABLE
                     || *name == OPTIONAL_HARNESS_HOOK_TABLE
                     || *name == OPTIONAL_TURN_RETENTION_TABLE
+                    || *name == current_seat::TABLE
                     || *name == OPTIONAL_FLOW_TRANSITIONS_TABLE
                     || *name == OPTIONAL_HOLD_TABLE
                     || *name == OPTIONAL_PERMAFLOW_HOLD_TABLE
@@ -8773,6 +8800,44 @@ mod tests {
                 .unwrap()
                 .delivery_state,
             signal_flow::DeliveryState::Uncertain
+        );
+    }
+
+    #[test]
+    fn absent_seat_is_not_an_end_and_history_does_not_recreate_it_on_open() {
+        use super::current_seat::CurrentSeatRead;
+        use crate::generated::memory::{SeatActivity, SeatStanding};
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let id = "current-state-fixture";
+        assert!(matches!(
+            store.current_seat(id).unwrap(),
+            CurrentSeatRead::NoRecord
+        ));
+        store
+            .record_observation(id, Some(SeatStanding::Alive(SeatActivity::Working)))
+            .unwrap();
+        store.record_observation(id, None).unwrap();
+        drop(store);
+        let store = fixture.store();
+        assert!(matches!(
+            store.current_seat(id).unwrap(),
+            CurrentSeatRead::NoRecord
+        ));
+        store
+            .record_observation(id, Some(SeatStanding::Alive(SeatActivity::Resting)))
+            .unwrap();
+        store
+            .record_observation(id, Some(SeatStanding::Ended))
+            .unwrap();
+        store
+            .record_observation(id, Some(SeatStanding::Alive(SeatActivity::Working)))
+            .unwrap();
+        drop(store);
+        let store = fixture.store();
+        assert!(
+            matches!(store.current_seat(id).unwrap(), CurrentSeatRead::Known(row)
+            if row.seat_standing == SeatStanding::Ended)
         );
     }
 

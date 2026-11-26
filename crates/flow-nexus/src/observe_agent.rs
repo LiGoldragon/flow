@@ -191,14 +191,8 @@ impl ObservesAgent for RunningNexus {
         )?;
         loop {
             let Some(event) = events.next_event(cancellation)? else {
-                // Herdr closed the subscription: the session is gone. The
-                // pane is read once more before the flow is recorded ended.
-                if let Some((node, _)) = self.observable(flow_id)
-                    && matches!(self.herdr.pane_agent(&node), PaneAgent::Absent)
-                {
-                    self.exited_as_witnessed_by(flow_id, witness.as_ref());
-                }
-                return send(&AgentState::Gone.observed_of(flow_id));
+                // End-of-stream is loss of the observation source, not a witnessed exit.
+                return send(&AgentState::Unknown.observed_of(flow_id));
             };
             let agent_state = match event {
                 PaneEvent::Status(status) => Some(status.as_str()).agent_state(),

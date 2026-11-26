@@ -397,6 +397,9 @@ impl DeliversUnderLease for RunningNexus {
                 return Output::DeliveryRejected(DeliveryRejection::PersistenceRefused);
             }
         }
+        if !self.store.seat_is_alive(&request.flow_id.0) {
+            return Output::DeliveryRejected(DeliveryRejection::RouteUnavailable);
+        }
         // A restart holds the flow: nothing is typed into a pane it is
         // closing or opening.
         match crate::store::restart::RecordsRestarts::restart_record(

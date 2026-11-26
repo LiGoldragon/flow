@@ -1339,6 +1339,86 @@ impl crate::generated::overriding::InterruptsCodexThreads for CodexAdapter {
     }
 }
 
+pub(crate) trait ReadsThreadStanding {
+    fn thread_standing(
+        &self,
+        id: &str,
+    ) -> Result<crate::generated::memory::SeatStanding, CodexAdapterUnavailable>;
+}
+impl ReadsThreadStanding for CodexAdapter {
+    fn thread_standing(
+        &self,
+        id: &str,
+    ) -> Result<crate::generated::memory::SeatStanding, CodexAdapterUnavailable> {
+        use crate::generated::memory::{SeatActivity, SeatStanding};
+        let mut session = self.initialize_bound_session()?;
+        let result = (|| {
+            // Only live server membership counts. A saved thread may have
+            // history on disk even after it was closed on the server.
+            let mut cursor: Option<String> = None;
+            let mut seen = std::collections::BTreeSet::new();
+            loop {
+                let page = session.request(
+                    2,
+                    "thread/loaded/list",
+                    serde_json::json!({"cursor":cursor}),
+                    self.timeout,
+                )?;
+                let ids = page["data"].as_array().ok_or_else(|| {
+                    CodexAdapterUnavailable::Protocol("invalid loaded thread list".into())
+                })?;
+                if ids.iter().any(|entry| entry.as_str() == Some(id)) {
+                    break;
+                }
+                if !ids.iter().all(serde_json::Value::is_string) {
+                    return Err(CodexAdapterUnavailable::Protocol(
+                        "invalid loaded thread id".into(),
+                    ));
+                }
+                match page.get("nextCursor") {
+                    Some(serde_json::Value::Null) => return Ok(SeatStanding::Ended),
+                    Some(serde_json::Value::String(next)) if seen.insert(next.clone()) => {
+                        cursor = Some(next.clone());
+                    }
+                    _ => {
+                        return Err(CodexAdapterUnavailable::Protocol(
+                            "invalid loaded thread cursor".into(),
+                        ));
+                    }
+                }
+            }
+            let reply = session.request(
+                3,
+                "thread/read",
+                serde_json::json!({"threadId":id,"includeTurns":false}),
+                self.timeout,
+            )?;
+            if reply
+                .pointer("/thread/id")
+                .and_then(serde_json::Value::as_str)
+                != Some(id)
+            {
+                return Err(CodexAdapterUnavailable::Protocol(
+                    "thread/read returned another thread".into(),
+                ));
+            }
+            match reply
+                .pointer("/thread/status/type")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("active") => Ok(SeatStanding::Alive(SeatActivity::Working)),
+                Some("idle") => Ok(SeatStanding::Alive(SeatActivity::Resting)),
+                Some("notLoaded") => Ok(SeatStanding::Ended),
+                _ => Err(CodexAdapterUnavailable::Protocol(
+                    "thread status unavailable".into(),
+                )),
+            }
+        })();
+        session.stop_proxy();
+        result
+    }
+}
+
 impl ReadsCodexTurnHistory for CodexAdapter {
     fn newest_turn(&self, thread_id: &str) -> Result<Option<String>, CodexAdapterUnavailable> {
         let mut session = self.initialize_bound_session()?;

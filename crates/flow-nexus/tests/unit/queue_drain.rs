@@ -863,3 +863,86 @@ pub(super) fn resolver() -> ResolverIdentity {
         flow_id_option: Some(flow_ethos::FlowId("aa034f".into())),
     }
 }
+
+/// The typed release is the only cause of this handover: no ordinary send,
+/// general announcement, simulated timer or explicit wake follows it.
+#[test]
+fn a_committed_release_dispatches_only_its_recipient_and_waits_for_native_evidence() {
+    use crate::HoldsStopRequest;
+    use crate::generated::memory::{SeatActivity, SeatStanding};
+    use crate::store::metaflow::MutatesMetaflows;
+    use crate::store::recipient_retries::RetriesRecipients;
+    use crate::store::{AnnouncesLaunchChanges, ManagesMetaflowState};
+    use std::time::{Duration, Instant};
+    for (expired, missing) in [(false, false), (true, false), (false, true)] {
+        let fixture = NexusFixture::new();
+        fixture.accept_pane_operations(
+            vec![claude_agent(&fixture)],
+            PromptFixture::Prompted("w1:p3"),
+        );
+        seat(&fixture, vec![from_core("delivery already queued")]);
+        append_main_rows(&fixture, &[end_turn("rest before release")]);
+        let store = &fixture.nexus.store;
+        let recipient = address(Model::Sol);
+        if missing {
+            store.record_observation(CLAUDE_SEAT, None).unwrap();
+        }
+        let Output::Locked(lock) = store
+            .lock_metaflow(
+                signal_flow::Lock_Data {
+                    first_address: address(Model::Astra),
+                    second_address: recipient.clone(),
+                },
+                100,
+            )
+            .unwrap()
+        else {
+            panic!("expected delivery lock")
+        };
+        fixture.nexus.watch_recipient_retries().unwrap();
+        std::thread::scope(|scope| {
+            struct Stop<'a>(&'a crate::RunningNexus);
+            impl Drop for Stop<'_> {
+                fn drop(&mut self) {
+                    self.0.stopping.request();
+                }
+            }
+            scope.spawn(|| fixture.nexus.serve_recipient_retries());
+            let _stop = Stop(&fixture.nexus);
+            store.launch_changes.announce();
+            assert_eq!(typed_count(&fixture, "delivery already queued"), 0);
+            let at = if expired { lock.until.0 } else { 100 };
+            let result = store.release_metaflow_lock(lock.clone(), at).unwrap();
+            assert_eq!(
+                result,
+                if expired {
+                    Output::Refused(signal_flow::Refusal::Lapsed)
+                } else {
+                    Output::Released
+                }
+            );
+            assert!(store.stored_metaflow_lock(&recipient).unwrap().is_none());
+            if missing {
+                assert_eq!(typed_count(&fixture, "delivery already queued"), 0);
+                assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 1);
+                store
+                    .record_observation(
+                        CLAUDE_SEAT,
+                        Some(SeatStanding::Alive(SeatActivity::Resting)),
+                    )
+                    .unwrap();
+            }
+            assert!(
+                store.launch_changes.until_holds(
+                    Instant::now() + Duration::from_secs(5),
+                    &mut || stored(&fixture, Model::Sol).queue.0.is_empty()
+                )
+            );
+            assert_eq!(typed_count(&fixture, "delivery already queued"), 1);
+            assert!(matches!(
+                store.release_metaflow_lock(lock, at).unwrap(),
+                Output::Refused(signal_flow::Refusal::Unknown(_))
+            ));
+        });
+    }
+}

@@ -744,7 +744,7 @@ fn a_held_soft_is_delivered_at_its_recipients_idle_event() {
     let (_caller, peer) = soft_recipient(&fixture, false);
     let response = send_soft(&fixture, &peer, "Read the ruling when you rest.");
     assert!(
-        matches!(response, signal_flow::Output::SendAccepted(_)),
+        matches!(response, signal_flow::Output::Sent(_)),
         "{response:?}"
     );
     assert!(fixture.typed().is_none(), "nothing typed during the turn");
@@ -772,7 +772,7 @@ fn a_refused_claude_drain_is_retried_at_the_next_stop_of_its_session() {
     for body in ["Oldest retained.", "Next retained."] {
         assert!(matches!(
             send_soft(&fixture, &peer, body),
-            signal_flow::Output::SendAccepted(_)
+            signal_flow::Output::Sent(_)
         ));
     }
     let signal_flow::Event::Stopped(stop) = claude_stop(&fixture) else {
@@ -781,7 +781,7 @@ fn a_refused_claude_drain_is_retried_at_the_next_stop_of_its_session() {
     let session = stop.native_session_id_option.as_ref().unwrap();
     assert!(matches!(
         fixture.nexus.settle_native_rest(CLAUDE_SEAT, &session.0),
-        AtStop::Kept(KeptAtStop::NotResting(_))
+        AtStop::Kept(KeptAtStop::InTurn)
     ));
     assert!(fixture.typed().is_none());
     let retained = stored(&fixture, Model::Sol).queue.0;
@@ -824,7 +824,7 @@ fn several_held_soft_messages_are_delivered_in_order_at_one_idle_event() {
     for body in ["First held.", "Second held.", "Third held."] {
         let response = send_soft(&fixture, &peer, body);
         assert!(
-            matches!(response, signal_flow::Output::SendAccepted(_)),
+            matches!(response, signal_flow::Output::Sent(_)),
             "{response:?}"
         );
     }
@@ -6476,6 +6476,28 @@ fn a_sender_observe_reports_gone_is_exited_and_its_lock_released() {
     fixture.accept_pane_operations(vec![], PromptFixture::Prompted("w1:p3"));
     let recipient = sender_holding_a_lock(&fixture);
 
+    assert!(
+        matches!(fixture.nexus.agent_observation(CLAUDE_SEAT),signal_flow::Output::AgentObserved(standing) if standing.agent_state==signal_flow::AgentState::Idle)
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .stored_metaflow_lock(&recipient)
+            .unwrap()
+            .is_some()
+    );
+    let end = signal_flow::Event::Ended(Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into())));
+    let id = flow_ethos::FlowId(CLAUDE_SEAT.into());
+    assert_eq!(
+        fixture.nexus.report(signal_flow::Report_Data {
+            flow_id: id.clone(),
+            process_option: None,
+            event: end.clone()
+        }),
+        signal_flow::Output::Reported
+    );
+    fixture.nexus.after_report(&id, &end);
     assert_eq!(
         fixture.nexus.agent_observation(CLAUDE_SEAT),
         signal_flow::Output::AgentObserved(signal_flow::AgentObservation {

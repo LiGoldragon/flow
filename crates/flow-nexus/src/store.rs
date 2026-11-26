@@ -48,6 +48,7 @@ pub(crate) mod pending_handover;
 pub(crate) mod pending_reap;
 pub(crate) mod queue_delivery;
 pub(crate) mod reap_upgrade;
+pub mod recipient_retries;
 pub(crate) mod recovery_upgrade;
 pub(crate) mod refresh_caller_upgrade;
 pub mod reminder;
@@ -1850,6 +1851,7 @@ pub struct FlowStore {
     /// Whether Memory announces `metaflow_changes`: subscribed once, at the
     /// first metaflow subscriber.
     pub(crate) metaflow_watch: Mutex<bool>,
+    pub(crate) recipient_retries: Arc<recipient_retries::RecipientRetries>,
     pub(crate) delivery_retirements: Arc<delivery_retirement::DeliveryRetirements>,
 }
 
@@ -3008,6 +3010,7 @@ impl OpensFlowStore for FlowStore {
             metaflow_changes: LaunchChanges::default(),
             metaflow_watch: Mutex::new(false),
             delivery_retirements: Arc::default(),
+            recipient_retries: Arc::default(),
         };
 
         // Recognition already checked the authored Memory identity record. A
@@ -3261,6 +3264,7 @@ impl OpensFlowStore for FlowStore {
             metaflow_changes: LaunchChanges::default(),
             metaflow_watch: Mutex::new(false),
             delivery_retirements: Arc::default(),
+            recipient_retries: Arc::default(),
         };
         store.seed_request_policy()?;
         attempt_membership::KeepsAttemptMemberships::build_attempt_memberships(&store)?;

@@ -1309,6 +1309,9 @@ impl SleepsAndWakesSeats for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !matches!(self.store.stored_metaflow_lock(&address), Ok(None)) {
+                return;
+            }
             self.rest_ended_awake(&address);
             matches!(
                 self.store.metaflow(&address),
@@ -2383,6 +2386,11 @@ impl DrainsHeldSeats for RunningNexus {
                 .unwrap_or_else(|error| error.into_inner());
             if self.permaflow_held(address.clone()) || self.held() {
                 return Outcome::Drained(Vec::new());
+            }
+            match self.store.stored_metaflow_lock(&address) {
+                Ok(None) => {}
+                Ok(Some(_)) => return Outcome::Drained(Vec::new()),
+                Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
             }
             let flow_id = match self.store.metaflow(&address) {
                 Ok(Some(Metaflow {

@@ -1,6 +1,7 @@
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
 use flow_nexus::place::{FindsFlowPlace, LaysOutPlace, PlaceName, ReportsPlaceRefusal};
 use flow_nexus::placed_socket::{PlacedSocket, PlacesSocket};
+use flow_nexus::store::recipient_retries::RetriesRecipients;
 use flow_nexus::{
     AnnouncesReadiness, OpensRunningNexus, Readiness, RunningNexus, ServesMeta, ServesOrdinary,
     StopsNexus, TerminationSignals, WatchesTerminationSignals,
@@ -134,6 +135,10 @@ fn main() -> ExitCode {
     // before anything is served, and readiness is announced only once they
     // are: a unit ordered after this one, or a peer that saw a name moved
     // in, finds both listening.
+    if let Err(error) = nexus.watch_recipient_retries() {
+        eprintln!("flow-nexus: could not observe recipient retry events: {error}");
+        return ExitCode::FAILURE;
+    }
     if let Err(error) = nexus.watch_delivery_retirements() {
         eprintln!("flow-nexus: could not observe retired delivery seats: {error}");
         return ExitCode::FAILURE;
@@ -166,6 +171,8 @@ fn main() -> ExitCode {
     // Every thread borrows the Nexus inside this scope, so when a stop has
     // ended them all the Nexus drops here and its store closes cleanly.
     std::thread::scope(|scope| {
+        let retries = &nexus;
+        scope.spawn(move || retries.serve_recipient_retries());
         let routes = &nexus;
         scope.spawn(move || flow_nexus::seat_routes::ServesBoundRoutes::serve_bound_routes(routes));
         // One connection per live Codex thread answers its send-tool calls.

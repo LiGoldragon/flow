@@ -1028,3 +1028,24 @@ harness session registry and verified process birth. A pidfd wakes the
 observer when that process exits, even if its shell pane survives. Exit
 handling revalidates the bound native session and route; unavailable evidence
 does not prove death.
+
+### Retrying the Address whose condition changed
+
+Lock release, expiry processed by release, an oversized refusal that releases
+its lock, and sender termination all retract the actual recipient's same lock
+row. The Memory subscription supplies its pre-image only after the transaction
+commits. A failed commit or mismatched release emits nothing. The sink
+records the recipient Address and signals its dispatcher; it never performs a
+wake from inside a store callback. A separate general announcement remains
+available to observers.
+
+A committed live current-seat event names a FlowId. The dispatcher resolves
+its presently receiving Address and merges these targets with released lock
+recipients. It processes different Addresses independently. A new event for
+an Address already being retried remains pending until that attempt ends.
+Retry takes the Address effect lease, rechecks its current seat, lock, holds
+and durable queue, and delegates to the same wake/drain policy as admission.
+NoRecord and Ended suppress a seat effect. A later native live observation,
+not an unrelated configuration or launch announcement, resolves NoRecord.
+Startup recovery and explicit Resume retain responsibility for the queues
+already present; initial subscription snapshots are not release events.

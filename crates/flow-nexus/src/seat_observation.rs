@@ -39,14 +39,9 @@ impl ObservesCurrentSeats for RunningNexus {
             }
             if let Some(observed) = self.read_native_standing(node) {
                 match self.store.establish_observation(&node.flow_id.0, observed) {
-                    Ok(true) => {
-                        use crate::send_tool::ServesLaunchCalls;
-                        use crate::store::metaflow::SleepsMetaflows;
-                        if let Ok(Some(seat)) = self.store.metaflow_awake_as(&node.flow_id.0) {
-                            self.defer_wake(seat.address);
-                        }
-                    }
-                    Ok(false) => {}
+                    // A committed Alive row already names exactly one
+                    // retry through the recipient dispatcher.
+                    Ok(_) => {}
                     Err(error) => {
                         eprintln!("flow-nexus: failed to record returning source: {error}")
                     }

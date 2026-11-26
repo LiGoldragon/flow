@@ -871,7 +871,7 @@ fn a_committed_release_dispatches_only_its_recipient_and_waits_for_native_eviden
     use crate::HoldsStopRequest;
     use crate::generated::memory::{SeatActivity, SeatStanding};
     use crate::store::metaflow::MutatesMetaflows;
-    use crate::store::recipient_retries::RetriesRecipients;
+    use crate::store::recipient_retries::{ObservesRetryCompletion, RetriesRecipients};
     use crate::store::{AnnouncesLaunchChanges, ManagesMetaflowState};
     use std::time::{Duration, Instant};
     for (expired, missing) in [(false, false), (true, false), (false, true)] {
@@ -923,6 +923,13 @@ fn a_committed_release_dispatches_only_its_recipient_and_waits_for_native_eviden
             );
             assert!(store.stored_metaflow_lock(&recipient).unwrap().is_none());
             if missing {
+                assert!(
+                    store.completed_by(
+                        std::slice::from_ref(&recipient),
+                        Instant::now() + Duration::from_secs(5)
+                    ),
+                    "release retry completed before native availability"
+                );
                 assert_eq!(typed_count(&fixture, "delivery already queued"), 0);
                 assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 1);
                 store
@@ -943,6 +950,113 @@ fn a_committed_release_dispatches_only_its_recipient_and_waits_for_native_eviden
                 store.release_metaflow_lock(lock, at).unwrap(),
                 Output::Refused(signal_flow::Refusal::Unknown(_))
             ));
+        });
+    }
+}
+
+/// Oversize refusal and a sender shutdown share the same typed pre-image
+/// source. Verify the recipient's durable queue, not a simulated wake.
+#[test]
+fn oversized_or_sender_end_releases_retry_exactly_the_removed_locks() {
+    use crate::HoldsStopRequest;
+    use crate::store::ManagesMetaflowState;
+    use crate::store::metaflow::{MutatesMetaflows, SleepsMetaflows};
+    use crate::store::recipient_retries::{ObservesRetryCompletion, RetriesRecipients};
+    use crate::test_faults::{InjectsCrashes, RefusedWrite};
+    use std::time::{Duration, Instant};
+    for sender_ends in [false, true] {
+        let fixture = NexusFixture::new();
+        fixture.accept_pane_operations(
+            vec![claude_agent(&fixture)],
+            PromptFixture::Prompted("w1:p3"),
+        );
+        seat(&fixture, vec![from_core("blocked behind the sender")]);
+        append_main_rows(&fixture, &[end_turn("recipient-resting")]);
+        let store = &fixture.nexus.store;
+        let to = address(Model::Sol);
+        let sender = address(Model::Astra);
+        let second = address(Model::Luna);
+        store.seed_metaflow(super::waking::metaflow(
+            Model::Astra,
+            State::Awake(flow_ethos::FlowId("sender".into())),
+            vec![],
+            vec![],
+        ));
+        store.seed_metaflow(super::waking::metaflow(
+            Model::Luna,
+            State::Asleep,
+            vec![],
+            vec![],
+        ));
+        let lock = |recipient: &Address| {
+            let Output::Locked(lock) = store
+                .lock_metaflow(
+                    signal_flow::Lock_Data {
+                        first_address: sender.clone(),
+                        second_address: recipient.clone(),
+                    },
+                    100,
+                )
+                .unwrap()
+            else {
+                panic!("expected lock")
+            };
+            lock
+        };
+        let held = lock(&to);
+        if sender_ends {
+            let _ = lock(&second);
+        }
+        fixture.nexus.watch_recipient_retries().unwrap();
+        std::thread::scope(|scope| {
+            struct Stop<'a>(&'a crate::RunningNexus);
+            impl Drop for Stop<'_> {
+                fn drop(&mut self) {
+                    self.0.stopping.request();
+                }
+            }
+            scope.spawn(|| fixture.nexus.serve_recipient_retries());
+            let _stop = Stop(&fixture.nexus);
+            if sender_ends {
+                store.faults.refuse_next(RefusedWrite::MetaflowSleep);
+                assert!(store.sleep_metaflow(&sender, "sender").is_err());
+                assert!(store.stored_metaflow_lock(&to).unwrap().is_some());
+                assert!(store.stored_metaflow_lock(&second).unwrap().is_some());
+                assert!(store.completed_recipients().is_empty());
+                assert!(store.sleep_metaflow(&sender, "sender").unwrap());
+            } else {
+                let response = store
+                    .queue_metaflow(
+                        signal_flow::Deliver_Data {
+                            lock: held,
+                            deliver_key: super::deliver_key(32),
+                            sendable_message: signal_flow::SendableMessage::Soft(
+                                signal_flow::SendableRequest::Order(
+                                    "x".repeat(crate::sending::MAX_SEND_PAYLOAD_BYTES + 1),
+                                ),
+                            ),
+                        },
+                        100,
+                    )
+                    .unwrap();
+                assert!(matches!(
+                    response,
+                    signal_flow::PrivateSendResponse::Refused(signal_flow::Refusal::Oversized(_))
+                ));
+            }
+            let required = if sender_ends {
+                vec![to.clone(), second.clone()]
+            } else {
+                vec![to.clone()]
+            };
+            assert!(store.completed_by(&required, Instant::now() + Duration::from_secs(5)));
+            let done = store.completed_recipients();
+            assert!(done.contains(&to));
+            assert_eq!(done.contains(&second), sender_ends);
+            assert!(!done.contains(&sender));
+            assert!(store.stored_metaflow_lock(&to).unwrap().is_none());
+            assert_eq!(typed_count(&fixture, "blocked behind the sender"), 1);
+            assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
         });
     }
 }

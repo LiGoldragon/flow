@@ -29,6 +29,10 @@ struct Targets {
 pub(crate) struct RecipientRetries {
     targets: Mutex<Targets>,
     changes: LaunchChanges,
+    #[cfg(test)]
+    completed: Mutex<Vec<Address>>,
+    #[cfg(test)]
+    completion: LaunchChanges,
 }
 struct ReleasedRecipients {
     retries: Arc<RecipientRetries>,
@@ -83,7 +87,7 @@ pub trait RetriesRecipients {
 }
 trait DispatchesRecipientRetries {
     fn ready_recipients(&self) -> Vec<(String, Address)>;
-    fn retry_recipient(&self, address: Address);
+    fn retry_recipient(&self, address: &Address);
 }
 impl DispatchesRecipientRetries for RunningNexus {
     fn ready_recipients(&self) -> Vec<(String, Address)> {
@@ -122,17 +126,17 @@ impl DispatchesRecipientRetries for RunningNexus {
         }
         ready
     }
-    fn retry_recipient(&self, address: Address) {
+    fn retry_recipient(&self, address: &Address) {
         let _effect = self.waking.effect(address.clone());
         {
             let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
             if self.held()
                 || self.permaflow_held(address.clone())
-                || !matches!(self.store.stored_metaflow_lock(&address), Ok(None))
+                || !matches!(self.store.stored_metaflow_lock(address), Ok(None))
             {
                 return;
             }
-            let Ok(Some(row)) = self.store.metaflow(&address) else {
+            let Ok(Some(row)) = self.store.metaflow(address) else {
                 return;
             };
             if row.queue.0.is_empty() {
@@ -147,7 +151,7 @@ impl DispatchesRecipientRetries for RunningNexus {
                 return;
             }
         }
-        self.wake_due(address);
+        self.wake_due(address.clone());
     }
 }
 
@@ -175,7 +179,12 @@ impl RetriesRecipients for RunningNexus {
                 };
                 for (key, address) in self.ready_recipients() {
                     scope.spawn(move || {
-                        self.retry_recipient(address);
+                        self.retry_recipient(&address);
+                        #[cfg(test)]
+                        {
+                            retries.completed.lock().unwrap().push(address);
+                            retries.completion.announce();
+                        }
                         let mut targets = retries.targets.lock().unwrap_or_else(|e| e.into_inner());
                         targets.active.remove(&key);
                         if targets.addresses.contains_key(&key) {
@@ -191,5 +200,25 @@ impl RetriesRecipients for RunningNexus {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+pub(crate) trait ObservesRetryCompletion {
+    fn completed_recipients(&self) -> Vec<Address>;
+    fn completed_by(&self, addresses: &[Address], deadline: std::time::Instant) -> bool;
+}
+#[cfg(test)]
+impl ObservesRetryCompletion for FlowStore {
+    fn completed_recipients(&self) -> Vec<Address> {
+        self.recipient_retries.completed.lock().unwrap().clone()
+    }
+    fn completed_by(&self, addresses: &[Address], deadline: std::time::Instant) -> bool {
+        self.recipient_retries
+            .completion
+            .until_holds(deadline, &mut || {
+                let completed = self.recipient_retries.completed.lock().unwrap();
+                addresses.iter().all(|address| completed.contains(address))
+            })
     }
 }

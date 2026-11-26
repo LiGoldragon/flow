@@ -131,6 +131,7 @@ impl RoutesCreatedPane for HerdrPaneBinding {
 /// of the seat a restart bound there, when one did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeatWitness {
+    pub session: signal_flow::SessionId,
     pub route: HerdrRoute,
     pub birth: Option<Process>,
 }
@@ -1706,6 +1707,7 @@ impl FencesSeatEvents for RunningNexus {
         };
         let birth = self.store.seat_birth(flow_id).ok()?;
         Some(SeatWitness {
+            session: node.session_id,
             route,
             birth: birth.map(|birth| birth.process),
         })

@@ -2,7 +2,6 @@
 
 use crate::RunningNexus;
 use crate::herdr::HerdrCli;
-use crate::herdr::events::{HerdrCue, HerdrEvents, SubscribesHerdrEvents};
 use crate::observation_lifetime::{CancelsObservation, ObservationCancellation};
 use crate::store::current_seat::RecordsCurrentSeats;
 use crate::store::{AnnouncesLaunchChanges, metaflow_watch::WatchesMetaflows};
@@ -141,7 +140,7 @@ impl ObservesAgent for RunningNexus {
                 if matches!(
                     current,
                     Output::AgentObserved(AgentObservation {
-                        agent_state: AgentState::Gone | AgentState::Unknown,
+                        agent_state: AgentState::Gone,
                         ..
                     })
                 ) {
@@ -166,134 +165,5 @@ impl LocatesHerdrSession for HerdrCli {
             .into_iter()
             .find(|session| session.name == session_name)
             .map(|session| session.socket)
-    }
-}
-
-/// What Herdr said of the observed pane.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PaneEvent {
-    Status(String),
-    Updated,
-    Gone,
-}
-
-/// The observed pane's stream: Herdr's events of it, waited on with its
-/// connection's cancellation.
-pub(crate) struct PaneEvents {
-    pane_id: String,
-    events: HerdrEvents,
-}
-
-pub(crate) trait ReadsPaneEvents: Sized {
-    fn subscribe(
-        socket: &std::path::Path,
-        pane_id: &str,
-        cancellation: &ObservationCancellation,
-    ) -> Result<Self, String>;
-    /// The next event about this pane; None when Herdr closes the stream,
-    /// an error once the observation is cancelled. The stream and the
-    /// cancellation descriptor are waited on together, so either wakes it.
-    fn next_event(
-        &mut self,
-        cancellation: &ObservationCancellation,
-    ) -> Result<Option<PaneEvent>, String>;
-}
-
-impl ReadsPaneEvents for PaneEvents {
-    fn subscribe(
-        socket: &std::path::Path,
-        pane_id: &str,
-        cancellation: &ObservationCancellation,
-    ) -> Result<Self, String> {
-        let subscriptions = vec![
-            serde_json::json!({"type": "pane.agent_status_changed", "pane_id": pane_id}),
-            serde_json::json!({"type": "pane.closed"}),
-            serde_json::json!({"type": "pane.exited"}),
-            serde_json::json!({"type": "pane.updated"}),
-        ];
-        let events = HerdrEvents::subscribe(
-            socket,
-            "flow-nexus:observe-agent",
-            serde_json::Value::Array(subscriptions),
-            None,
-            Some(cancellation),
-        )
-        .map_err(|error| error.to_string())?;
-        Ok(Self {
-            pane_id: pane_id.to_owned(),
-            events,
-        })
-    }
-
-    fn next_event(
-        &mut self,
-        cancellation: &ObservationCancellation,
-    ) -> Result<Option<PaneEvent>, String> {
-        loop {
-            cancellation.check()?;
-            match self
-                .events
-                .next_cue(&[], None, Some(cancellation))
-                .map_err(|error| error.to_string())?
-            {
-                HerdrCue::Event(event) => {
-                    if let Some(event) = event.pane_event(&self.pane_id) {
-                        return Ok(Some(event));
-                    }
-                }
-                HerdrCue::Other => return Err("the Nexus is stopping".into()),
-                HerdrCue::Closed => return Ok(None),
-                HerdrCue::Passed => {}
-            }
-        }
-    }
-}
-
-/// A Herdr stream event, read as what it says of one pane.
-pub(crate) trait ReadsPaneEvent {
-    /// Herdr 0.8.2 names events `pane_closed` on the stream and
-    /// `pane.closed` in its schema; both spellings are read.
-    fn pane_event(&self, pane_id: &str) -> Option<PaneEvent>;
-}
-
-impl ReadsPaneEvent for serde_json::Value {
-    fn pane_event(&self, pane_id: &str) -> Option<PaneEvent> {
-        let event = self;
-        let data = event.get("data")?;
-        let kind = event.get("event").and_then(serde_json::Value::as_str)?;
-        if matches!(kind, "pane_updated" | "pane.updated") {
-            return (data
-                .pointer("/pane/pane_id")
-                .and_then(serde_json::Value::as_str)
-                == Some(pane_id))
-            .then_some(PaneEvent::Updated);
-        }
-        if data.get("pane_id").and_then(serde_json::Value::as_str) != Some(pane_id) {
-            return None;
-        }
-        if kind.ends_with("closed") || kind.ends_with("exited") {
-            return Some(PaneEvent::Gone);
-        }
-        data.get("agent_status")
-            .and_then(serde_json::Value::as_str)
-            .map(|status| PaneEvent::Status(status.to_owned()))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{PaneEvent, ReadsPaneEvent};
-
-    #[test]
-    fn herdr_events_read_as_the_observed_panes_state_or_its_going() {
-        // As Herdr 0.8.2 sent them on the stream, 2026-09-25.
-        let closed = serde_json::json!({"data":{"pane_id":"w1:p3","type":"pane_closed","workspace_id":"w1"},"event":"pane_closed"});
-        assert_eq!(closed.pane_event("w1:p3"), Some(PaneEvent::Gone));
-        assert_eq!(closed.pane_event("w1:p1"), None);
-        let working = serde_json::json!({"data":{"pane_id":"w1:p1","agent_status":"working","workspace_id":"w1"},"event":"pane_agent_status_changed"});
-        assert_eq!(
-            working.pane_event("w1:p1"),
-            Some(PaneEvent::Status("working".into()))
-        );
     }
 }

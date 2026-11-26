@@ -7,6 +7,7 @@ pub(crate) mod events;
 pub mod launch;
 pub mod pane;
 pub mod reservation;
+pub(crate) mod session_stream;
 
 use crate::codex::{CodexEndpoint, CodexEndpoints};
 use crate::emission::{AddressesHerdrSession, ReadsProcessReply};
@@ -121,6 +122,7 @@ impl LocatesNativeTranscripts for HerdrCli {
 
 /// The production Herdr roster reader.
 pub struct HerdrCli {
+    pub(crate) session_streams: session_stream::SessionStreams,
     pub(crate) executable: PathBuf,
     pub(crate) flow_id_executable: PathBuf,
     /// The flows directory under the configured source root.
@@ -171,6 +173,7 @@ impl Default for HerdrCli {
         let workspace_root = defaults.source_root();
         let flows_root = workspace_root.join("flows");
         Self {
+            session_streams: Default::default(),
             executable: PathBuf::from("herdr"),
             flow_id_executable: PathBuf::from("flow-id"),
             flows_root: Live::holding(flows_root.clone()),
@@ -469,6 +472,7 @@ impl ConfiguresHerdrCli for HerdrCli {
             .expect("fixture flows root has a parent")
             .join("native-transcripts");
         Self {
+            session_streams: Default::default(),
             executable,
             flow_id_executable: fixture_root.join("flow-id"),
             flows_root: Live::holding(flows_root.clone()),

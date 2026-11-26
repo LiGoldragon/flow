@@ -1007,3 +1007,22 @@ determines harness activity or proves a harness ended. A successful
 observation of absence establishes an end.
 An unavailable source supplies no state: stale live knowledge must not
 survive that failure. A returning source may establish the missing record.
+
+### Session transport and native lifetime
+
+A Herdr session socket has one subscription owned by the running Nexus. Bound
+seats, pending rests, launch-title waits and reap workers follow cursors on
+that subscription. The owner receives the subscription acknowledgement before
+a consumer takes its opening pane snapshot. An event invalidates the named
+pane's snapshot; the consumer reads ownership again before acting. A closed
+stream means transport unavailable, not a closed pane. Socket recreation
+starts a new subscription and invalidates all cursors. No timer retries it.
+
+Pane disappearance may settle an already authorized pane-cleanup obligation;
+neither it nor a reused pane, Herdr activity, or stream loss ends a native
+seat. Codex lifecycle follows the app-server and activity includes its child
+threads. Claude lifecycle follows matching native session hooks or the
+harness session registry and verified process birth. A pidfd wakes the
+observer when that process exits, even if its shell pane survives. Exit
+handling revalidates the bound native session and route; unavailable evidence
+does not prove death.

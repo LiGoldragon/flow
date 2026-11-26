@@ -1504,10 +1504,12 @@ impl EngineRecord for Replacement {
 /// Nothing re-reads on a timer; a waiter sleeps until a change is announced.
 #[derive(Clone, Default)]
 pub struct LaunchChanges {
+    next_descriptor: Arc<Mutex<Option<Arc<crate::event_wait::Announcement>>>>,
     count: Arc<(Mutex<u64>, Condvar)>,
 }
 
 pub trait AnnouncesLaunchChanges {
+    fn next_descriptor(&self) -> std::io::Result<Arc<crate::event_wait::Announcement>>;
     fn announce(&self);
     fn current(&self) -> u64;
     /// Blocks until the count moves past `seen` or `deadline` passes.
@@ -1536,11 +1538,33 @@ pub trait AnnouncesLaunchChanges {
 }
 
 impl AnnouncesLaunchChanges for LaunchChanges {
+    fn next_descriptor(&self) -> std::io::Result<Arc<crate::event_wait::Announcement>> {
+        use crate::event_wait::AnnouncesOnce;
+        let mut next = self
+            .next_descriptor
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(current) = &*next {
+            return Ok(current.clone());
+        }
+        let fd = Arc::new(crate::event_wait::Announcement::open()?);
+        *next = Some(fd.clone());
+        Ok(fd)
+    }
     fn announce(&self) {
         let (count, changed) = &*self.count;
         *count
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
+        if let Some(next) = self
+            .next_descriptor
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            use crate::event_wait::AnnouncesOnce;
+            next.announce();
+        }
         changed.notify_all();
     }
 

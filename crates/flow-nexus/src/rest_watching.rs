@@ -2,10 +2,9 @@
 //! existing queue indexed by its bound rest until the pane announces ready.
 use crate::generated::overriding::{HeedsOverrides, SerializesPermaflowEffects};
 use crate::herdr::pane::{PaneAgent, WritesPane};
-use crate::observation_lifetime::{
-    CancelsObservation, ObservationCancellation, ObservationCancellationCause,
-};
-use crate::observe_agent::{LocatesHerdrSession, PaneEvent, PaneEvents, ReadsPaneEvents};
+use crate::herdr::session_stream::{ReadsSessionChanges, SharesSessionStreams};
+use crate::herdr::{PaneOwnership, ReadsHerdrPanes};
+use crate::observe_agent::LocatesHerdrSession;
 use crate::restarting::{FencesSeatEvents, SeatWitness};
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::metaflow_watch::WatchesMetaflows;
@@ -15,8 +14,8 @@ use crate::waking::{DrainsHeldSeats, HoldsSoftForIdle, HoldsWakingMetaflows};
 use crate::{HoldsStopRequest, RunningNexus};
 use signal_flow::{Address, HarnessKind};
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
-use std::thread::{Scope, ScopedJoinHandle};
+use std::sync::Mutex;
+use std::thread::Scope;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BoundRest {
@@ -108,131 +107,48 @@ impl RemembersPendingRest for RunningNexus {
     }
 }
 
-struct RestObserver<'scope> {
-    rest: BoundRest,
-    cancel: Arc<ObservationCancellation>,
-    thread: ScopedJoinHandle<'scope, ()>,
-}
-
 pub trait ServesRestObservations {
     fn serve_rest_observations<'scope, 'env>(&'env self, scope: &'scope Scope<'scope, 'env>);
 }
 
 impl ServesRestObservations for RunningNexus {
-    fn serve_rest_observations<'scope, 'env>(&'env self, scope: &'scope Scope<'scope, 'env>) {
+    fn serve_rest_observations<'scope, 'env>(&'env self, _scope: &'scope Scope<'scope, 'env>) {
         let changes = self.pending_rests.changes.clone();
         if let Err(error) = self.store.watch_native_rests(changes.clone()) {
             eprintln!("flow-nexus: the pending rest observations could not be attached: {error}");
             return;
         }
-        let mut observers = BTreeMap::<String, RestObserver<'scope>>::new();
+        self.herdr.session_streams.announce_to(changes.clone());
         while !self.stopping.requested() {
             let seen = changes.current();
-            let mut requested = self.pending_rests.snapshot();
-            requested.retain(|_, rest| {
-                if self.rest_still_bound(rest) {
-                    true
-                } else {
-                    self.pending_rests.remove(rest);
-                    false
-                }
-            });
-            let ended = observers
-                .iter()
-                .filter(|(flow, watcher)| requested.get(*flow) != Some(&watcher.rest))
-                .map(|(flow, _)| flow.clone())
-                .collect::<Vec<_>>();
-            for flow in ended {
-                if let Some(watcher) = observers.remove(&flow) {
-                    watcher
-                        .cancel
-                        .cancel(ObservationCancellationCause::ObligationRetracted);
-                    let _ = watcher.thread.join();
-                }
-            }
-            for (flow, rest) in requested {
-                if observers.contains_key(&flow) {
+            for rest in self.pending_rests.snapshot().into_values() {
+                if !self.rest_still_bound(&rest) {
+                    self.pending_rests.remove(&rest);
                     continue;
                 }
-                let cancel = match ObservationCancellation::open(changes.clone()) {
-                    Ok(cancel) => Arc::new(cancel),
-                    Err(error) => {
-                        eprintln!("flow-nexus: cannot observe the rest of {flow}: {error}");
-                        self.pending_rests.remove(&rest);
-                        continue;
-                    }
+                let route = &rest.seat.route;
+                let Some(socket) = self.herdr.session_socket(&route.herdr_session_name.0) else {
+                    continue;
                 };
-                let worker_rest = rest.clone();
-                let worker_cancel = cancel.clone();
-                let thread = scope.spawn(move || {
-                    if let Err(error) = self.observe_bound_rest(&worker_rest, &worker_cancel)
-                        && worker_cancel.cause().is_none()
-                    {
-                        eprintln!(
-                            "flow-nexus: pending rest of {} had no Herdr observation: {error}",
-                            worker_rest.flow_id
-                        );
-                    }
-                    self.pending_rests.remove(&worker_rest);
-                });
-                observers.insert(
-                    flow,
-                    RestObserver {
-                        rest,
-                        cancel,
-                        thread,
-                    },
-                );
+                let Ok(cursor) = self
+                    .herdr
+                    .session_streams
+                    .follow(&socket, Some(&route.herdr_pane_id.0))
+                else {
+                    continue;
+                };
+                if cursor.available() && self.drain_bound_rest(&rest) {
+                    self.pending_rests.remove(&rest);
+                }
             }
             changes.after_while(seen, &|| !self.stopping.requested());
         }
-        for observer in observers.into_values() {
-            observer
-                .cancel
-                .cancel(ObservationCancellationCause::NexusStopped);
-            let _ = observer.thread.join();
-        }
     }
 }
-
-trait ObservesBoundRest {
-    fn observe_bound_rest(
-        &self,
-        rest: &BoundRest,
-        cancellation: &ObservationCancellation,
-    ) -> Result<(), String>;
+trait DrainsBoundRest {
     fn drain_bound_rest(&self, rest: &BoundRest) -> bool;
 }
-
-impl ObservesBoundRest for RunningNexus {
-    fn observe_bound_rest(
-        &self,
-        rest: &BoundRest,
-        cancellation: &ObservationCancellation,
-    ) -> Result<(), String> {
-        let route = &rest.seat.route;
-        let socket = self
-            .herdr
-            .session_socket(&route.herdr_session_name.0)
-            .ok_or("Herdr session socket not found")?;
-        let mut events = PaneEvents::subscribe(&socket, &route.herdr_pane_id.0, cancellation)?;
-        // The opening read covers readiness reached before subscription.
-        if self.drain_bound_rest(rest) {
-            return Ok(());
-        }
-        while let Some(event) = events.next_event(cancellation)? {
-            match event {
-                PaneEvent::Status(_) | PaneEvent::Updated => {
-                    if self.drain_bound_rest(rest) {
-                        return Ok(());
-                    }
-                }
-                PaneEvent::Gone => return Ok(()),
-            }
-        }
-        Ok(())
-    }
-
+impl DrainsBoundRest for RunningNexus {
     fn drain_bound_rest(&self, rest: &BoundRest) -> bool {
         let _effect = self.waking.effect(rest.address.clone());
         if !self.rest_still_bound(rest) || self.stopping.requested() {
@@ -241,6 +157,9 @@ impl ObservesBoundRest for RunningNexus {
         let Ok(Some(node)) = self.store.flow_node(&rest.flow_id) else {
             return false;
         };
+        if self.herdr.pane_ownership(&node) != PaneOwnership::Owned {
+            return false;
+        }
         if !matches!(
             self.herdr.pane_agent(&node),
             PaneAgent::Present { ready: true, .. }

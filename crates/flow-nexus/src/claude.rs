@@ -127,7 +127,12 @@ pub trait ReadsClaudeSessions: Sized {
     /// names that process at the start it runs with now; None otherwise.
     /// Every recorded process of this session was checked against its birth.
     /// Unreadable evidence cannot prove that a process is gone.
-    fn session_is_live(&self, session_id: &str) -> Option<bool>;
+    fn session_is_live(&self, session_id: &str) -> Option<bool> {
+        self.session_process(session_id).map(|pid| pid.is_some())
+    }
+    /// A process whose recorded session and birth were verified; None outside
+    /// the inner option means the source could not give a complete answer.
+    fn session_process(&self, session_id: &str) -> Option<Option<u32>>;
     fn session_of(&self, process_id: u32) -> Option<String>;
 }
 
@@ -138,7 +143,7 @@ impl ReadsClaudeSessions for ClaudeSessions {
         }
     }
 
-    fn session_is_live(&self, session_id: &str) -> Option<bool> {
+    fn session_process(&self, session_id: &str) -> Option<Option<u32>> {
         for entry in fs::read_dir(&self.directory).ok()? {
             let path = entry.ok()?.path();
             if path.extension() != Some(std::ffi::OsStr::new("json")) {
@@ -163,10 +168,10 @@ impl ReadsClaudeSessions for ClaudeSessions {
             let mut fields = fields.split_whitespace();
             let state = fields.next()?;
             if !matches!(state, "Z" | "X") && fields.nth(18)? == start {
-                return Some(true);
+                return Some(Some(pid));
             }
         }
-        Some(false)
+        Some(None)
     }
 
     fn session_of(&self, process_id: u32) -> Option<String> {
@@ -787,5 +792,65 @@ mod simplified_answer_tests {
         )
         .unwrap();
         assert!(!path.main_turn_unstarted("session"));
+    }
+}
+
+#[cfg(test)]
+mod process_witness_tests {
+    use super::{ClaudeSessions, ReadsClaudeSessions};
+    use crate::event_wait::{AwaitsDescriptors, OpensExitDescriptor};
+    use std::{
+        fs,
+        os::fd::AsFd,
+        process::{Command, Stdio},
+        time::{Duration, Instant},
+    };
+    #[test]
+    fn native_exit_is_visible_while_the_shell_transport_remains_open() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = ClaudeSessions::under(root.path());
+        fs::create_dir(&registry.directory).unwrap();
+        let (pane, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        // The child's lifetime is bounded by the parent's stdin pipe even if an assertion fails.
+        let mut agent = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = agent.id();
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let birth = stat
+            .rsplit_once(") ")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .nth(19)
+            .unwrap();
+        let record = registry.directory.join(format!("{pid}.json"));
+        let set = |birth: &str| {
+            fs::write(
+                &record,
+                serde_json::json!({"pid":pid,"sessionId":"synthetic","procStart":birth})
+                    .to_string(),
+            )
+            .unwrap()
+        };
+        set("different birth");
+        assert_eq!(registry.session_process("synthetic"), Some(None));
+        set(birth);
+        assert_eq!(registry.session_process("synthetic"), Some(Some(pid)));
+        let native = pid.exit_descriptor().unwrap();
+        assert_eq!(registry.session_of(pid).as_deref(), Some("synthetic"));
+        drop(agent.stdin.take());
+        assert_eq!(
+            [native.as_fd(), pane.as_fd()]
+                .ready(Some(Instant::now() + Duration::from_secs(3)))
+                .unwrap(),
+            [true, false]
+        );
+        agent.wait().unwrap();
+        assert_eq!(registry.session_process("synthetic"), Some(None));
+        fs::write(&record, "unreadable record").unwrap();
+        assert_eq!(registry.session_process("synthetic"), None);
     }
 }

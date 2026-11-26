@@ -166,6 +166,8 @@ fn main() -> ExitCode {
     // Every thread borrows the Nexus inside this scope, so when a stop has
     // ended them all the Nexus drops here and its store closes cleanly.
     std::thread::scope(|scope| {
+        let routes = &nexus;
+        scope.spawn(move || flow_nexus::seat_routes::ServesBoundRoutes::serve_bound_routes(routes));
         // One connection per live Codex thread answers its send-tool calls.
         let send_tool_nexus = &nexus;
         scope.spawn(move || send_tool_nexus.serve_send_tool(scope));

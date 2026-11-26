@@ -58,12 +58,11 @@ use crate::RunningNexus;
 use crate::generated::memory::{Predecessor, ReapResponsibility};
 use crate::herdr::{
     PaneClose, PaneOwnership, ReadsHerdrUntilCancelled,
-    events::{HerdrCue, HerdrEvents, SubscribesHerdrEvents},
+    session_stream::{ReadsSessionChanges, SessionCue, SharesSessionStreams},
 };
 use crate::observation_lifetime::{
     CancelsObservation, ObservationCancellation, ObservationCancellationCause,
 };
-use crate::observe_agent::{PaneEvent, ReadsPaneEvent};
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::handover::{ClosesHandovers, HoldsHandovers, JudgesHandoverOwner};
 use crate::store::metaflow::{ReadsSuccession, SleepsMetaflows};
@@ -1320,13 +1319,14 @@ impl WatchesReapedPane for RunningNexus {
         };
         // 3. Subscribe first, so no close is lost between it and the
         // snapshot.
-        let mut events = match HerdrEvents::subscribe(
-            &socket,
-            "flow-nexus:reaped-pane",
-            serde_json::json!([{"type": "pane.closed"}, {"type": "pane.exited"}]),
-            None,
-            Some(cancellation),
-        ) {
+        let mut events = match self
+            .herdr
+            .session_streams
+            .follow(&socket, Some(&route.herdr_pane_id.0))
+            .and_then(|mut cursor| {
+                cursor.connected(None, Some(cancellation))?;
+                Ok(cursor)
+            }) {
             Ok(events) => events,
             Err(crate::herdr::events::HerdrSubscriptionFailure::Cancelled(cause)) => {
                 return PaneWatchEnd::Cancelled(cause);
@@ -1403,7 +1403,7 @@ impl WatchesReapedPane for RunningNexus {
         }
         // 5. Events: the pane's own going, or the stream's end.
         loop {
-            match events.next_cue(&[], None, Some(cancellation)) {
+            match events.next_change(&[], None, Some(cancellation)) {
                 Err(crate::herdr::events::HerdrSubscriptionFailure::Cancelled(cause)) => {
                     return PaneWatchEnd::Cancelled(cause);
                 }
@@ -1412,28 +1412,36 @@ impl WatchesReapedPane for RunningNexus {
                         error.to_string(),
                     ));
                 }
-                Ok(HerdrCue::Event(event)) => {
+                Ok(SessionCue::Changed) => {
                     #[cfg(test)]
                     self.pane_watch_hooks.at_event();
-                    if event.pane_event(&route.herdr_pane_id.0) == Some(PaneEvent::Gone) {
-                        #[cfg(test)]
-                        crate::test_faults::InjectsCrashes::crash_if_armed(
-                            &self.store.faults,
-                            crate::test_faults::CrashPoint::WatchAfterGone,
-                        );
-                        return self.worker_act(predecessor, armed, cancellation);
+                    match self.herdr.pane_ownership_until(&node, cancellation) {
+                        Err(cause) => return PaneWatchEnd::Cancelled(cause),
+                        Ok(PaneOwnership::Absent) => {
+                            #[cfg(test)]
+                            crate::test_faults::InjectsCrashes::crash_if_armed(
+                                &self.store.faults,
+                                crate::test_faults::CrashPoint::WatchAfterGone,
+                            );
+                            return self.worker_act(predecessor, armed, cancellation);
+                        }
+                        Ok(PaneOwnership::Foreign) => {
+                            return PaneWatchEnd::Lapsed(PaneWatchLapse::RouteChanged);
+                        }
+                        Ok(_) => {}
                     }
                 }
-                Ok(HerdrCue::Closed) => {
-                    return match self.herdr.pane_ownership_until(&node, cancellation) {
-                        Err(cause) => PaneWatchEnd::Cancelled(cause),
-                        Ok(PaneOwnership::Absent) => {
-                            self.worker_act(predecessor, armed, cancellation)
-                        }
-                        Ok(_) => PaneWatchEnd::Lapsed(PaneWatchLapse::StreamClosedPanePresent),
-                    };
+                Ok(SessionCue::Unavailable) => {
+                    if let Err(end) = self.worker_rewrite(
+                        predecessor,
+                        armed,
+                        cancellation,
+                        ReapStanding::HerdrUnavailable,
+                    ) {
+                        return end;
+                    }
                 }
-                Ok(HerdrCue::Other | HerdrCue::Passed) => {}
+                Ok(SessionCue::Deadline | SessionCue::Other) => {}
             }
         }
     }

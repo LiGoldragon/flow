@@ -27,8 +27,10 @@ use crate::generated::starter::{
     ReadsTypedUserText, RendersLeanStart, StartupReading, Textual,
 };
 use crate::harness_command::HarnessCommandResources;
-use crate::herdr::events::{HerdrCue, HerdrEvents, NamesEventPane, SubscribesHerdrEvents};
 use crate::herdr::reservation::ChoosesNativeSession;
+use crate::herdr::session_stream::{
+    ReadsSessionChanges, SessionCue, SessionCursor, SharesSessionStreams,
+};
 use crate::live::HoldsLiveValue;
 use crate::title::{NativeTitle, ShowsNativeTitle, TitlesFlow};
 use datom_codec::{Datomizable, Path as DatomPath};
@@ -1399,8 +1401,7 @@ impl ReadsTranscriptRow for serde_json::Value {
 /// Herdr's events of the launch pane, subscribed before the first read, so
 /// a change after it is never missed. Nothing is read again on a timer.
 pub(crate) struct TitleCues {
-    pane_id: String,
-    events: Option<HerdrEvents>,
+    events: Option<SessionCursor>,
     deadline: std::time::Instant,
 }
 
@@ -1420,22 +1421,10 @@ impl AwaitsTitleCue for TitleCues {
         let Some(events) = self.events.as_mut() else {
             return false;
         };
-        loop {
-            match events.next_cue(&[], Some(self.deadline), None) {
-                Ok(HerdrCue::Event(event)) => {
-                    if event.event_pane() != Some(self.pane_id.as_str()) {
-                        continue;
-                    }
-                    let kind = event
-                        .get("event")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default();
-                    return !(kind.ends_with("closed") || kind.ends_with("exited"));
-                }
-                Ok(HerdrCue::Other) => {}
-                Ok(HerdrCue::Closed | HerdrCue::Passed) | Err(_) => return false,
-            }
-        }
+        matches!(
+            events.next_change(&[], Some(self.deadline), None),
+            Ok(SessionCue::Changed)
+        )
     }
 }
 
@@ -1523,19 +1512,9 @@ impl TitlesClaudeSession for HerdrCli {
         let events = self
             .herdr_session_socket(&pane.herdr_session_name.0)
             .and_then(|socket| {
-                HerdrEvents::subscribe(
-                    Path::new(&socket),
-                    "flow-nexus:title",
-                    serde_json::json!([
-                        {"type": "pane.updated"},
-                        {"type": "pane.agent_status_changed", "pane_id": pane.herdr_pane_id.0},
-                        {"type": "pane.agent_detected"},
-                        {"type": "pane.closed"},
-                        {"type": "pane.exited"}
-                    ]),
-                    Some(deadline),
-                    None,
-                ).map_err(|error| error.to_string())
+                let mut cursor = self.session_streams.follow(Path::new(&socket), Some(&pane.herdr_pane_id.0)).map_err(|e|e.to_string())?;
+                cursor.connected(Some(deadline), None).map_err(|e|e.to_string())?;
+                Ok(cursor)
             })
             .inspect_err(|error| {
                 eprintln!(
@@ -1544,11 +1523,7 @@ impl TitlesClaudeSession for HerdrCli {
                 );
             })
             .ok();
-        TitleCues {
-            pane_id: pane.herdr_pane_id.clone().0,
-            events,
-            deadline,
-        }
+        TitleCues { events, deadline }
     }
 
     fn claude_transcript_titles(

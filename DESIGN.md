@@ -804,7 +804,7 @@ each recorded with the event that caused it, for every harness alike
 (`crates/flow-nexus/ethos/transitions.ethos`: `Caused`, `CodexReport`,
 `ClaudeReport`, `ReportedEvent`, `CodexFlowReport`, `AskedFlow`,
 `TransitionWrite`; `LeadsToState`, `TypesCodexReport`,
-`SeedsReportedTransition`, the store's `RecordsTransitions` and the Nexus's
+the store's `RecordsTransitions` and the Nexus's
 `ReportsEvents`), written through `Record.Caused`. A report is typed into
 one `Event`, recorded with the cause `Reported`: Started and Working lead
 to Acting, Idle to Resting, Ended to Asleep, and Compacting keeps the state
@@ -840,11 +840,8 @@ drain ask, reads Resting from it (a Simplified Claude seat that opened with
 no prompt is ready for its first input), and the panel's state of a live
 seat is it. Every write of the family takes `transitions_gate`.
 
-At every open, each live flow whose transitions hold no `Reported` one is
-given the one its last recorded harness event maps to, carrying the
-context size Memory holds; a flow the panel recorded is given it first, at
-its first override's moment (`seed_reported_transitions`). No family or
-schema changes.
+Opening the store never creates a current record or historical event from
+earlier reports. These audit records are left as written.
 
 `CrystallizeNow` sends the flow its handover warning now, whatever its
 context, as the warning goes (`handover_reminding::RendersHandoverWarning`):

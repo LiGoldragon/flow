@@ -2998,7 +2998,6 @@ impl OpensFlowStore for FlowStore {
         store.seed_missing_queued_deliveries()?;
         logical_delivery::RecordsQueueWrites::recover_queue_writes(&store)?;
         request_id_upgrade::RunsRequestIdAnnouncements::run_request_id_announcements(&store)?;
-        <FlowStore as crate::generated::transitions::RecordsTransitions>::seed_reported_transitions(&store)?;
         Ok(store)
     }
 
@@ -3244,7 +3243,6 @@ impl OpensFlowStore for FlowStore {
         store.align_followed_requests()?;
         store.seed_missing_queued_deliveries()?;
         logical_delivery::RecordsQueueWrites::recover_queue_writes(&store)?;
-        <FlowStore as crate::generated::transitions::RecordsTransitions>::seed_reported_transitions(&store)?;
         if store
             .engine
             .match_records(QueryPlan::key(store.state, RecordKey::new(STATE_KEY)))?
@@ -9468,6 +9466,10 @@ mod tests {
                 .reserve_pending_start(Input::Start(self.launch_profile("legacy-start-1")))
                 .expect("start reserves")
                 .expect("flow type is accepted");
+            assert!(matches!(
+                store.current_seat(&pending.flow_id).unwrap(),
+                super::current_seat::CurrentSeatRead::NoRecord
+            ));
             assert!(
                 store
                     .record_pending_thread(&pending, "thread-1".into())
@@ -9479,6 +9481,10 @@ mod tests {
             let Output::Started(started) = response else {
                 panic!("start must be accepted")
             };
+            assert!(
+                matches!(store.current_seat(&started.flow_id.0).unwrap(), super::current_seat::CurrentSeatRead::Known(row)
+                if row.seat_standing == crate::generated::memory::SeatStanding::Alive(crate::generated::memory::SeatActivity::Working))
+            );
             started.flow_id.0
         }
     }

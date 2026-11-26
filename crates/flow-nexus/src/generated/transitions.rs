@@ -103,13 +103,6 @@ pub trait TypesCodexReport {
     ) -> std::option::Option<flow_nexus::generated::memory::Event>;
 }
 #[rustfmt::skip]
-pub trait SeedsReportedTransition {
-    fn last_reported(
-        &self,
-        input: std::option::Option<signal_flow::Tokens>,
-    ) -> std::option::Option<flow_nexus::generated::memory::Event>;
-}
-#[rustfmt::skip]
 pub trait RecordsTransitions {
     fn record_caused(
         &self,
@@ -132,9 +125,6 @@ pub trait RecordsTransitions {
         std::option::Option<meta_signal_flow::generated::signal::State>,
         flow_nexus::store::StoreError,
     >;
-    fn seed_reported_transitions(
-        &self,
-    ) -> std::result::Result<i64, flow_nexus::store::StoreError>;
 }
 #[rustfmt::skip]
 pub trait ReportsEvents {
@@ -164,13 +154,6 @@ const _: () = {
 const _: () = {
     fn assert_codexreport_typescodexreport<T: TypesCodexReport>() {}
     let _ = assert_codexreport_typescodexreport::<CodexReport>;
-};
-#[rustfmt::skip]
-const _: () = {
-    fn assert_flowevents_seedsreportedtransition<T: SeedsReportedTransition>() {}
-    let _ = assert_flowevents_seedsreportedtransition::<
-        flow_nexus::generated::memory::FlowEvents,
-    >;
 };
 #[rustfmt::skip]
 const _: () = {

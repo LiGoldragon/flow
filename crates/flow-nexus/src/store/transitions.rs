@@ -1,37 +1,16 @@
-//! A flow's state is a record of events (`ethos/transitions.ethos`): each
-//! cause is appended to its seat's flow as the transition it leads to, in
-//! the family the override panel opened (`overriding`), and the state a flow
-//! is in is its last transition's.
-//!
-//! Every write of that family takes `transitions_gate`, so two causes
-//! recorded at once each read the record the other wrote. A delivery that
-//! makes a request arrive takes the gate over its own commit and writes the
-//! arrival in it (`logical_delivery`), folded with the turn its receipt
-//! lies in: one whose turn has already ended records no Acting, and the
-//! seat stays as it is (`LeadsToState for Arrival`).
-//!
-//! The Memory upgrade runs at every open (`seed_reported_transitions`): a
-//! store an earlier Flow wrote holds each flow's reports as harness events
-//! and no transition caused by one, so each live flow whose transitions hold
-//! no Reported one is given the one its last recorded report maps to. A
-//! flow the override panel already recorded keeps the overrides after it,
-//! the owner's word standing last. Nothing a 0.56.2 or a 0.58.0 store holds
-//! is refused, and no family or schema changes.
+//! Append-only transition audit and the separate durable current-state read.
 
 use super::current_seat::{CurrentSeatRead, SeatEvent};
 use super::{FlowStore, ReadsFlowStore, StoreError};
-use crate::generated::memory::{Cause, Event, Flow, FlowEvents, Moment, Transition};
+use crate::generated::memory::{Cause, Event, Flow, Moment, Transition};
 use crate::generated::memory::{SeatActivity, SeatStanding};
-use crate::generated::overriding::{RemembersOverrides, Seat, Subject};
+use crate::generated::overriding::Seat;
 use crate::generated::transitions::LeadsToState;
 use crate::generated::transitions::{
-    Arrival, AskedFlow, Caused, ReceiptTurn, RecordsTransitions, SeedsReportedTransition,
-    TransitionWrite,
+    Arrival, AskedFlow, Caused, ReceiptTurn, RecordsTransitions, TransitionWrite,
 };
 use crate::reminding::CountsUnixSeconds;
-use crate::store::NamesLiveFlow;
 use crate::store::context::RecordsContextSize;
-use crate::store::events::RecordedHarnessEvent;
 use meta_signal_flow::State;
 use sema_engine::{QueryPlan, RecordKey};
 use signal_flow::Tokens;
@@ -164,37 +143,6 @@ impl FoldsTransitions for FlowStore {
     }
 }
 
-impl SeedsReportedTransition for FlowEvents {
-    /// Each recorded report maps as the Nexus maps it now, with the size
-    /// given: Started, a tool boundary and a prompt Working, a Stop Idle,
-    /// an end Ended. A Started of a session an earlier Started named is the
-    /// session going on, and takes the event before it; a Cleared maps to
-    /// none.
-    fn last_reported(&self, tokens: Option<Tokens>) -> Option<Event> {
-        let tokens = tokens.unwrap_or(Tokens(0));
-        let events = &self.recorded_harness_event_vector;
-        events
-            .iter()
-            .enumerate()
-            .filter_map(|(index, event)| match event {
-                RecordedHarnessEvent::Started(session) => {
-                    let repeated = session.is_some()
-                        && events[..index].iter().any(|earlier| {
-                            matches!(earlier, RecordedHarnessEvent::Started(named) if named == session)
-                        });
-                    (!repeated).then_some(Event::Started)
-                }
-                RecordedHarnessEvent::ToolUsed(_) | RecordedHarnessEvent::PromptSubmitted(_) => {
-                    Some(Event::Working(tokens))
-                }
-                RecordedHarnessEvent::Stopped(_) => Some(Event::Idle(tokens)),
-                RecordedHarnessEvent::Ended(_) => Some(Event::Ended),
-                RecordedHarnessEvent::Cleared(_) => None,
-            })
-            .next_back()
-    }
-}
-
 impl FlowStore {
     /// An observed native state is itself an event, in the same audit as a
     /// report. The caller holds the current-state writer gate across both.
@@ -305,100 +253,5 @@ impl RecordsTransitions for FlowStore {
                 SeatStanding::Ended => State::Asleep,
             }),
         })
-    }
-
-    /// Each live flow whose transitions hold no Reported one is given the
-    /// transition its last recorded report maps to, carrying the context
-    /// size Memory holds for it: appended, the moment now, to a flow with no
-    /// transition; placed first, at its first override's moment, before
-    /// the overrides a flow holds. A flow Memory seats nowhere is left as
-    /// it is. Answers how many flows were given one.
-    fn seed_reported_transitions(&self) -> Result<i64, StoreError> {
-        let _gate = self
-            .transitions_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let now = Moment(std::time::SystemTime::now().seconds_since_epoch());
-        let recorded = self
-            .engine
-            .match_records(QueryPlan::all(self.event_tables.events))?
-            .records()
-            .to_vec();
-        let mut seeded = 0;
-        for events in recorded {
-            let flow_id = events.flow_id.clone();
-            if !self
-                .flow(&flow_id.0)?
-                .is_some_and(|row| row.flow_lifecycle.is_live())
-            {
-                continue;
-            }
-            let held = self
-                .engine
-                .match_records(QueryPlan::key(
-                    self.flow_transitions,
-                    RecordKey::new(flow_id.0.clone()),
-                ))?
-                .records()
-                .first()
-                .cloned();
-            if held.as_ref().is_some_and(|flow| {
-                flow.transition_vector
-                    .iter()
-                    .any(|transition| matches!(transition.cause, Cause::Reported(_)))
-            }) {
-                continue;
-            }
-            let tokens = self.context_size(&flow_id.0)?.map(Tokens);
-            let Some(event) = events.last_reported(tokens) else {
-                continue;
-            };
-            let cause = Cause::Reported(event);
-            let Some(state) = cause.leads_to(None) else {
-                continue;
-            };
-            let commit = self.engine.begin_atomic_commit();
-            let commit = match held {
-                Some(mut flow) => {
-                    let moment = flow
-                        .transition_vector
-                        .first()
-                        .map(|first| first.moment)
-                        .filter(|first| first.0 < now.0)
-                        .unwrap_or(now);
-                    flow.transition_vector.insert(
-                        0,
-                        Transition {
-                            state,
-                            cause,
-                            moment,
-                        },
-                    );
-                    commit.mutate(self.flow_transitions, flow)
-                }
-                None => {
-                    let Some(Seat { flow_id, address }) =
-                        self.seat(Subject::Named(flow_id.clone()))?
-                    else {
-                        continue;
-                    };
-                    commit.assert(
-                        self.flow_transitions,
-                        Flow {
-                            flow_id,
-                            address,
-                            transition_vector: vec![Transition {
-                                state,
-                                cause,
-                                moment: now,
-                            }],
-                        },
-                    )
-                }
-            };
-            self.engine.commit_atomic(commit)?;
-            seeded += 1;
-        }
-        Ok(seeded)
     }
 }

@@ -11,7 +11,7 @@ use super::waking::{
 };
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
 use crate::generated::memory::{Cause, Event, Moment, Transition};
-use crate::generated::overriding::{HeedsOverrides, RemembersOverrides, Seat, Transitioned};
+use crate::generated::overriding::{HeedsOverrides, RemembersOverrides, Seat};
 use crate::generated::transitions::{AskedFlow, RecordsTransitions};
 use crate::reporting::RecordsReports;
 use crate::store::context::RecordsContextSize;
@@ -569,11 +569,19 @@ fn reopen(fixture: &mut NexusFixture, as_before_the_panel: bool) {
                     "__sema_engine_catalog",
                 ))
                 .unwrap();
-            for family in ["flow_nexus_flow_transitions", "flow_nexus_hold"] {
+            for family in [
+                "flow_nexus_flow_transitions",
+                "flow_nexus_hold",
+                "flow_nexus_current_seats",
+            ] {
                 catalog.remove(family).unwrap();
             }
         }
-        for family in ["flow_nexus_flow_transitions", "flow_nexus_hold"] {
+        for family in [
+            "flow_nexus_flow_transitions",
+            "flow_nexus_hold",
+            "flow_nexus_current_seats",
+        ] {
             let _ = write.delete_table(redb::TableDefinition::<String, &[u8]>::new(family));
         }
         write.commit().unwrap();
@@ -608,13 +616,9 @@ fn earlier_seat(fixture: &NexusFixture) {
     ));
 }
 
-/// A 0.56.2 store, which holds neither the transitions family nor the
-/// switch, opens refusing nothing: both are registered, the Nexus acts on
-/// its own, and each live flow is given the transition its last recorded
-/// report maps to, with the size Memory holds. Opened again, nothing more
-/// is given.
+/// Old raw reports are audit evidence, never startup initialization.
 #[test]
-fn a_0_56_2_store_opens_with_each_live_flow_given_its_reported_state() {
+fn an_earlier_store_opens_without_deriving_state_or_rewriting_history() {
     let mut fixture = NexusFixture::new();
     earlier_seat(&fixture);
     reopen(&mut fixture, true);
@@ -622,55 +626,11 @@ fn a_0_56_2_store_opens_with_each_live_flow_given_its_reported_state() {
         fixture.nexus.store.holding(),
         Ok(crate::generated::overriding::Holding::Acting)
     ));
-    assert_eq!(
-        held(&fixture, CLAUDE_SEAT),
-        vec![reported(meta::State::Resting, Event::Idle(Tokens(151_000)))]
-    );
-    assert!(fixture.nexus.rests_now(CLAUDE_SEAT));
+    let id = AskedFlow(flow_ethos::FlowId(CLAUDE_SEAT.into()));
+    assert_eq!(fixture.nexus.store.state_of(id.clone()).unwrap(), None);
+    assert!(held(&fixture, CLAUDE_SEAT).is_empty());
+    assert!(!fixture.nexus.rests_now(CLAUDE_SEAT));
     reopen(&mut fixture, false);
-    assert_eq!(transitions(&fixture, CLAUDE_SEAT).len(), 1);
-}
-
-/// A 0.58.0 store, whose transitions are the override panel's alone,
-/// opens refusing nothing: a flow the panel recorded is given its reported
-/// transition first, at its first override's moment, so the owner's word
-/// stays its state.
-#[test]
-fn a_0_58_0_store_opens_with_the_reported_state_before_the_overrides() {
-    let mut fixture = NexusFixture::new();
-    earlier_seat(&fixture);
-    let seat = Seat {
-        flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
-        address: address(Model::Sol),
-    };
-    fixture
-        .nexus
-        .store
-        .record_transition(Transitioned {
-            seat,
-            transition: Transition {
-                state: meta::State::Crystallizing,
-                cause: Cause::Overridden,
-                moment: Moment(1_000),
-            },
-        })
-        .unwrap();
-    reopen(&mut fixture, false);
-    assert_eq!(
-        transitions(&fixture, CLAUDE_SEAT),
-        vec![
-            Transition {
-                state: meta::State::Resting,
-                cause: Cause::Reported(Event::Idle(Tokens(151_000))),
-                moment: Moment(1_000),
-            },
-            Transition {
-                state: meta::State::Crystallizing,
-                cause: Cause::Overridden,
-                moment: Moment(1_000),
-            },
-        ]
-    );
-    reopen(&mut fixture, false);
-    assert_eq!(transitions(&fixture, CLAUDE_SEAT).len(), 2);
+    assert_eq!(fixture.nexus.store.state_of(id).unwrap(), None);
+    assert!(held(&fixture, CLAUDE_SEAT).is_empty());
 }

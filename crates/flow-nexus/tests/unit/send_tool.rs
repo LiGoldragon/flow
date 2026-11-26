@@ -1,9 +1,8 @@
 //! The send tool against a fake Codex app-server: each connection Flow
 //! opens is one run of a script that answers the WebSocket upgrade, prints
 //! the frames prepared for that connection, records what the client wrote,
-//! and stays open or closes. A responder's every connection is preceded by
-//! the send-tool probe, so connection `n` of a responder is run `2n` of its
-//! script, and run `2n - 1` is the probe.
+//! and stays open or closes. A confirmed seat scripts the send-tool probe,
+//! subscription and independent read-only family observation, in that order.
 
 use super::{ControlsHerdrSnapshot, NexusFixture};
 use crate::HoldsStopRequest;
@@ -164,7 +163,13 @@ pub(super) struct FakeAppServer {
 }
 
 pub(super) trait RunsFakeAppServer {
-    fn install(connections: Vec<FakeConnection>) -> FakeAppServer;
+    fn install(connections: Vec<FakeConnection>) -> FakeAppServer {
+        Self::install_sessions(None, connections)
+    }
+    fn install_sessions(
+        confirmed_thread: Option<&str>,
+        connections: Vec<FakeConnection>,
+    ) -> FakeAppServer;
     /// The JSON messages the client wrote on run `run`, waiting until one
     /// satisfies `wanted`.
     fn written_on(
@@ -180,7 +185,10 @@ pub(super) trait RunsFakeAppServer {
 }
 
 impl RunsFakeAppServer for FakeAppServer {
-    fn install(connections: Vec<FakeConnection>) -> FakeAppServer {
+    fn install_sessions(
+        confirmed_thread: Option<&str>,
+        connections: Vec<FakeConnection>,
+    ) -> FakeAppServer {
         let directory = tempfile::tempdir().expect("fake app-server directory");
         let root = directory.path();
         let initialized = frame(&serde_json::json!({ "id": 1, "result": {} }));
@@ -193,7 +201,15 @@ impl RunsFakeAppServer for FakeAppServer {
         ]
         .concat();
         for (index, connection) in connections.iter().enumerate() {
-            let run = 2 * index + 1;
+            let run = (if confirmed_thread.is_some() { 3 } else { 2 }) * index + 1;
+            if let Some(thread) = confirmed_thread {
+                let family = [
+                    initialized.clone(),
+                    frame(&serde_json::json!({"id":2,"result":{"data":[thread],"nextCursor":null}})),
+                    frame(&serde_json::json!({"id":3,"result":{"thread":{"id":thread,"parentThreadId":null,"status":{"type":"active"}}}})),
+                ].concat();
+                std::fs::write(root.join(format!("frames-{}", run + 2)), family).unwrap();
+            }
             std::fs::write(root.join(format!("frames-{run}")), &probe).unwrap();
             // The resume answers the cut: a thread with no turn, or in the
             // one turn the connection names running; the terminal list
@@ -408,6 +424,12 @@ impl SeatsCodexFlows for NexusFixture {
                 },
             )
             .expect("Codex seat registered");
+        use crate::generated::memory::{SeatActivity, SeatStanding};
+        use crate::store::current_seat::RecordsCurrentSeats;
+        self.nexus
+            .store
+            .record_observation(flow_id, Some(SeatStanding::Alive(SeatActivity::Working)))
+            .unwrap();
         self.nexus.store.seed_metaflow(Metaflow {
             address: at,
             state: State::Awake(flow_ethos::FlowId(flow_id.into())),
@@ -495,6 +517,16 @@ pub(super) fn accepting_codex_endpoint(
     fake
 }
 
+/// Stop even when a handshake assertion unwinds; the scoped join cannot
+/// otherwise finish while the responder is sleeping on its socket watch.
+struct StopFixtureResponder(mpsc::Sender<ResponderSignal>);
+
+impl Drop for StopFixtureResponder {
+    fn drop(&mut self) {
+        let _ = self.0.send(ResponderSignal::Stop);
+    }
+}
+
 /// Runs a responder for `thread` until `done` returns, then stops it.
 fn responding<T>(
     fixture: &NexusFixture,
@@ -504,11 +536,11 @@ fn responding<T>(
 ) -> T {
     std::thread::scope(|scope| {
         let (signals, inbox) = mpsc::channel();
-        let stop = signals.clone();
+        let stop = StopFixtureResponder(signals.clone());
         let responder =
             scope.spawn(move || fixture.nexus.respond_for(thread, adapter, signals, inbox));
         let result = done();
-        stop.send(ResponderSignal::Stop).unwrap();
+        drop(stop);
         responder.join().expect("responder ends when told to stop");
         result
     })
@@ -520,16 +552,22 @@ fn two_threads_are_each_attributed_to_their_own_metaflow() {
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
     fixture.codex_seat("b2b2b2", THREAD_B, "w1:p6", "gpt-6-sol", sender_b());
     fixture.awake_target();
-    let fake_a = FakeAppServer::install(vec![FakeConnection {
-        requests: vec![tool_call_request(10, THREAD_A, "call-a", "from a")],
-        closes: false,
-        running: None,
-    }]);
-    let fake_b = FakeAppServer::install(vec![FakeConnection {
-        requests: vec![tool_call_request(11, THREAD_B, "call-b", "from b")],
-        closes: false,
-        running: None,
-    }]);
+    let fake_a = FakeAppServer::install_sessions(
+        Some(THREAD_A),
+        vec![FakeConnection {
+            requests: vec![tool_call_request(10, THREAD_A, "call-a", "from a")],
+            closes: false,
+            running: None,
+        }],
+    );
+    let fake_b = FakeAppServer::install_sessions(
+        Some(THREAD_B),
+        vec![FakeConnection {
+            requests: vec![tool_call_request(11, THREAD_B, "call-b", "from b")],
+            closes: false,
+            running: None,
+        }],
+    );
     let adapter_a = fixture.adapter("gpt-sol", &fake_a);
     let adapter_b = fixture.adapter("gpt-6-sol", &fake_b);
 
@@ -561,6 +599,20 @@ fn two_threads_are_each_attributed_to_their_own_metaflow() {
         .find(|m| m["method"] == "thread/resume")
         .expect("thread A resumed");
     assert_eq!(resume["params"]["threadId"], THREAD_A);
+    for (fake, thread) in [(&fake_a, THREAD_A), (&fake_b, THREAD_B)] {
+        let observed = fake.written_on(3, |message| message["method"] == "thread/read");
+        assert!(
+            observed
+                .iter()
+                .any(|message| message["method"] == "thread/loaded/list")
+        );
+        assert!(
+            observed
+                .iter()
+                .any(|message| message["method"] == "thread/read"
+                    && message["params"]["threadId"] == thread)
+        );
+    }
     let recorded = fixture
         .nexus
         .store
@@ -568,6 +620,45 @@ fn two_threads_are_each_attributed_to_their_own_metaflow() {
         .unwrap()
         .expect("thread B's call recorded");
     assert!(matches!(recorded.send_outcome, SendOutcome::Accepted(_)));
+}
+
+#[test]
+fn a_lost_fixture_handshake_releases_the_responder_on_unwind() {
+    use crate::event_wait::AwaitsDirectory;
+    let mut fixture = NexusFixture::new();
+    fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
+    let fake = FakeAppServer::install(Vec::new());
+    let adapter = fixture.adapter("gpt-sol", &fake);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        responding(&fixture, THREAD_A, &adapter, || {
+            // Let the first connection reach the deliberately unscripted
+            // endpoint. It cannot resume this seat or answer any call.
+            assert!(
+                fake.directory
+                    .path()
+                    .until_holds(deadline, &mut || fake.runs() > 0)
+            );
+            let path = fake.directory.path().join("record-2");
+            let answered = fake.directory.path().until_holds(
+                Instant::now() + Duration::from_millis(100),
+                &mut || {
+                    path.client_messages()
+                        .iter()
+                        .any(|message| message["id"] == 10)
+                },
+            );
+            if !answered {
+                std::panic::panic_any("lost fixture handshake");
+            }
+        })
+    }));
+    let failure = result.expect_err("the missing handshake must not succeed");
+    assert_eq!(
+        failure.downcast_ref::<&str>(),
+        Some(&"lost fixture handshake")
+    );
+    assert!(Instant::now() < deadline + Duration::from_secs(5));
 }
 
 /// A call from a thread no live flow of an Awake metaflow runs is sent as
@@ -579,11 +670,14 @@ fn a_call_from_a_thread_no_flow_holds_is_sent_as_unbound() {
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
     fixture.awake_target();
     let foreign = "01a0b22c-0000-7000-8000-0000000000ff";
-    let fake = FakeAppServer::install(vec![FakeConnection {
-        requests: vec![tool_call_request(12, foreign, "call-x", "intruder")],
-        closes: false,
-        running: None,
-    }]);
+    let fake = FakeAppServer::install_sessions(
+        Some(THREAD_A),
+        vec![FakeConnection {
+            requests: vec![tool_call_request(12, foreign, "call-x", "intruder")],
+            closes: false,
+            running: None,
+        }],
+    );
     let adapter = fixture.adapter("gpt-sol", &fake);
     let answer = responding(&fixture, THREAD_A, &adapter, || {
         answer_to(&fake.written_on(2, |m| m["id"] == 12), 12)
@@ -677,11 +771,14 @@ fn a_call_queued_before_a_crash_is_answered_from_its_record_when_replayed() {
         .handle_send_call(tool_call(THREAD_A, "call-a", "exactly once"));
     assert!(matches!(handled, SendOutcome::Accepted(_)));
     // The app-server replays the pending call to the next subscriber.
-    let fake = FakeAppServer::install(vec![FakeConnection {
-        requests: vec![tool_call_request(13, THREAD_A, "call-a", "exactly once")],
-        closes: false,
-        running: None,
-    }]);
+    let fake = FakeAppServer::install_sessions(
+        Some(THREAD_A),
+        vec![FakeConnection {
+            requests: vec![tool_call_request(13, THREAD_A, "call-a", "exactly once")],
+            closes: false,
+            running: None,
+        }],
+    );
     let adapter = fixture.adapter("gpt-sol", &fake);
     let answer = responding(&fixture, THREAD_A, &adapter, || {
         answer_to(&fake.written_on(2, |m| m["id"] == 13), 13)
@@ -961,23 +1058,26 @@ fn a_pending_call_is_answered_after_start_and_reconnect() {
     let mut fixture = NexusFixture::new();
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
     fixture.awake_target();
-    let fake = FakeAppServer::install(vec![
-        FakeConnection {
-            requests: vec![],
-            closes: true,
-            running: None,
-        },
-        FakeConnection {
-            requests: vec![tool_call_request(14, THREAD_A, "call-a", "after restart")],
-            closes: false,
-            running: None,
-        },
-    ]);
+    let fake = FakeAppServer::install_sessions(
+        Some(THREAD_A),
+        vec![
+            FakeConnection {
+                requests: vec![],
+                closes: true,
+                running: None,
+            },
+            FakeConnection {
+                requests: vec![tool_call_request(14, THREAD_A, "call-a", "after restart")],
+                closes: false,
+                running: None,
+            },
+        ],
+    );
     fixture.adapter("gpt-sol", &fake);
     let answer = std::thread::scope(|scope| {
         let nexus = &fixture.nexus;
         let server = scope.spawn(move || nexus.serve_send_tool(scope));
-        let answer = answer_to(&fake.written_on(4, |m| m["id"] == 14), 14);
+        let answer = answer_to(&fake.written_on(5, |m| m["id"] == 14), 14);
         nexus.stopping.request();
         nexus.store.launch_changes.announce();
         server.join().expect("the send tool stops with the Nexus");
@@ -997,7 +1097,10 @@ fn a_pending_call_is_answered_after_start_and_reconnect() {
         fixture.target_queue(),
         vec![sent(sender_a(), "after restart")]
     );
-    assert!(fake.runs() >= 4, "probe, connection, probe, connection");
+    assert!(
+        fake.runs() >= 5,
+        "probe, subscription, family read, probe, subscription"
+    );
 }
 
 #[test]

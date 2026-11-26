@@ -757,7 +757,7 @@ fn a_held_soft_is_delivered_at_its_recipients_idle_event() {
     let (_caller, peer) = soft_recipient(&fixture, false);
     let response = send_soft(&fixture, &peer, "Read the ruling when you rest.");
     assert!(
-        matches!(response, signal_flow::Output::Sent(_)),
+        matches!(&response, signal_flow::Output::SendAccepted(accepted) if accepted.visible_delivery_state == signal_flow::VisibleDeliveryState::Queued),
         "{response:?}"
     );
     assert!(fixture.typed().is_none(), "nothing typed during the turn");
@@ -785,7 +785,7 @@ fn a_refused_claude_drain_is_retried_at_the_next_stop_of_its_session() {
     for body in ["Oldest retained.", "Next retained."] {
         assert!(matches!(
             send_soft(&fixture, &peer, body),
-            signal_flow::Output::Sent(_)
+            signal_flow::Output::SendAccepted(accepted) if accepted.visible_delivery_state == signal_flow::VisibleDeliveryState::Queued
         ));
     }
     let signal_flow::Event::Stopped(stop) = claude_stop(&fixture) else {
@@ -816,6 +816,14 @@ fn a_refused_claude_drain_is_retried_at_the_next_stop_of_its_session() {
     assert_eq!(stored(&fixture, Model::Sol).queue.0, retained);
     assert!(fixture.typed().is_none());
 
+    assert_eq!(
+        fixture.nexus.report(signal_flow::Report_Data {
+            flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+            process_option: None,
+            event: signal_flow::Event::Stopped(stop.clone()),
+        }),
+        signal_flow::Output::Reported
+    );
     fixture.nexus.after_report(
         &flow_ethos::FlowId(CLAUDE_SEAT.into()),
         &signal_flow::Event::Stopped(stop),
@@ -837,7 +845,7 @@ fn several_held_soft_messages_are_delivered_in_order_at_one_idle_event() {
     for body in ["First held.", "Second held.", "Third held."] {
         let response = send_soft(&fixture, &peer, body);
         assert!(
-            matches!(response, signal_flow::Output::Sent(_)),
+            matches!(&response, signal_flow::Output::SendAccepted(accepted) if accepted.visible_delivery_state == signal_flow::VisibleDeliveryState::Queued),
             "{response:?}"
         );
     }
@@ -8141,6 +8149,7 @@ fn check_fresh_receipt(late: bool) {
     use crate::store::RecordsPromptDeliveryResult;
     use crate::store::fresh_launch::TracksFreshLaunches;
     let mut fixture = NexusFixture::new();
+    fixture.herdr_for_replacement(0);
     let mut launch = fixture.staged_launch("fresh-cohort-proof", None);
     let at = launch.profile.address.clone();
     fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {

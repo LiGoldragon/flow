@@ -768,6 +768,16 @@ impl RespondsToSendCalls for RunningNexus {
                 crate::seat_observation::ObservesCurrentSeats::observe_returning_source(
                     self, &node,
                 );
+                if node.flow_lifecycle == signal_flow::FlowLifecycle::Active
+                    && !self.store.seat_is_alive(&node.flow_id.0)
+                {
+                    // A responder resumes the thread; never do that to learn
+                    // whether the seat exists. Wait for a real source cue.
+                    if Self::stopped_before_appearance(&inbox, generation) {
+                        return;
+                    }
+                    continue;
+                }
             }
             match adapter.subscribe_thread(thread, generation, &signals, &inbox, &notes) {
                 Err(SubscriptionEnd::Stopped) => return,

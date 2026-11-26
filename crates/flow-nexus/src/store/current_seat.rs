@@ -73,9 +73,7 @@ impl FlowStore {
             .unwrap_or_else(|e| e.into_inner());
         let commit = self.engine.begin_atomic_commit();
         let commit = match observation {
-            Some(standing) => {
-                self.stage_current_event(commit, id, SeatEvent::Observed(standing))?
-            }
+            Some(standing) => self.stage_observation(commit, id, standing)?,
             None => match self.current_seat(id)? {
                 CurrentSeatRead::Known(CurrentSeat {
                     seat_standing: SeatStanding::Alive(_),
@@ -102,13 +100,34 @@ impl FlowStore {
         if !matches!(self.current_seat(id)?, CurrentSeatRead::NoRecord) {
             return Ok(false);
         }
-        let commit = self.stage_current_event(
-            self.engine.begin_atomic_commit(),
-            id,
-            SeatEvent::Observed(standing),
-        )?;
+        let commit = self.stage_observation(self.engine.begin_atomic_commit(), id, standing)?;
         self.engine.commit_atomic(commit)?;
         Ok(true)
+    }
+
+    fn stage_observation(
+        &self,
+        commit: AtomicCommit,
+        id: &str,
+        standing: SeatStanding,
+    ) -> Result<AtomicCommit, StoreError> {
+        use crate::store::metaflow::SleepsMetaflows;
+        if matches!(self.current_seat(id)?, CurrentSeatRead::Known(row) if row.seat_standing == standing || row.seat_standing == SeatStanding::Ended)
+        {
+            return Ok(commit);
+        }
+        let commit = match self.metaflow_awake_as(id)? {
+            Some(seat) => self.stage_observation_audit(
+                commit,
+                crate::generated::overriding::Seat {
+                    flow_id: FlowId(id.into()),
+                    address: seat.address,
+                },
+                &standing,
+            )?,
+            None => commit,
+        };
+        self.stage_current_event(commit, id, SeatEvent::Observed(standing))
     }
 
     /// Called under transitions_gate and committed with the event source.

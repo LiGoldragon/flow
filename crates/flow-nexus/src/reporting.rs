@@ -131,6 +131,12 @@ impl RecordsReports for RunningNexus {
         if let Ok(Some(node)) = self.store.flow_node(&flow_id.0) {
             crate::seat_observation::ObservesCurrentSeats::observe_returning_source(self, &node);
         }
+        if matches!(
+            self.store.current_seat(&flow_id.0),
+            Err(_) | Ok(crate::store::current_seat::CurrentSeatRead::NoRecord)
+        ) {
+            return;
+        }
         // A prompt the flow's own session took is first the seat's word of
         // a submission: a writer that typed it waits for it, holding the
         // gate the settlement below takes, so it is witnessed before

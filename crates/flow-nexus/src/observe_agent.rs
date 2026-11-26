@@ -181,7 +181,7 @@ impl ObservesAgent for RunningNexus {
             return Ok(());
         }
         let Some((node, route)) = self.observable(flow_id) else {
-            return send(&AgentState::Gone.observed_of(flow_id));
+            return Ok(());
         };
         // What this subscription watches: a Gone it reads acts only while
         // the flow still runs there, as the seat it was opened on.

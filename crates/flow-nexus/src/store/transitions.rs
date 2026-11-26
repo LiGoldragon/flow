@@ -195,6 +195,36 @@ impl SeedsReportedTransition for FlowEvents {
     }
 }
 
+impl FlowStore {
+    /// An observed native state is itself an event, in the same audit as a
+    /// report. The caller holds the current-state writer gate across both.
+    pub(super) fn stage_observation_audit(
+        &self,
+        commit: sema_engine::AtomicCommit,
+        seat: Seat,
+        standing: &SeatStanding,
+    ) -> Result<sema_engine::AtomicCommit, StoreError> {
+        let tokens = Tokens(self.context_size(&seat.flow_id.0)?.unwrap_or(0));
+        let event = match standing {
+            SeatStanding::Alive(SeatActivity::Working) => Event::Working(tokens),
+            SeatStanding::Alive(SeatActivity::Resting) => Event::Idle(tokens),
+            SeatStanding::Ended => Event::Ended,
+        };
+        let caused = Caused {
+            seat,
+            cause: Cause::Reported(event),
+            moment: Moment(std::time::SystemTime::now().seconds_since_epoch()),
+        };
+        let writes = self.fold(vec![caused])?;
+        Ok(writes
+            .into_iter()
+            .fold(commit, |commit, write| match write {
+                TransitionWrite::Appended(flow) => commit.mutate(self.flow_transitions, flow),
+                TransitionWrite::Opened(flow) => commit.assert(self.flow_transitions, flow),
+            }))
+    }
+}
+
 pub(crate) trait ReadsRestEpoch {
     /// A stable identity within the append-only history of this flow.
     fn rest_epoch(&self, flow_id: &str) -> Result<Option<usize>, StoreError>;

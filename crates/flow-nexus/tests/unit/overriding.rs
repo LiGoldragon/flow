@@ -1784,7 +1784,9 @@ fn a_reply_left_unwritten_fences_only_its_recipient_and_reopens_in_order() {
     let prompts = super::prompts(&fixture.directory.path().join("herdr-operations.log"));
     assert_eq!(prompts.len(), 1, "{prompts:?}");
     let first = prompts[0].find(&oldest_id.0).expect("oldest recovered");
-    let second = prompts[0].find(&following_id.0).expect("following recovered");
+    let second = prompts[0]
+        .find(&following_id.0)
+        .expect("following recovered");
     assert!(first < second);
 }
 

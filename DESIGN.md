@@ -834,11 +834,8 @@ so its arrival's turn runs (`Running`). The fold rule stands in one place,
 `LeadsToState for Arrival`: an arrival whose receipt lies in a turn that
 has already ended records no Acting, and the seat stays as it is; one
 whose turn runs leads to Acting, so a seat in its turn waits for its idle
-event. The state the Nexus
-decides by is the last transition: `rests_now`, which a Soft request and a
-drain ask, reads Resting from it (a Simplified Claude seat that opened with
-no prompt is ready for its first input), and the panel's state of a live
-seat is it. Every write of the family takes `transitions_gate`.
+event. The Nexus decides from the keyed current seat record: `rests_now`, a Soft
+request, a drain and the panel all read it; no decision replays this audit. Every write of the family takes `transitions_gate`.
 
 Opening the store never creates a current record or historical event from
 earlier reports. These audit records are left as written.
@@ -1006,6 +1003,7 @@ statuses determine family activity: an active descendant keeps an idle
 parent working. A native status broadcast, including a child's, prompts
 a new family reading. Claude's session process and native transcript
 determine its activity. Herdr locates the pane and carries writes, never
-determines harness activity or proves a harness ended. A successful observation of absence establishes an end.
+determines harness activity or proves a harness ended. A successful
+observation of absence establishes an end.
 An unavailable source supplies no state: stale live knowledge must not
 survive that failure. A returning source may establish the missing record.

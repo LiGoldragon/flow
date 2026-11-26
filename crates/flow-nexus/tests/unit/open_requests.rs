@@ -411,8 +411,8 @@ fn delivered_to_codex(store: &FlowStore, address: &Address, flow_id: &str, threa
 /// successor's Done closes it by its id.
 #[test]
 fn a_codex_refresh_carries_its_open_requests_to_its_successor() {
-    use super::codex_turns::{completed, idle, started};
-    use crate::codex_turns::SettlesRestingCodexSeats;
+    use crate::generated::memory::{SeatActivity, SeatStanding};
+    use crate::send_tool::RespondsToSendCalls;
     use crate::waking::AtStop;
     let mut fixture = NexusFixture::new();
     let world = codex_seat_in_fresh_world(&mut fixture);
@@ -465,18 +465,20 @@ fn a_codex_refresh_carries_its_open_requests_to_its_successor() {
 
     // The thread works: the Refresh waits for its rest.
     assert_eq!(
-        fixture
-            .nexus
-            .codex_events(WORKING_CODEX_THREAD, vec![idle(), started("turn-working")]),
+        fixture.nexus.apply_thread_family(
+            WORKING_CODEX_THREAD,
+            Some(SeatStanding::Alive(SeatActivity::Working))
+        ),
         None
     );
     let ordered = fixture.nexus.dispatch(Input::Refresh(at.clone()));
     assert!(matches!(ordered, Output::RefreshQueued(_)), "{ordered:?}");
     assert_eq!(world.claude_starts(), 0, "{}", world.calls());
 
-    let at_rest = fixture
-        .nexus
-        .codex_events(WORKING_CODEX_THREAD, vec![completed("turn-working")]);
+    let at_rest = fixture.nexus.apply_thread_family(
+        WORKING_CODEX_THREAD,
+        Some(SeatStanding::Alive(SeatActivity::Resting)),
+    );
     assert!(
         matches!(
             &at_rest,

@@ -88,6 +88,29 @@ impl FlowStore {
         Ok(())
     }
 
+    /// The source answered after an unavailable takeover. Do not overwrite
+    /// a newer event that won the race while this observation was in flight.
+    pub(crate) fn establish_observation(
+        &self,
+        id: &str,
+        standing: SeatStanding,
+    ) -> Result<bool, StoreError> {
+        let _gate = self
+            .transitions_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !matches!(self.current_seat(id)?, CurrentSeatRead::NoRecord) {
+            return Ok(false);
+        }
+        let commit = self.stage_current_event(
+            self.engine.begin_atomic_commit(),
+            id,
+            SeatEvent::Observed(standing),
+        )?;
+        self.engine.commit_atomic(commit)?;
+        Ok(true)
+    }
+
     /// Called under transitions_gate and committed with the event source.
     pub(super) fn stage_current_event(
         &self,

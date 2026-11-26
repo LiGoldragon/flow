@@ -2387,6 +2387,43 @@ mod tests {
     }
 
     #[test]
+    fn takeover_distinguishes_missing_loaded_thread_from_unavailable_and_idle() {
+        use crate::generated::memory::{SeatActivity, SeatStanding};
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
+        let fake = FakeProxy;
+        let initialize = fake.websocket_frame(r#"{"id":1,"result":{}}"#);
+        let absent = [
+            initialize.clone(),
+            fake.websocket_frame(r#"{"id":2,"result":{"data":[],"nextCursor":null}}"#),
+        ];
+        let (_directory, executable) = fake.install(&absent);
+        assert_eq!(
+            adapter_at(executable).thread_standing("thread-1").unwrap(),
+            SeatStanding::Ended
+        );
+        let unreadable = [
+            initialize.clone(),
+            fake.websocket_frame(
+                r#"{"id":2,"error":{"code":-32000,"message":"temporarily unavailable"}}"#,
+            ),
+        ];
+        let (_directory, executable) = fake.install(&unreadable);
+        assert!(adapter_at(executable).thread_standing("thread-1").is_err());
+        let idle = [
+            initialize,
+            fake.websocket_frame(r#"{"id":2,"result":{"data":["thread-1"],"nextCursor":null}}"#),
+            fake.websocket_frame(
+                r#"{"id":3,"result":{"thread":{"id":"thread-1","status":{"type":"idle"}}}}"#,
+            ),
+        ];
+        let (_directory, executable) = fake.install(&idle);
+        assert_eq!(
+            adapter_at(executable).thread_standing("thread-1").unwrap(),
+            SeatStanding::Alive(SeatActivity::Resting)
+        );
+    }
+
+    #[test]
     fn fake_proxy_names_the_bound_thread_and_reads_the_name_back() {
         let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
         let fake = FakeProxy;

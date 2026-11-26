@@ -74,6 +74,38 @@ fn report(fixture: &NexusFixture, event: signal_flow::Event) {
     fixture.nexus.after_report(&flow_id, &event);
 }
 
+#[test]
+fn refused_hook_commit_neither_acknowledges_nor_changes_activity_or_audit() {
+    use crate::store::events::RecordsHarnessEvents;
+    use crate::test_faults::{InjectsCrashes, RefusedWrite};
+    let fixture = NexusFixture::new();
+    awake_claude_seat(&fixture);
+    let before = fixture.nexus.store.events(CLAUDE_SEAT).unwrap();
+    let state = || {
+        fixture
+            .nexus
+            .store
+            .state_of(AskedFlow(flow_ethos::FlowId(CLAUDE_SEAT.into())))
+            .unwrap()
+    };
+    assert_eq!(state(), Some(meta::State::Resting));
+    fixture
+        .nexus
+        .store
+        .faults
+        .refuse_next(RefusedWrite::SeatReport);
+    assert_ne!(
+        fixture.nexus.report(signal_flow::Report_Data {
+            flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+            process_option: None,
+            event: signal_flow::Event::ToolUsed("Read".into()),
+        }),
+        signal_flow::Output::Reported
+    );
+    assert_eq!(state(), Some(meta::State::Resting));
+    assert_eq!(fixture.nexus.store.events(CLAUDE_SEAT).unwrap(), before);
+}
+
 fn session() -> Option<signal_flow::NativeSessionId> {
     Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into()))
 }

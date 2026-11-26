@@ -125,6 +125,9 @@ pub trait ReadsClaudeSessions: Sized {
 
     /// The session process `process_id` runs, when Claude's record of it
     /// names that process at the start it runs with now; None otherwise.
+    /// Every recorded process of this session was checked against its birth.
+    /// Unreadable evidence cannot prove that a process is gone.
+    fn session_is_live(&self, session_id: &str) -> Option<bool>;
     fn session_of(&self, process_id: u32) -> Option<String>;
 }
 
@@ -133,6 +136,37 @@ impl ReadsClaudeSessions for ClaudeSessions {
         Self {
             directory: claude_home.join("sessions"),
         }
+    }
+
+    fn session_is_live(&self, session_id: &str) -> Option<bool> {
+        for entry in fs::read_dir(&self.directory).ok()? {
+            let path = entry.ok()?.path();
+            if path.extension() != Some(std::ffi::OsStr::new("json")) {
+                continue;
+            }
+            let record = path.read_json()?;
+            if record.get("sessionId")?.as_str()? != session_id {
+                continue;
+            }
+            let pid = u32::try_from(record.get("pid")?.as_u64()?).ok()?;
+            let start = match record.get("procStart")? {
+                Value::String(start) => start.clone(),
+                Value::Number(start) => start.to_string(),
+                _ => return None,
+            };
+            let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Ok(stat) => stat,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return None,
+            };
+            let (_, fields) = stat.rsplit_once(") ")?;
+            let mut fields = fields.split_whitespace();
+            let state = fields.next()?;
+            if !matches!(state, "Z" | "X") && fields.nth(18)? == start {
+                return Some(true);
+            }
+        }
+        Some(false)
     }
 
     fn session_of(&self, process_id: u32) -> Option<String> {

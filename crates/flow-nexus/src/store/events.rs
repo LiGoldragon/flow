@@ -238,6 +238,13 @@ impl FlowStore {
             Some(state_event) => self.stage_current_event(commit, flow_id, state_event)?,
             None => commit,
         };
+        #[cfg(test)]
+        {
+            use crate::test_faults::{InjectsCrashes, RefusedWrite};
+            if self.faults.refused_now(RefusedWrite::SeatReport) {
+                return Err(StoreError::StateInvariant);
+            }
+        }
         self.engine.commit_atomic(commit)?;
         Ok(EventRecording::Recorded)
     }

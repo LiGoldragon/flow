@@ -37,11 +37,20 @@ impl ObservesCurrentSeats for RunningNexus {
             if node.flow_lifecycle != signal_flow::FlowLifecycle::Active {
                 return;
             }
-            let observed = self.read_native_standing(node);
-            if observed.is_some()
-                && let Err(error) = self.store.record_observation(&node.flow_id.0, observed)
-            {
-                eprintln!("flow-nexus: failed to record returning source: {error}");
+            if let Some(observed) = self.read_native_standing(node) {
+                match self.store.establish_observation(&node.flow_id.0, observed) {
+                    Ok(true) => {
+                        use crate::send_tool::ServesLaunchCalls;
+                        use crate::store::metaflow::SleepsMetaflows;
+                        if let Ok(Some(seat)) = self.store.metaflow_awake_as(&node.flow_id.0) {
+                            self.defer_wake(seat.address);
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        eprintln!("flow-nexus: failed to record returning source: {error}")
+                    }
+                }
             }
         }
     }
@@ -68,7 +77,17 @@ impl ReadsNativeStanding for RunningNexus {
                     return None;
                 };
                 match self.herdr.pane_presence(node) {
-                    PanePresence::Absent => return Some(Ended),
+                    PanePresence::Absent => {
+                        return match self
+                            .herdr
+                            .claude_sessions
+                            .session_is_live(&node.session_id.0)
+                        {
+                            Some(false) => Some(Ended),
+                            // A live session without its pane has no observed activity.
+                            Some(true) | None => None,
+                        };
+                    }
                     PanePresence::Unknown => return None,
                     PanePresence::Bare | PanePresence::Present => {}
                 }
@@ -91,7 +110,17 @@ impl ReadsNativeStanding for RunningNexus {
                     }
                 });
                 if !present {
-                    return (!unidentified_claude).then_some(Ended);
+                    return if !unidentified_claude
+                        && self
+                            .herdr
+                            .claude_sessions
+                            .session_is_live(&node.session_id.0)
+                            == Some(false)
+                    {
+                        Some(Ended)
+                    } else {
+                        None
+                    };
                 }
                 match self.herdr.pane_agent(node) {
                     PaneAgent::Present {

@@ -5005,6 +5005,8 @@ mod tests {
 
         fn register_with(&self, lifecycle: FlowLifecycle) {
             let mut node = self.node();
+            let active = lifecycle == FlowLifecycle::Active;
+            let id = node.flow_id.clone();
             node.flow_lifecycle = lifecycle;
             let response = self
                 .nexus
@@ -5013,6 +5015,14 @@ mod tests {
                 matches!(response, meta_signal_flow::Output::FlowRegistered(_)),
                 "{response:?}"
             );
+            if active {
+                use crate::generated::memory::{SeatActivity, SeatStanding};
+                use crate::store::current_seat::RecordsCurrentSeats;
+                self.nexus
+                    .store
+                    .record_observation(&id.0, Some(SeatStanding::Alive(SeatActivity::Working)))
+                    .unwrap();
+            }
         }
 
         /// A MiddleAbrupt Deliver of `text` from the owner: the tier that

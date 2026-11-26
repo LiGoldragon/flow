@@ -1365,6 +1365,21 @@ impl super::counters::CountsIds for QueueAttemptIds<'_> {
 }
 
 #[cfg(test)]
+pub(crate) trait SeedsStockQueueAttempts {
+    fn seed_stock_queue_attempt(&self, attempt: QueueDeliveryAttempt);
+}
+
+#[cfg(test)]
+impl SeedsStockQueueAttempts for FlowStore {
+    fn seed_stock_queue_attempt(&self, attempt: QueueDeliveryAttempt) {
+        let commit = self
+            .commit_attempt(self.engine.begin_atomic_commit(), attempt)
+            .unwrap();
+        self.engine.commit_atomic(commit).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1589,20 +1604,5 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-    }
-}
-
-#[cfg(test)]
-pub(crate) trait SeedsStockQueueAttempts {
-    fn seed_stock_queue_attempt(&self, attempt: QueueDeliveryAttempt);
-}
-
-#[cfg(test)]
-impl SeedsStockQueueAttempts for FlowStore {
-    fn seed_stock_queue_attempt(&self, attempt: QueueDeliveryAttempt) {
-        let commit = self
-            .commit_attempt(self.engine.begin_atomic_commit(), attempt)
-            .unwrap();
-        self.engine.commit_atomic(commit).unwrap();
     }
 }

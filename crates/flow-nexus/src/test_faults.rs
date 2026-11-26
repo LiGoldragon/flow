@@ -16,6 +16,8 @@ use std::sync::{Condvar, Mutex};
 /// The points after a successor's confirmation a crash is injected at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum CrashPoint {
+    AfterFreshClaim,
+    AfterFreshSubmission,
     /// K0: W1 landed; the successor holds its Address, unconfirmed.
     AfterAcknowledgement,
     /// K1, K6, K8, and K10 at a later launch: W2 landed, before the

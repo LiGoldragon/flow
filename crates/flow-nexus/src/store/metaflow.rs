@@ -408,7 +408,7 @@ pub(crate) enum AddressTaking {
 
 /// The writes that take an Address for a launched flow.
 pub(crate) struct TakenAddress {
-    metaflow: StoredMetaflow,
+    pub(super) metaflow: StoredMetaflow,
     new: bool,
     /// A binding of a process no longer live, left by an earlier Bind.
     stale_binding: bool,

@@ -1049,3 +1049,27 @@ NoRecord and Ended suppress a seat effect. A later native live observation,
 not an unrelated configuration or launch announcement, resolves NoRecord.
 Startup recovery and explicit Resume retain responsibility for the queues
 already present; initial subscription snapshots are not release events.
+
+### Fresh launch and its queue prefix
+
+An ordinary pane write has a request-state marker. A fresh launch instead
+owns one cohort at its Address: the launch request ID and the exact ordered
+logical request IDs selected for its first prompt. The claim is committed
+before Start. Ordinary pane delivery cannot write through an unresolved
+claim. It does not duplicate the native phase, the queue bodies or the
+receipt: the existing launch attempt owns that evidence.
+
+On confirmation the same transaction binds the flow Awake, accounts for the
+fixed prefix, records any native receipt and drops the claim. Admissions
+behind that prefix stay queued. Neither an assigned launch ID nor an
+uncorrelated hook is a native receipt. A transport acceptance with no
+conclusive observation accounts for the selected work as final Uncertain.
+
+Both production and seeded store openers reconcile claims before ordinary
+interrupted writes. No attempt or a conclusive pre-prompt refusal releases
+the claim without consuming its queue. If native submission was possible,
+opening consumes the selected prefix as Uncertain and retains the existing
+launch identity until confirmation: another wake cannot create a duplicate.
+An observed receipt can complete the same stored attempt without resubmission.
+Takeover also rejects undeclared parked reservations and discards undeclared
+successor and replacement obligations, preserving the Address's durable queue.

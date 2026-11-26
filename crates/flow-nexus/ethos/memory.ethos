@@ -390,6 +390,9 @@ Memory
   SeatStanding.[ Alive.SeatActivity Ended ]
   StateRevision.Integer
   CurrentSeat.{ FlowId SeatStanding StateRevision }
+  ; One unfinished fresh launch per Address. The attempt owns its native
+  ; progress; this record owns only the exact durable request membership.
+  FreshLaunchCohort.{ Address LaunchRequestId Vector<LogicalDeliveryId> }
   ; One transition: the state entered, its cause and its moment.
   Transition.{ State Cause Moment }
   ; A flow's transitions, oldest first, keyed by its FlowId, with the

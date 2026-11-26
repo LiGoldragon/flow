@@ -683,7 +683,34 @@ impl LaunchesFlows for RunningNexus {
             composed_launch: launch,
             prompt_delivery_intent: delivery_intent.clone(),
         })) {
-            Outcome::Submitted(_) => self.confirmed(&binding.flow_id.0),
+            Outcome::Submitted(result) => {
+                #[cfg(test)]
+                crate::test_faults::InjectsCrashes::crash_if_armed(
+                    &self.store.faults,
+                    crate::test_faults::CrashPoint::AfterFreshSubmission,
+                );
+                // A transport acceptance alone never names a native turn.
+                // Preserve it as ambiguous unless the harness positively
+                // receipts this exact launch and all submitted prompt parts.
+                use crate::herdr::launch::ObservesNativeTargetReceipt;
+                let result = match result {
+                    signal_flow::PromptDeliveryResult::Ambiguous(intent) => {
+                        match self.herdr.observe_native_target_receipt(&intent) {
+                            Ok(crate::generated::starter::StartupProgress::Received(receipt)) => {
+                                signal_flow::PromptDeliveryResult::Observed(receipt)
+                            }
+                            _ => signal_flow::PromptDeliveryResult::Ambiguous(intent),
+                        }
+                    }
+                    receipt => receipt,
+                };
+                if self.perform(Operation::Record(Record_Data::Delivered(result)))
+                    != Outcome::Recorded
+                {
+                    return Output::StartRejected(StartRejection::LaunchPersistenceRefused);
+                }
+                self.confirmed(&binding.flow_id.0)
+            }
             outcome => Self::native_refused(NativeLaunchStage::Confirm, outcome),
         }
     }

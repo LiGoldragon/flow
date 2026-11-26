@@ -31,6 +31,7 @@ use effort_configuration::{RegistersModelEfforts, StoredModelEffort};
 pub(crate) mod current_seat;
 mod delivery_attempt_upgrade;
 pub mod delivery_retirement;
+pub(crate) mod fresh_launch;
 pub(crate) mod living_upgrade;
 pub(crate) mod logical_delivery;
 #[cfg(test)]
@@ -347,6 +348,7 @@ const RUNNING_TABLES: &[&str] = &[
     OPTIONAL_PENDING_HANDOVER_TABLE,
     OPTIONAL_TURN_RETENTION_TABLE,
     current_seat::TABLE,
+    fresh_launch::TABLE,
     OPTIONAL_FLOW_TRANSITIONS_TABLE,
     OPTIONAL_HOLD_TABLE,
     OPTIONAL_PERMAFLOW_HOLD_TABLE,
@@ -1806,6 +1808,7 @@ pub struct FlowStore {
     turn_ends: TableReference<turn_end::TurnEndRecord>,
     kept_answers: TableReference<kept_answer::KeptAnswer>,
     scheduled_reminders: TableReference<scheduled_reminder::ScheduledReminder>,
+    fresh_launch_cohorts: TableReference<crate::generated::memory::FreshLaunchCohort>,
     current_seats: TableReference<crate::generated::memory::CurrentSeat>,
     flow_transitions: TableReference<crate::generated::memory::Flow>,
     /// Taken by every write of a flow's transitions (`transitions`).
@@ -2922,6 +2925,7 @@ impl OpensFlowStore for FlowStore {
         let scheduled_reminders = engine.register_table(
             <scheduled_reminder::ScheduledReminder as scheduled_reminder::DescribesScheduledReminderTable>::descriptor(),
         )?;
+        let fresh_launch_cohorts = engine.register_table(<crate::generated::memory::FreshLaunchCohort as fresh_launch::DescribesFreshCohorts>::descriptor())?;
         let current_seats = engine.register_table(<crate::generated::memory::CurrentSeat as current_seat::DescribesCurrentSeats>::descriptor())?;
         let flow_transitions = engine.register_table(
             <crate::generated::memory::Flow as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
@@ -2977,6 +2981,7 @@ impl OpensFlowStore for FlowStore {
             kept_answers,
             scheduled_reminders,
             current_seats,
+            fresh_launch_cohorts,
             flow_transitions,
             transitions_gate: Mutex::new(()),
             hold,
@@ -3024,6 +3029,7 @@ impl OpensFlowStore for FlowStore {
         store.align_followed_requests()?;
         store.seed_store_identity()?;
         store.seed_missing_queued_deliveries()?;
+        fresh_launch::TracksFreshLaunches::recover_fresh_launches(&store)?;
         logical_delivery::RecordsQueueWrites::recover_queue_writes(&store)?;
         request_id_upgrade::RunsRequestIdAnnouncements::run_request_id_announcements(&store)?;
         Ok(store)
@@ -3176,6 +3182,7 @@ impl OpensFlowStore for FlowStore {
         let scheduled_reminders = engine.register_table(
             <scheduled_reminder::ScheduledReminder as scheduled_reminder::DescribesScheduledReminderTable>::descriptor(),
         )?;
+        let fresh_launch_cohorts = engine.register_table(<crate::generated::memory::FreshLaunchCohort as fresh_launch::DescribesFreshCohorts>::descriptor())?;
         let current_seats = engine.register_table(<crate::generated::memory::CurrentSeat as current_seat::DescribesCurrentSeats>::descriptor())?;
         let flow_transitions = engine.register_table(
             <crate::generated::memory::Flow as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
@@ -3231,6 +3238,7 @@ impl OpensFlowStore for FlowStore {
             kept_answers,
             scheduled_reminders,
             current_seats,
+            fresh_launch_cohorts,
             flow_transitions,
             transitions_gate: Mutex::new(()),
             hold,
@@ -3271,6 +3279,7 @@ impl OpensFlowStore for FlowStore {
         store.archive_legacy_queue()?;
         store.align_followed_requests()?;
         store.seed_missing_queued_deliveries()?;
+        fresh_launch::TracksFreshLaunches::recover_fresh_launches(&store)?;
         logical_delivery::RecordsQueueWrites::recover_queue_writes(&store)?;
         if store
             .engine
@@ -5475,12 +5484,18 @@ impl WritesFlowStore for FlowStore {
         // The launch that bound this flow names the Address it takes, in
         // the same write that makes it Active; a launch that held it since
         // its binding keeps it and drops the hold.
+        let _delivery_writer = self
+            .logical_deliveries
+            .write_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut confirming_attempt = None;
         let mut taken = None;
         let mut taken_address = None;
         if let Some(launch_request_id) = self.launch_requests_bound_to(flow_id)?.pop()
             && let Some(attempt) = self.launch_attempt(&launch_request_id)?
         {
-            let profile = attempt.launch_profile;
+            let profile = &attempt.launch_profile;
             taken_address = Some(profile.address.clone());
             match self.address_taking(
                 &profile.address,
@@ -5496,6 +5511,7 @@ impl WritesFlowStore for FlowStore {
                     return Ok(Output::StartRejected(rejection));
                 }
             }
+            confirming_attempt = Some(attempt);
         }
         let _state_writer = self
             .transitions_gate
@@ -5510,7 +5526,24 @@ impl WritesFlowStore for FlowStore {
             commit = commit.mutate(self.flows, flow);
             written = true;
         }
-        if let Some(taking) = taken {
+        if let Some(mut taking) = taken {
+            if let Some(attempt) = confirming_attempt.as_ref()
+                && fresh_launch::TracksFreshLaunches::fresh_cohort(
+                    self,
+                    &attempt.launch_profile.address,
+                )?
+                .is_some()
+            {
+                use fresh_launch::TracksFreshLaunches;
+                commit = self.stage_fresh_confirmation(commit, attempt, &mut taking)?;
+                commit = pending_reap::ReassignsPendingReaps::reaps_reassigned(
+                    self,
+                    &attempt.launch_profile.address,
+                    Some(&signal_flow::FlowId(flow_id.to_owned())),
+                    commit,
+                )?
+                .commit;
+            }
             commit = taking.written(self, commit);
             written = true;
         }
@@ -5733,6 +5766,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                 META_TURN_RETENTION_CONFIGURATION_FAMILY,
                 META_TURN_RETENTION_CONFIGURATION_SCHEMA,
             ),
+            fresh_launch::TABLE => (fresh_launch::FAMILY, fresh_launch::SCHEMA),
             current_seat::TABLE => (current_seat::FAMILY, current_seat::SCHEMA),
             "flow_nexus_flow_transitions" => (
                 overriding::TRANSITIONS_FAMILY,
@@ -6128,6 +6162,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                     || *name == OPTIONAL_PENDING_HANDOVER_TABLE
                     || *name == OPTIONAL_HARNESS_HOOK_TABLE
                     || *name == OPTIONAL_TURN_RETENTION_TABLE
+                    || *name == fresh_launch::TABLE
                     || *name == current_seat::TABLE
                     || *name == OPTIONAL_FLOW_TRANSITIONS_TABLE
                     || *name == OPTIONAL_HOLD_TABLE

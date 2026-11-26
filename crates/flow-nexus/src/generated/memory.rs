@@ -1066,6 +1066,14 @@ pub struct CurrentSeat {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct FreshLaunchCohort {
+    pub address: signal_flow::Address,
+    pub launch_request_id: signal_flow::LaunchRequestId,
+    pub logical_delivery_id_vector: std::vec::Vec<signal_flow::LogicalDeliveryId>,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Transition {
     pub state: meta_signal_flow::generated::signal::State,
     pub cause: Cause,

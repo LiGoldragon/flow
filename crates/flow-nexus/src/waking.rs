@@ -104,7 +104,7 @@ use crate::delivery::DeliversMessages;
 use crate::delivery::lease::LeasesPanes;
 use crate::generated::memory::RefreshCaller;
 use crate::generated::operation::{
-    Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
+    Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data,
 };
 use crate::generated::overriding::HeedsOverrides;
 use crate::generated::starter::ProfilesFreshSeat;
@@ -732,8 +732,6 @@ pub enum WakeRefusal {
     /// The fresh launch was refused for this reason. The queue is kept,
     /// each request waiting in it marked `Retryable.WakeRefused` with it.
     StartRejected(signal_flow::StartRejection),
-    /// The started flow was not recorded Awake.
-    AwakeNotRecorded,
 }
 
 /// What a wake refusal answers on the wire.
@@ -745,7 +743,7 @@ pub trait AnswersWakeRefusal {
 impl AnswersWakeRefusal for WakeRefusal {
     fn failure(&self) -> Failed_Data {
         match self {
-            Self::StoreUnreadable | Self::AwakeNotRecorded => Failed_Data::StoreRefused,
+            Self::StoreUnreadable => Failed_Data::StoreRefused,
             Self::NotAsleep => Failed_Data::NotAsleep,
             Self::NothingQueued | Self::AdmissionReplyPending => Failed_Data::NothingQueued,
             Self::SessionLive => Failed_Data::ConflictingBinding,
@@ -833,14 +831,6 @@ pub(crate) enum FreshRefusal {
     Failed(Failed_Data),
 }
 
-/// A fresh run together with the exact launch that placed its first prompt.
-/// A wake keeps both so it never receipts another launch later bound to the
-/// same run.
-pub(crate) struct FreshStarted {
-    flow_id: FlowId,
-    launch_request_id: String,
-}
-
 /// A flow the Nexus starts itself, as a wake starts one: no calling flow is
 /// its origin. The start runs under the dispatch gate, which is released
 /// while the launch settles.
@@ -887,15 +877,8 @@ pub(crate) trait WakesInParts {
         metaflow: &Metaflow,
         fresh: FreshContext,
         text: &str,
-    ) -> Result<FreshStarted, FreshRefusal>;
-    fn settle_startup(
-        &self,
-        address: &Address,
-        flow_id: &str,
-        launch_request_id: &str,
         startup: &[QueueEntry],
-        simplified: bool,
-    ) -> bool;
+    ) -> Result<FlowId, FreshRefusal>;
     fn last_launch_profile(&self, flow_id: &str) -> Option<LaunchProfile>;
     /// Writes the context size the flow's native transcript shows now, the
     /// size a Compact of the flow is judged by.
@@ -2602,61 +2585,6 @@ impl DrainsHeldSeats for RunningNexus {
 }
 
 impl WakesInParts for RunningNexus {
-    fn settle_startup(
-        &self,
-        address: &Address,
-        flow_id: &str,
-        launch_request_id: &str,
-        startup: &[QueueEntry],
-        simplified: bool,
-    ) -> bool {
-        let Ok(Some(node)) = self.store.flow_node(flow_id) else {
-            return false;
-        };
-        if simplified
-            && let Some(oldest) = startup.first()
-            && let signal_flow::SentBy::Sender(recipient) = &oldest.sent_by
-        {
-            let binding = SimplifiedReplyBinding {
-                flow_id: flow_ethos::FlowId(flow_id.to_owned()),
-                input_delivery_id: crate::generated::memory::InputDeliveryId(
-                    oldest.logical_delivery_id.clone().0,
-                ),
-                source: crate::generated::memory::Source(address.clone()),
-                recipient: crate::generated::memory::Recipient(recipient.clone()),
-                completed: crate::generated::memory::Completed(false),
-            };
-            if self.store.bind_simplified_reply(binding).is_err() {
-                return false;
-            }
-        }
-        // `Started` is the launch's own word that its first prompt was
-        // submitted, carrying the batch: each request it carried is
-        // Delivered in the commit that takes the batch from the queue,
-        // named by the native prompt the launch observed, else the one its
-        // session reported, else by the launch.
-        let observed = match self.store.launch_attempt(launch_request_id) {
-            Ok(Some(attempt)) => match attempt.prompt_delivery_result_option {
-                Some(signal_flow::PromptDeliveryResult::Observed(observed)) => {
-                    Some(observed.native_turn_id.0)
-                }
-                _ => None,
-            },
-            _ => None,
-        };
-        let prompt = observed
-            .or_else(|| self.reported_prompt(flow_id, None))
-            .unwrap_or_else(|| launch_request_id.to_owned());
-        let delivered = signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
-            harness_kind: node.harness_kind.clone(),
-            native_session_id: signal_flow::NativeSessionId(node.session_id.0.clone()),
-            native_prompt_id: signal_flow::NativePromptId(prompt),
-        });
-        self.store
-            .record_hand_over(address, flow_id, startup, delivered)
-            .unwrap_or(false)
-    }
-
     fn waken(&self, address: &Address) -> Result<FlowId, WakeRefusal> {
         let metaflow = {
             let _turn = self
@@ -2768,70 +2696,21 @@ impl WakesInParts for RunningNexus {
                 return Err(WakeRefusal::StoreUnreadable);
             }
         }
-        let started = match self.start_fresh(&metaflow, fresh, &startup_text) {
-            Ok(started) => started,
-            Err(FreshRefusal::Failed(failure)) => {
-                return Err(WakeRefusal::FreshNotStarted(failure));
-            }
+        match self.start_fresh(&metaflow, fresh, &startup_text, &startup.0) {
+            Ok(id) => Ok(id),
+            Err(FreshRefusal::Failed(failure)) => Err(WakeRefusal::FreshNotStarted(failure)),
             Err(FreshRefusal::Rejected(rejection)) => {
-                // Nothing was taken: every request stays queued, and its
-                // sender sees why it waits. The next waking request retries.
-                use crate::store::logical_delivery::RecordsLogicalDeliveries;
-                let _turn = self
-                    .dispatch_gate
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let queue = match self.store.metaflow(address) {
-                    Ok(Some(current)) => current.queue,
-                    _ => metaflow.queue.clone(),
-                };
-                if let Err(error) = self.store.mark_queue_retryable(
-                    &queue.0,
-                    signal_flow::RetryCause::WakeRefused(rejection.clone()),
-                ) {
-                    eprintln!(
-                        "flow-nexus: the queue of {:?} {} {:?} is not marked WakeRefused: {error}",
-                        address.aspect, address.topic.0, address.model
+                // Only the prefix, never admissions behind it. A retained
+                // ambiguous launch is not a refusal that authorizes a retry.
+                use crate::store::fresh_launch::TracksFreshLaunches;
+                let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+                if matches!(self.store.fresh_cohort(address), Ok(None)) {
+                    let _ = self.store.mark_queue_retryable(
+                        &startup.0,
+                        signal_flow::RetryCause::WakeRefused(rejection.clone()),
                     );
                 }
-                return Err(WakeRefusal::StartRejected(rejection));
-            }
-        };
-        // Its handover was settled with its launch (`settle`), as any fresh
-        // start's is.
-        let flow_id = started.flow_id;
-        let _turn = self
-            .dispatch_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match self.perform(Operation::Record(Record_Data::Awoken(
-            Record_Data_Awoken_Data {
-                address: address.clone(),
-                flow_id: flow_id.clone(),
-                // `Started` is the launch boundary that accepted this first
-                // prompt; `settle_startup` removes exactly its fixed batch,
-                // and anything admitted while it started remains queued
-                // behind.
-                delivered_count: crate::generated::operation::DeliveredCount(0),
-            },
-        ))) {
-            Outcome::Recorded
-                if self.settle_startup(
-                    address,
-                    &flow_id.0,
-                    &started.launch_request_id,
-                    &startup.0,
-                    simplified,
-                ) =>
-            {
-                Ok(flow_id)
-            }
-            _ => {
-                eprintln!(
-                    "flow-nexus: flow {flow_id} woke but is not recorded Awake",
-                    flow_id = flow_id.0
-                );
-                Err(WakeRefusal::AwakeNotRecorded)
+                Err(WakeRefusal::StartRejected(rejection))
             }
         }
     }
@@ -2841,7 +2720,8 @@ impl WakesInParts for RunningNexus {
         metaflow: &Metaflow,
         fresh: FreshContext,
         text: &str,
-    ) -> Result<FreshStarted, FreshRefusal> {
+        startup: &[QueueEntry],
+    ) -> Result<FlowId, FreshRefusal> {
         let address = &metaflow.address;
         // The seat's model is the one configured for its Model.
         let model = match self.store.configured_model(address) {
@@ -2855,14 +2735,8 @@ impl WakesInParts for RunningNexus {
             }
             Err(_) => return Err(FreshRefusal::Failed(Failed_Data::StoreRefused)),
         };
-        let launch_request_id = format!(
-            "wake-{}-{}",
-            metaflow.past.0.len(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_nanos())
-                .unwrap_or_default()
-        );
+        use crate::sending::MintsId;
+        let launch_request_id = "wake".minted_id();
         let seat = FreshSeat {
             address: address.clone(),
             launch_request_id: launch_request_id.clone(),
@@ -2884,10 +2758,29 @@ impl WakesInParts for RunningNexus {
         // the predecessor takes no part in taking its Address.
         let mut profile = seat.fresh_profile();
         profile.flow_id_option = metaflow.past.0.last().cloned();
-        self.start_unbound(profile).map(|flow_id| FreshStarted {
-            flow_id,
-            launch_request_id,
-        })
+        use crate::store::fresh_launch::TracksFreshLaunches;
+        let claim = {
+            let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+            if !self
+                .store
+                .claim_fresh(address, &profile.launch_request_id, startup)
+                .map_err(|_| FreshRefusal::Failed(Failed_Data::StoreRefused))?
+            {
+                return Err(FreshRefusal::Failed(Failed_Data::StoreRefused));
+            }
+            self.store
+                .fresh_cohort(address)
+                .map_err(|_| FreshRefusal::Failed(Failed_Data::StoreRefused))?
+                .ok_or(FreshRefusal::Failed(Failed_Data::StoreRefused))?
+        };
+        let result = self.start_unbound(profile);
+        if result.is_err() {
+            let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+            self.store
+                .reconcile_fresh(&claim)
+                .map_err(|_| FreshRefusal::Failed(Failed_Data::StoreRefused))?;
+        }
+        result
     }
 
     fn last_launch_profile(&self, flow_id: &str) -> Option<LaunchProfile> {

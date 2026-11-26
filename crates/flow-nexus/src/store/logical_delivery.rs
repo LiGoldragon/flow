@@ -84,7 +84,9 @@ impl RecordsQueueWrites for FlowStore {
         let Some(stored) = self.stored_metaflow(address)? else {
             return Ok(false);
         };
-        if entries.is_empty()
+        use super::fresh_launch::TracksFreshLaunches;
+        if self.fresh_cohort(address)?.is_some()
+            || entries.is_empty()
             || stored.metaflow.state
                 != flow_ethos::State::Awake(flow_ethos::FlowId(flow_id.to_owned()))
             || !stored.metaflow.queue.0.starts_with(entries)
@@ -216,90 +218,12 @@ impl CommitsQueueOutcomes for FlowStore {
                 )
             }
         };
-        let allocation = self.allocate_logical_cursor()?;
-        let mut next_cursor = allocation.cursor;
-        let mut changed = false;
         let mut commit = self.engine.begin_atomic_commit();
         for attempt in attempts {
             commit = self.stage_interrupted_queue_attempt(attempt, commit)?;
         }
-        let mut seen = std::collections::HashSet::new();
-        // Each request Delivered to the flow arrives there.
-        let mut arrived = Vec::new();
-        for entry in handed {
-            if let Some(request_state) = &request_state {
-                commit =
-                    self.stage_queue_request_state(address, entry, request_state.clone(), commit)?;
-            }
-            let records = self.engine.match_records(QueryPlan::key(
-                self.logical_deliveries.current,
-                RecordKey::new(entry.logical_delivery_id.clone().0),
-            ))?;
-            let Some(current) = records.records().first() else {
-                // A legacy queue entry has no logical lifecycle row. Its
-                // exact prefix position is still taken by this hand-over.
-                continue;
-            };
-            if !seen.insert(entry.logical_delivery_id.clone()) {
-                return Err(StoreError::StateInvariant);
-            }
-            if records.records().len() != 1 {
-                return Err(StoreError::StateInvariant);
-            }
-            if current.delivery_snapshot.address != *address {
-                return Err(StoreError::StateInvariant);
-            }
-            // A request whose record is already final, as a hand-over a
-            // crash left unrecorded may find it, keeps that record.
-            if matches!(
-                current.delivery_snapshot.delivery_state,
-                DeliveryState::Uncertain
-                    | DeliveryState::Delivered(_)
-                    | DeliveryState::Read
-                    | DeliveryState::Failed(_)
-                    | DeliveryState::Withdrawn
-                    | DeliveryState::Archived
-                    | DeliveryState::Abandoned
-            ) || current.delivery_snapshot.delivery_state == state
-            {
-                continue;
-            }
-            let mut snapshot = current.delivery_snapshot.clone();
-            snapshot.delivery_cursor = signal_flow::DeliveryCursor(next_cursor);
-            snapshot.delivery_state = state.clone();
-            if matches!(state, DeliveryState::Delivered(_)) {
-                arrived.push(snapshot.request_id.clone());
-            }
-            next_cursor = next_cursor
-                .checked_add(1)
-                .ok_or(StoreError::StateInvariant)?;
-            commit = commit
-                .mutate(
-                    self.logical_deliveries.current,
-                    CurrentLogicalDelivery {
-                        delivery_snapshot: snapshot.clone(),
-                        archived_cursor: crate::generated::memory::ArchivedCursor(None),
-                        delivery_admission: current.delivery_admission.clone(),
-                    },
-                )
-                .assert(
-                    self.logical_deliveries.events,
-                    LogicalDeliveryEvent {
-                        delivery_snapshot: snapshot,
-                    },
-                );
-            changed = true;
-        }
-        if changed {
-            let counter = LogicalDeliveryCounter {
-                next_cursor: crate::generated::memory::NextCursor(next_cursor),
-            };
-            commit = if allocation.existing {
-                commit.mutate(self.logical_deliveries.counter, counter)
-            } else {
-                commit.assert(self.logical_deliveries.counter, counter)
-            };
-        }
+        let (mut commit, arrived) =
+            self.stage_queue_states(commit, address, handed, &state, request_state.as_ref())?;
         let receiver_is_current = flow_id.is_some_and(|id| {
             matches!(&stored.metaflow.state, flow_ethos::State::Awake(current) if current.0 == id)
         });
@@ -315,6 +239,42 @@ impl CommitsQueueOutcomes for FlowStore {
             .transitions_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        commit =
+            self.stage_queue_arrivals(commit, address, flow_id, receiver_is_current, arrived)?;
+        self.engine.commit_atomic(commit)?;
+        self.launch_changes.announce();
+        Ok(true)
+    }
+}
+
+/// Stages lifecycle snapshots and stock request states without committing.
+pub(super) trait StagesQueueStates {
+    fn stage_queue_arrivals(
+        &self,
+        commit: AtomicCommit,
+        address: &Address,
+        flow_id: Option<&str>,
+        receiver_is_current: bool,
+        arrived: Vec<signal_flow::RequestId>,
+    ) -> Result<AtomicCommit, StoreError>;
+    fn stage_queue_states(
+        &self,
+        commit: AtomicCommit,
+        address: &Address,
+        handed: &[QueueEntry],
+        state: &DeliveryState,
+        request_state: Option<&RequestState>,
+    ) -> Result<(AtomicCommit, Vec<signal_flow::RequestId>), StoreError>;
+}
+impl StagesQueueStates for FlowStore {
+    fn stage_queue_arrivals(
+        &self,
+        mut commit: AtomicCommit,
+        address: &Address,
+        flow_id: Option<&str>,
+        receiver_is_current: bool,
+        arrived: Vec<signal_flow::RequestId>,
+    ) -> Result<AtomicCommit, StoreError> {
         if let Some(flow_id) = flow_id
             && !arrived.is_empty()
         {
@@ -359,9 +319,98 @@ impl CommitsQueueOutcomes for FlowStore {
                 };
             }
         }
-        self.engine.commit_atomic(commit)?;
-        self.launch_changes.announce();
-        Ok(true)
+        Ok(commit)
+    }
+
+    fn stage_queue_states(
+        &self,
+        mut commit: AtomicCommit,
+        address: &Address,
+        handed: &[QueueEntry],
+        state: &DeliveryState,
+        request_state: Option<&RequestState>,
+    ) -> Result<(AtomicCommit, Vec<signal_flow::RequestId>), StoreError> {
+        let allocation = self.allocate_logical_cursor()?;
+        let mut next_cursor = allocation.cursor;
+        let mut changed = false;
+        let mut seen = std::collections::HashSet::new();
+        // Each request Delivered to the flow arrives there.
+        let mut arrived = Vec::new();
+        for entry in handed {
+            if let Some(request_state) = request_state {
+                commit =
+                    self.stage_queue_request_state(address, entry, request_state.clone(), commit)?;
+            }
+            let records = self.engine.match_records(QueryPlan::key(
+                self.logical_deliveries.current,
+                RecordKey::new(entry.logical_delivery_id.clone().0),
+            ))?;
+            let Some(current) = records.records().first() else {
+                // A legacy queue entry has no logical lifecycle row. Its
+                // exact prefix position is still taken by this hand-over.
+                continue;
+            };
+            if !seen.insert(entry.logical_delivery_id.clone()) {
+                return Err(StoreError::StateInvariant);
+            }
+            if records.records().len() != 1 {
+                return Err(StoreError::StateInvariant);
+            }
+            if current.delivery_snapshot.address != *address {
+                return Err(StoreError::StateInvariant);
+            }
+            // A request whose record is already final, as a hand-over a
+            // crash left unrecorded may find it, keeps that record.
+            if matches!(
+                current.delivery_snapshot.delivery_state,
+                DeliveryState::Uncertain
+                    | DeliveryState::Delivered(_)
+                    | DeliveryState::Read
+                    | DeliveryState::Failed(_)
+                    | DeliveryState::Withdrawn
+                    | DeliveryState::Archived
+                    | DeliveryState::Abandoned
+            ) || &current.delivery_snapshot.delivery_state == state
+            {
+                continue;
+            }
+            let mut snapshot = current.delivery_snapshot.clone();
+            snapshot.delivery_cursor = signal_flow::DeliveryCursor(next_cursor);
+            snapshot.delivery_state = state.clone();
+            if matches!(state, DeliveryState::Delivered(_)) {
+                arrived.push(snapshot.request_id.clone());
+            }
+            next_cursor = next_cursor
+                .checked_add(1)
+                .ok_or(StoreError::StateInvariant)?;
+            commit = commit
+                .mutate(
+                    self.logical_deliveries.current,
+                    CurrentLogicalDelivery {
+                        delivery_snapshot: snapshot.clone(),
+                        archived_cursor: crate::generated::memory::ArchivedCursor(None),
+                        delivery_admission: current.delivery_admission.clone(),
+                    },
+                )
+                .assert(
+                    self.logical_deliveries.events,
+                    LogicalDeliveryEvent {
+                        delivery_snapshot: snapshot,
+                    },
+                );
+            changed = true;
+        }
+        if changed {
+            let counter = LogicalDeliveryCounter {
+                next_cursor: crate::generated::memory::NextCursor(next_cursor),
+            };
+            commit = if allocation.existing {
+                commit.mutate(self.logical_deliveries.counter, counter)
+            } else {
+                commit.assert(self.logical_deliveries.counter, counter)
+            };
+        }
+        Ok((commit, arrived))
     }
 }
 

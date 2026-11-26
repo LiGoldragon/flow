@@ -702,17 +702,30 @@ pub(super) fn soft_recipient_shows(fixture: &NexusFixture, resting: bool) {
         vec![super::codex_agent_in("pane-1", "terminal-pane-1"), seat],
         PromptFixture::Prompted("w1:p3"),
     );
-    // What the seat's harness reported last: its rest, or its turn.
-    use crate::generated::transitions::{ReportedEvent, ReportsEvents};
-    let tokens = signal_flow::Tokens(40_000);
-    fixture.nexus.report_event(ReportedEvent {
-        flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
-        event: if resting {
-            crate::generated::memory::Event::Idle(tokens)
-        } else {
-            crate::generated::memory::Event::Working(tokens)
-        },
-    });
+    // Feed the real Claude reporting boundary. report_event alone is
+    // audit-only for Claude; it is not the writer of the current row.
+    let event = if resting {
+        claude_stop(fixture)
+    } else {
+        signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
+            native_session_id_option: Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into())),
+            prompt_id_option: None,
+            prompt_sha256: signal_flow::PromptSha256("0".repeat(64)),
+        })
+    };
+    assert_eq!(
+        fixture.nexus.report(signal_flow::Report_Data {
+            flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+            process_option: None,
+            event
+        }),
+        signal_flow::Output::Reported
+    );
+    use crate::generated::memory::{SeatActivity, SeatStanding};
+    use crate::store::current_seat::SeatDecision;
+    assert!(
+        matches!(fixture.nexus.store.seat_decision(CLAUDE_SEAT).unwrap(),SeatDecision::Observed(SeatStanding::Alive(activity)) if (activity==SeatActivity::Resting)==resting)
+    );
 }
 
 /// Sends `body` Soft from `peer` to the seat as a flow's own Send is

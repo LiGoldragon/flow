@@ -146,6 +146,14 @@ pub(super) fn tool_call(thread: &str, call: &str, body: &str) -> ToolCall {
     }
 }
 
+fn native_family_reply(thread: &str, status: &str) -> String {
+    [
+        frame(&serde_json::json!({"id":1,"result":{}})),
+        frame(&serde_json::json!({"id":2,"result":{"data":[thread],"nextCursor":null}})),
+        frame(&serde_json::json!({"id":3,"result":{"thread":{"id":thread,"parentThreadId":null,"status":{"type":status}}}})),
+    ].concat()
+}
+
 /// What one subscribed connection of the fake does: the server requests it
 /// sends after the initialize and resume answers, and whether it closes once
 /// it has sent them; else it holds the connection until the client closes
@@ -203,11 +211,7 @@ impl RunsFakeAppServer for FakeAppServer {
         for (index, connection) in connections.iter().enumerate() {
             let run = (if confirmed_thread.is_some() { 3 } else { 2 }) * index + 1;
             if let Some(thread) = confirmed_thread {
-                let family = [
-                    initialized.clone(),
-                    frame(&serde_json::json!({"id":2,"result":{"data":[thread],"nextCursor":null}})),
-                    frame(&serde_json::json!({"id":3,"result":{"thread":{"id":thread,"parentThreadId":null,"status":{"type":"active"}}}})),
-                ].concat();
+                let family = native_family_reply(thread, "active");
                 std::fs::write(root.join(format!("frames-{}", run + 2)), family).unwrap();
             }
             std::fs::write(root.join(format!("frames-{run}")), &probe).unwrap();
@@ -2239,6 +2243,10 @@ fn turn_notice(method: &str, thread: &str, turn: &str) -> serde_json::Value {
     })
 }
 
+fn seat_rest_notification(thread: &str) -> serde_json::Value {
+    serde_json::json!({"method":"thread/status/changed","params":{"threadId":thread,"status":{"type":"idle"}}})
+}
+
 /// A call the seat's thread makes to the Awake gamma target: once it is
 /// answered, every frame sent before it has been read.
 fn fence(request_id: u64) -> serde_json::Value {
@@ -2251,8 +2259,8 @@ fn fence(request_id: u64) -> serde_json::Value {
 }
 
 trait SeatsAwakeCodexSeat {
-    /// The fixture's Codex seat 908786, Active, resting in pane w1:p3 as
-    /// Herdr's screen shows it, its metaflow Awake as it at `seat_at`
+    /// The fixture's confirmed Working Codex seat 908786. The pane is
+    /// writable, its metaflow Awake as it at `seat_at`
     /// holding `queue`; gamma Awake as a flow Flow does not hold.
     fn awake_codex_seat(&self, queue: Vec<TestRequest>);
     fn seat_queue(&self) -> Vec<TestRequest>;
@@ -2264,8 +2272,8 @@ impl SeatsAwakeCodexSeat for NexusFixture {
     fn awake_codex_seat(&self, queue: Vec<TestRequest>) {
         use super::PromptFixture;
         self.accept_pane_operations(vec![self.settled_agent()], PromptFixture::Prompted("w1:p3"));
-        let mut node = self.node();
-        node.flow_lifecycle = signal_flow::FlowLifecycle::Pending;
+        let node = self.node();
+        assert_eq!(node.flow_lifecycle, signal_flow::FlowLifecycle::Active);
         assert!(matches!(
             self.nexus.store.register_flow_in_role(
                 node,
@@ -2277,6 +2285,12 @@ impl SeatsAwakeCodexSeat for NexusFixture {
             ),
             Ok(crate::store::FlowRegistration::Registered(_))
         ));
+        use crate::generated::memory::{SeatActivity, SeatStanding};
+        use crate::store::current_seat::RecordsCurrentSeats;
+        self.nexus
+            .store
+            .record_observation("908786", Some(SeatStanding::Alive(SeatActivity::Working)))
+            .unwrap();
         self.nexus.store.seed_metaflow(Metaflow {
             address: seat_at(),
             state: State::Awake(flow_ethos::FlowId("908786".into())),
@@ -2313,7 +2327,15 @@ impl SeatsAwakeCodexSeat for NexusFixture {
     }
 
     fn typed_count(&self, request: &TestRequest) -> usize {
-        usize::from(!self.seat_queue().contains(request))
+        let body = match &request.request {
+            Request::Living(message) => &message.verbatim.0,
+            Request::Order(body) | Request::Notice(body) => body,
+            _ => panic!("unexpected fixture request"),
+        };
+        self.typed()
+            .unwrap_or_default()
+            .matches(body.as_str())
+            .count()
     }
 }
 
@@ -2332,19 +2354,57 @@ fn seat_responding(
         .and_then(|notice| notice.pointer("/params/turn/id"))
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
+    // The initial family snapshot reads active independently of the cut.
+    // A status broadcast causes another real read. An unrelated thread's
+    // idle status leaves the seat working. Later connections read the pane
+    // write's native history anchor, never a synthetic status.
+    let family = notices
+        .iter()
+        .filter(|notice| notice["method"] == "thread/status/changed")
+        .map(|notice| {
+            if notice["params"]["threadId"] == SEAT_THREAD {
+                "idle"
+            } else {
+                "active"
+            }
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        family.len() <= 1,
+        "each batch has at most one family reread before its pane write"
+    );
     let mut requests = notices;
     requests.push(fence(fence_id));
-    let fake = FakeAppServer::install(vec![FakeConnection {
-        requests,
-        closes: false,
-        running,
-    }]);
-    fake.accept_queued_turns(SEAT_THREAD, 3..=12);
+    let fake = FakeAppServer::install_sessions(
+        Some(SEAT_THREAD),
+        vec![FakeConnection {
+            requests,
+            closes: false,
+            running,
+        }],
+    );
+    for (index, status) in family.iter().enumerate() {
+        std::fs::write(
+            fake.directory.path().join(format!("frames-{}", 4 + index)),
+            native_family_reply(SEAT_THREAD, status),
+        )
+        .unwrap();
+    }
+    fake.accept_queued_turns(SEAT_THREAD, (4 + family.len() as u64)..=16);
     let adapter = fixture.adapter("gpt-sol", &fake);
     let answered = responding(fixture, SEAT_THREAD, &adapter, || {
         answer_to(&fake.written_on(2, |m| m["id"] == fence_id), fence_id)
     });
     assert!(answered.is_some(), "the fence was answered");
+    for run in 3..4 + family.len() as u64 {
+        let written = fake.written_on(run, |message| message["method"] == "thread/read");
+        assert!(
+            written
+                .iter()
+                .any(|message| message["method"] == "thread/read"
+                    && message["params"]["threadId"] == SEAT_THREAD)
+        );
+    }
     fake
 }
 
@@ -2366,6 +2426,7 @@ fn a_codex_native_event_delivers_the_oldest_cohort_through_its_pane() {
         vec![
             turn_notice("turn/started", SEAT_THREAD, "turn-first"),
             turn_notice("turn/completed", SEAT_THREAD, "turn-first"),
+            seat_rest_notification(SEAT_THREAD),
             turn_notice("turn/started", SEAT_THREAD, "turn-psyche"),
             turn_notice("turn/completed", SEAT_THREAD, "turn-psyche"),
         ],
@@ -2449,7 +2510,10 @@ fn soft_work_queued_while_a_codex_turn_runs_waits_for_its_completion() {
 
     let second = seat_responding(
         &mut fixture,
-        vec![turn_notice("turn/completed", SEAT_THREAD, "turn-running")],
+        vec![
+            turn_notice("turn/completed", SEAT_THREAD, "turn-running"),
+            seat_rest_notification(SEAT_THREAD),
+        ],
         44,
     );
     assert_eq!(fixture.typed_count(&queued), 1, "typed at the completion");
@@ -2491,7 +2555,10 @@ fn a_working_codex_seat_holds_soft_work_until_its_turn_completes() {
 
     let completed = seat_responding(
         &mut fixture,
-        vec![turn_notice("turn/completed", SEAT_THREAD, "turn-working")],
+        vec![
+            turn_notice("turn/completed", SEAT_THREAD, "turn-working"),
+            seat_rest_notification(SEAT_THREAD),
+        ],
         46,
     );
     assert_eq!(fixture.typed_count(&psyche), 1);

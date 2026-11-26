@@ -91,6 +91,7 @@ pub mod place;
 pub mod placed_socket;
 pub mod reaping;
 pub mod reporting;
+pub mod role_tool_policy;
 pub mod request_waking;
 pub mod rest_watching;
 pub mod send_tool;

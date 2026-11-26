@@ -1182,6 +1182,11 @@ rec {
             requiredFeatures = [ ];
           }
           {
+            name = "flow-role-tool-manifest";
+            path = "src/bin/flow-role-tool-manifest.rs";
+            requiredFeatures = [ ];
+          }
+          {
             name = "flow-store-check";
             path = "src/bin/flow-store-check.rs";
             requiredFeatures = [ ];

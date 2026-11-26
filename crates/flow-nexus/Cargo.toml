@@ -6,6 +6,9 @@ edition.workspace = true
 [[bin]]
 name = "flow-nexus-daemon"
 path = "src/main.rs"
+[[bin]]
+name = "flow-role-tool-manifest"
+path = "src/bin/flow-role-tool-manifest.rs"
 [features]
 default = ["datom"]
 datom = []

@@ -2002,7 +2002,7 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
     );
     woken.queue.0.push(Request::Order("D".into()).unsent());
     fixture.nexus.store.seed_metaflow(woken);
-    fixture.nexus.drain_woken(&at, lease);
+    fixture.nexus.drain_due_held(&at, lease);
     assert!(!fixture.nexus.waking.is_waking(&at), "the hold is released");
 
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());

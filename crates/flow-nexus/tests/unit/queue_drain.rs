@@ -287,6 +287,37 @@ fn a_missing_observation_preserves_even_an_abrupt_order_without_pane_input() {
         fixture.nexus.store.current_seat(CLAUDE_SEAT).unwrap(),
         crate::store::current_seat::CurrentSeatRead::NoRecord
     ));
+    use crate::delivery::{FindsDeliveryTarget, TargetRefusal};
+    use crate::generated::memory::SeatStanding;
+    use crate::observe_agent::ObservesAgent;
+    assert!(matches!(
+        fixture.nexus.delivery_target(CLAUDE_SEAT),
+        Err(TargetRefusal::Unconfirmed)
+    ));
+    assert!(
+        matches!(fixture.nexus.agent_observation(CLAUDE_SEAT), Output::AgentObserved(observation) if observation.agent_state == signal_flow::AgentState::Unknown)
+    );
+    assert_eq!(
+        fixture.nexus.perform(Operation::Drain(target.clone())),
+        Outcome::Failed(Failed_Data::NoRecord)
+    );
+    fixture
+        .nexus
+        .store
+        .record_observation(CLAUDE_SEAT, Some(SeatStanding::Ended))
+        .unwrap();
+    assert!(matches!(
+        fixture.nexus.delivery_target(CLAUDE_SEAT),
+        Err(TargetRefusal::FlowExited)
+    ));
+    assert!(
+        matches!(fixture.nexus.agent_observation(CLAUDE_SEAT), Output::AgentObserved(observation) if observation.agent_state == signal_flow::AgentState::Gone)
+    );
+    assert_eq!(
+        fixture.nexus.perform(Operation::Drain(target)),
+        Outcome::Failed(Failed_Data::NotAwake)
+    );
+    assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 2);
 }
 
 fn await_stalled_writer(release: &std::path::Path) -> bool {

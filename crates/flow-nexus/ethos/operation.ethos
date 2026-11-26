@@ -187,7 +187,8 @@ Operation
            LeaveOutRefused.LeaveOutRefusal
            SpawnRefused.HarnessSpawnRefusal
            LaunchRefused.NativeLaunchRefusal
-           Restarting ] ]
+           Restarting
+           NoRecord ] ]
 [ LaunchReservation.{ ComposedLaunch Origin }
   HarnessArguments.Vector<String>
   PaneLaunch.{ ComposedLaunch Root HerdrPaneBinding Option<FlowId> Option<NativeSessionId> HarnessArguments } ]

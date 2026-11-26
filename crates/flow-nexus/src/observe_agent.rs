@@ -126,9 +126,6 @@ trait FindsObservableFlow {
 impl FindsObservableFlow for RunningNexus {
     fn observable(&self, flow_id: &str) -> Option<(FlowNode, HerdrRoute)> {
         let node = self.store.flow_node(flow_id).ok()??;
-        if !self.store.seat_is_alive(flow_id) {
-            return None;
-        }
         let HerdrRouteSelection::Available(route) = node.herdr_route_selection.clone() else {
             return None;
         };
@@ -138,14 +135,17 @@ impl FindsObservableFlow for RunningNexus {
 
 impl ObservesAgent for RunningNexus {
     fn agent_observation(&self, flow_id: &str) -> Output {
-        if !matches!(
-            self.store.current_seat(flow_id),
-            Ok(crate::store::current_seat::CurrentSeatRead::Known(_))
-        ) {
-            return AgentState::Unknown.observed_of(flow_id);
+        use crate::generated::memory::SeatStanding;
+        use crate::store::current_seat::SeatDecision;
+        match self.store.seat_decision(flow_id) {
+            Ok(SeatDecision::Observed(SeatStanding::Alive(_))) => {}
+            Ok(SeatDecision::Observed(SeatStanding::Ended)) => {
+                return AgentState::Gone.observed_of(flow_id);
+            }
+            Ok(SeatDecision::NoRecord) | Err(_) => return AgentState::Unknown.observed_of(flow_id),
         }
         let Some((node, _)) = self.observable(flow_id) else {
-            return AgentState::Gone.observed_of(flow_id);
+            return AgentState::Unknown.observed_of(flow_id);
         };
         let agent_state = match self.herdr.pane_agent(&node) {
             PaneAgent::Present { agent_state, .. } => agent_state,
@@ -177,7 +177,7 @@ impl ObservesAgent for RunningNexus {
         else {
             return Ok(());
         };
-        if last == AgentState::Gone {
+        if matches!(last, AgentState::Gone | AgentState::Unknown) {
             return Ok(());
         }
         let Some((node, route)) = self.observable(flow_id) else {

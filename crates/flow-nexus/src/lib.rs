@@ -1764,8 +1764,19 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
                 ))));
             }
         };
-        if !nexus.store.seat_is_alive(&flow_id.0) {
-            return unrenewed(RefreshRejection::NotAwake);
+        use crate::generated::memory::SeatStanding;
+        use crate::store::current_seat::SeatDecision;
+        match nexus.store.seat_decision(&flow_id.0) {
+            Ok(SeatDecision::Observed(SeatStanding::Alive(_))) => {}
+            Ok(SeatDecision::Observed(SeatStanding::Ended)) => {
+                return unrenewed(RefreshRejection::NotAwake);
+            }
+            Ok(SeatDecision::NoRecord) => return unrenewed(RefreshRejection::SuccessorUnconfirmed),
+            Err(error) => {
+                return Err(Output::Refused(Refused_Data::StoreRefused(StoreFailure(
+                    error.to_string(),
+                ))));
+            }
         }
         // The successor is started and confirmed first, then the old flow
         // is reaped, whatever the metaflow's continuity and whether or not

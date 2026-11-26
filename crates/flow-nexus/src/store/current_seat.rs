@@ -31,6 +31,13 @@ pub(crate) enum CurrentSeatRead {
     Known(CurrentSeat),
 }
 
+/// Decision view of the keyed record. An unavailable source cannot be
+/// mistaken for the terminal state or for a store error.
+pub(crate) enum SeatDecision {
+    NoRecord,
+    Observed(SeatStanding),
+}
+
 pub(crate) enum SeatEvent {
     Observed(SeatStanding),
     Started,
@@ -39,14 +46,11 @@ pub(crate) enum SeatEvent {
 }
 
 impl FlowStore {
-    pub(crate) fn seat_is_alive(&self, id: &str) -> bool {
-        matches!(
-            self.current_seat(id),
-            Ok(CurrentSeatRead::Known(CurrentSeat {
-                seat_standing: SeatStanding::Alive(_),
-                ..
-            }))
-        )
+    pub(crate) fn seat_decision(&self, id: &str) -> Result<SeatDecision, StoreError> {
+        Ok(match self.current_seat(id)? {
+            CurrentSeatRead::NoRecord => SeatDecision::NoRecord,
+            CurrentSeatRead::Known(row) => SeatDecision::Observed(row.seat_standing),
+        })
     }
 
     pub(crate) fn current_seat(&self, id: &str) -> Result<CurrentSeatRead, StoreError> {

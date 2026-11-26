@@ -115,13 +115,20 @@ impl FindsDeliveryTarget for RunningNexus {
             Ok(None) => return Err(TargetRefusal::UnknownFlow),
             Err(_) => return Err(TargetRefusal::PersistenceRefused),
         };
-        // A gone flow is refused by who ended it: Flow (Stopped), the owner
-        // (Retired), or the seat leaving Herdr (Exited).
-        match node.flow_lifecycle {
-            FlowLifecycle::Pending | FlowLifecycle::Active => {}
-            FlowLifecycle::Stopped => return Err(TargetRefusal::FlowStopped),
-            FlowLifecycle::Retired => return Err(TargetRefusal::FlowRetired),
-            FlowLifecycle::Exited => return Err(TargetRefusal::FlowExited),
+        use crate::generated::memory::SeatStanding;
+        use crate::store::current_seat::SeatDecision;
+        match self.store.seat_decision(flow_id) {
+            Ok(SeatDecision::Observed(SeatStanding::Alive(_))) => {}
+            Ok(SeatDecision::Observed(SeatStanding::Ended)) => {
+                // Preserve the wire reason after (never instead of) the current decision.
+                return Err(match node.flow_lifecycle {
+                    FlowLifecycle::Stopped => TargetRefusal::FlowStopped,
+                    FlowLifecycle::Retired => TargetRefusal::FlowRetired,
+                    _ => TargetRefusal::FlowExited,
+                });
+            }
+            Ok(SeatDecision::NoRecord) => return Err(TargetRefusal::Unconfirmed),
+            Err(_) => return Err(TargetRefusal::PersistenceRefused),
         }
         // Which flow an Address receives as is read from the record its
         // launch writes at confirmation, never from a pending reap or
@@ -391,9 +398,6 @@ impl DeliversUnderLease for RunningNexus {
             Err(_) => {
                 return Output::DeliveryRejected(DeliveryRejection::PersistenceRefused);
             }
-        }
-        if !self.store.seat_is_alive(&request.flow_id.0) {
-            return Output::DeliveryRejected(DeliveryRejection::RouteUnavailable);
         }
         // A restart holds the flow: nothing is typed into a pane it is
         // closing or opening.

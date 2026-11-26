@@ -220,6 +220,7 @@ pub enum Failed_Data {
     SpawnRefused(signal_flow::HarnessSpawnRefusal),
     LaunchRefused(signal_flow::NativeLaunchRefusal),
     Restarting,
+    NoRecord,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

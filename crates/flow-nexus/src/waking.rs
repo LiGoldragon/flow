@@ -227,9 +227,7 @@ impl HoldsSoftForIdle for RunningNexus {
             _ => false,
         }
     }
-    // The flow's state is its last transition (`transitions`). A Simplified
-    // Claude seat that opened with no prompt has had no turn yet and is
-    // ready for its first input.
+    // Only the authoritative current row establishes a rest.
     fn rests_now(&self, flow_id: &str) -> bool {
         use crate::generated::transitions::{AskedFlow, RecordsTransitions};
         matches!(
@@ -1817,8 +1815,15 @@ impl RefreshesMetaflows for RunningNexus {
             }
             Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
         };
-        if !self.store.seat_is_alive(&flow_id.0) {
-            return self.queue_refresh(address, &flow_id.0, caller);
+        use crate::generated::memory::SeatStanding;
+        use crate::store::current_seat::SeatDecision;
+        match self.store.seat_decision(&flow_id.0) {
+            Ok(SeatDecision::Observed(SeatStanding::Alive(_))) => {}
+            Ok(SeatDecision::Observed(SeatStanding::Ended)) => {
+                return Output::RefreshRejected(RefreshRejection::NotAwake);
+            }
+            Ok(SeatDecision::NoRecord) => return self.queue_refresh(address, &flow_id.0, caller),
+            Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
         }
         // A refresh never closes a working flow, whoever asks: one that does
         // not rest now is refreshed at its idle event.
@@ -2455,8 +2460,15 @@ impl DrainsHeldSeats for RunningNexus {
                 Ok(_) => return Outcome::Failed(Failed_Data::NotAwake),
                 Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
             };
-            if !self.store.seat_is_alive(&flow_id.0) {
-                return Outcome::Drained(Vec::new());
+            use crate::generated::memory::SeatStanding;
+            use crate::store::current_seat::SeatDecision;
+            match self.store.seat_decision(&flow_id.0) {
+                Ok(SeatDecision::Observed(SeatStanding::Alive(_))) => {}
+                Ok(SeatDecision::Observed(SeatStanding::Ended)) => {
+                    return Outcome::Failed(Failed_Data::NotAwake);
+                }
+                Ok(SeatDecision::NoRecord) => return Outcome::Failed(Failed_Data::NoRecord),
+                Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
             }
             let node = match self.store.flow_node(&flow_id.0) {
                 Ok(Some(node)) => node,

@@ -206,6 +206,7 @@
                 '') (environment.beside or [ ])}
                 cd "$NIX_BUILD_TOP/source"
                 ${if environment ? boundedCases then ''
+                  ${pkgs.python3}/bin/python3 ${./nix/test-bounded-runner.py} ${./nix/bounded-tests.py}
                   cases=()
                   for test in ${tests}/tests/*; do
                     cp "$test" "$binaries/"

@@ -206,10 +206,16 @@ impl RetriesRecipients for RunningNexus {
 #[cfg(test)]
 pub(crate) trait ObservesRetryCompletion {
     fn completed_recipients(&self) -> Vec<Address>;
+    fn active_with_followup(&self, address: &Address) -> bool;
     fn completed_by(&self, addresses: &[Address], deadline: std::time::Instant) -> bool;
 }
 #[cfg(test)]
 impl ObservesRetryCompletion for FlowStore {
+    fn active_with_followup(&self, address: &Address) -> bool {
+        let key = Self::address_record_key(address);
+        let targets = self.recipient_retries.targets.lock().unwrap();
+        targets.active.contains(&key) && targets.addresses.contains_key(&key)
+    }
     fn completed_recipients(&self) -> Vec<Address> {
         self.recipient_retries.completed.lock().unwrap().clone()
     }

@@ -1060,3 +1060,75 @@ fn oversized_or_sender_end_releases_retry_exactly_the_removed_locks() {
         });
     }
 }
+
+#[test]
+fn a_new_release_during_a_blocked_retry_stays_pending_without_a_second_writer() {
+    use crate::HoldsStopRequest;
+    use crate::event_wait::AwaitsPath;
+    use crate::store::ManagesMetaflowState;
+    use crate::store::metaflow::MutatesMetaflows;
+    use crate::store::recipient_retries::{ObservesRetryCompletion, RetriesRecipients};
+    use std::time::{Duration, Instant};
+    let fixture = NexusFixture::new();
+    let release = fixture.directory.path().join("stall-retry");
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Stalled("w1:p3", &release),
+    );
+    seat(&fixture, vec![from_core("coalesce the retry")]);
+    append_main_rows(&fixture, &[end_turn("rest before the blocked retry")]);
+    let store = &fixture.nexus.store;
+    let to = address(Model::Sol);
+    let lock = |time| {
+        let Output::Locked(lock) = store
+            .lock_metaflow(
+                signal_flow::Lock_Data {
+                    first_address: address(Model::Astra),
+                    second_address: to.clone(),
+                },
+                time,
+            )
+            .unwrap()
+        else {
+            panic!("expected lock")
+        };
+        lock
+    };
+    let first = lock(100);
+    fixture.nexus.watch_recipient_retries().unwrap();
+    std::thread::scope(|scope| {
+        struct Stop<'a>(&'a crate::RunningNexus, &'a std::path::Path);
+        impl Drop for Stop<'_> {
+            fn drop(&mut self) {
+                let _ = std::fs::write(self.1, "");
+                self.0.stopping.request();
+            }
+        }
+        scope.spawn(|| fixture.nexus.serve_recipient_retries());
+        let _stop = Stop(&fixture.nexus, &release);
+        assert_eq!(
+            store.release_metaflow_lock(first, 100).unwrap(),
+            Output::Released
+        );
+        assert!(
+            release
+                .with_extension("entered")
+                .appeared_by(Instant::now() + Duration::from_secs(5))
+        );
+        // A different verified lock at the same Address, committed while
+        // the previous external write is still held by the test.
+        assert_eq!(
+            store.release_metaflow_lock(lock(101), 101).unwrap(),
+            Output::Released
+        );
+        assert!(store.active_with_followup(&to));
+        assert_eq!(typed_count(&fixture, "coalesce the retry"), 0);
+        std::fs::write(&release, "").unwrap();
+        assert!(store.completed_by(
+            std::slice::from_ref(&to),
+            Instant::now() + Duration::from_secs(5)
+        ));
+        assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
+        assert_eq!(typed_count(&fixture, "coalesce the retry"), 1);
+    });
+}

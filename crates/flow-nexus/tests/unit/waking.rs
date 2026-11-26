@@ -8001,3 +8001,191 @@ fn a_push_of_a_queue_holding_an_order_wakes_its_asleep_permaflow() {
         .unwrap_or_else(|| panic!("the Order is in the first prompt: {turns:?}"));
     assert!(notice < order, "oldest first: {first}");
 }
+
+/// Kill the wake at its actual pre-Start and post-native-submit boundaries,
+/// append later work, then reopen the same isolated store through the real opener.
+#[test]
+fn a_fresh_launch_crash_never_retypes_a_possible_submission_or_consumes_the_tail() {
+    use crate::store::fresh_launch::TracksFreshLaunches;
+    use crate::test_faults::{CrashPoint, InjectsCrashes};
+    for (point, possible) in [
+        (CrashPoint::AfterFreshClaim, false),
+        (CrashPoint::AfterFreshSubmission, true),
+    ] {
+        let mut fixture = NexusFixture::new();
+        ended_claude(&fixture);
+        let at = address(Model::Sol);
+        fixture.nexus.store.seed_metaflow(metaflow(
+            Model::Sol,
+            State::Asleep,
+            vec!["abc123"],
+            vec![],
+        ));
+        let accept = |store: &crate::store::FlowStore, body: &str| {
+            let signal_flow::PrivateSendResponse::SendAccepted(accepted) = store
+                .accept_logical_delivery(
+                    &at,
+                    SentBy::Sender(address(Model::Terra)),
+                    Delivery::Wake,
+                    Message::Soft(Request::Order(body.into())),
+                    None,
+                )
+                .unwrap()
+            else {
+                panic!("admitted")
+            };
+            accepted.logical_delivery_id
+        };
+        let first = accept(&fixture.nexus.store, "exact selected first");
+        let world = fixture.fresh_claude_world();
+        fixture.nexus.store.faults.crash_at(point);
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            fixture.nexus.perform(Operation::Wake(at.clone()))
+        }));
+        assert!(crashed.is_err(), "did not reach {point:?}");
+        assert!(
+            fixture
+                .nexus
+                .store
+                .faults
+                .fired_by(point, std::time::Instant::now())
+        );
+        assert_eq!(startup_prompts(&world), usize::from(possible));
+        let launch = fixture
+            .nexus
+            .store
+            .fresh_cohort(&at)
+            .unwrap()
+            .expect("claim committed first")
+            .launch_request_id;
+        let tail = accept(&fixture.nexus.store, "later admitted tail");
+        fixture.restarted();
+        let state = |id: &signal_flow::LogicalDeliveryId| {
+            fixture
+                .nexus
+                .store
+                .logical_delivery_snapshot(id)
+                .unwrap()
+                .unwrap()
+                .delivery_state
+        };
+        let queue = stored(&fixture, Model::Sol)
+            .queue
+            .0
+            .into_iter()
+            .map(|q| q.logical_delivery_id)
+            .collect::<Vec<_>>();
+        if possible {
+            assert_eq!(state(&first), signal_flow::DeliveryState::Uncertain);
+            assert_eq!(queue, vec![tail.clone()]);
+            assert_eq!(
+                fixture
+                    .nexus
+                    .store
+                    .fresh_cohort(&at)
+                    .unwrap()
+                    .unwrap()
+                    .launch_request_id,
+                launch
+            );
+            let _ = fixture.nexus.perform(Operation::Wake(at.clone()));
+            assert_eq!(world.claude_starts(), 1);
+            assert_eq!(startup_prompts(&world), 1);
+        } else {
+            assert_eq!(state(&first), signal_flow::DeliveryState::Queued);
+            assert_eq!(queue, vec![first.clone(), tail.clone()]);
+            assert!(fixture.nexus.store.fresh_cohort(&at).unwrap().is_none());
+            assert_eq!(world.claude_starts(), 0);
+        }
+        assert_eq!(state(&tail), signal_flow::DeliveryState::Queued);
+    }
+}
+
+#[test]
+fn a_durable_launch_receipt_confirms_and_accounts_its_prefix_once_on_reopen() {
+    use crate::herdr::launch::ObservesNativeTargetReceipt;
+    use crate::store::RecordsPromptDeliveryResult;
+    use crate::store::fresh_launch::TracksFreshLaunches;
+    let mut fixture = NexusFixture::new();
+    let mut launch = fixture.staged_launch("fresh-cohort-proof", None);
+    let at = launch.profile.address.clone();
+    fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+        address: at.clone(),
+        state: State::Asleep,
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
+    });
+    let admit = |store: &crate::store::FlowStore, body: &str| {
+        let signal_flow::PrivateSendResponse::SendAccepted(accepted) = store
+            .accept_logical_delivery(
+                &at,
+                SentBy::Sender(address(Model::Terra)),
+                Delivery::Wake,
+                Message::Soft(Request::Order(body.into())),
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("admitted")
+        };
+        accepted.logical_delivery_id
+    };
+    let first = admit(&fixture.nexus.store, "fixed prefix");
+    let prefix = fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue.0;
+    assert!(
+        fixture
+            .nexus
+            .store
+            .claim_fresh(&at, &launch.profile.launch_request_id, &prefix)
+            .unwrap()
+    );
+    launch.stage_to_ambiguity(&fixture.nexus);
+    launch.write_receipt();
+    let crate::generated::starter::StartupProgress::Received(receipt) = fixture
+        .nexus
+        .herdr
+        .observe_native_target_receipt(launch.intent.as_ref().unwrap())
+        .unwrap()
+    else {
+        panic!("conclusive native evidence")
+    };
+    fixture
+        .nexus
+        .store
+        .record_prompt_delivery_result(signal_flow::PromptDeliveryResult::Observed(receipt.clone()))
+        .unwrap();
+    let tail = admit(&fixture.nexus.store, "unclaimed suffix");
+    fixture.restarted();
+    let stored = fixture.nexus.store.metaflow(&at).unwrap().unwrap();
+    assert_eq!(stored.state, State::Awake(receipt.flow_id.clone()));
+    assert_eq!(
+        stored
+            .queue
+            .0
+            .iter()
+            .map(|q| &q.logical_delivery_id)
+            .collect::<Vec<_>>(),
+        vec![&tail]
+    );
+    let delivered = fixture
+        .nexus
+        .store
+        .logical_delivery_snapshot(&first)
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(&delivered.delivery_state,signal_flow::DeliveryState::Delivered(native) if native.native_prompt_id.0==receipt.native_turn_id.0)
+    );
+    assert!(fixture.nexus.store.fresh_cohort(&at).unwrap().is_none());
+    fixture.restarted();
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .logical_delivery_snapshot(&first)
+            .unwrap()
+            .unwrap(),
+        delivered,
+        "no second settlement/cursor increment"
+    );
+}

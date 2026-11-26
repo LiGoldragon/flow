@@ -1378,7 +1378,14 @@ impl RecordsLogicalDeliveries for FlowStore {
             return Ok(Err(ArchiveRejection::NotYet(ArchiveHold::AdmissionPending)));
         }
         let queue_state = self.queue_request_state(&binding.logical_delivery_id.0)?;
-        if queue_state == Some(RequestState::InFlight) {
+        use super::fresh_launch::TracksFreshLaunches;
+        if queue_state == Some(RequestState::InFlight)
+            || self.fresh_cohort(&retained.address)?.is_some_and(|claim| {
+                claim
+                    .logical_delivery_id_vector
+                    .contains(&binding.logical_delivery_id)
+            })
+        {
             return Ok(Err(ArchiveRejection::NotYet(
                 ArchiveHold::AttemptUnfinished,
             )));

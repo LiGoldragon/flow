@@ -21,7 +21,7 @@ use crate::store::queue_delivery::{
     AccountsQueueDelivery, NativeHistoryAnchor, QueueDeliveryAttempt, QueueDeliveryPhase,
     RequestState, SeedsStockQueueAttempts,
 };
-use crate::waking::{HoldsWakingMetaflows, SettlesStopsAtConfirmation};
+use crate::waking::{HoldsWakingMetaflows, SettlesStopsAtConfirmation, SleepsAndWakesSeats};
 use flow_ethos::Delivery;
 use flow_ethos::State;
 use meta_signal_flow::{ProcessIdentity, ResolverIdentity};
@@ -256,6 +256,15 @@ fn a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop() {
     );
 }
 
+fn await_stalled_writer(release: &std::path::Path) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let entered = release.with_extension("entered");
+    while !entered.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    entered.exists()
+}
+
 #[test]
 fn a_hung_queue_pane_write_leaves_admission_hooks_and_meta_running() {
     let fixture = NexusFixture::new();
@@ -270,12 +279,7 @@ fn a_hung_queue_pane_write_leaves_admission_hooks_and_meta_running() {
     let target = address(Model::Sol);
     std::thread::scope(|scope| {
         let writer = scope.spawn(|| report(&fixture, claude_stop(&fixture)));
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let entered = release.with_extension("entered");
-        while !entered.exists() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let was_in_flight = entered.exists()
+        let was_in_flight = await_stalled_writer(&release)
             && matches!(
                 fixture
                     .nexus
@@ -325,6 +329,66 @@ fn a_hung_queue_pane_write_leaves_admission_hooks_and_meta_running() {
     });
     assert_eq!(typed_count(&fixture, "stalling-pane-input"), 1);
     assert_eq!(typed_count(&fixture, "while writer waits"), 0);
+}
+
+#[test]
+fn an_abrupt_request_admitted_during_a_stalled_write_drains_once_without_another_kick() {
+    let fixture = NexusFixture::new();
+    let release = fixture.directory.path().join("release-writer");
+    fixture.accept_pane_operations(
+        vec![working_claude_agent(&fixture)],
+        PromptFixture::Stalled("w1:p3", &release),
+    );
+    seat(&fixture, vec![from_core("first blocked input")]);
+    append_main_rows(&fixture, &[end_turn("before blocked write")]);
+    let target = address(Model::Sol);
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(|| report(&fixture, claude_stop(&fixture)));
+        let entered = await_stalled_writer(&release);
+        let (sent, received) = std::sync::mpsc::channel();
+        let fixture = &fixture;
+        let target = &target;
+        scope.spawn(move || {
+            let crate::sending::SendAnswer {
+                response,
+                pending,
+                _pending_answer: pending_answer,
+                ..
+            } = fixture.nexus.admit_ordinary_send(
+                signal_flow::SendRequest {
+                    address: target.clone(),
+                    sendable_message: signal_flow::SendableMessage::MiddleAbrupt(
+                        signal_flow::SendableRequest::Order("abrupt input behind writer".into()),
+                    ),
+                },
+                None,
+            );
+            let admitted = matches!(response, Output::SendAccepted(_));
+            // The reply has finished writing. Release the pending admission
+            // permit and run its one normal wake check while the writer
+            // still owns the Address. Do not kick the seat again.
+            if let Some(pending) = pending {
+                drop(pending_answer);
+                drop(pending.pane_input);
+                fixture.nexus.wake_due(pending.address);
+            } else {
+                panic!("abrupt admission did not schedule a post-reply wake");
+            }
+            sent.send(admitted).unwrap();
+        });
+        let admitted = received.recv_timeout(std::time::Duration::from_secs(5));
+        let typed_while_stalled = typed_count(fixture, "abrupt input behind writer");
+        std::fs::write(&release, "").unwrap();
+        writer.join().unwrap();
+        assert!(entered, "the first pane write reached its latch");
+        assert!(admitted.expect("the admission and its wake check completed while stalled"));
+        assert_eq!(typed_while_stalled, 0);
+    });
+    let typed = fixture.typed().unwrap_or_default();
+    assert_eq!(typed_count(&fixture, "first blocked input"), 1);
+    assert_eq!(typed_count(&fixture, "abrupt input behind writer"), 1);
+    assert!(typed.find("first blocked input") < typed.find("abrupt input behind writer"));
+    assert!(queue(&fixture).is_empty());
 }
 
 fn reopen(fixture: &mut NexusFixture) {

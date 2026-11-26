@@ -8725,7 +8725,7 @@ mod tests {
         mem.configured();
         let address = Address {
             aspect: Aspect::Mind,
-            topic: "recoveryTarget".into(),
+            topic: flow_ethos::Topic("recoveryTarget".into()),
             model: Model::Sol,
         };
         let flow_id = signal_flow::FlowId("12abcd".into());

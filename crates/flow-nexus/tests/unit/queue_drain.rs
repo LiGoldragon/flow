@@ -392,7 +392,7 @@ fn an_abrupt_request_admitted_during_a_stalled_write_drains_once_without_another
 }
 
 fn reopen(fixture: &mut NexusFixture) {
-    use crate::store::{FlowStore, OpensFlowStore};
+    use crate::store::{FlowStore, OpensFlowStore, SetsNativeOwnerEnvironmentForTests};
     let path = fixture.directory.path().join("flow.sema");
     let placeholder = FlowStore::open(&fixture.directory.path().join("placeholder.sema")).unwrap();
     drop(std::mem::replace(

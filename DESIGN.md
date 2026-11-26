@@ -161,7 +161,11 @@ head first), refuses a body carrying a control character or a harness command
 (`delivery::body`), and refuses a Blocked recipient and an occupied composer.
 A `Soft` request is handed to it only at its recipient's idle event, the
 seat's Stop or its Codex thread's turn completed; until then it waits in its
-metaflow's queue (`waking::HoldsSoftForIdle`). `HardAbrupt` presses the
+metaflow's queue (`waking::HoldsSoftForIdle`). Only a waking request (an
+Order, a Question, a Task, the living's words, a Result or a Done) starts
+the seat's next turn: a queue of Soft Notices alone is not handed over, and
+they ride with the next hand-over. `HardAbrupt` and `MiddleAbrupt`, a Notice
+among them, are handed over when they arrive. `HardAbrupt` presses the
 profile's interrupt keys when the recipient is Working and records whether it
 was seen leaving Working; the composer is read before any key, so a draft
 refuses it without cancelling the recipient's turn, and a prompt the
@@ -567,7 +571,10 @@ datom, `Queued.{ Sender Target }` or `Refused.SendRefusal`, with `success`
 true only when queued.
 
 A metaflow continues as its declaration's `Continuity.[ OnDemand
-Maintained ]` names; a metaflow no declaration names is OnDemand. A
+Maintained ]` names; a metaflow no declaration names is OnDemand. A wake
+composes its fresh flow from the metaflow's declaration alone: an Address
+no declaration names is never woken (`WakePlan::Unplaceable`), whatever
+its last flow's launch named. A
 metaflow is Maintained by its exact Address, never by its Model. When a seat's turn ends
 and it rests with nothing queued, an OnDemand seat sleeps: its harness and
 pane are closed under the pane's lease (a Claude seat only once it rests,
@@ -608,7 +615,7 @@ stays asleep under it. A Send or a locked Deliver to a recipient
 with no live flow starts it before answering only for an abrupt request that
 wakes it; an abrupt Notice is queued for the next waking, and a Soft request
 that wakes it is answered queued and woken after its answer. To an Awake
-seat the priority decides, as before. After every commit that queues a
+seat the priority and the kind decide, as above. After every commit that queues a
 request, from a send-tool call or a Deliver, and after a replayed call is answered from its record, the
 target's Awake seat is read first: a seat whose pane Herdr shows gone has
 its flow recorded Exited, which puts the metaflow Asleep, and a seat known
@@ -621,39 +628,26 @@ At its start the Nexus wakes every metaflow due a wake, so a Nexus that died
 between the commit and the wake leaves none owed. A wake already running for
 the metaflow absorbs the request: it drains what arrives during it.
 
-Every request one typed payload carried leaves the queue in one store
-commit (`store::queue_delivery::park_typed_cohort`), under the gate
-admission writes the queue under: the head's Uncertain attempt is parked,
-and every further request is given its own Uncertain attempt at the head's
-native anchor, its attempt number reserved in the same commit, and parked.
-The batch is parked whole or not at all, so a typed request is never left
-queued to be typed again; the one receipt of the payload settles them all.
+A hand-over takes the queue's head, the whole queue up to the first
+request still waiting for its admission reply (a Simplified seat's oldest
+alone), types it in one payload under the dispatch gate and the pane's
+lease, and records the pane writer's own result in the one store commit
+that takes those requests from the queue (`logical_delivery::
+record_hand_over`): Presented or Transported is Delivered, naming the
+seat's session and the pane write; Uncertain is Uncertain, final and never
+looked for again; a write refused before any key leaves them queued for
+the next due event. Nothing is read back from native history.
 No migration runs on the delivery path: queue data from before logical
 identities is archived once, when the store opens, before anything is
 served (`archive_legacy_queue`).
 
 A wake's fresh flow takes the queued batch in its first prompt. Its launch
-answers `Started` once that prompt is submitted, and the harness may show it
-taken only later: Claude may write it to the transcript after `Started`, and
-a Codex rollout shows the flow's first answer, which a Codex receipt needs,
-after the first turn has run. A batch whose receipt is not yet seen leaves
-the queue as Uncertain attempts of the woken session, of either harness,
-anchored at the session's start (a Claude transcript before it holds
-anything, a Codex thread before its first turn), so nothing types it again,
-and the wake answers `Woken`. The launch's receipt, the first prompt the
-session reports or the transcript showing the prompt and the flow's first
-answer, settles every request the prompt carried, at the first event that
-reads it. A direct Send that woke its
-recipient waits for that receipt and is never typed into the new pane a
-second time. A wake that started its seat and could not record what the
-first prompt carried leaves that Send to record it: what the prompt
-carried and the queue still holds is parked Uncertain at the session's
-start, as a typed payload is, so no drain types it again and the launch's
-receipt settles it. The Send then answers `SendAccepted` with its delivery
-`Uncertain`, the request placed without its receipt, and writes no retry
-cause on the queue: nothing failed before the native submission. A Send
-queued behind what the prompt carried waits for the seat's turn; a record
-the store refuses answers `Failed` with the store's refusal.
+answers `Started` once that prompt is submitted: that is the writer's
+result for the batch, and every request it carried is Delivered in the
+commit that takes the batch from the queue and records the woken flow
+Awake. A direct Send that woke its recipient answers `Sent` from it; one
+whose request stays queued behind the batch waits for the seat's next due
+event.
 
 A Codex seat runs no hook and reports no Stop; its turn ends are its
 app-server's. Every connection Flow keeps on a Codex thread (the launch's
@@ -812,23 +806,12 @@ the flow was in.
 A request delivered (its logical delivery Delivered, or Read without its
 receipt) is recorded in the same commit with the cause `Arrived` and its
 `RequestId` (`logical_delivery`), folded as an `Arrival` with the turn its
-receipt lies in (`ReceiptTurn`). The Nexus reads that turn from the seat's
-own native history when it settles the receipt (`ReadsReceiptTurn`):
-Ended when the seat rests past it, a Claude transcript whose main turn
-ended with no later prompt or a Codex thread its ledger shows at rest;
-Running otherwise. The fold rule stands in one place, `LeadsToState for
-Arrival`: an arrival whose receipt lies in a turn that has already ended
-records no Acting, and the seat stays as it is; one whose turn runs leads
-to Acting, so a seat genuinely in its turn still waits for its idle event.
-So a receipt settled after the rest of the turn that took it, whatever
-order the events reached Flow in, leaves the seat at that rest: at the
-Nexus's start (`recover_deliveries`), at a Codex turn's completion (the
-drain its rest allows), and at a Claude Stop (the drain that rest runs).
-A store opening settles a receipt recorded before a crash before any
-native history is read, and folds it as Running. A Claude flow's own
-Stop also settles first every hand-over its ended turn took whose receipt
-its transcript shows (`settle_turn_receipts`), so each arrival is
-recorded before the Idle that ends its turn. The state the Nexus
+receipt lies in (`ReceiptTurn`). A hand-over is recorded as it is typed,
+so its arrival's turn runs (`Running`). The fold rule stands in one place,
+`LeadsToState for Arrival`: an arrival whose receipt lies in a turn that
+has already ended records no Acting, and the seat stays as it is; one
+whose turn runs leads to Acting, so a seat in its turn waits for its idle
+event. The state the Nexus
 decides by is the last transition: `rests_now`, which a Soft request and a
 drain ask, reads Resting from it (a Simplified Claude seat that opened with
 no prompt is ready for its first input), and the panel's state of a live

@@ -16,19 +16,23 @@
 //!
 //! A HardAbrupt or MiddleAbrupt request queued later for an Awake seat is
 //! handed over at once, with the Soft work queued before it; the delivery
-//! engine interrupts only for HardAbrupt. Soft work alone waits for the
-//! seat's idle event, the turn end above, which hands over the whole queue,
-//! oldest first ([`HoldsSoftForIdle`]). A seat known resting by the same
-//! evidence has had its idle event, and its Soft work is handed over at
-//! once. Held Soft work is the metaflow's durable queue, so a Nexus that
-//! starts again holds it as before.
+//! engine interrupts only for HardAbrupt. Soft work waits for the seat's
+//! idle event, the turn end above, and only a waking request starts the
+//! seat's next turn ([`HoldsSoftForIdle`]): an Order, Question, Task,
+//! Living, Result or Done ([`crate::request_waking`]). Its hand-over carries
+//! the whole queue, oldest first, the Soft Notices waiting in it included;
+//! a queue of Soft Notices alone is not handed over, and they ride with the
+//! next hand-over. A seat known resting by the same evidence has had its
+//! idle event, and a waking Soft request is handed over at once. Held Soft
+//! work is the metaflow's durable queue, so a Nexus that starts again holds
+//! it as before.
 //!
 //! A seat is closed, refreshed or put to sleep, only once it rests: its
 //! turn ended by the evidence above and no work it started in flight. A
 //! Claude seat's work in flight is the background work its own last Stop
 //! names; Claude wakes the seat when that work ends, into a turn whose Stop
-//! is then its rest (`JudgesClosingRest`). Soft work is handed over at the
-//! turn's end whatever background work runs.
+//! is then its rest (`JudgesClosingRest`). Soft work due at the turn's end
+//! is handed over whatever background work runs.
 //!
 //! A seat is replaced at its idle event, its Stop or its Codex thread's turn
 //! completed, once it is past its model's refresh threshold, or once it was
@@ -70,7 +74,7 @@
 //! the next waking, and a Reminder wakes by the mark it was queued with,
 //! Wake when a flow asked for it, Queue when it reminds a Task's sender. The wake (`Operation::Wake`)
 //! launches a fresh flow from the native model configured for its Model and
-//! the module identities the metaflow's last launch named, composed again
+//! the modules its declaration binds it to, composed again
 //! as any Start is, with the whole queue, oldest first, as its brief. The requests leave the queue only in the write that records
 //! the started flow Awake, so a Nexus that dies mid-wake loses none: at its
 //! next start it wakes every Asleep metaflow still holding work. Requests
@@ -94,18 +98,12 @@
 //! turn end does not drain the waking seat.
 
 use crate::RunningNexus;
-use crate::claude::{
-    ClaudeQueuedHistory, ClaudeTranscriptCursor, LocatesClaudeTranscript, ReadsClaudeTurns,
-};
-use crate::codex::{CodexTurnHistory, ReadsCodexTurnHistory, SelectsCodexEndpoint};
-use crate::codex_turns::{SettlesRestingCodexSeats, TracksCodexTurns};
+use crate::claude::{LocatesClaudeTranscript, ReadsClaudeTurns};
+use crate::codex_turns::SettlesRestingCodexSeats;
 use crate::composition::{FreshSeat, JoinsPurpose, RendersQueuedWork};
-use crate::delivery::body::RendersNativeContent;
 use crate::delivery::lease::LeasesPanes;
-use crate::delivery::{
-    DeliversMessages, DeliversPreparedQueue, FindsDeliveryTarget, ReadsLeasedPane,
-};
-use crate::generated::memory::{Device, Inode, Offset, RefreshCaller};
+use crate::delivery::{DeliversMessages, FindsDeliveryTarget, ReadsLeasedPane};
+use crate::generated::memory::RefreshCaller;
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
 };
@@ -114,12 +112,8 @@ use crate::generated::starter::ProfilesFreshSeat;
 use crate::herdr::pane::{PaneAgent, WritesPane};
 use crate::herdr::{LocatesNativeTranscripts, PaneOwnership, PanePresence, ReadsHerdrPanes};
 use crate::launching::LaunchesFlows;
-use crate::live::HoldsLiveValue;
 use crate::performing::Performs;
-use crate::queue_write_fence::{
-    CoordinatesQueueWrites, HoldsQueueWrite, LendsQueueDispatch, QueueDispatch,
-};
-use crate::request_waking::HoldsWakingRequest;
+use crate::request_waking::{HoldsWakingRequest, WakesSleepingPermaflow};
 use crate::send_tool::ServesLaunchCalls;
 use crate::store::NamesConfiguredModel;
 use crate::store::address_hold::HoldsLaunchAddress;
@@ -140,16 +134,9 @@ use crate::store::ordered_replacement::{
     ShowsWaitingAttempt,
 };
 use crate::store::pending_reap::RecordsPendingReaps;
-use crate::store::queue_delivery::{
-    AbsenceRecord, AccountsQueueDelivery, NativeDeliveryReceipt, NativeHistoryAnchor,
-    NativeTranscriptCursor, PrepareQueueDelivery, QueueDeliveryAttempt, QueueDeliveryPhase,
-};
 use crate::store::successor::{OwesSuccessors, ReadsContinuity, SuccessionCause, SuccessorIntent};
-use crate::store::{
-    ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt,
-};
-use flow_native::DigestsPrompt;
-use meta_signal_flow::{AbsenceProof, Continuity, Undecided};
+use crate::store::{ManagesMetaflowState, NamesLiveFlow, ReadsFlowRows, ReadsLaunchAttempt};
+use meta_signal_flow::Continuity;
 use signal_flow::{
     Address, AgentState, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile,
     Metaflow, NativePrompt, Origin, Output, QueueEntry,
@@ -168,21 +155,64 @@ pub trait WakePolicy {
 
 impl WakePolicy for RunningNexus {}
 
-/// Soft work waits for its recipient's idle event. HardAbrupt and
-/// MiddleAbrupt are handed to an Awake seat when they arrive; a queue that
-/// holds only Soft work is handed over at the seat's next idle event, its
-/// Stop or its thread's turn completed, which drains the whole queue, oldest
-/// first. A seat whose last turn event already is its rest has had that
-/// event, and is handed its Soft work when it arrives.
+/// A request's priority, read for its hand-over.
+pub trait ReadsPriority {
+    /// Whether it is HardAbrupt or MiddleAbrupt.
+    fn abrupt(&self) -> bool;
+}
+
+impl ReadsPriority for signal_flow::Message {
+    fn abrupt(&self) -> bool {
+        !matches!(self, signal_flow::Message::Soft(_))
+    }
+}
+
+impl ReadsPriority for signal_flow::SendableMessage {
+    fn abrupt(&self) -> bool {
+        !matches!(self, signal_flow::SendableMessage::Soft(_))
+    }
+}
+
+impl ReadsPriority for QueueEntry {
+    fn abrupt(&self) -> bool {
+        self.message.abrupt()
+    }
+}
+
+/// When queued work is handed to an Awake seat. HardAbrupt and MiddleAbrupt
+/// are handed over when they arrive, a Notice among them. Soft work waits
+/// for the seat's idle event, its Stop or its thread's turn completed, and
+/// only a waking request starts the seat's next turn: an Order, Question,
+/// Task, Living, Result or Done, or a Reminder marked Wake
+/// ([`crate::request_waking`]). A queue of Soft Notices alone is not handed
+/// over; they ride with the next hand-over, which carries the whole queue,
+/// oldest first. A seat whose last turn event already is its rest has had
+/// that event, and is handed a waking Soft request when it arrives.
 pub trait HoldsSoftForIdle {
     /// Whether the seat's last turn event is its rest: its last transition
     /// leads to Resting, an Idle its harness reported or an owner's
     /// SetState among them.
     fn rests_now(&self, flow_id: &str) -> bool;
-    /// Whether `queue`, at the seat Awake as `flow_id`, waits for that
-    /// seat's idle event: it holds only Soft work and the seat is in its
-    /// turn.
-    fn waits_for_idle(&self, queue: &[QueueEntry], flow_id: &str) -> bool;
+    /// Whether `requests` start a turn of a resting seat: one of them is
+    /// abrupt or wakes.
+    fn due_at_rest<Queued: ReadsPriority + WakesSleepingPermaflow>(
+        &self,
+        requests: &[Queued],
+    ) -> bool {
+        requests
+            .iter()
+            .any(|request| request.abrupt() || request.wakes_sleeping_permaflow())
+    }
+    /// Whether `requests` are handed now to the seat Awake as `flow_id`:
+    /// one of them is abrupt, or they are due at rest and the seat rests.
+    fn due_now<Queued: ReadsPriority + WakesSleepingPermaflow>(
+        &self,
+        requests: &[Queued],
+        flow_id: &str,
+    ) -> bool {
+        requests.iter().any(ReadsPriority::abrupt)
+            || (self.due_at_rest(requests) && self.rests_now(flow_id))
+    }
 }
 
 impl HoldsSoftForIdle for RunningNexus {
@@ -198,13 +228,6 @@ impl HoldsSoftForIdle for RunningNexus {
             self.store.flow_node(flow_id),
             Ok(Some(node)) if self.simplified_first_input_ready(&node)
         )
-    }
-
-    fn waits_for_idle(&self, queue: &[QueueEntry], flow_id: &str) -> bool {
-        queue
-            .iter()
-            .all(|entry| matches!(entry.message, signal_flow::Message::Soft(_)))
-            && !self.rests_now(flow_id)
     }
 }
 
@@ -562,10 +585,10 @@ impl SettlesStopsAtConfirmation for RunningNexus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WakePlan {
     /// A new flow, launched from configuration and the context the
-    /// metaflow's last launch named.
+    /// metaflow's declaration binds it to.
     Fresh(FreshContext),
-    /// No declaration or launch of the metaflow names a context to wake it
-    /// with, or no Herdr session is configured.
+    /// The Address is not declared, or no Herdr session is configured: it
+    /// is never woken.
     Unplaceable,
 }
 
@@ -829,10 +852,9 @@ pub trait PerformsWakeAndDrain {
     fn wake(&self, address: Address) -> Outcome;
     /// Performed under the dispatch gate.
     fn drain(&self, address: Address) -> Outcome;
-    /// Hands over as many queued requests as can be settled now, oldest
-    /// first. It stops at the first hand-over whose native receipt is not
-    /// yet established, or at any refusal; work behind that request stays
-    /// durable. The caller holds the dispatch gate.
+    /// Hands over as many queued requests as can be handed now, oldest
+    /// first. It stops at any refusal; the work it did not hand over stays
+    /// queued. The caller holds the dispatch gate.
     fn drain_all(&self, address: Address) -> Outcome;
 }
 
@@ -969,42 +991,6 @@ pub(crate) trait WakesInParts {
     fn successor_refused(&self, flow_id: &str, reason: &KeptAtStop);
 }
 
-/// The start of a Claude session's history: before its transcript holds
-/// anything, whichever file it is written to. Input anchored here is read
-/// for in the whole transcript.
-pub(crate) trait StartsSessionHistory {
-    fn session_start() -> Self;
-}
-
-impl StartsSessionHistory for NativeTranscriptCursor {
-    fn session_start() -> Self {
-        NativeTranscriptCursor {
-            device: Device(0),
-            inode: Inode(0),
-            offset: Offset(0),
-        }
-    }
-}
-
-/// Where a harness's session history begins, as the anchor of the input a
-/// launch's first prompt carried: a Claude session's transcript before it
-/// holds anything, a Codex thread before its first turn. Input anchored
-/// here is read for in the session's whole history.
-pub(crate) trait AnchorsSessionStart {
-    fn session_start_anchor(&self) -> NativeHistoryAnchor;
-}
-
-impl AnchorsSessionStart for HarnessKind {
-    fn session_start_anchor(&self) -> NativeHistoryAnchor {
-        match self {
-            HarnessKind::Claude => {
-                NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor::session_start())
-            }
-            HarnessKind::Codex => NativeHistoryAnchor::CodexTurns(None),
-        }
-    }
-}
-
 /// Whether a launch opens its seat with no first prompt: a Simplified seat
 /// with no instruction, whose first model turn is the queued request a
 /// drain types.
@@ -1023,15 +1009,6 @@ pub(crate) trait ReadsClaudeDelivery {
     fn simplified_first_input_ready(&self, node: &FlowNode) -> bool;
     fn claude_transcript(&self, node: &FlowNode) -> Option<std::path::PathBuf>;
     fn claude_main_turn_ended(&self, node: &FlowNode) -> bool;
-    fn claude_delivery_cursor(&self, node: &FlowNode) -> Option<NativeTranscriptCursor>;
-    /// What the flow's transcript after the attempt's cursor shows of
-    /// `text`, the payload that carried its request; Unreadable when the
-    /// attempt is no longer the flow's own session's.
-    fn claude_delivery_history(
-        &self,
-        attempt: &QueueDeliveryAttempt,
-        text: &str,
-    ) -> ClaudeQueuedHistory;
 }
 
 impl ReadsClaudeDelivery for RunningNexus {
@@ -1072,53 +1049,6 @@ impl ReadsClaudeDelivery for RunningNexus {
                 || self
                     .claude_transcript(node)
                     .is_some_and(|transcript| transcript.main_turn_ended(&node.session_id.0)))
-    }
-
-    fn claude_delivery_cursor(&self, node: &FlowNode) -> Option<NativeTranscriptCursor> {
-        let cursor = match self.claude_transcript(node) {
-            Some(transcript) => transcript.claude_cursor()?,
-            None if self.simplified_first_input_ready(node) => {
-                return Some(NativeTranscriptCursor::session_start());
-            }
-            None => return None,
-        };
-        // The cursor's u64s are kept as the i64s Memory archives, bit for bit.
-        Some(NativeTranscriptCursor {
-            device: Device(cursor.device as i64),
-            inode: Inode(cursor.inode as i64),
-            offset: Offset(cursor.offset as i64),
-        })
-    }
-
-    fn claude_delivery_history(
-        &self,
-        attempt: &QueueDeliveryAttempt,
-        text: &str,
-    ) -> ClaudeQueuedHistory {
-        let NativeHistoryAnchor::ClaudeTranscript(cursor) = &attempt.native_history_anchor else {
-            return ClaudeQueuedHistory::Unreadable;
-        };
-        let node = match self.store.flow_node(&attempt.flow_id.0) {
-            Ok(Some(node))
-                if node.harness_kind == HarnessKind::Claude
-                    && node.session_id.0 == attempt.thread_id.0 =>
-            {
-                node
-            }
-            _ => return ClaudeQueuedHistory::Unreadable,
-        };
-        let Some(transcript) = self.claude_transcript(&node) else {
-            return ClaudeQueuedHistory::Unreadable;
-        };
-        transcript.queued_history_after(
-            &node.session_id.0,
-            &ClaudeTranscriptCursor {
-                device: cursor.device.0 as u64,
-                inode: cursor.inode.0 as u64,
-                offset: cursor.offset.0 as u64,
-            },
-            text,
-        )
     }
 }
 
@@ -1321,415 +1251,6 @@ impl JudgesClosingRest for RunningNexus {
     }
 }
 
-/// Where the seat stands once a reconciled request has settled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SeatAfter {
-    /// The request's own turn has ended and the seat rests: the next
-    /// request may be handed over now.
-    Resting,
-    /// The request's turn may still run: the next waits for its end.
-    InItsTurn,
-}
-
-/// The turn a receipt Flow settles now lies in, read from the seat's own
-/// native history at the settlement (`transitions`, `Arrival`): Ended when
-/// the seat rests past it, a Claude transcript whose main turn ended with
-/// no later prompt or a Codex thread its ledger shows at rest; Running
-/// otherwise. The receipt is already in that history, so a seat resting
-/// past every prompt rests past it.
-pub(crate) trait ReadsReceiptTurn {
-    fn receipt_turn(&self, flow_id: &str) -> crate::generated::transitions::ReceiptTurn;
-}
-
-impl ReadsReceiptTurn for RunningNexus {
-    fn receipt_turn(&self, flow_id: &str) -> crate::generated::transitions::ReceiptTurn {
-        use crate::codex_turns::SettlesRestingCodexSeats;
-        use crate::generated::transitions::ReceiptTurn;
-        let ended = match self.store.flow_node(flow_id) {
-            Ok(Some(node)) => match node.harness_kind {
-                HarnessKind::Claude => self.claude_main_turn_ended(&node),
-                HarnessKind::Codex => self.codex_resting(flow_id),
-            },
-            _ => false,
-        };
-        if ended {
-            ReceiptTurn::Ended
-        } else {
-            ReceiptTurn::Running
-        }
-    }
-}
-
-/// What reconciling one outstanding hand-over found.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Reconciled {
-    /// Its exact native receipt is recorded and the request left the queue.
-    Settled(QueueEntry, SeatAfter),
-    /// Native history proved it never reached the seat; the request is
-    /// still queued and may be handed over again.
-    Absent,
-    /// Native history could not decide; it stays Uncertain and is never
-    /// handed over again.
-    Undecided(Undecided),
-    /// The store refused, or the recorded receipt no longer settles the
-    /// oldest request.
-    Refused,
-}
-
-/// Reconciliation of a queued request's hand-over from the seat's own
-/// native history: Claude's transcript after the stored cursor and its
-/// UserPromptSubmit receipts, Codex's thread turns after the stored newest
-/// turn. Found settles, proven absence authorises a new attempt, and
-/// anything else stays Uncertain with its reason, readable through
-/// `ReadQueueDeliveries`.
-pub(crate) trait ReconcilesQueueDelivery {
-    /// Under the dispatch gate.
-    fn reconcile_delivery(&self, attempt: &QueueDeliveryAttempt) -> Reconciled;
-    fn reconcile_delivery_during_dispatch(
-        &self,
-        attempt: &QueueDeliveryAttempt,
-        dispatch: Option<&mut QueueDispatch<'_>>,
-    ) -> Reconciled;
-    /// Records the one receipt on every attempt of `run`, the payload
-    /// that carried `attempt`, and settles their requests in order.
-    fn settle_received(
-        &self,
-        attempt: &QueueDeliveryAttempt,
-        run: &[QueueDeliveryAttempt],
-        turn_id: String,
-        native_receipt: String,
-        seat_after: SeatAfter,
-    ) -> Reconciled;
-    /// A prompt the flow's own session took: settles the outstanding
-    /// hand-over whose request it exactly is. Anything else, a task
-    /// notification among them, settles nothing.
-    fn settle_submitted_prompt(&self, flow_id: &str, prompt: &NativePrompt);
-    /// At the Nexus's start: reconciles every hand-over the last Nexus left
-    /// outstanding, then settles every Claude seat whose own turn end was
-    /// recorded and which holds work, as a Stop would.
-    fn recover_deliveries(&self);
-}
-
-pub(crate) trait RendersAttemptInput {
-    fn prompt_text(&self) -> String;
-    fn as_settled(&self, seat_after: SeatAfter) -> Reconciled;
-}
-
-impl RendersAttemptInput for QueueDeliveryAttempt {
-    fn prompt_text(&self) -> String {
-        match &self.queue_evidence {
-            meta_signal_flow::QueueEvidence::Logical(entry) => {
-                [entry.clone()].prompt_text(&self.address)
-            }
-            meta_signal_flow::QueueEvidence::Legacy(legacy) => legacy.request.native_content(),
-        }
-    }
-    fn as_settled(&self, seat_after: SeatAfter) -> Reconciled {
-        match &self.queue_evidence {
-            meta_signal_flow::QueueEvidence::Logical(entry) => {
-                Reconciled::Settled(entry.clone(), seat_after)
-            }
-            meta_signal_flow::QueueEvidence::Legacy(_) => Reconciled::Refused,
-        }
-    }
-}
-
-impl ReconcilesQueueDelivery for RunningNexus {
-    fn reconcile_delivery(&self, attempt: &QueueDeliveryAttempt) -> Reconciled {
-        self.reconcile_delivery_during_dispatch(attempt, None)
-    }
-
-    fn reconcile_delivery_during_dispatch(
-        &self,
-        attempt: &QueueDeliveryAttempt,
-        dispatch: Option<&mut QueueDispatch<'_>>,
-    ) -> Reconciled {
-        if self.queue_writes.owns_attempt(&attempt.queue_attempt_id.0) {
-            return Reconciled::Refused;
-        }
-        let baseline = if dispatch.is_some() {
-            match self
-                .store
-                .queue_delivery_attempt(&attempt.queue_attempt_id.0)
-            {
-                Ok(Some(current)) => Some(current),
-                _ => return Reconciled::Refused,
-            }
-        } else {
-            None
-        };
-        let attempt = baseline.as_ref().unwrap_or(attempt);
-        match &attempt.queue_delivery_phase {
-            QueueDeliveryPhase::ReceiptRecorded(_) => {
-                return if self
-                    .store
-                    .settle_recorded_delivery(
-                        &attempt.queue_attempt_id.0,
-                        self.receipt_turn(&attempt.flow_id.0),
-                    )
-                    .unwrap_or(false)
-                {
-                    attempt.as_settled(SeatAfter::InItsTurn)
-                } else {
-                    Reconciled::Refused
-                };
-            }
-            QueueDeliveryPhase::Settled(_) => {
-                return attempt.as_settled(SeatAfter::InItsTurn);
-            }
-            QueueDeliveryPhase::Read { .. } | QueueDeliveryPhase::Abandoned(_) => {
-                return Reconciled::Refused;
-            }
-            QueueDeliveryPhase::Absent(_) => return Reconciled::Absent,
-            QueueDeliveryPhase::Resolved(record) => {
-                return match record.queue_resolution_outcome {
-                    meta_signal_flow::QueueResolutionOutcome::Delivered => {
-                        attempt.as_settled(SeatAfter::InItsTurn)
-                    }
-                    meta_signal_flow::QueueResolutionOutcome::Absent => Reconciled::Absent,
-                };
-            }
-            QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_) => {}
-        }
-        let evidence = match dispatch {
-            Some(dispatch) => {
-                let evidence = dispatch.outside(|| self.find_receipt(attempt));
-                // A native hook or an explicit resolution may have moved
-                // the stored attempt while the history read was in flight.
-                match self
-                    .store
-                    .queue_delivery_attempt(&attempt.queue_attempt_id.0)
-                {
-                    Ok(Some(current))
-                        if current.queue_delivery_phase == attempt.queue_delivery_phase => {}
-                    Ok(Some(current)) => {
-                        return match current.queue_delivery_phase {
-                            QueueDeliveryPhase::Settled(_) => {
-                                current.as_settled(SeatAfter::InItsTurn)
-                            }
-                            QueueDeliveryPhase::Absent(_) => Reconciled::Absent,
-                            _ => Reconciled::Refused,
-                        };
-                    }
-                    _ => return Reconciled::Refused,
-                }
-                evidence
-            }
-            None => self.find_receipt(attempt),
-        };
-        match evidence {
-            Ok((run, turn_id, native_receipt, seat_after)) => {
-                self.settle_received(attempt, &run, turn_id, native_receipt, seat_after)
-            }
-            Err(undecided) => self.undecided(attempt, undecided),
-        }
-    }
-
-    fn settle_received(
-        &self,
-        attempt: &QueueDeliveryAttempt,
-        run: &[QueueDeliveryAttempt],
-        turn_id: String,
-        native_receipt: String,
-        seat_after: SeatAfter,
-    ) -> Reconciled {
-        // A Codex letter's receipt in a turn its ledger knows takes the
-        // letter there too; a turn it has not seen will show the letter's
-        // own item.
-        if attempt.harness_kind == HarnessKind::Codex {
-            use crate::generated::turn_ledger::{CodexTurnId, LedgerEvent, LetterReceived_Data};
-            for member in run {
-                self.codex_turns.apply(
-                    &member.thread_id.0,
-                    LedgerEvent::LetterReceived(LetterReceived_Data {
-                        queue_attempt_id: member.queue_attempt_id.clone(),
-                        codex_turn_id: CodexTurnId(turn_id.clone()),
-                    }),
-                );
-            }
-        }
-        // Read once the ledger has taken the letters above: the turn the one
-        // receipt lies in is every member's.
-        let receipt_turn = self.receipt_turn(&attempt.flow_id.0);
-        for member in run.iter().filter(|member| {
-            matches!(
-                member.queue_delivery_phase,
-                QueueDeliveryPhase::Prepared
-                    | QueueDeliveryPhase::Uncertain(_)
-                    | QueueDeliveryPhase::ReceiptRecorded(_)
-            )
-        }) {
-            let receipt = NativeDeliveryReceipt {
-                native_request_id: member.native_request_id,
-                thread_id: member.thread_id.clone(),
-                turn_id: crate::generated::memory::TurnId(turn_id.clone()),
-                native_receipt_text: crate::generated::memory::NativeReceiptText(
-                    native_receipt.clone(),
-                ),
-            };
-            if !(self
-                .store
-                .record_delivery_receipt(&member.queue_attempt_id.0, receipt)
-                .unwrap_or(false)
-                && self
-                    .store
-                    .settle_recorded_delivery(&member.queue_attempt_id.0, receipt_turn.clone())
-                    .unwrap_or(false))
-            {
-                return Reconciled::Refused;
-            }
-        }
-        attempt.as_settled(seat_after)
-    }
-
-    fn settle_submitted_prompt(&self, flow_id: &str, prompt: &NativePrompt) {
-        let _turn = self
-            .dispatch_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Ok(Some(metaflow)) = self.store.metaflow_awake_as(flow_id) else {
-            return;
-        };
-        let Ok(attempts) = self.store.unsettled_deliveries(&metaflow.address) else {
-            return;
-        };
-        let own = |attempt: &QueueDeliveryAttempt| {
-            !self.queue_writes.owns_attempt(&attempt.queue_attempt_id.0)
-                && attempt.flow_id.0 == flow_id
-                && attempt.harness_kind == HarnessKind::Claude
-                && prompt
-                    .native_session_id_option
-                    .as_ref()
-                    .map(|value| value.0.as_str())
-                    == Some(attempt.thread_id.0.as_str())
-                && matches!(
-                    attempt.queue_delivery_phase,
-                    QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_)
-                )
-        };
-        // The batch a fresh session's first prompt carried settles on that
-        // prompt's receipt, the first prompt its session reported.
-        if let Some(carried) = attempts
-            .iter()
-            .find(|attempt| own(attempt) && self.startup_launch(attempt).is_some())
-        {
-            let _ = self.reconcile_delivery(carried);
-        }
-        let attempt = attempts.into_iter().find(|attempt| {
-            own(attempt)
-                && self.startup_launch(attempt).is_none()
-                && self
-                    .cohort_runs(attempt)
-                    .iter()
-                    .any(|(_, text)| text.prompt_sha256() == prompt.prompt_sha256.0)
-        });
-        let Some(attempt) = attempt else {
-            return;
-        };
-        // A native hook proves that a submission was observed, not that an
-        // exact USER row has been durably recorded. Reconcile the transcript
-        // after its pre-submit anchor; an unreadable or not-yet-written row
-        // remains explicitly uncertain and cannot remove the logical entry.
-        let _ = self.reconcile_delivery(&attempt);
-    }
-
-    fn recover_deliveries(&self) {
-        let (addresses, outstanding) = {
-            let _turn = self
-                .dispatch_gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let Ok(metaflows) = self.store.list_metaflows() else {
-                eprintln!("flow-nexus: metaflows unreadable; no queued delivery reconciled");
-                return;
-            };
-            let outstanding = metaflows
-                .iter()
-                .filter_map(|metaflow| {
-                    self.store
-                        .outstanding_delivery(&metaflow.address)
-                        .ok()
-                        .flatten()
-                })
-                .collect::<Vec<_>>();
-            let addresses = metaflows
-                .into_iter()
-                .map(|metaflow| metaflow.address)
-                .collect::<Vec<_>>();
-            (addresses, outstanding)
-        };
-        // Native history is read off the gate, so a read that waits on its
-        // harness holds no other request; each answer is settled under it.
-        for attempt in outstanding {
-            let found = matches!(
-                attempt.queue_delivery_phase,
-                QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_)
-            )
-            .then(|| self.find_receipt(&attempt));
-            let _turn = self
-                .dispatch_gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if self.queue_writes.owns_attempt(&attempt.queue_attempt_id.0) {
-                continue;
-            }
-            let reconciled = match found {
-                Some(Ok((run, turn_id, native_receipt, seat_after))) => {
-                    self.settle_received(&attempt, &run, turn_id, native_receipt, seat_after)
-                }
-                Some(Err(undecided)) => {
-                    self.await_letter(&attempt);
-                    self.undecided(&attempt, undecided)
-                }
-                None => self.reconcile_delivery(&attempt),
-            };
-            eprintln!("flow-nexus: a queued delivery was reconciled at start: {reconciled:?}");
-        }
-        self.recover_typed(&addresses);
-        let seats = {
-            let _turn = self
-                .dispatch_gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.store
-                .list_metaflows()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|metaflow| !metaflow.queue.0.is_empty())
-                .filter_map(|metaflow| match metaflow.state {
-                    flow_ethos::State::Awake(flow_id) => Some(flow_id),
-                    _ => None,
-                })
-                .filter(|flow_id| {
-                    matches!(self.store.address_hold(&flow_id.0), Ok(None))
-                        && self.turn_end_recorded(&flow_id.0)
-                })
-                .collect::<Vec<_>>()
-        };
-        for flow_id in seats {
-            self.settle_stopped(&flow_id.0);
-        }
-    }
-}
-
-trait MarksUndecided {
-    fn undecided(&self, attempt: &QueueDeliveryAttempt, undecided: Undecided) -> Reconciled;
-}
-
-impl MarksUndecided for RunningNexus {
-    fn undecided(&self, attempt: &QueueDeliveryAttempt, undecided: Undecided) -> Reconciled {
-        if self
-            .store
-            .mark_delivery_undecided(&attempt.queue_attempt_id.0, undecided.clone())
-            .unwrap_or(false)
-        {
-            Reconciled::Undecided(undecided)
-        } else {
-            Reconciled::Refused
-        }
-    }
-}
-
 trait ClassifiesSuccessorCause {
     fn is_automatic_refresh(&self) -> bool;
 }
@@ -1873,33 +1394,21 @@ impl SleepsAndWakesSeats for RunningNexus {
             let Some(lease) = self.waking.hold(address) else {
                 return;
             };
-            let mut dispatch = QueueDispatch::new(&self.dispatch_gate, _turn);
-            let presence = dispatch.outside(|| self.herdr.pane_presence(&node));
-            if self.held()
-                || self.permaflow_held(address.clone())
-                || !matches!(self.store.flow_node(&flow_id.0), Ok(Some(current))
-                    if current.session_id == node.session_id
-                        && current.herdr_route_selection == node.herdr_route_selection)
-            {
-                return;
-            }
-            let Ok(Some(current)) = self.store.metaflow(address) else {
-                return;
-            };
-            if current.state != flow_ethos::State::Awake(flow_id.clone()) {
-                return;
-            }
-            if matches!(presence, PanePresence::Absent | PanePresence::Bare) {
+            if matches!(
+                self.herdr.pane_presence(&node),
+                PanePresence::Absent | PanePresence::Bare
+            ) {
                 let _ = self.perform(Operation::Record(Record_Data::Exited(flow_id)));
                 return;
             }
             // Pressing work is handed over now, the Soft work queued before
             // it included; the delivery engine interrupts only for
-            // HardAbrupt. Soft work alone waits for the seat's idle event.
-            if self.waits_for_idle(&current.queue.0, &flow_id.0) {
+            // HardAbrupt. Soft work waits for the seat's idle event, and a
+            // queue of Soft Notices alone for the next waking request.
+            if !self.due_now(&metaflow.queue.0, &flow_id.0) {
                 return;
             }
-            let _ = self.drain_all_held(address.clone(), &lease, Some(&mut dispatch));
+            let _ = self.drain_all_held(address.clone(), &lease);
         }
         self.wake_deferred();
     }
@@ -1952,8 +1461,21 @@ impl SleepsAndWakesSeats for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let mut dispatch = QueueDispatch::new(&self.dispatch_gate, _turn);
-            match self.drain_held(address.clone(), &lease, Some(&mut dispatch)) {
+            // What queued while the woken flow started waits, as for any
+            // seat, until it is due.
+            let due = match self.store.metaflow(address) {
+                Ok(Some(Metaflow {
+                    state: flow_ethos::State::Awake(flow_id),
+                    queue,
+                    ..
+                })) => self.due_now(&queue.0, &flow_id.0),
+                _ => false,
+            };
+            if !due {
+                drop(lease);
+                return;
+            }
+            match self.drain_held(address.clone(), &lease) {
                 Outcome::Drained(typed) if typed.is_empty() => {
                     drop(lease);
                     return;
@@ -1970,11 +1492,6 @@ impl SleepsAndWakesSeats for RunningNexus {
 
     fn wake_plan(&self, metaflow: &Metaflow) -> WakePlan {
         use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
-        let last = metaflow
-            .past
-            .0
-            .last()
-            .and_then(|flow_id| self.last_launch_profile(&flow_id.0));
         // Every launch opens in the one configured session.
         let session = {
             use crate::launching::NamesLaunchSession;
@@ -1983,28 +1500,19 @@ impl SleepsAndWakesSeats for RunningNexus {
                 Err(_) => return WakePlan::Unplaceable,
             }
         };
-        // A declared metaflow wakes with the modules it is bound to; one
-        // never declared, with those its last launch named.
-        match (self.store.metaflow_declaration(&metaflow.address), last) {
-            (Ok(Some(declared)), _) => WakePlan::Fresh(FreshContext {
-                herdr_session_name: session.clone(),
-                flow_kind: declared.flow_kind.clone(),
-                tool_set: declared.tool_set.clone(),
+        // A metaflow wakes with the modules its declaration binds it to; an
+        // undeclared Address is never woken.
+        match self.store.metaflow_declaration(&metaflow.address) {
+            Ok(Some(declared)) => WakePlan::Fresh(FreshContext {
+                herdr_session_name: session,
+                flow_kind: declared.flow_kind,
+                tool_set: declared.tool_set,
                 system_modules: declared.system_modules,
                 prompt_modules: declared.prompt_modules,
                 leave_outs_option: None,
                 purpose: crate::generated::starter::Purpose(declared.purpose.0),
             }),
-            (_, Some(profile)) => WakePlan::Fresh(FreshContext {
-                herdr_session_name: session.clone(),
-                flow_kind: profile.flow_kind.clone(),
-                tool_set: profile.tool_set.clone(),
-                system_modules: profile.system_modules,
-                prompt_modules: profile.prompt_modules,
-                leave_outs_option: profile.leave_outs_option,
-                purpose: crate::generated::starter::Purpose(String::new()),
-            }),
-            (_, None) => WakePlan::Unplaceable,
+            _ => WakePlan::Unplaceable,
         }
     }
 
@@ -2042,12 +1550,35 @@ impl SleepsAndWakesSeats for RunningNexus {
         // acts on none of it: no restart, successor, drain or wake is taken
         // up until Resume.
         if self.held() {
-            self.recover_deliveries();
             crate::reaping::TakesUpObligations::recover_obligations(self);
             eprintln!("flow-nexus: the Nexus is held; what it owes is taken up at Resume");
             return;
         }
-        self.recover_deliveries();
+        // A seat whose own turn end was recorded and which holds work is
+        // settled as its Stop would settle it.
+        let rested = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.store
+                .list_metaflows()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|metaflow| !metaflow.queue.0.is_empty())
+                .filter_map(|metaflow| match metaflow.state {
+                    flow_ethos::State::Awake(flow_id) => Some(flow_id),
+                    _ => None,
+                })
+                .filter(|flow_id| {
+                    matches!(self.store.address_hold(&flow_id.0), Ok(None))
+                        && self.turn_end_recorded(&flow_id.0)
+                })
+                .collect::<Vec<_>>()
+        };
+        for flow_id in rested {
+            self.settle_stopped(&flow_id.0);
+        }
         {
             use crate::generated::overriding::{ParksHeldLaunches, ResumesHeldLaunches};
             let addresses = self
@@ -2224,8 +1755,7 @@ pub trait RefreshesMetaflows {
     /// closed under its pane's lease, typing nothing, and its flow recorded
     /// Stopped, which puts the metaflow Asleep with the flow in Past and its
     /// queue kept. The successor's context is what any wake composes: the
-    /// metaflow's declaration, else the last launch's modules, remembering
-    /// the ending flow.
+    /// metaflow's declaration, remembering the ending flow.
     ///
     /// A caller that is a flow of the Address refreshes only itself: while
     /// the Address is no longer Awake as that flow, the refresh is refused
@@ -2885,43 +2415,88 @@ impl PerformsWakeAndDrain for RunningNexus {
         let Some(lease) = self.waking.hold(&address) else {
             return Outcome::Failed(Failed_Data::NotAwake);
         };
-        self.drain_held(address, &lease, None)
+        self.drain_held(address, &lease)
     }
 
     fn drain_all(&self, address: Address) -> Outcome {
         let Some(lease) = self.waking.hold(&address) else {
             return Outcome::Failed(Failed_Data::NotAwake);
         };
-        self.drain_all_held(address, &lease, None)
+        self.drain_all_held(address, &lease)
     }
 }
 
 pub(crate) trait DrainsHeldSeats {
-    fn drain_held(
-        &self,
-        address: Address,
-        lease: &WakingLease,
-        dispatch: Option<&mut QueueDispatch<'_>>,
-    ) -> Outcome;
-    fn drain_all_held(
-        &self,
-        address: Address,
-        lease: &WakingLease,
-        dispatch: Option<&mut QueueDispatch<'_>>,
-    ) -> Outcome;
+    /// Under the dispatch gate the caller holds, with the metaflow's waking
+    /// lease: hands the queue of the seat `address` is Awake as to its pane
+    /// in one payload, oldest first, and records the pane writer's own
+    /// result in the one store commit that takes those requests from the
+    /// queue. Presented or Transported is Delivered and Uncertain is
+    /// Uncertain, each final; a refused write leaves them queued.
+    fn drain_held(&self, address: Address, lease: &WakingLease) -> Outcome;
+    /// Hands over until the queue is empty or a hand-over takes nothing.
+    fn drain_all_held(&self, address: Address, lease: &WakingLease) -> Outcome;
+}
+
+/// What a hand-over's requests are recorded as, read off the pane writer's
+/// own result.
+pub(crate) trait RecordsWriterResult {
+    /// Delivered for Presented or Transported, naming the seat's session
+    /// and `prompt`, the native prompt that took it; Uncertain for
+    /// Uncertain.
+    fn handed_over_state(&self, node: &FlowNode, prompt: String) -> signal_flow::DeliveryState;
+}
+
+impl RecordsWriterResult for meta_signal_flow::VisibleDelivery {
+    fn handed_over_state(&self, node: &FlowNode, prompt: String) -> signal_flow::DeliveryState {
+        match self.delivery_grade {
+            meta_signal_flow::DeliveryGrade::Presented
+            | meta_signal_flow::DeliveryGrade::Transported => {
+                signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                    harness_kind: node.harness_kind.clone(),
+                    native_session_id: signal_flow::NativeSessionId(node.session_id.0.clone()),
+                    native_prompt_id: signal_flow::NativePromptId(prompt),
+                })
+            }
+            meta_signal_flow::DeliveryGrade::Uncertain => signal_flow::DeliveryState::Uncertain,
+        }
+    }
+}
+
+/// The native prompt a Claude seat's own UserPromptSubmit names, the word
+/// a pane writer waits for: the id a Simplified seat's answer is read
+/// after.
+pub(crate) trait ReadsReportedPrompt {
+    /// The prompt id of the flow's last submitted prompt its own session
+    /// reported, of `digest` when one is named.
+    fn reported_prompt(&self, flow_id: &str, digest: Option<&str>) -> Option<String>;
+}
+
+impl ReadsReportedPrompt for RunningNexus {
+    fn reported_prompt(&self, flow_id: &str, digest: Option<&str>) -> Option<String> {
+        self.store
+            .events(flow_id)
+            .ok()
+            .flatten()?
+            .into_iter()
+            .rev()
+            .find_map(|event| match event {
+                RecordedHarnessEvent::PromptSubmitted(prompt)
+                    if self.correlated_prompt(flow_id, &prompt)
+                        && digest.is_none_or(|digest| prompt.prompt_sha256.0 == digest) =>
+                {
+                    prompt.prompt_id_option.map(|prompt_id| prompt_id.0)
+                }
+                _ => None,
+            })
+    }
 }
 
 impl DrainsHeldSeats for RunningNexus {
-    fn drain_held(
-        &self,
-        address: Address,
-        lease: &WakingLease,
-        mut dispatch: Option<&mut QueueDispatch<'_>>,
-    ) -> Outcome {
-        if self.permaflow_held(address.clone()) {
+    fn drain_held(&self, address: Address, lease: &WakingLease) -> Outcome {
+        if self.permaflow_held(address.clone()) || self.held() {
             return Outcome::Drained(Vec::new());
         }
-
         let flow_id = match self.store.metaflow(&address) {
             Ok(Some(Metaflow {
                 state: flow_ethos::State::Awake(flow_id),
@@ -2934,80 +2509,16 @@ impl DrainsHeldSeats for RunningNexus {
             Ok(Some(node)) => node,
             _ => return Outcome::Failed(Failed_Data::StoreRefused),
         };
-        // A hand-over still outstanding is reconciled first: its request is
-        // the oldest, and nothing behind it is handed over until it is
-        // settled, or proved never to have reached the seat.
-        let mut drained = Vec::new();
-        match self.store.outstanding_delivery(&address) {
-            Ok(None) => {}
-            Ok(Some(attempt)) => match self
-                .reconcile_delivery_during_dispatch(&attempt, dispatch.as_deref_mut())
-            {
-                Reconciled::Settled(queued, SeatAfter::Resting) => drained.push(queued),
-                Reconciled::Settled(queued, SeatAfter::InItsTurn) => {
-                    if attempt.flow_id == flow_id
-                        && attempt.thread_id.0 == node.session_id.0
-                        && node.harness_kind == HarnessKind::Codex
-                    {
-                        // Only this bound seat's turn can hold its work.
-                        // A predecessor's receipt never marks its successor busy.
-                        // The settled turn may still run: its ledger holds it
-                        // open until its own end, and what follows waits.
-                        return Outcome::Drained(vec![queued]);
-                    }
-                    drained.push(queued);
-                }
-                Reconciled::Absent => {}
-                // An attempt native history cannot decide (absence
-                // unprovable, a Codex seat not resting, a history replaced or
-                // unreadable) is parked: it stays Uncertain, is never typed
-                // again, and settles on a later receipt, while the queue
-                // behind it moves on.
-                Reconciled::Undecided(undecided) => {
-                    eprintln!(
-                        "flow-nexus: a queued delivery remains uncertain ({undecided:?}); parking it without retry"
-                    );
-                    if !self
-                        .store
-                        .park_uncertain_delivery(&attempt.queue_attempt_id.0)
-                        .unwrap_or(false)
-                    {
-                        return Outcome::Failed(Failed_Data::StoreRefused);
-                    }
-                    return match self.drain_held(address.clone(), lease, dispatch) {
-                        Outcome::Drained(mut following) => {
-                            drained.append(&mut following);
-                            Outcome::Drained(drained)
-                        }
-                        Outcome::AwaitingReceipt(id) if drained.is_empty() => {
-                            Outcome::AwaitingReceipt(id)
-                        }
-                        Outcome::AwaitingReceipt(_) => Outcome::Drained(drained),
-                        Outcome::WaitingForTurn(id) if drained.is_empty() => {
-                            Outcome::WaitingForTurn(id)
-                        }
-                        Outcome::WaitingForTurn(_) => Outcome::Drained(drained),
-                        Outcome::Failed(reason) if drained.is_empty() => Outcome::Failed(reason),
-                        Outcome::Failed(_) => Outcome::Drained(drained),
-                        other => other,
-                    };
-                }
-                Reconciled::Refused => return Outcome::Failed(Failed_Data::StoreRefused),
-            },
-            Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
-        }
-        // Payloads typed earlier settle on the receipts native history
-        // now shows, and a simplified seat's answer to the input it was
-        // bound to is queued once its transcript shows it, so the binding
-        // is free for the request now oldest.
-        self.reconcile_typed_during_dispatch(&address, dispatch.as_deref_mut());
+        // A simplified seat's answer to the input it was bound to is queued
+        // once its transcript shows it, so the binding is free for the
+        // request now oldest.
         self.queue_simplified_answer(&flow_id.0);
         let queue = match self.store.metaflow(&address) {
             Ok(Some(metaflow)) => metaflow.queue,
             _ => return Outcome::Failed(Failed_Data::StoreRefused),
         };
         let Some(oldest) = queue.0.first().cloned() else {
-            return Outcome::Drained(drained);
+            return Outcome::Drained(Vec::new());
         };
         if self.store.pane_input_waits_for_reply(&oldest.request_id) {
             return Outcome::WaitingForTurn(oldest.logical_delivery_id);
@@ -3065,101 +2576,6 @@ impl DrainsHeldSeats for RunningNexus {
                 .take_while(|entry| !self.store.pane_input_waits_for_reply(&entry.request_id))
                 .collect()
         };
-        let refused = |drained: Vec<QueueEntry>, failure| {
-            if drained.is_empty() {
-                Outcome::Failed(failure)
-            } else {
-                Outcome::Drained(drained)
-            }
-        };
-        let write = if dispatch.is_some() {
-            if self.held() {
-                return Outcome::WaitingForTurn(oldest.logical_delivery_id);
-            }
-            let Some(write) = self.queue_writes.reserve() else {
-                return Outcome::WaitingForTurn(oldest.logical_delivery_id);
-            };
-            Some(write)
-        } else {
-            None
-        };
-        // Native history is anchored before any native input.
-        let read_anchor = || match node.harness_kind {
-            HarnessKind::Claude => match self.claude_delivery_cursor(&node) {
-                Some(cursor) => Ok(NativeHistoryAnchor::ClaudeTranscript(cursor)),
-                None => Err(Failed_Data::HerdrRefused),
-            },
-            HarnessKind::Codex => {
-                let model = match self.store.role(&flow_id.0) {
-                    Ok(Some(role)) => role.model_name,
-                    _ => return Err(Failed_Data::StoreRefused),
-                };
-                let adapter = match self.codex_endpoints.current().adapter_for(&model.0) {
-                    Ok(adapter) => adapter,
-                    Err(_) => return Err(Failed_Data::CodexRefused),
-                };
-                adapter
-                    .newest_turn(&node.session_id.0)
-                    .map(NativeHistoryAnchor::CodexTurns)
-                    .map_err(|_| Failed_Data::CodexRefused)
-            }
-        };
-        let anchor = match dispatch.as_mut() {
-            Some(dispatch) => dispatch.outside(read_anchor),
-            None => read_anchor(),
-        };
-        if let Some(write) = &write {
-            // Other calls may append work while this recipient's native
-            // thread supplies its anchor. Only the same bound queue prefix
-            // may proceed; this cohort never includes a newer admission.
-            if write.revoked()
-                || self.permaflow_held(address.clone())
-                || !matches!(self.store.metaflow(&address), Ok(Some(latest))
-                    if latest.state == flow_ethos::State::Awake(flow_id.clone())
-                        && latest.queue.0.starts_with(&cohort))
-                || !matches!(self.store.flow_node(&flow_id.0), Ok(Some(latest))
-                    if latest.session_id == node.session_id
-                        && latest.herdr_route_selection == node.herdr_route_selection)
-            {
-                return Outcome::WaitingForTurn(oldest.logical_delivery_id);
-            }
-        }
-        let anchor = match anchor {
-            Ok(anchor) => anchor,
-            Err(failure) => {
-                if matches!(failure, Failed_Data::HerdrRefused) {
-                    eprintln!(
-                        "flow-nexus: HerdrRefused flow={} request={} preflight=claude_history_anchor_unavailable emission=not_attempted",
-                        flow_id.0, oldest.request_id.0
-                    );
-                }
-                return refused(drained, failure);
-            }
-        };
-        let attempt = match self.store.prepare_oldest_delivery(
-            &address,
-            &flow_id.0,
-            &node.session_id.0,
-            node.harness_kind.clone(),
-            anchor,
-        ) {
-            Ok(PrepareQueueDelivery::Prepared(attempt)) => attempt,
-            Ok(PrepareQueueDelivery::Empty) => return Outcome::Drained(drained),
-            Ok(PrepareQueueDelivery::Outstanding(_)) | Err(_) => {
-                return refused(drained, Failed_Data::StoreRefused);
-            }
-        };
-        let absent = |observation: String| {
-            self.store
-                .mark_delivery_absent(
-                    &attempt.queue_attempt_id.0,
-                    AbsenceRecord {
-                        absence_proof: AbsenceProof::HandOverRefused,
-                        observation: crate::generated::memory::Observation(observation),
-                    },
-                )
-                .unwrap_or(false)
-        };
         // One Waking carries the whole cohort, every input under its own id,
         // sender and priority. Every priority uses the same pane delivery;
         // only a cohort containing HardAbrupt interrupts a working seat.
@@ -3195,727 +2611,66 @@ impl DrainsHeldSeats for RunningNexus {
         } else {
             meta_signal_flow::Message::Soft(letter)
         };
+        // The pane write is named by the oldest request it carries.
+        let delivery_id = oldest.logical_delivery_id.0.clone();
+        let digest = {
+            use crate::delivery::body::{RendersPaneText, ShowsPaneText};
+            use flow_native::DigestsPrompt;
+            message.pane_text().as_str().prompt_sha256()
+        };
         let request = meta_signal_flow::DeliveryRequest {
-            delivery_id: meta_signal_flow::DeliveryId(attempt.queue_attempt_id.0.clone()),
+            delivery_id: meta_signal_flow::DeliveryId(delivery_id.clone()),
             flow_id: flow_id.clone(),
             message,
         };
-        let result = if let (Some(dispatch), Some(write)) = (dispatch.as_deref_mut(), &write) {
-            write.prepared(
-                attempt.queue_attempt_id.0.clone(),
-                cohort
-                    .iter()
-                    .map(|entry| entry.logical_delivery_id.0.clone())
-                    .collect(),
-            );
-            let result = dispatch.outside(|| self.deliver_prepared_queue(request, lease, write));
-            write.release_preparation();
-            if write.revoked() {
-                // The Hold transaction already returned this attempt to
-                // its original logical queue before granting Held.
-                return Outcome::WaitingForTurn(oldest.logical_delivery_id);
+        let delivery = match self.deliver_while_waking(request, lease) {
+            meta_signal_flow::Output::MessageTyped(delivery) => delivery,
+            refused => {
+                eprintln!(
+                    "flow-nexus: HerdrRefused flow={} request={} outcome={refused:?}; it stays queued",
+                    flow_id.0, oldest.request_id.0
+                );
+                return Outcome::Failed(Failed_Data::HerdrRefused);
             }
-            result
-        } else {
-            self.deliver_while_waking(request, lease)
         };
-        let proved_absent = matches!(&result,
-            meta_signal_flow::Output::DeliveryRejected(rejected)
-                if matches!(rejected,
-                    meta_signal_flow::DeliveryRejection::UnknownFlow
-                    | meta_signal_flow::DeliveryRejection::FlowStopped
-                    | meta_signal_flow::DeliveryRejection::RouteUnavailable
-                    | meta_signal_flow::DeliveryRejection::RecipientWorking
-                    | meta_signal_flow::DeliveryRejection::RecipientBlocked
-                    | meta_signal_flow::DeliveryRejection::ComposerOccupied
-                    | meta_signal_flow::DeliveryRejection::NotDelivered));
-        if proved_absent {
-            eprintln!(
-                "flow-nexus: HerdrRefused flow={} request={} attempt={} outcome={result:?}",
-                flow_id.0, oldest.request_id.0, attempt.queue_attempt_id.0
-            );
-            absent(format!("{result:?}"));
-            return refused(drained, Failed_Data::HerdrRefused);
+        // A Claude seat that took the text named its prompt in its own
+        // UserPromptSubmit, the word its writer waited for; any other
+        // hand-over is named by its pane write.
+        let prompt = match (&delivery.delivery_grade, &node.harness_kind) {
+            (meta_signal_flow::DeliveryGrade::Presented, HarnessKind::Claude) => {
+                self.reported_prompt(&flow_id.0, Some(&digest))
+            }
+            _ => None,
         }
-        // Typed once, never typed again: every message the payload carried
-        // leaves the queue as an Uncertain attempt of the same native
-        // anchor, and the one receipt of the payload settles them all.
-        let _ = self
+        .unwrap_or(delivery_id);
+        let state = delivery.handed_over_state(&node, prompt);
+        match self
             .store
-            .mark_delivery_uncertain(&attempt.queue_attempt_id.0);
-        let typed = self.park_cohort(&attempt, &cohort);
-        let _ = self.reconcile_delivery_during_dispatch(&attempt, dispatch);
-        // A payload typed into a Codex pane is a letter its thread holds
-        // until a user message of exactly its text takes it, whether or not
-        // a turn has begun: the seat does not rest meanwhile, so the rest
-        // that typed it neither closes it nor hands it more. No turn's start
-        // or end, interrupted or not, takes the letter.
-        if node.harness_kind == HarnessKind::Codex {
-            use crate::generated::turn_ledger::{
-                Interrupt, LedgerEvent, PayloadText, PendingLetter,
-            };
-            let interrupt = match &result {
-                meta_signal_flow::Output::MessageTyped(delivery)
-                    if delivery.interrupt_witness
-                        != meta_signal_flow::InterruptWitness::NotRequested =>
-                {
-                    Interrupt::Pressed
-                }
-                _ => Interrupt::NotPressed,
-            };
-            self.codex_turns.apply(
-                &node.session_id.0,
-                LedgerEvent::LetterTyped(PendingLetter {
-                    queue_attempt_id: attempt.queue_attempt_id.clone(),
-                    payload_text: PayloadText(cohort.prompt_text(&address)),
-                    interrupt,
-                }),
-            );
-        }
-        drained.extend(typed);
-        Outcome::Drained(drained)
-    }
-
-    fn drain_all_held(
-        &self,
-        address: Address,
-        lease: &WakingLease,
-        mut dispatch: Option<&mut QueueDispatch<'_>>,
-    ) -> Outcome {
-        if self.permaflow_held(address.clone()) {
-            return Outcome::Drained(Vec::new());
-        }
-
-        let queued = match self.store.metaflow(&address) {
-            Ok(Some(metaflow)) => metaflow.queue,
-            Ok(None) => return Outcome::Failed(Failed_Data::NotAwake),
-            Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
-        };
-        let mut removed = 0;
-        let mut delivered = Vec::new();
-        loop {
-            let outcome = self.drain_held(address.clone(), lease, dispatch.as_deref_mut());
-            match outcome {
-                Outcome::Drained(mut entries) => delivered.append(&mut entries),
-                Outcome::AwaitingReceipt(id) => return Outcome::AwaitingReceipt(id),
-                Outcome::WaitingForTurn(id) => return Outcome::WaitingForTurn(id),
-                Outcome::Failed(reason) => return Outcome::Failed(reason),
-                _ => {}
-            }
-            let remaining = match self.store.metaflow(&address) {
-                Ok(Some(metaflow)) => metaflow.queue.0.len(),
-                _ => return Outcome::Failed(Failed_Data::StoreRefused),
-            };
-            let now_removed = queued.0.len().saturating_sub(remaining);
-            if now_removed == removed || remaining == 0 {
-                return Outcome::Drained(delivered);
-            }
-            removed = now_removed;
-        }
-    }
-}
-
-/// The messages one payload carried leave the queue together, and are
-/// settled together by its one receipt.
-pub(crate) trait ParksCohort {
-    /// After `head`'s payload was typed: parks `head` and gives each
-    /// further message of `cohort` its own attempt at the same native
-    /// anchor, parked, all in one store commit, so none is typed again.
-    /// Returns those parked, oldest first: the whole cohort, or none.
-    fn park_cohort(&self, head: &QueueDeliveryAttempt, cohort: &[QueueEntry]) -> Vec<QueueEntry>;
-    /// Candidate runs of retained attempts sharing `attempt`'s native
-    /// anchor, including completed comparison members. Only an exact
-    /// native receipt establishes a candidate's original payload boundary.
-    fn cohort_runs(
-        &self,
-        attempt: &QueueDeliveryAttempt,
-    ) -> Vec<(Vec<QueueDeliveryAttempt>, String)>;
-    /// Retained comparison members at `attempt`'s native anchor whose
-    /// attempt numbers run consecutively through its own, oldest first.
-    /// Consecutive identities nominate a candidate, not proof of a cohort.
-    fn typed_group(&self, attempt: &QueueDeliveryAttempt) -> Vec<QueueDeliveryAttempt>;
-    /// Under the gate the caller holds: reconciles every disjoint pending
-    /// payload of the seat `address` is Awake as, using exact native receipts.
-    fn reconcile_typed(&self, address: &Address);
-    fn reconcile_typed_during_dispatch(
-        &self,
-        address: &Address,
-        dispatch: Option<&mut QueueDispatch<'_>>,
-    );
-    /// Under the gate the caller holds, at the seat's own turn end: settles
-    /// every hand-over the ended turn took whose exact native receipt its
-    /// history shows, each payload typed past the queue's head and then the
-    /// hand-over holding that head, so each request arrives before the turn
-    /// end's rest is recorded. One whose receipt does not show is left as
-    /// it stands, for the drain at that rest.
-    fn settle_turn_receipts(&self, address: &Address);
-    /// At start, with no gate held: reads native history for every
-    /// payload still to settle, then takes the gate only to settle each
-    /// one whose receipt it found. A read that cannot decide, or that
-    /// waits on its harness, holds no other request.
-    fn recover_typed(&self, addresses: &[Address]);
-    /// The typed attempts of `flow_id` at `address` still to settle, past
-    /// the one still holding the queue's head, by attempt number.
-    fn typed(&self, address: &Address, flow_id: &str) -> Vec<QueueDeliveryAttempt>;
-    /// The run of typed attempts native history shows one exact receipt
-    /// for, with that receipt; else why it cannot be decided.
-    fn find_receipt(&self, attempt: &QueueDeliveryAttempt) -> Result<Receipted, Undecided>;
-    /// Under the gate, at start: a Codex attempt typed before this Nexus
-    /// started whose receipt history does not show is a letter its
-    /// thread's ledger awaits, until its user message or the queue settles
-    /// it. A first prompt's batch is its launch's own turn, never a letter.
-    fn await_letter(&self, attempt: &QueueDeliveryAttempt);
-}
-
-/// A run of attempts one payload carried, and the receipt that took it.
-pub(crate) type Receipted = (Vec<QueueDeliveryAttempt>, String, String, SeatAfter);
-
-impl ParksCohort for RunningNexus {
-    fn park_cohort(&self, head: &QueueDeliveryAttempt, cohort: &[QueueEntry]) -> Vec<QueueEntry> {
-        match self.store.park_typed_cohort(head, cohort) {
-            Ok(true) => cohort.to_vec(),
+            .record_hand_over(&address, &flow_id.0, &cohort, state)
+        {
+            Ok(true) => Outcome::Drained(cohort),
             answer => {
                 eprintln!(
-                    "flow-nexus: a typed batch of {} was not parked; its head stays outstanding: {answer:?}",
-                    cohort.len()
+                    "flow-nexus: a hand-over to flow {} was typed and not recorded: {answer:?}",
+                    flow_id.0
                 );
-                Vec::new()
+                Outcome::Failed(Failed_Data::StoreRefused)
             }
         }
     }
 
-    fn find_receipt(&self, attempt: &QueueDeliveryAttempt) -> Result<Receipted, Undecided> {
-        // A request a launch's first prompt carried is received when that
-        // prompt is: the whole batch it carried settles on its receipt.
-        if let Some(launch_request_id) = self.startup_launch(attempt) {
-            return match self.startup_receipt(&attempt.flow_id.0, &launch_request_id) {
-                Some(receipt) if receipt.native_session_id.0 == attempt.thread_id.0 => Ok((
-                    self.typed_group(attempt),
-                    receipt.native_prompt_id.0.clone(),
-                    format!(
-                        "first prompt of launch {launch_request_id}, native prompt {}",
-                        receipt.native_prompt_id.0
-                    ),
-                    SeatAfter::Resting,
-                )),
-                // Typed and not yet seen taken: absence is never proven.
-                _ => Err(Undecided::AbsenceUnprovable),
-            };
-        }
-        // One payload may have carried this attempt with the others typed
-        // with it: each run of them is looked for, the longest first.
-        let mut found = Undecided::AbsenceUnprovable;
-        for (run, text) in self.cohort_runs(attempt) {
-            let answer = match attempt.harness_kind {
-                HarnessKind::Claude => match self.claude_delivery_history(attempt, &text) {
-                    // A Claude seat takes input while its turn runs, into
-                    // its own queue: the next request need not wait.
-                    ClaudeQueuedHistory::Received(receipt) => {
-                        Ok((receipt.turn_id, receipt.row, SeatAfter::Resting))
-                    }
-                    // Text typed into a Claude pane may sit in its composer
-                    // or its input queue unrecorded: absence after typing is
-                    // never proven from the transcript.
-                    ClaudeQueuedHistory::Unseen => Err(Undecided::AbsenceUnprovable),
-                    ClaudeQueuedHistory::Pending => Err(Undecided::PendingInHarness),
-                    ClaudeQueuedHistory::Ambiguous => Err(Undecided::Ambiguous),
-                    ClaudeQueuedHistory::Unreadable => Err(Undecided::HistoryUnreadable),
-                    ClaudeQueuedHistory::Replaced => Err(Undecided::HistoryReplaced),
-                },
-                HarnessKind::Codex => {
-                    let NativeHistoryAnchor::CodexTurns(anchor) = &attempt.native_history_anchor
-                    else {
-                        return Err(Undecided::HistoryUnreadable);
-                    };
-                    let history = self
-                        .store
-                        .role(&attempt.flow_id.0)
-                        .ok()
-                        .flatten()
-                        .and_then(|role| {
-                            self.codex_endpoints
-                                .current()
-                                .adapter_for(&role.model_name.0)
-                                .ok()
-                        })
-                        .and_then(|adapter| {
-                            adapter
-                                .queued_turn_after(&attempt.thread_id.0, anchor.as_deref(), &text)
-                                .ok()
-                        });
-                    match history {
-                        Some(CodexTurnHistory::Received {
-                            turn_id,
-                            turn,
-                            resting,
-                        }) => Ok((
-                            turn_id,
-                            turn,
-                            if resting {
-                                SeatAfter::Resting
-                            } else {
-                                SeatAfter::InItsTurn
-                            },
-                        )),
-                        Some(CodexTurnHistory::Unseen { resting: true, .. }) => {
-                            // An absent row at this instant is not proof that
-                            // an unacknowledged request cannot materialize later.
-                            Err(Undecided::AbsenceUnprovable)
-                        }
-                        Some(CodexTurnHistory::Unseen { resting: false, .. }) => {
-                            Err(Undecided::SeatNotResting)
-                        }
-                        Some(CodexTurnHistory::AnchorMissing) => Err(Undecided::HistoryReplaced),
-                        Some(CodexTurnHistory::Ambiguous) => Err(Undecided::Ambiguous),
-                        None => Err(Undecided::HistoryUnreadable),
-                    }
+    fn drain_all_held(&self, address: Address, lease: &WakingLease) -> Outcome {
+        let mut delivered = Vec::new();
+        loop {
+            match self.drain_held(address.clone(), lease) {
+                Outcome::Drained(entries) if entries.is_empty() => {
+                    return Outcome::Drained(delivered);
                 }
-            };
-            match answer {
-                Ok((turn_id, native_receipt, seat_after)) => {
-                    return Ok((run, turn_id, native_receipt, seat_after));
-                }
-                // What a run in the harness's own queue shows outweighs a
-                // run nothing names.
-                Err(undecided) => {
-                    if !matches!(found, Undecided::PendingInHarness | Undecided::Ambiguous) {
-                        found = undecided;
-                    }
-                }
+                Outcome::Drained(mut entries) => delivered.append(&mut entries),
+                outcome if delivered.is_empty() => return outcome,
+                _ => return Outcome::Drained(delivered),
             }
         }
-        Err(found)
-    }
-
-    fn typed_group(&self, attempt: &QueueDeliveryAttempt) -> Vec<QueueDeliveryAttempt> {
-        let Ok(retained) = self.store.retained_delivery_attempts(&attempt.address) else {
-            return vec![attempt.clone()];
-        };
-        let mut siblings = retained
-            .into_iter()
-            .filter(|other| {
-                other.flow_id == attempt.flow_id
-                    && other.thread_id == attempt.thread_id
-                    && other.native_history_anchor == attempt.native_history_anchor
-                    && matches!(
-                        other.queue_evidence,
-                        meta_signal_flow::QueueEvidence::Logical(_)
-                    )
-                    && matches!(
-                        other.queue_delivery_phase,
-                        QueueDeliveryPhase::Prepared
-                            | QueueDeliveryPhase::Uncertain(_)
-                            | QueueDeliveryPhase::ReceiptRecorded(_)
-                            | QueueDeliveryPhase::Settled(_)
-                            | QueueDeliveryPhase::Read { .. }
-                    )
-            })
-            .collect::<Vec<_>>();
-        siblings.sort_by_key(|other| other.native_request_id);
-        let Some(at) = siblings
-            .iter()
-            .position(|other| other.queue_attempt_id == attempt.queue_attempt_id)
-        else {
-            return vec![attempt.clone()];
-        };
-        let mut start = at;
-        while start > 0
-            && siblings[start - 1].native_request_id.0 + 1 == siblings[start].native_request_id.0
-        {
-            start -= 1;
-        }
-        let mut end = at + 1;
-        while end < siblings.len()
-            && siblings[end - 1].native_request_id.0 + 1 == siblings[end].native_request_id.0
-        {
-            end += 1;
-        }
-        siblings[start..end].to_vec()
-    }
-
-    fn typed(&self, address: &Address, flow_id: &str) -> Vec<QueueDeliveryAttempt> {
-        let Ok(unsettled) = self.store.unsettled_deliveries(address) else {
-            return Vec::new();
-        };
-        let outstanding = self
-            .store
-            .outstanding_delivery(address)
-            .ok()
-            .flatten()
-            .map(|attempt| attempt.queue_attempt_id);
-        let mut typed = unsettled
-            .into_iter()
-            .filter(|attempt| {
-                attempt.flow_id.0 == flow_id
-                    && Some(&attempt.queue_attempt_id) != outstanding.as_ref()
-                    && matches!(
-                        attempt.queue_delivery_phase,
-                        QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_)
-                    )
-            })
-            .collect::<Vec<_>>();
-        typed.sort_by_key(|attempt| attempt.native_request_id);
-        typed
-    }
-
-    fn reconcile_typed(&self, address: &Address) {
-        self.reconcile_typed_during_dispatch(address, None);
-    }
-
-    fn reconcile_typed_during_dispatch(
-        &self,
-        address: &Address,
-        mut dispatch: Option<&mut QueueDispatch<'_>>,
-    ) {
-        let Ok(Some(Metaflow {
-            state: flow_ethos::State::Awake(flow_id),
-            ..
-        })) = self.store.metaflow(address)
-        else {
-            return;
-        };
-        let mut covered = HashSet::new();
-        for attempt in self.typed(address, &flow_id.0) {
-            if !covered.insert(attempt.queue_attempt_id.0.clone()) {
-                continue;
-            }
-            let evidence = match dispatch.as_deref_mut() {
-                Some(dispatch) => dispatch.outside(|| self.find_receipt(&attempt)),
-                None => self.find_receipt(&attempt),
-            };
-            if let Ok((run, turn_id, native_receipt, seat_after)) = evidence {
-                if !matches!(self.store.queue_delivery_attempt(&attempt.queue_attempt_id.0),
-                    Ok(Some(current)) if current.queue_delivery_phase == attempt.queue_delivery_phase)
-                {
-                    continue;
-                }
-                covered.extend(run.iter().map(|member| member.queue_attempt_id.0.clone()));
-                let _ = self.settle_received(&attempt, &run, turn_id, native_receipt, seat_after);
-            }
-        }
-    }
-
-    fn settle_turn_receipts(&self, address: &Address) {
-        // The typed payloads first: settling the head first would make the
-        // next typed attempt the head, and leave it to the drain after the
-        // rest.
-        self.reconcile_typed(address);
-        let Ok(Some(head)) = self.store.outstanding_delivery(address) else {
-            return;
-        };
-        if self.queue_writes.owns_attempt(&head.queue_attempt_id.0) {
-            return;
-        }
-        match head.queue_delivery_phase {
-            QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_) => {
-                if let Ok((run, turn_id, native_receipt, seat_after)) = self.find_receipt(&head) {
-                    let _ = self.settle_received(&head, &run, turn_id, native_receipt, seat_after);
-                }
-            }
-            QueueDeliveryPhase::ReceiptRecorded(_) => {
-                let _ = self.reconcile_delivery(&head);
-            }
-            QueueDeliveryPhase::Settled(_)
-            | QueueDeliveryPhase::Read { .. }
-            | QueueDeliveryPhase::Absent(_)
-            | QueueDeliveryPhase::Resolved(_)
-            | QueueDeliveryPhase::Abandoned(_) => {}
-        }
-    }
-
-    fn recover_typed(&self, addresses: &[Address]) {
-        for address in addresses {
-            let flow_id = match self.store.metaflow(address) {
-                Ok(Some(Metaflow {
-                    state: flow_ethos::State::Awake(flow_id),
-                    ..
-                })) => flow_id,
-                _ => continue,
-            };
-            let mut covered = HashSet::new();
-            for attempt in self.typed(address, &flow_id.0) {
-                if !covered.insert(attempt.queue_attempt_id.0.clone()) {
-                    continue;
-                }
-                covered.extend(
-                    self.typed_group(&attempt)
-                        .iter()
-                        .map(|member| member.queue_attempt_id.0.clone()),
-                );
-                // Read off the gate; settle under it.
-                let Ok((run, turn_id, native_receipt, seat_after)) = self.find_receipt(&attempt)
-                else {
-                    let _turn = self
-                        .dispatch_gate
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    self.await_letter(&attempt);
-                    continue;
-                };
-                let _turn = self
-                    .dispatch_gate
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let _ = self.settle_received(&attempt, &run, turn_id, native_receipt, seat_after);
-            }
-        }
-    }
-
-    fn await_letter(&self, attempt: &QueueDeliveryAttempt) {
-        use crate::generated::turn_ledger::{Interrupt, LedgerEvent, PayloadText, PendingLetter};
-        if attempt.harness_kind != HarnessKind::Codex || self.startup_launch(attempt).is_some() {
-            return;
-        }
-        let Some((_, payload)) = self.cohort_runs(attempt).into_iter().next() else {
-            return;
-        };
-        self.codex_turns.apply(
-            &attempt.thread_id.0,
-            LedgerEvent::LetterTyped(PendingLetter {
-                queue_attempt_id: attempt.queue_attempt_id.clone(),
-                payload_text: PayloadText(payload),
-                interrupt: Interrupt::NotPressed,
-            }),
-        );
-    }
-
-    fn cohort_runs(
-        &self,
-        attempt: &QueueDeliveryAttempt,
-    ) -> Vec<(Vec<QueueDeliveryAttempt>, String)> {
-        let alone = (vec![attempt.clone()], attempt.prompt_text());
-        let group = self.typed_group(attempt);
-        if group.len() < 2 {
-            return vec![alone];
-        }
-        let entries = group
-            .iter()
-            .filter_map(|member| match &member.queue_evidence {
-                meta_signal_flow::QueueEvidence::Logical(entry) => Some(entry.clone()),
-                meta_signal_flow::QueueEvidence::Legacy(_) => None,
-            })
-            .collect::<Vec<_>>();
-        let text = entries.prompt_text(&attempt.address);
-        vec![(group, text), alone]
-    }
-}
-
-/// A fresh wake's first prompt carries the queued batch. `Started` proves
-/// that prompt was submitted; the receipt that proves the harness took it
-/// can land after `Started`: Claude may write the prompt to its transcript
-/// later, and a Codex receipt is the rollout showing the prompt and the
-/// flow's first answer. Until it lands, the batch is typed input awaiting
-/// its receipt: each request leaves the queue as an Uncertain attempt
-/// anchored at the start of the woken session, so it is never typed again,
-/// and the launch's own receipt settles it.
-pub(crate) trait CarriesStartup {
-    /// The receipt of the first prompt launch `launch_request_id` typed
-    /// into flow `flow_id`: the launch's recorded observation, else the
-    /// transcript showing that prompt and the flow's first answer, else the
-    /// first prompt the flow's own session reported submitted.
-    fn startup_receipt(
-        &self,
-        flow_id: &str,
-        launch_request_id: &str,
-    ) -> Option<signal_flow::NativeReceipt>;
-    /// Under the dispatch gate the caller holds: parks the batch, oldest
-    /// first, as Uncertain attempts of the woken session anchored at its
-    /// start. False when the store refused or the batch is not the queue's
-    /// head.
-    fn carry_startup(&self, address: &Address, flow_id: &str, startup: &[QueueEntry]) -> bool;
-    /// Under the dispatch gate the caller holds, after a wake started flow
-    /// `flow_id` and could not record what its first prompt carried: parks
-    /// what that prompt carried and the queue still holds, as
-    /// `carry_startup` parks a batch, so no drain types it again and the
-    /// launch's receipt settles it. The carried requests are those whose
-    /// rendered run, after the ones already parked at the session's start,
-    /// ends the launch's brief. Answers the requests it parked, oldest
-    /// first, none when nothing carried is still queued; None when the
-    /// store refused.
-    fn carry_left_queued(&self, address: &Address, flow_id: &str) -> Option<Vec<QueueEntry>>;
-    /// The launch whose first prompt carried `attempt`, when one did: an
-    /// attempt anchored at its session's start, in a flow whose launch
-    /// typed a first prompt whose brief ends with the run of requests the
-    /// attempt was parked in. A request typed by a drain is anchored at the
-    /// history as it stood: a Claude transcript's cursor, a Codex thread's
-    /// newest turn. A Codex thread whose history lists no turn yet anchors
-    /// a drain's run at its start too; that run is no launch's brief.
-    fn startup_launch(&self, attempt: &QueueDeliveryAttempt) -> Option<String>;
-}
-
-impl CarriesStartup for RunningNexus {
-    fn startup_receipt(
-        &self,
-        flow_id: &str,
-        launch_request_id: &str,
-    ) -> Option<signal_flow::NativeReceipt> {
-        use crate::generated::starter::StartupProgress;
-        use crate::herdr::launch::ObservesNativeTargetReceipt;
-        let node = self.store.flow_node(flow_id).ok().flatten()?;
-        let attempt = self
-            .store
-            .launch_attempt(launch_request_id)
-            .ok()
-            .flatten()?;
-        let receipt = |native_session_id, native_turn_id: signal_flow::NativeTurnId| {
-            signal_flow::NativeReceipt {
-                harness_kind: node.harness_kind.clone(),
-                native_session_id,
-                native_prompt_id: signal_flow::NativePromptId(native_turn_id.0),
-            }
-        };
-        if let Some(signal_flow::PromptDeliveryResult::Observed(observed)) =
-            &attempt.prompt_delivery_result_option
-        {
-            return Some(receipt(
-                observed.native_session_id.clone(),
-                observed.native_turn_id.clone(),
-            ));
-        }
-        if let Some(intent) = &attempt.prompt_delivery_intent_option
-            && let Ok(StartupProgress::Received(observed)) =
-                self.herdr.observe_native_target_receipt(intent)
-        {
-            return Some(receipt(observed.native_session_id, observed.native_turn_id));
-        }
-        // A fresh session's first submitted prompt is its launch's: nothing
-        // else is typed into it before its launch answers Started.
-        self.store
-            .events(flow_id)
-            .ok()
-            .flatten()?
-            .into_iter()
-            .find_map(|event| match event {
-                RecordedHarnessEvent::PromptSubmitted(prompt)
-                    if self.correlated_prompt(flow_id, &prompt) =>
-                {
-                    Some(signal_flow::NativeReceipt {
-                        harness_kind: node.harness_kind.clone(),
-                        native_session_id: prompt.native_session_id_option?,
-                        native_prompt_id: signal_flow::NativePromptId(prompt.prompt_id_option?.0),
-                    })
-                }
-                _ => None,
-            })
-    }
-
-    fn carry_startup(&self, address: &Address, flow_id: &str, startup: &[QueueEntry]) -> bool {
-        let Some(first) = startup.first() else {
-            return true;
-        };
-        let node = match self.store.flow_node(flow_id) {
-            Ok(Some(node)) => node,
-            _ => return false,
-        };
-        let head = match self.store.prepare_oldest_delivery(
-            address,
-            flow_id,
-            &node.session_id.0,
-            node.harness_kind.clone(),
-            node.harness_kind.session_start_anchor(),
-        ) {
-            Ok(PrepareQueueDelivery::Prepared(head))
-                if head.queue_evidence
-                    == meta_signal_flow::QueueEvidence::Logical(first.clone()) =>
-            {
-                head
-            }
-            _ => return false,
-        };
-        if !self
-            .store
-            .mark_delivery_uncertain(&head.queue_attempt_id.0)
-            .unwrap_or(false)
-        {
-            return false;
-        }
-        let carried = self.park_cohort(&head, startup);
-        eprintln!(
-            "flow-nexus: flow {flow_id} woke; its first prompt carried {} requests, their receipt awaited",
-            carried.len()
-        );
-        carried.len() == startup.len()
-    }
-
-    fn carry_left_queued(&self, address: &Address, flow_id: &str) -> Option<Vec<QueueEntry>> {
-        let node = self.store.flow_node(flow_id).ok()??;
-        let profile = self.last_launch_profile(flow_id)?;
-        let queue = self.store.metaflow(address).ok()??.queue.0;
-        let anchor = node.harness_kind.session_start_anchor();
-        let parked = self
-            .store
-            .unsettled_deliveries(address)
-            .ok()?
-            .into_iter()
-            .filter(|attempt| {
-                attempt.flow_id.0 == flow_id
-                    && attempt.thread_id.0 == node.session_id.0
-                    && attempt.native_history_anchor == anchor
-                    && matches!(
-                        attempt.queue_delivery_phase,
-                        QueueDeliveryPhase::Prepared
-                            | QueueDeliveryPhase::Uncertain(_)
-                            | QueueDeliveryPhase::ReceiptRecorded(_)
-                    )
-            })
-            .filter_map(|attempt| match attempt.queue_evidence {
-                meta_signal_flow::QueueEvidence::Logical(entry) => Some(entry),
-                meta_signal_flow::QueueEvidence::Legacy(_) => None,
-            })
-            .collect::<Vec<_>>();
-        // Work admitted while the launch started is queued behind its batch:
-        // what the prompt carried is the longest head of the queue that,
-        // after what is already parked, renders as the brief's end.
-        if profile.opens_without_prompt() {
-            return Some(Vec::new());
-        }
-        let brief = &profile.instruction_prompt.0;
-        let left = (1..=queue.len())
-            .rev()
-            .map(|length| &queue[..length])
-            .find(|head| {
-                let run = parked
-                    .iter()
-                    .chain(head.iter())
-                    .cloned()
-                    .collect::<Vec<_>>();
-                brief.ends_with(&run.prompt_text(address))
-            })
-            .map(<[QueueEntry]>::to_vec)
-            .unwrap_or_default();
-        (left.is_empty() || self.carry_startup(address, flow_id, &left)).then_some(left)
-    }
-
-    fn startup_launch(&self, attempt: &QueueDeliveryAttempt) -> Option<String> {
-        if attempt.native_history_anchor != attempt.harness_kind.session_start_anchor() {
-            return None;
-        }
-        let launch_request_id = self
-            .store
-            .launch_requests_bound_to(&attempt.flow_id.0)
-            .ok()?
-            .pop()?;
-        let profile = self
-            .store
-            .composable_launch_profile(&launch_request_id)
-            .ok()??;
-        // The launch's brief ends with the batch its first prompt carried,
-        // as the wake rendered it; a run a drain typed at the same anchor
-        // is no part of it.
-        let carried = self
-            .typed_group(attempt)
-            .into_iter()
-            .filter_map(|member| match member.queue_evidence {
-                meta_signal_flow::QueueEvidence::Logical(entry) => Some(entry),
-                meta_signal_flow::QueueEvidence::Legacy(_) => None,
-            })
-            .collect::<Vec<_>>();
-        (!profile.opens_without_prompt()
-            && profile
-                .instruction_prompt
-                .0
-                .ends_with(&carried.prompt_text(&attempt.address)))
-        .then_some(launch_request_id)
     }
 }
 
@@ -3928,14 +2683,9 @@ impl WakesInParts for RunningNexus {
         startup: &[QueueEntry],
         simplified: bool,
     ) -> bool {
-        let receipt = self.startup_receipt(flow_id, launch_request_id);
-        let has_logical = startup.iter().any(|entry| {
-            self.store
-                .logical_delivery_snapshot(&entry.logical_delivery_id)
-                .ok()
-                .flatten()
-                .is_some()
-        });
+        let Ok(Some(node)) = self.store.flow_node(flow_id) else {
+            return false;
+        };
         if simplified
             && let Some(oldest) = startup.first()
             && let signal_flow::SentBy::Sender(recipient) = &oldest.sent_by
@@ -3953,24 +2703,31 @@ impl WakesInParts for RunningNexus {
                 return false;
             }
         }
-        // A Started response proves the first prompt was submitted, and the
-        // first prompt carried the batch; the receipt proves it was taken.
-        // A receipt not yet observed leaves the batch typed input awaiting
-        // its receipt: it leaves the queue, is never typed again, and
-        // settles when the receipt is observed (`find_receipt`).
-        match receipt {
-            None if has_logical => self.carry_startup(address, flow_id, startup),
-            receipt => self
-                .store
-                .settle_wake_startup_receipts(
-                    address,
-                    flow_id,
-                    startup,
-                    receipt.as_ref(),
-                    self.receipt_turn(flow_id),
-                )
-                .unwrap_or(false),
-        }
+        // `Started` is the launch's own word that its first prompt was
+        // submitted, carrying the batch: each request it carried is
+        // Delivered in the commit that takes the batch from the queue,
+        // named by the native prompt the launch observed, else the one its
+        // session reported, else by the launch.
+        let observed = match self.store.launch_attempt(launch_request_id) {
+            Ok(Some(attempt)) => match attempt.prompt_delivery_result_option {
+                Some(signal_flow::PromptDeliveryResult::Observed(observed)) => {
+                    Some(observed.native_turn_id.0)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let prompt = observed
+            .or_else(|| self.reported_prompt(flow_id, None))
+            .unwrap_or_else(|| launch_request_id.to_owned());
+        let delivered = signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+            harness_kind: node.harness_kind.clone(),
+            native_session_id: signal_flow::NativeSessionId(node.session_id.0.clone()),
+            native_prompt_id: signal_flow::NativePromptId(prompt),
+        });
+        self.store
+            .record_hand_over(address, flow_id, startup, delivered)
+            .unwrap_or(false)
     }
 
     fn waken(&self, address: &Address) -> Result<FlowId, WakeRefusal> {
@@ -4088,12 +2845,10 @@ impl WakesInParts for RunningNexus {
             Record_Data_Awoken_Data {
                 address: address.clone(),
                 flow_id: flow_id.clone(),
-                // `Started` is the launch boundary that authoritatively
-                // accepted this first prompt. Remove exactly its fixed batch;
-                // anything admitted while it started remains queued behind.
-                // If a response is lost, recovery counts it delivered only
-                // when the seat is up and its transcript shows this batch;
-                // otherwise the queue and its uncertainty stay preserved.
+                // `Started` is the launch boundary that accepted this first
+                // prompt; `settle_startup` removes exactly its fixed batch,
+                // and anything admitted while it started remains queued
+                // behind.
                 delivered_count: crate::generated::operation::DeliveredCount(0),
             },
         ))) {
@@ -4316,8 +3071,7 @@ impl WakesInParts for RunningNexus {
         launch_request_id: String,
     ) -> Option<LaunchProfile> {
         let address = metaflow.address.clone();
-        // The successor's context is the metaflow's declaration, else what
-        // the predecessor's own launch named.
+        // The successor's context is the metaflow's declaration.
         let mut lineage = metaflow.clone();
         lineage.past.0.retain(|past| past.0 != flow_id);
         lineage.past.0.push(flow_ethos::FlowId(flow_id.to_owned()));
@@ -4418,10 +3172,9 @@ impl WakesInParts for RunningNexus {
                     ),
                 }
             }
-            self.reconcile_typed(&address);
             if matches!(
                 self.store.metaflow(&address),
-                Ok(Some(metaflow)) if !metaflow.queue.0.is_empty()
+                Ok(Some(metaflow)) if self.due_at_rest(&metaflow.queue.0)
             ) {
                 let _ = self.perform(Operation::Drain(address.clone()));
             }
@@ -4706,6 +3459,11 @@ impl WakesInParts for RunningNexus {
                 if !self.codex_resting(flow_id) {
                     return AtStop::Kept(KeptAtStop::ThreadNotResting);
                 }
+                // A hand-over recorded since its rest (an Arrival) opened a
+                // turn its thread may not have announced yet.
+                if !self.rests_now(flow_id) {
+                    return AtStop::Kept(KeptAtStop::InTurn);
+                }
                 true
             }
             // A Claude seat ordered refreshed or restarted, or due a refresh
@@ -4786,19 +3544,26 @@ impl WakesInParts for RunningNexus {
                 Err(outcome) => AtStop::Kept(KeptAtStop::RefreshRefused(outcome)),
             };
         }
-        self.reconcile_typed(&address);
         // A simplified seat's answer is queued before the seat is handed
         // more or sleeps.
         self.queue_simplified_answer(flow_id);
-        if !metaflow.queue.0.is_empty() {
+        // Only work due at its rest starts the seat's next turn; Soft
+        // Notices alone stay queued for the next hand-over or waking, and
+        // the seat continues as one with nothing due.
+        let metaflow = match self.store.metaflow(&address) {
+            Ok(Some(metaflow)) => metaflow,
+            _ => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+        };
+        if self.due_at_rest(&metaflow.queue.0) {
             if let Some(pane_agent) = unwritable_pane {
                 return AtStop::Kept(KeptAtStop::NotResting(pane_agent));
             }
             let Some(lease) = self.waking.hold(&address) else {
                 return AtStop::Kept(KeptAtStop::Waking);
             };
-            let mut dispatch = QueueDispatch::new(&self.dispatch_gate, turn);
-            return match self.drain_held(address, &lease, Some(&mut dispatch)) {
+            let handed = self.drain_held(address, &lease);
+            drop(turn);
+            return match handed {
                 Outcome::Drained(mut typed) if !typed.is_empty() => {
                     AtStop::Drained(typed.remove(0))
                 }
@@ -4808,7 +3573,7 @@ impl WakesInParts for RunningNexus {
         if refresh_mode == meta_signal_flow::RefreshMode::Manual {
             return AtStop::Idle;
         }
-        // With nothing queued, how the metaflow continues decides: a
+        // With nothing due, how the metaflow continues decides: a
         // Maintained seat stays Awake in its pane; an OnDemand seat closes
         // its harness, its Address and transcript kept, once it can be
         // closed without ending work its harness still runs.

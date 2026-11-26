@@ -23,7 +23,6 @@
 //! bounded wait.
 
 use crate::delivery::body::ShowsPaneText;
-use crate::queue_write_fence::HoldsQueueWrite;
 pub mod body;
 pub mod lease;
 
@@ -258,11 +257,11 @@ impl DeliversMessages for RunningNexus {
             Ok(None) => None,
             Err(_) => return Output::DeliveryRejected(DeliveryRejection::PersistenceRefused),
         };
-        self.deliver_inner(request, lease.as_ref(), None)
+        self.deliver_inner(request, lease.as_ref())
     }
 
     fn deliver_while_waking(&self, request: DeliveryRequest, lease: &WakingLease) -> Output {
-        self.deliver_inner(request, Some(lease), None)
+        self.deliver_inner(request, Some(lease))
     }
 
     fn vet(&self, request: &DeliveryRequest) -> Output {
@@ -380,37 +379,13 @@ impl DeliversOwnerCommands for RunningNexus {
     }
 }
 
-pub(crate) trait DeliversPreparedQueue {
-    fn deliver_prepared_queue(
-        &self,
-        request: DeliveryRequest,
-        lease: &WakingLease,
-        write: &crate::queue_write_fence::QueueWrite<'_>,
-    ) -> Output;
-    fn deliver_inner(
-        &self,
-        request: DeliveryRequest,
-        lease: Option<&WakingLease>,
-        write: Option<&crate::queue_write_fence::QueueWrite<'_>>,
-    ) -> Output;
+/// The one pane write every delivery goes through, under the pane's lease.
+pub(crate) trait DeliversUnderLease {
+    fn deliver_inner(&self, request: DeliveryRequest, lease: Option<&WakingLease>) -> Output;
 }
 
-impl DeliversPreparedQueue for RunningNexus {
-    fn deliver_prepared_queue(
-        &self,
-        request: DeliveryRequest,
-        lease: &WakingLease,
-        write: &crate::queue_write_fence::QueueWrite<'_>,
-    ) -> Output {
-        self.deliver_inner(request, Some(lease), Some(write))
-    }
-
-    fn deliver_inner(
-        &self,
-        request: DeliveryRequest,
-        lease: Option<&WakingLease>,
-        write: Option<&crate::queue_write_fence::QueueWrite<'_>>,
-    ) -> Output {
+impl DeliversUnderLease for RunningNexus {
+    fn deliver_inner(&self, request: DeliveryRequest, lease: Option<&WakingLease>) -> Output {
         match self.store.delivery(&request.delivery_id.0) {
             Ok(Some(delivery)) => {
                 return Output::MessageTyped(
@@ -470,7 +445,7 @@ impl DeliversPreparedQueue for RunningNexus {
             return Output::DeliveryRejected(DeliveryRejection::BodyRefused(refusal));
         }
         let _lease = self.pane_leases.hold(&target.route);
-        match LeasedDelivery::new(self, &request, &target).run(write) {
+        match LeasedDelivery::new(self, &request, &target).run() {
             Ok(delivery) => Output::MessageTyped(
                 crate::message_projection::ProjectsDelivery::visible_delivery(&delivery),
             ),
@@ -550,10 +525,7 @@ trait RunsLeasedDelivery<'run> {
     /// interrupt cancelled, which its writer had already submitted. It is
     /// never deleted; the letter follows it.
     fn resubmitted_cancelled_prompt(&self) -> bool;
-    fn run(
-        &self,
-        write: Option<&crate::queue_write_fence::QueueWrite<'_>>,
-    ) -> Result<Delivery, DeliveryRejection>;
+    fn run(&self) -> Result<Delivery, DeliveryRejection>;
 }
 
 impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
@@ -713,10 +685,7 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
                 || herdr.composer_now(route, harness_kind) == Submission::Seen)
     }
 
-    fn run(
-        &self,
-        write: Option<&crate::queue_write_fence::QueueWrite<'_>>,
-    ) -> Result<Delivery, DeliveryRejection> {
+    fn run(&self) -> Result<Delivery, DeliveryRejection> {
         let hard = matches!(self.request.message, Message::HardAbrupt(_));
         // A hard delivery reads the composer before it presses any key. A
         // text there that is not Flow's own letter refuses it untouched: an
@@ -760,9 +729,6 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         self.step(LeaseStep::Acquired)?;
         let mut interrupt_witness = InterruptWitness::NotRequested;
         if hard && agent_state == AgentState::Working {
-            if write.is_some_and(|write| !write.start()) {
-                return self.refuse(DeliveryRejection::NotDelivered);
-            }
             let interruption = self.nexus.herdr.interrupt(
                 &self.target.route,
                 &self.target.profile.interrupt_keys.texts(),
@@ -815,9 +781,6 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             .flatten();
         // Whether Herdr saw the recipient react; None when what followed
         // the text is not known.
-        if write.is_some_and(|write| !write.start()) {
-            return self.refuse(DeliveryRejection::NotDelivered);
-        }
         let reacted = match self
             .nexus
             .herdr

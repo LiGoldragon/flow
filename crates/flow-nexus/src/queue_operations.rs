@@ -9,7 +9,6 @@
 
 use crate::RunningNexus;
 use crate::caller::ResolvesEndedCaller;
-use crate::queue_write_fence::CoordinatesQueueWrites;
 use crate::store::closed_request::{
     Closer, MarksEndedReminder, RecordsClosedRequests, RequestEnding,
 };
@@ -78,9 +77,6 @@ impl EmptiesQueues for RunningNexus {
         };
         let mut withdrawn = Vec::new();
         for entry in metaflow.queue.0 {
-            if self.queue_writes.owns_request(&entry.logical_delivery_id.0) {
-                continue;
-            }
             if let Ok(()) = self
                 .store
                 .withdraw_queued(address, &entry.logical_delivery_id.0)?
@@ -179,14 +175,6 @@ impl EndsRequests for RunningNexus {
         let Some(retained) = retained else {
             return Err(RequestRejection::UnknownRequest);
         };
-        if self
-            .queue_writes
-            .owns_request(&binding.logical_delivery_id.0)
-        {
-            return Err(RequestRejection::NotYet(
-                signal_flow::ArchiveHold::AttemptUnfinished,
-            ));
-        }
         let reached = self
             .store
             .logical_delivery_snapshot(&binding.logical_delivery_id)
@@ -369,8 +357,7 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
             // mark, so a queue of Notices leaves the metaflow asleep.
             let asleep = metaflow.state == flow_ethos::State::Asleep;
             if !asleep && let Some(lease) = self.waking.hold(address) {
-                let _ =
-                    self.drain_all_held(address.clone(), &lease.pushed_at(priority.clone()), None);
+                let _ = self.drain_all_held(address.clone(), &lease.pushed_at(priority.clone()));
             }
             (before, asleep)
         };

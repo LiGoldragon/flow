@@ -533,6 +533,7 @@ fn hold_stops_launches_and_resume_starts_what_is_owed() {
         vec!["abc123"],
         vec![Request::Order("Carry the design on.".into())],
     ));
+    super::waking::declare_on_demand(&fixture, at.clone());
     let world = fixture.fresh_claude_world();
     fixture
         .nexus
@@ -1046,7 +1047,7 @@ fn held_scheduled_reminder_queues_once_across_restart_and_release_delivers_it() 
 }
 
 #[test]
-fn held_task_sender_keeps_due_task_reminder_queued_until_release() {
+fn held_task_sender_keeps_due_task_reminder_queued_until_its_next_hand_over() {
     let fixture = NexusFixture::new();
     resting_seat(&fixture);
     let sender = address(Model::Sol);
@@ -1087,10 +1088,25 @@ fn held_task_sender_keeps_due_task_reminder_queued_until_release() {
     assert_eq!(queued.0.len(), 1);
     fixture.nexus.send_due_reminders();
     assert_eq!(stored(&fixture, Model::Sol).queue, queued);
-    overridden(&fixture, meta::Input::ReleasePermaflow(sender));
+    overridden(&fixture, meta::Input::ReleasePermaflow(sender.clone()));
+    // A Task's reminder from Flow is no waking request: released, it waits
+    // in the queue for its sender's next hand-over.
+    assert!(fixture.typed().is_none());
+    assert_eq!(stored(&fixture, Model::Sol).queue, queued);
+    assert!(matches!(
+        fixture.nexus.store.accept_logical_delivery(
+            &sender,
+            SentBy::Flow,
+            flow_ethos::Delivery::Wake,
+            Message::Soft(Request::Order("Carry on.".into())),
+            None,
+        ),
+        Ok(PrivateSendResponse::SendAccepted(_))
+    ));
+    fixture.nexus.wake_due(sender);
     let typed = fixture
         .typed()
-        .expect("release delivers the due task reminder");
+        .expect("the next hand-over carries the due task reminder");
     assert!(
         typed.contains(&format!("Reminder.{{ {} ", accepted.request_id.0)),
         "the reminder names the task by its id: {typed}"
@@ -1520,236 +1536,6 @@ fn a_parked_prompt_fingerprint_conflict_is_terminal_without_a_profile_conflict()
     assert_eq!(world.claude_starts(), 0, "{}", world.calls());
 }
 
-/// A FIFO stops the actual Herdr adapter immediately before, or immediately
-/// after, the queue writer crosses its first-input boundary.
-#[test]
-fn hold_revokes_the_prepared_awake_write_and_resume_keeps_its_id() {
-    queue_writer_crosses_hold_at("agent read");
-}
-
-#[test]
-fn hold_answers_only_after_the_started_direct_writer_settles() {
-    queue_writer_crosses_hold_at("agent prompt");
-}
-
-fn queue_writer_crosses_hold_at(barrier: &str) {
-    use crate::DispatchesSerially;
-    use crate::delivery::lease::ObservesWaitingPane;
-    use crate::event_wait::AwaitsPath;
-    use crate::fixture_executable::{FixtureExecutable, HoldsLatch, InstallsScript, Latch};
-    use crate::sending::SendsRequests;
-    use crate::store::AnnouncesLaunchChanges;
-    use std::fs;
-    use std::sync::mpsc::{TryRecvError, channel};
-    use std::time::{Duration, Instant};
-
-    let fixture = NexusFixture::new();
-    resting_seat(&fixture);
-    let recipient = address(Model::Sol);
-    let other = address(Model::Astra);
-    fixture
-        .nexus
-        .store
-        .seed_metaflow(metaflow(Model::Astra, State::Asleep, vec![], vec![]));
-    let marker = "queue write at Hold fence";
-    let reaches = fixture.directory.path().join("queue-write-reached");
-    let release = Latch::closed(fixture.directory.path().join("queue-write-release"));
-    let script = fs::read_to_string(&fixture.snapshot_program).unwrap();
-    let arm = format!("\"{barrier}\") ");
-    assert!(script.contains(&arm));
-    FixtureExecutable {
-        path: fixture.snapshot_program.clone(),
-    }
-    .install(&script.replacen(
-        &arm,
-        &format!(
-            "{arm} if [ ! -e '{}' ]; then : > '{}'; : < '{}'; fi; ",
-            reaches.display(),
-            reaches.display(),
-            release.path.display(),
-        ),
-        1,
-    ));
-    let awake_drain = barrier == "agent read";
-    if awake_drain {
-        queue_order(&fixture, marker);
-    }
-    let (answers, held) = channel();
-    let limit = Duration::from_secs(15);
-    std::thread::scope(|scope| {
-        let recipient = &recipient;
-        let fixture = &fixture;
-        let writer = scope.spawn(move || {
-            if awake_drain {
-                fixture.nexus.drain_awake(recipient);
-                None
-            } else {
-                Some(
-                    fixture
-                        .nexus
-                        .send_request(
-                            signal_flow::SendRequest {
-                                address: recipient.clone(),
-                                sendable_message: super::sendable_message(Message::MiddleAbrupt(
-                                    Request::Order(marker.into()),
-                                )),
-                            },
-                            None,
-                        )
-                        .response,
-                )
-            }
-        });
-        if !reaches.appeared_by(Instant::now() + limit) {
-            release.release();
-            panic!("fixture did not reach {barrier}");
-        }
-        let (read_completed, read_reply) = channel();
-        let other_read = other.clone();
-        scope.spawn(move || {
-            let current = fixture.nexus.dispatch_serially(
-                signal_flow::Input::Current(other_read),
-                signal_flow::Origin::Unbound,
-            );
-            let configuration = fixture
-                .nexus
-                .dispatch_meta_serially(meta::Input::Configuration, None);
-            read_completed.send((current, configuration)).unwrap();
-        });
-        let read = match read_reply.recv_timeout(limit) {
-            Ok(read) => read,
-            Err(error) => {
-                release.release();
-                panic!("unrelated Current and Configuration waited for {barrier}: {error}");
-            }
-        };
-        assert_eq!(
-            read.0,
-            signal_flow::Output::Current(signal_flow::Current_Data::Asleep)
-        );
-        assert!(matches!(read.1, meta::Output::Configuration(_)));
-        let queued = stored(fixture, Model::Sol).queue.0[0].clone();
-        let mut pending_command = None;
-        if !awake_drain {
-            let (command_completed, command_reply) = channel();
-            scope.spawn(move || {
-                let reply = fixture.nexus.dispatch_meta_serially(
-                    meta::Input::Command(meta::CommandRequest {
-                        flow_id: seat_id(),
-                        harness_command_kind: meta::HarnessCommandKind::Interrupt,
-                    }),
-                    None,
-                );
-                command_completed.send(reply).unwrap();
-            });
-            let node = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
-            let signal_flow::HerdrRouteSelection::Available(route) = node.herdr_route_selection
-            else {
-                release.release();
-                panic!("fixture lost its bound pane");
-            };
-            if !fixture.nexus.pane_leases.waiter_registered(&route, limit) {
-                release.release();
-                panic!("same-pane Command did not enter its pane wait");
-            }
-            assert!(matches!(command_reply.try_recv(), Err(TryRecvError::Empty)));
-            pending_command = Some(command_reply);
-            let another = fixture.nexus.send_request(
-                signal_flow::SendRequest {
-                    address: other.clone(),
-                    sendable_message: super::sendable_message(Message::Soft(Request::Notice(
-                        "distinct recipient".into(),
-                    ))),
-                },
-                None,
-            );
-            assert!(matches!(
-                another.response,
-                signal_flow::Output::SendAccepted(_)
-            ));
-            assert_eq!(stored(fixture, Model::Astra).queue.0.len(), 1);
-            assert_eq!(
-                fixture
-                    .nexus
-                    .dispatch_meta_serially(meta::Input::HoldPermaflow(other.clone()), None),
-                meta::Output::PermaflowHeld(other.clone()),
-            );
-        }
-        let changes = fixture.nexus.store.launch_changes.clone();
-        let seen = changes.current();
-        scope.spawn(move || {
-            answers
-                .send(overridden(fixture, meta::Input::Hold))
-                .unwrap();
-        });
-        let committed = changes.until(seen, Instant::now() + limit)
-            && matches!(fixture.nexus.store.holding().unwrap(), Holding::Held(_));
-        let response = if awake_drain {
-            let answer = held.recv_timeout(limit);
-            // The second Hold sees the same durable transition before the
-            // original preflight returns; it does not stage another change.
-            let at_held = fixture
-                .nexus
-                .store
-                .logical_delivery_snapshot(&queued.logical_delivery_id)
-                .unwrap();
-            let repeated = matches!(answer, Ok(meta::Output::Held))
-                .then(|| overridden(fixture, meta::Input::Hold));
-            let after_repeat = fixture
-                .nexus
-                .store
-                .logical_delivery_snapshot(&queued.logical_delivery_id)
-                .unwrap();
-            release.release();
-            assert_eq!(repeated, Some(meta::Output::Held));
-            assert_eq!(at_held, after_repeat);
-            assert_eq!(
-                at_held.unwrap().delivery_state,
-                signal_flow::DeliveryState::Queued,
-            );
-            answer
-        } else {
-            let still_waiting = matches!(held.try_recv(), Err(TryRecvError::Empty));
-            release.release();
-            assert!(still_waiting, "started writer outlived Held reply");
-            held.recv_timeout(limit)
-        };
-        assert!(committed, "Hold did not commit while the pane was barred");
-        assert_eq!(response.unwrap(), meta::Output::Held);
-        if let Some(command) = pending_command {
-            // The manual interrupt ran after A, then declined because
-            // the fixture still showed A idle. It never cut across A.
-            assert_eq!(
-                command.recv_timeout(limit).unwrap(),
-                meta::Output::CommandRejected(meta::CommandRejection::NotDelivered),
-            );
-        }
-        let _ = writer.join().unwrap();
-        let log = fixture.directory.path().join("herdr-operations.log");
-        if awake_drain {
-            assert!(super::prompts(&log).is_empty());
-            assert_eq!(stored(fixture, Model::Sol).queue.0, vec![queued.clone()]);
-            assert_eq!(
-                fixture
-                    .nexus
-                    .store
-                    .logical_delivery_snapshot(&queued.logical_delivery_id)
-                    .unwrap()
-                    .unwrap()
-                    .delivery_state,
-                signal_flow::DeliveryState::Queued,
-            );
-            assert_eq!(
-                overridden(fixture, meta::Input::Resume),
-                meta::Output::Resumed
-            );
-        }
-        let prompts = super::prompts(&log);
-        assert_eq!(prompts.len(), 1, "{prompts:?}");
-        assert!(prompts[0].contains(&queued.request_id.0), "{prompts:?}");
-    });
-}
-
 #[test]
 fn rebind_cannot_move_a_pane_while_its_confirmed_owner_command_writes() {
     use crate::DispatchesSerially;
@@ -1835,107 +1621,6 @@ fn rebind_cannot_move_a_pane_while_its_confirmed_owner_command_writes() {
 }
 
 #[test]
-fn unrelated_dispatch_progresses_while_a_direct_herdr_prompt_is_barred() {
-    use crate::DispatchesSerially;
-    use crate::event_wait::AwaitsPath;
-    use crate::fixture_executable::{FixtureExecutable, HoldsLatch, InstallsScript, Latch};
-    use crate::sending::SendsRequests;
-    use std::sync::mpsc::channel;
-    use std::time::{Duration, Instant};
-
-    let fixture = NexusFixture::new();
-    resting_seat(&fixture);
-    let recipient = address(Model::Sol);
-    let other = address(Model::Astra);
-    fixture
-        .nexus
-        .store
-        .seed_metaflow(metaflow(Model::Astra, State::Asleep, vec![], vec![]));
-    let reaches = fixture.directory.path().join("direct-prompt-reached");
-    let release = Latch::closed(fixture.directory.path().join("direct-prompt-release"));
-    let script = std::fs::read_to_string(&fixture.snapshot_program).unwrap();
-    let arm = "\"agent prompt\") ";
-    assert!(script.contains(arm));
-    FixtureExecutable {
-        path: fixture.snapshot_program.clone(),
-    }
-    .install(&script.replacen(
-        arm,
-        &format!(
-            "{arm} if [ ! -e '{}' ]; then : > '{}'; : < '{}'; fi; ",
-            reaches.display(),
-            reaches.display(),
-            release.path.display()
-        ),
-        1,
-    ));
-    std::thread::scope(|scope| {
-        let fixture = &fixture;
-        let writer = scope.spawn(move || {
-            fixture.nexus.send_request(
-                signal_flow::SendRequest {
-                    address: recipient,
-                    sendable_message: super::sendable_message(Message::MiddleAbrupt(
-                        Request::Order("barred prompt".into()),
-                    )),
-                },
-                None,
-            )
-        });
-        let limit = Duration::from_secs(15);
-        if !reaches.appeared_by(Instant::now() + limit) {
-            release.release();
-            panic!("writer never reached the Herdr prompt");
-        }
-        // This is the actual mutex used by both following callers, not a
-        // timeout used to infer ownership from an unscheduled thread.
-        if fixture.nexus.dispatch_gate.try_lock().is_err() {
-            release.release();
-            panic!("Herdr prompt holds the global dispatch gate");
-        }
-        let (sent, received) = channel();
-        scope.spawn(move || {
-            let current = fixture.nexus.dispatch_serially(
-                signal_flow::Input::Current(other.clone()),
-                signal_flow::Origin::Unbound,
-            );
-            let configuration = fixture
-                .nexus
-                .dispatch_meta_serially(meta::Input::Configuration, None);
-            let differing_recipient = fixture.nexus.send_request(
-                signal_flow::SendRequest {
-                    address: other,
-                    sendable_message: super::sendable_message(Message::Soft(Request::Notice(
-                        "independent admission".into(),
-                    ))),
-                },
-                None,
-            );
-            sent.send((current, configuration, differing_recipient.response))
-                .unwrap();
-        });
-        let observed = received.recv_timeout(limit);
-        release.release();
-        let (current, configuration, differing_recipient) =
-            observed.expect("unrelated work completed before prompt release");
-        assert!(matches!(
-            current,
-            signal_flow::Output::Current(signal_flow::Current_Data::Asleep)
-        ));
-        assert!(matches!(configuration, meta::Output::Configuration(_)));
-        assert!(matches!(
-            differing_recipient,
-            signal_flow::Output::SendAccepted(_)
-        ));
-        let _ = writer.join().unwrap();
-        assert_eq!(
-            super::prompts(&fixture.directory.path().join("herdr-operations.log")).len(),
-            1
-        );
-    });
-}
-
-#[test]
 fn ordinary_send_replies_before_its_own_barred_herdr_prompt() {
     use super::GreetsOrdinarySocket;
     use crate::event_wait::AwaitsPath;
@@ -1992,31 +1677,6 @@ fn ordinary_send_replies_before_its_own_barred_herdr_prompt() {
         } else {
             None
         };
-        let following = if matches!(reply, Some(Ok(signal_flow::Output::SendAccepted(_)))) {
-            let (peer, mut caller) = UnixStream::pair().unwrap();
-            caller
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let worker = scope.spawn(move || {
-                Connection::accepted(peer)
-                    .unwrap()
-                    .serve_ordinary(&fixture.nexus)
-            });
-            caller.greet_ordinary();
-            caller
-                .write_query(&signal_flow::Input::Send(signal_flow::SendRequest {
-                    address: recipient.clone(),
-                    sendable_message: super::sendable_message(Message::MiddleAbrupt(
-                        Request::Order("same recipient behind barred prompt".into()),
-                    )),
-                }))
-                .unwrap();
-            let second = caller.read_response();
-            drop(caller);
-            Some((second, worker))
-        } else {
-            None
-        };
         release.release();
         let Some(Ok(signal_flow::Output::SendAccepted(accepted))) = reply else {
             panic!("no durable admission before the Herdr barrier released: {reply:?}");
@@ -2025,17 +1685,7 @@ fn ordinary_send_replies_before_its_own_barred_herdr_prompt() {
             accepted.visible_delivery_state,
             signal_flow::VisibleDeliveryState::Queued
         );
-        let Some((Ok(signal_flow::Output::SendAccepted(second)), second_worker)) = following else {
-            panic!("same-recipient Send did not answer before the earlier write was released");
-        };
-        assert_eq!(
-            second.visible_delivery_state,
-            signal_flow::VisibleDeliveryState::Queued
-        );
-        assert_ne!(second.request_id, accepted.request_id);
-        assert!(second.delivery_cursor > accepted.delivery_cursor);
         assert!(server.join().unwrap().is_ok());
-        assert!(second_worker.join().unwrap().is_ok());
         let prompts = super::prompts(&fixture.directory.path().join("herdr-operations.log"));
         assert!(prompts[0].contains(&accepted.request_id.0));
         assert_eq!(
@@ -2044,13 +1694,6 @@ fn ordinary_send_replies_before_its_own_barred_herdr_prompt() {
                 .filter(|prompt| prompt.contains(&accepted.request_id.0))
                 .count(),
             1
-        );
-        assert!(
-            prompts
-                .iter()
-                .filter(|prompt| prompt.contains(&second.request_id.0))
-                .count()
-                <= 1
         );
     });
 }
@@ -2148,11 +1791,7 @@ fn a_reply_left_unwritten_fences_only_its_recipient_and_reopens_in_order() {
 #[test]
 fn held_socket_admissions_survive_disconnect_and_reopen_with_the_same_receipt_ids() {
     use super::GreetsOrdinarySocket;
-    use super::waking::CLAUDE_SESSION;
-    use crate::composition::RendersQueuedWork;
-    use crate::waking::ReconcilesQueueDelivery;
     use crate::{CarriesSignalFrames, Connection, ServesConnection};
-    use flow_native::DigestsPrompt;
     use signal_flow::{Input, Output, SendRequest, VisibleDeliveryState};
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
@@ -2217,22 +1856,6 @@ fn held_socket_admissions_survive_disconnect_and_reopen_with_the_same_receipt_id
     assert_eq!(
         overridden(&fixture, meta::Input::ReleasePermaflow(address.clone())),
         meta::Output::PermaflowReleased(address.clone())
-    );
-    let body = before.queue.0.prompt_text(&address);
-    append_main_rows(
-        &fixture,
-        &[serde_json::json!({
-            "type":"user", "sessionId": CLAUDE_SESSION, "uuid":"held-socket-user",
-            "message":{"content":format!("\n\n<pasted_content id=\"04ef\">\n{body}\n</pasted_content id=\"04ef\">\n")}
-        })],
-    );
-    fixture.nexus.settle_submitted_prompt(
-        CLAUDE_SEAT,
-        &signal_flow::NativePrompt {
-            native_session_id_option: Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into())),
-            prompt_id_option: Some(signal_flow::PromptId("exact-held-input".into())),
-            prompt_sha256: signal_flow::PromptSha256(body.prompt_sha256()),
-        },
     );
 
     let (peer, mut observer) = UnixStream::pair().unwrap();
@@ -2334,10 +1957,8 @@ fn socket_admission_stays_accepted_when_herdr_refuses_before_input() {
         .logical_delivery_snapshot(&queued[0].logical_delivery_id)
         .unwrap()
         .unwrap();
-    assert_eq!(
-        state.delivery_state,
-        DeliveryState::Retryable(signal_flow::RetryCause::HistoryAbsent)
-    );
-    assert!(state.delivery_cursor > acceptance.delivery_cursor);
+    // A write refused before any key leaves the request queued as it was
+    // admitted.
+    assert_eq!(state.delivery_state, DeliveryState::Queued);
     assert!(fixture.typed().is_none());
 }

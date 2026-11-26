@@ -167,10 +167,13 @@ impl DispatchesMetaflowPeer for RunningNexus {
                         signal_flow::SendableMessage::Soft(_)
                     );
                     // A Soft request to a seat in its turn is queued for the
-                    // seat's idle event.
+                    // seat's idle event, and a Soft Notice for the next
+                    // hand-over.
                     let live = self.live_awake_flow(&recipient);
-                    let direct_requested =
-                        abrupt || live.as_ref().is_some_and(|flow_id| self.rests_now(flow_id));
+                    let direct_requested = abrupt
+                        || live.as_ref().is_some_and(|flow_id| {
+                            self.due_now(std::slice::from_ref(&request.sendable_message), flow_id)
+                        });
                     // A metaflow another holds takes the request into its
                     // queue instead.
                     let direct_lease = if direct_requested {

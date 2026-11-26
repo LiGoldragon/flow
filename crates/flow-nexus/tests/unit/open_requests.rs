@@ -12,16 +12,11 @@ use super::waking::{
 };
 use crate::Dispatches;
 use crate::composition::RendersQueuedWork;
-use crate::generated::memory::{Device, Inode, Offset};
 use crate::handover::FramesOpenRequests;
 use crate::store::FlowStore;
 use crate::store::RecordsLaunchOutcome as _;
 use crate::store::logical_delivery::{HoldsOpenRequests, RecordsLogicalDeliveries};
-use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows as _};
-use crate::store::queue_delivery::{
-    AccountsQueueDelivery, NativeDeliveryReceipt, NativeHistoryAnchor, NativeTranscriptCursor,
-    PrepareQueueDelivery, QueueDeliveryAttempt,
-};
+use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::reminder::RecordsReminders;
 use flow_ethos::{AnswerableTask, FlowId, State};
 use signal_flow::{
@@ -47,10 +42,10 @@ fn psyche_core() -> Address {
 trait DeliversRequests {
     /// Admits `request` from `sender` to `recipient`, Soft and queued.
     fn admitted(&self, recipient: &Address, sender: &Address, request: Request) -> SendAcceptance;
-    /// Hands the oldest queued request of `address` to `flow_id`.
-    fn handed_over(&self, address: &Address, flow_id: &str) -> QueueDeliveryAttempt;
-    /// Delivers the oldest queued request of `address` to `flow_id`: handed
-    /// over, its receipt recorded, and settled out of the queue.
+    /// Hands the oldest queued request of `address` to `flow_id`, its pane
+    /// writer's result `state`, recorded as it leaves the queue.
+    fn handed_over(&self, address: &Address, flow_id: &str, state: DeliveryState);
+    /// Delivers the oldest queued request of `address` to `flow_id`.
     fn delivered(&self, address: &Address, flow_id: &str);
     /// Resolves and admits `message` from `answerer` to `requester`, as a
     /// Send from `answerer` is: refused, or accepted.
@@ -79,51 +74,31 @@ impl DeliversRequests for FlowStore {
         }
     }
 
-    fn handed_over(&self, address: &Address, flow_id: &str) -> QueueDeliveryAttempt {
-        match self
-            .prepare_oldest_delivery(
-                address,
-                flow_id,
-                &format!("{flow_id}-session"),
-                signal_flow::HarnessKind::Claude,
-                NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
-                    device: Device(0),
-                    inode: Inode(0),
-                    offset: Offset(0),
-                }),
-            )
-            .expect("the oldest request prepares")
-        {
-            PrepareQueueDelivery::Prepared(attempt) => attempt,
-            other => panic!("the oldest request is handed over: {other:?}"),
-        }
+    fn handed_over(&self, address: &Address, flow_id: &str, state: DeliveryState) {
+        let oldest = self
+            .metaflow(address)
+            .expect("metaflow reads")
+            .expect("metaflow held")
+            .queue
+            .0
+            .first()
+            .cloned()
+            .expect("a request is queued");
+        assert!(
+            self.record_hand_over(address, flow_id, &[oldest], state)
+                .expect("the hand-over records")
+        );
     }
 
     fn delivered(&self, address: &Address, flow_id: &str) {
-        let attempt = self.handed_over(address, flow_id);
-        assert!(
-            self.record_delivery_receipt(
-                &attempt.queue_attempt_id.0,
-                NativeDeliveryReceipt {
-                    native_request_id: attempt.native_request_id,
-                    thread_id: attempt.thread_id.clone(),
-                    turn_id: crate::generated::memory::TurnId(format!(
-                        "{}-turn",
-                        attempt.queue_attempt_id.0
-                    )),
-                    native_receipt_text: crate::generated::memory::NativeReceiptText(
-                        "{\"result\":{}}".into(),
-                    ),
-                },
-            )
-            .expect("the receipt records")
-        );
-        assert!(
-            self.settle_recorded_delivery(
-                &attempt.queue_attempt_id.0,
-                crate::generated::transitions::ReceiptTurn::Running,
-            )
-            .expect("the delivery settles")
+        self.handed_over(
+            address,
+            flow_id,
+            DeliveryState::Delivered(signal_flow::NativeReceipt {
+                harness_kind: signal_flow::HarnessKind::Claude,
+                native_session_id: signal_flow::NativeSessionId(format!("{flow_id}-session")),
+                native_prompt_id: signal_flow::NativePromptId(format!("{flow_id}-prompt")),
+            }),
         );
     }
 
@@ -415,44 +390,14 @@ fn a_closed_request_is_not_carried_to_the_successors_first_prompt() {
 /// receipt and settles it out of the queue: delivered, and open until its
 /// Result or Done.
 fn delivered_to_codex(store: &FlowStore, address: &Address, flow_id: &str, thread: &str) {
-    let attempt = match store
-        .prepare_oldest_delivery(
-            address,
-            flow_id,
-            thread,
-            signal_flow::HarnessKind::Codex,
-            NativeHistoryAnchor::CodexTurns(None),
-        )
-        .expect("the oldest request prepares")
-    {
-        PrepareQueueDelivery::Prepared(attempt) => attempt,
-        other => panic!("the oldest request is handed over: {other:?}"),
-    };
-    assert!(
-        store
-            .record_delivery_receipt(
-                &attempt.queue_attempt_id.0,
-                NativeDeliveryReceipt {
-                    native_request_id: attempt.native_request_id,
-                    thread_id: attempt.thread_id.clone(),
-                    turn_id: crate::generated::memory::TurnId(format!(
-                        "{}-turn",
-                        attempt.queue_attempt_id.0
-                    )),
-                    native_receipt_text: crate::generated::memory::NativeReceiptText(
-                        "{\"result\":{}}".into(),
-                    ),
-                },
-            )
-            .expect("the receipt records")
-    );
-    assert!(
-        store
-            .settle_recorded_delivery(
-                &attempt.queue_attempt_id.0,
-                crate::generated::transitions::ReceiptTurn::Running,
-            )
-            .expect("the delivery settles")
+    store.handed_over(
+        address,
+        flow_id,
+        DeliveryState::Delivered(signal_flow::NativeReceipt {
+            harness_kind: signal_flow::HarnessKind::Codex,
+            native_session_id: signal_flow::NativeSessionId(thread.to_owned()),
+            native_prompt_id: signal_flow::NativePromptId(format!("{thread}-prompt")),
+        }),
     );
 }
 
@@ -659,12 +604,7 @@ fn a_flow_s_result_to_its_own_question_writes_its_metaflow_once() {
         "a queued Question is not yet answerable"
     );
 
-    let attempt = store.handed_over(&at, "a11ce5");
-    assert!(
-        store
-            .mark_delivery_uncertain(&attempt.queue_attempt_id.0)
-            .unwrap()
-    );
+    store.handed_over(&at, "a11ce5", DeliveryState::Uncertain);
     let answer = store
         .answered(&at, &at, result(&question.request_id.0))
         .expect("the Result to its own uncertain Question is admitted");
@@ -718,14 +658,7 @@ fn only_questions_and_tasks_owe_replies_across_delivery_states() {
             let sender = psyche_core();
             let admitted = store.admitted(&at, &sender, request.clone());
             match state {
-                "uncertain" => {
-                    let attempt = store.handed_over(&at, "abc123");
-                    assert!(
-                        store
-                            .mark_delivery_uncertain(&attempt.queue_attempt_id.0)
-                            .unwrap()
-                    );
-                }
+                "uncertain" => store.handed_over(&at, "abc123", DeliveryState::Uncertain),
                 "delivered" => store.delivered(&at, "abc123"),
                 _ => {}
             }

@@ -692,7 +692,6 @@ impl RestartsInSteps for RunningNexus {
         use crate::store::NamesConfiguredModel;
         use crate::store::address_hold::HoldsLaunchAddress;
         use crate::store::metaflow::SleepsMetaflows;
-        use crate::store::queue_delivery::AccountsQueueDelivery;
         use crate::waking::{HoldsWakingMetaflows, ReadsClaudeDelivery, WakePolicy};
         let refused = |refusal: fn(signal_flow::FlowId) -> RestartRefusal| {
             Err(Box::new(Output::RestartRefused(refusal(
@@ -780,9 +779,7 @@ impl RestartsInSteps for RunningNexus {
             Ok(None) => return refused(RestartRefusal::Unsupported),
             Err(error) => return Err(Box::new(error.refused())),
         };
-        if self.waking.is_waking(&address)
-            || !matches!(self.store.address_hold(flow_id), Ok(None))
-            || !matches!(self.store.outstanding_delivery(&address), Ok(None))
+        if self.waking.is_waking(&address) || !matches!(self.store.address_hold(flow_id), Ok(None))
         {
             return refused(RestartRefusal::Busy);
         }

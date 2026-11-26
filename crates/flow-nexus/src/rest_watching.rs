@@ -13,7 +13,7 @@ use crate::store::metaflow::SleepsMetaflows;
 use crate::store::metaflow_watch::WatchesMetaflows;
 use crate::store::transitions::ReadsRestEpoch;
 use crate::store::{AnnouncesLaunchChanges, LaunchChanges, ReadsFlowRows};
-use crate::waking::{DrainsHeldSeats, HoldsWakingMetaflows};
+use crate::waking::{DrainsHeldSeats, HoldsSoftForIdle, HoldsWakingMetaflows};
 use crate::{HoldsStopRequest, RunningNexus};
 use signal_flow::{Address, AgentState, HarnessKind};
 use std::collections::BTreeMap;
@@ -252,12 +252,9 @@ impl ObservesBoundRest for RunningNexus {
     }
 
     fn drain_bound_rest(&self, rest: &BoundRest) -> bool {
-        use crate::queue_write_fence::{LendsQueueDispatch, QueueDispatch};
-
         let _effect = self.waking.effect(rest.address.clone());
         let completed = {
             let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
-            let mut dispatch = QueueDispatch::new(&self.dispatch_gate, _turn);
             if !self.rest_still_bound(rest) || self.stopping.requested() {
                 return true;
             }
@@ -268,7 +265,7 @@ impl ObservesBoundRest for RunningNexus {
                 return false;
             };
             if !matches!(
-                dispatch.outside(|| self.herdr.pane_agent(&node)),
+                self.herdr.pane_agent(&node),
                 PaneAgent::Present {
                     agent_state: AgentState::Idle | AgentState::Done,
                     ready: true,
@@ -282,10 +279,16 @@ impl ObservesBoundRest for RunningNexus {
             if self.held() || self.permaflow_held(rest.address.clone()) {
                 return false;
             }
+            // Only work due at the rest starts the seat's next turn.
+            if !matches!(self.store.metaflow(&rest.address),
+                Ok(Some(metaflow)) if self.due_at_rest(&metaflow.queue.0))
+            {
+                return false;
+            }
             let Some(lease) = self.waking.hold(&rest.address) else {
                 return false;
             };
-            let _outcome = self.drain_all_held(rest.address.clone(), &lease, Some(&mut dispatch));
+            let _outcome = self.drain_all_held(rest.address.clone(), &lease);
             !self.rest_still_bound(rest)
         };
         use crate::send_tool::ServesLaunchCalls;

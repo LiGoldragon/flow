@@ -15,50 +15,6 @@ use sema_engine::{
     TableDescriptor, TableName,
 };
 
-pub(crate) trait HoldsQueueWritesDurably {
-    fn switch_queue_writes(
-        &self,
-        holding: Holding,
-        unstarted: &[String],
-    ) -> Result<bool, StoreError>;
-}
-
-impl HoldsQueueWritesDurably for FlowStore {
-    fn switch_queue_writes(
-        &self,
-        holding: Holding,
-        unstarted: &[String],
-    ) -> Result<bool, StoreError> {
-        use super::queue_delivery::StagesQueueRevocations;
-        let standing = self.holding()?;
-        let commit = self.engine.begin_atomic_commit();
-        let (commit, moved) = match (standing, holding) {
-            (Holding::Held(_), Holding::Held(_)) | (Holding::Acting, Holding::Acting) => {
-                (commit, false)
-            }
-            (Holding::Acting, Holding::Held(moment)) => {
-                (commit.assert(self.hold, StoredHold { moment }), true)
-            }
-            (Holding::Held(_), Holding::Acting) => {
-                (commit.retract(self.hold, RecordKey::new(HOLD_KEY)), true)
-            }
-        };
-        if !moved && unstarted.is_empty() {
-            return Ok(false);
-        }
-        let _guard = self
-            .logical_deliveries
-            .write_gate
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let commit = self.stage_queue_revocations(unstarted, commit)?;
-        self.engine.commit_atomic(commit)?;
-        self.reminder_changes.announce();
-        self.launch_changes.announce();
-        Ok(moved)
-    }
-}
-
 pub(super) const TRANSITIONS_TABLE: &str = "flow_nexus_flow_transitions";
 pub(super) const TRANSITIONS_FAMILY: &str = "flow-nexus-flow-transitions";
 pub(super) const TRANSITIONS_SCHEMA: &str = "flow-nexus-flow-transitions-v1";
@@ -272,7 +228,23 @@ impl RemembersOverrides for FlowStore {
     /// when the switch moved. Every thread that waits on a reminder or a
     /// launch is told, so a clock held back runs again at Resume.
     fn switch(&self, holding: Holding) -> Result<bool, StoreError> {
-        self.switch_queue_writes(holding, &[])
+        let standing = self.holding()?;
+        let commit = self.engine.begin_atomic_commit();
+        let commit = match (standing, holding) {
+            (Holding::Held(_), Holding::Held(_)) | (Holding::Acting, Holding::Acting) => {
+                return Ok(false);
+            }
+            (Holding::Acting, Holding::Held(moment)) => {
+                commit.assert(self.hold, StoredHold { moment })
+            }
+            (Holding::Held(_), Holding::Acting) => {
+                commit.retract(self.hold, RecordKey::new(HOLD_KEY))
+            }
+        };
+        self.engine.commit_atomic(commit)?;
+        self.reminder_changes.announce();
+        self.launch_changes.announce();
+        Ok(true)
     }
 
     /// One commit: the flow's row, route, role, owner proof, events and

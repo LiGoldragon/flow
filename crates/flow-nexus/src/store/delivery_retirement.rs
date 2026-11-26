@@ -7,7 +7,6 @@ use crate::store::queue_delivery::{
     AccountsQueueDelivery, EndsQueueDeliveryPhase, QueueDeliveryAttempt, QueueDeliveryPhase,
 };
 use crate::store::{AnnouncesLaunchChanges, FlowStore, LaunchChanges, StoreError, StoredMetaflow};
-use crate::waking::{ParksCohort, ReconcilesQueueDelivery};
 use crate::{HoldsStopRequest, RunningNexus};
 use flow_ethos::{Address, FlowId, State};
 use meta_signal_flow::{AbandonmentCause, AbandonmentRecord, QueueResolutionReason, UnixSeconds};
@@ -185,14 +184,6 @@ impl SettlesRetiredDeliveries for RunningNexus {
 
 impl SettlesRetiredAttempt for RunningNexus {
     fn settle_retired_attempt(&self, before: QueueDeliveryAttempt) -> Result<(), StoreError> {
-        // History lookup never holds the dispatch gate. The point read under
-        // the gate below handles a receipt or an explicit close that won while
-        // the native history was being read.
-        let found = matches!(
-            before.queue_delivery_phase,
-            QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_)
-        )
-        .then(|| self.find_receipt(&before));
         let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
         if self
             .store
@@ -210,13 +201,16 @@ impl SettlesRetiredAttempt for RunningNexus {
         if attempt.queue_delivery_phase.is_finished() {
             return Ok(());
         }
+        // An attempt a retired seat leaves is settled on the receipt it
+        // already recorded, or abandoned: no history is read for it.
         if matches!(
             attempt.queue_delivery_phase,
             QueueDeliveryPhase::ReceiptRecorded(_)
         ) {
-            self.reconcile_delivery(&attempt);
-        } else if let Some(Ok((run, turn_id, native_receipt, seat_after))) = found {
-            self.settle_received(&attempt, &run, turn_id, native_receipt, seat_after);
+            self.store.settle_recorded_delivery(
+                &attempt.queue_attempt_id.0,
+                crate::generated::transitions::ReceiptTurn::Running,
+            )?;
         } else {
             let record = AbandonmentRecord {
                 abandonment_cause: AbandonmentCause::FlowRetired(attempt.flow_id),

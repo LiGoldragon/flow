@@ -103,24 +103,6 @@ impl Drop for PaneLease<'_> {
 }
 
 #[cfg(test)]
-pub(crate) trait ObservesWaitingPane {
-    fn waiter_registered(&self, route: &HerdrRoute, limit: std::time::Duration) -> bool;
-}
-
-#[cfg(test)]
-impl ObservesWaitingPane for PaneLeases {
-    fn waiter_registered(&self, route: &HerdrRoute, limit: std::time::Duration) -> bool {
-        let pane = LeasedPane::from(route);
-        let held = self.held.lock().unwrap_or_else(|error| error.into_inner());
-        let (held, _) = self
-            .released
-            .wait_timeout_while(held, limit, |state| !state.waiting.contains(&pane))
-            .unwrap_or_else(|error| error.into_inner());
-        held.waiting.contains(&pane)
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::{LeasesPanes, PaneLeases};
     use signal_flow::HerdrRoute;

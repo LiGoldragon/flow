@@ -540,12 +540,9 @@ fn cancel_takes_a_queued_task_out_with_its_reminder() {
     assert!(notices(&fixture, &recipient).is_empty());
 }
 
-/// A parked Uncertain Task counts as reached for cancellation.
+/// A Task handed over Uncertain counts as reached for cancellation.
 #[test]
-fn cancel_of_a_parked_uncertain_task_notifies_only_its_receiver() {
-    use crate::store::queue_delivery::{
-        AccountsQueueDelivery, NativeHistoryAnchor, PrepareQueueDelivery,
-    };
+fn cancel_of_an_uncertain_task_notifies_only_its_receiver() {
     let fixture = NexusFixture::new();
     let sender = at("uncertainCancelSender");
     let recipient = at("uncertainCancelRecipient");
@@ -562,26 +559,10 @@ fn cancel_of_a_parked_uncertain_task_notifies_only_its_receiver() {
         }),
     );
     let store = &fixture.nexus.store;
-    let PrepareQueueDelivery::Prepared(attempt) = store
-        .prepare_oldest_delivery(
-            &recipient,
-            &flow.0,
-            "uncertain-thread",
-            HarnessKind::Codex,
-            NativeHistoryAnchor::CodexTurns(None),
-        )
-        .unwrap()
-    else {
-        panic!("the request prepared");
-    };
+    let handed = queued(&fixture, &recipient);
     assert!(
         store
-            .mark_delivery_uncertain(&attempt.queue_attempt_id.0)
-            .unwrap()
-    );
-    assert!(
-        store
-            .park_uncertain_delivery(&attempt.queue_attempt_id.0)
+            .record_hand_over(&recipient, &flow.0, &handed, DeliveryState::Uncertain)
             .unwrap()
     );
     assert_eq!(
@@ -1368,12 +1349,9 @@ fn close_request_takes_a_queued_task_out_and_tells_no_one() {
 
 /// CloseRequest is refused as Cancel is: an id no request holds is
 /// UnknownRequest, and a request already answered is Closed. A request
-/// with an unfinished attempt can be closed.
+/// handed over Uncertain can be closed.
 #[test]
 fn close_request_is_refused_as_cancel_is() {
-    use crate::store::queue_delivery::{
-        AccountsQueueDelivery, NativeHistoryAnchor, NativeTranscriptCursor, PrepareQueueDelivery,
-    };
     let fixture = NexusFixture::new();
     let sender = at("refusedSender");
     let recipient = at("refusedRecipient");
@@ -1408,8 +1386,8 @@ fn close_request_is_refused_as_cancel_is() {
         Output::CloseRequestRejected(RequestRejection::Closed)
     );
 
-    // A seat Awake as unsettled-flow is handed a request whose receipt is
-    // not yet settled.
+    // A seat Awake as unsettled-flow is handed a request its pane writer
+    // could not see taken.
     let seat = at("refusedSeat");
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: seat.clone(),
@@ -1421,26 +1399,16 @@ fn close_request_is_refused_as_cancel_is() {
         &fixture,
         &seat,
         SentBy::Sender(sender.clone()),
-        Request::Order("Still being handed over.".into()),
+        Request::Question("Still being handed over?".into()),
     );
-    let PrepareQueueDelivery::Prepared(attempt) = fixture
-        .nexus
-        .store
-        .prepare_oldest_delivery(
-            &seat,
-            "unsettled-flow",
-            "unsettled-flow-session",
-            HarnessKind::Claude,
-            NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
-                device: crate::generated::memory::Device(0),
-                inode: crate::generated::memory::Inode(0),
-                offset: crate::generated::memory::Offset(0),
-            }),
-        )
-        .expect("the oldest request prepares")
-    else {
-        panic!("the request is prepared");
-    };
+    let handed = queued(&fixture, &seat);
+    assert!(
+        fixture
+            .nexus
+            .store
+            .record_hand_over(&seat, "unsettled-flow", &handed, DeliveryState::Uncertain)
+            .expect("the hand-over records")
+    );
     assert_eq!(
         fixture
             .nexus
@@ -1456,13 +1424,6 @@ fn close_request_is_refused_as_cancel_is() {
             .is_none()
     );
     assert!(closed_record(&fixture, &unsettled.logical_delivery_id).is_some());
-    assert!(matches!(
-        fixture.nexus.store.queue_delivery_attempt(&attempt.queue_attempt_id.0).unwrap()
-            .unwrap().queue_delivery_phase,
-        crate::store::queue_delivery::QueueDeliveryPhase::Abandoned(meta_signal_flow::AbandonmentRecord {
-            abandonment_cause: meta_signal_flow::AbandonmentCause::RequestEnded(id), ..
-        }) if id == unsettled.request_id
-    ));
     assert!(queued(&fixture, &seat).is_empty());
 }
 
@@ -1559,226 +1520,4 @@ fn close_request_records_the_process_its_connection_showed() {
     );
     assert!(queued(&fixture, &sender).is_empty());
     assert!(queued(&fixture, &recipient).is_empty());
-}
-
-#[test]
-fn abandoning_a_queue_head_is_terminal_and_the_next_request_stays_queued() {
-    use crate::store::queue_delivery::{
-        AccountsQueueDelivery, NativeHistoryAnchor, PrepareQueueDelivery,
-    };
-    use meta_signal_flow as meta;
-    let fixture = NexusFixture::new();
-    let address = at("abandonQueueHead");
-    let flow = flow_ethos::FlowId("old-seat".into());
-    awake_as(&fixture, &address, &flow);
-    let task = admitted(
-        &fixture,
-        &address,
-        SentBy::Unbound,
-        Request::Task(flow_ethos::AnswerableTask {
-            minutes: flow_ethos::Minutes(30),
-            string: "Read this.".into(),
-        }),
-    );
-    let next = admitted(
-        &fixture,
-        &address,
-        SentBy::Unbound,
-        Request::Order("Then this.".into()),
-    );
-    let PrepareQueueDelivery::Prepared(attempt) = fixture
-        .nexus
-        .store
-        .prepare_oldest_delivery(
-            &address,
-            &flow.0,
-            "old-thread",
-            HarnessKind::Codex,
-            NativeHistoryAnchor::CodexTurns(None),
-        )
-        .unwrap()
-    else {
-        panic!("the first request prepared")
-    };
-    let abandon = |id, why: &str| {
-        fixture
-            .nexus
-            .dispatch_meta(meta::Input::AbandonQueueDelivery(
-                meta::AbandonQueueDelivery_Data {
-                    queue_attempt_id: id,
-                    queue_resolution_reason: meta::QueueResolutionReason(why.into()),
-                },
-            ))
-    };
-    assert_eq!(
-        abandon(
-            meta::QueueAttemptId("unknown-attempt".into()),
-            "Stop this attempt."
-        ),
-        meta::Output::AbandonQueueDeliveryRejected(
-            meta::AbandonQueueDeliveryRejected_Data::UnknownAttempt
-        )
-    );
-    assert_eq!(
-        abandon(attempt.queue_attempt_id.clone(), " "),
-        meta::Output::AbandonQueueDeliveryRejected(
-            meta::AbandonQueueDeliveryRejected_Data::EmptyReason
-        )
-    );
-    assert!(matches!(
-        abandon(attempt.queue_attempt_id.clone(), "The owner closed the seat."),
-        meta::Output::QueueDeliveryAbandoned(meta::QueueDeliveryAbandoned_Data { address: found, .. })
-            if found == address
-    ));
-    assert_eq!(
-        abandon(attempt.queue_attempt_id, "The owner closed the seat."),
-        meta::Output::AbandonQueueDeliveryRejected(
-            meta::AbandonQueueDeliveryRejected_Data::AlreadyFinished
-        )
-    );
-    assert_eq!(
-        fixture
-            .nexus
-            .store
-            .logical_delivery_snapshot(&task.logical_delivery_id)
-            .unwrap()
-            .unwrap()
-            .delivery_state,
-        DeliveryState::Abandoned
-    );
-    assert!(
-        fixture
-            .nexus
-            .store
-            .request_binding(&task.request_id)
-            .unwrap()
-            .is_some()
-    );
-    assert!(matches!(
-        fixture.nexus.dispatch_meta(meta::Input::ReadQueueDeliveries(address.clone())),
-        meta::Output::QueueDeliveriesRead(read)
-            if read.visible_queue_delivery_vector.iter().any(|delivery| matches!(
-                delivery.visible_queue_delivery_standing,
-                meta::VisibleQueueDeliveryStanding::Abandoned(meta::VisibleAbandonmentRecord {
-                    visible_abandonment_cause: meta::VisibleAbandonmentCause::Owner(_), ..
-                })
-            ))
-    ));
-    assert_eq!(
-        queued(&fixture, &address)[0].logical_delivery_id,
-        next.logical_delivery_id
-    );
-    assert!(fixture.typed().is_none());
-}
-
-#[test]
-fn startup_settles_stranded_attempts_without_waking_their_metaflow() {
-    use crate::generated::memory::{NativeReceiptText, TurnId};
-    use crate::store::delivery_retirement::SettlesRetiredDeliveries;
-    use crate::store::logical_delivery::HoldsOpenRequests;
-    use crate::store::queue_delivery::{
-        AccountsQueueDelivery, NativeDeliveryReceipt, NativeHistoryAnchor, PrepareQueueDelivery,
-        QueueDeliveryPhase,
-    };
-    use crate::waking::SleepsAndWakesSeats;
-    for receipt_recorded in [false, true] {
-        let fixture = NexusFixture::new();
-        let address = at("strandedAttempt");
-        let flow = flow_ethos::FlowId("retired-seat".into());
-        awake_as(&fixture, &address, &flow);
-        let task = admitted(
-            &fixture,
-            &address,
-            SentBy::Unbound,
-            Request::Task(flow_ethos::AnswerableTask {
-                minutes: flow_ethos::Minutes(30),
-                string: "Read this.".into(),
-            }),
-        );
-        let PrepareQueueDelivery::Prepared(attempt) = fixture
-            .nexus
-            .store
-            .prepare_oldest_delivery(
-                &address,
-                &flow.0,
-                "retired-thread",
-                HarnessKind::Codex,
-                NativeHistoryAnchor::CodexTurns(None),
-            )
-            .unwrap()
-        else {
-            panic!("the request prepared")
-        };
-        assert!(
-            fixture
-                .nexus
-                .store
-                .mark_delivery_uncertain(&attempt.queue_attempt_id.0)
-                .unwrap()
-        );
-        assert!(
-            fixture
-                .nexus
-                .store
-                .park_uncertain_delivery(&attempt.queue_attempt_id.0)
-                .unwrap()
-        );
-        if receipt_recorded {
-            assert!(
-                fixture
-                    .nexus
-                    .store
-                    .record_delivery_receipt(
-                        &attempt.queue_attempt_id.0,
-                        NativeDeliveryReceipt {
-                            native_request_id: attempt.native_request_id,
-                            thread_id: attempt.thread_id,
-                            turn_id: TurnId("recorded-receipt".into()),
-                            native_receipt_text: NativeReceiptText(
-                                "recorded before retirement".into()
-                            ),
-                        }
-                    )
-                    .unwrap()
-            );
-        }
-        fixture.nexus.store.seed_metaflow(Metaflow {
-            address: address.clone(),
-            state: State::Asleep,
-            past: flow_ethos::Past(vec![flow.clone()]),
-            queue: flow_ethos::Queue(vec![]),
-        });
-        fixture.nexus.settle_stranded_deliveries().unwrap();
-        let state = fixture
-            .nexus
-            .store
-            .logical_delivery_snapshot(&task.logical_delivery_id)
-            .unwrap()
-            .unwrap()
-            .delivery_state;
-        if receipt_recorded {
-            assert!(matches!(state, DeliveryState::Delivered(_)));
-        } else {
-            assert_eq!(state, DeliveryState::Abandoned);
-            assert!(matches!(
-                fixture.nexus.store.queue_delivery_attempt(&attempt.queue_attempt_id.0).unwrap().unwrap().queue_delivery_phase,
-                QueueDeliveryPhase::Abandoned(meta_signal_flow::AbandonmentRecord {
-                    abandonment_cause: meta_signal_flow::AbandonmentCause::FlowRetired(retired), ..
-                }) if retired == flow
-            ));
-        }
-        let open = fixture.nexus.store.open_requests(&address).unwrap();
-        assert_eq!(open.len(), 1);
-        assert_eq!(open[0].request_id, task.request_id);
-        let asleep = fixture.nexus.store.metaflow(&address).unwrap().unwrap();
-        assert_eq!(asleep.state, State::Asleep);
-        assert!(!fixture.nexus.wake_is_due(&asleep));
-        assert!(fixture.typed().is_none());
-        assert_eq!(
-            fixture
-                .nexus
-                .dispatch(Input::CloseRequest(task.request_id.clone())),
-            Output::RequestClosed(task.request_id)
-        );
-    }
 }

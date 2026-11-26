@@ -33,8 +33,7 @@
 //! never ends keeps the seat until it is stopped: nothing here interrupts.
 //!
 //! The ledger is memory only. A Nexus that starts again reads each live
-//! thread from its responder's cut, and the letters still unsettled from
-//! the queue (`recover_typed`).
+//! thread from its responder's cut.
 
 use crate::RunningNexus;
 use crate::generated::transitions::{
@@ -50,9 +49,7 @@ use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
 use crate::turn_ends::RecordsTurnEnd;
-use crate::waking::{
-    AtStop, HoldsWakingMetaflows, NotesStopsAtConfirmation, ParksCohort, SleepsAndWakesSeats,
-};
+use crate::waking::{AtStop, HoldsWakingMetaflows, NotesStopsAtConfirmation, SleepsAndWakesSeats};
 use meta_signal_flow::TurnRetentionBound;
 use signal_flow::{Address, FlowId, FlowNode, HarnessKind};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -811,11 +808,6 @@ impl SettlesRestingCodexSeats for RunningNexus {
         let closed = events
             .iter()
             .any(|event| matches!(event, LedgerEvent::ThreadClosed));
-        let announces_user_input = events.iter().any(|event| match event {
-            LedgerEvent::LetterSeen(_) => true,
-            LedgerEvent::Cut(cut) => !cut.seen_letter_vector.is_empty(),
-            _ => false,
-        });
         let (seat, ended) = {
             let _turn = self
                 .dispatch_gate
@@ -834,24 +826,6 @@ impl SettlesRestingCodexSeats for RunningNexus {
                 .map(|reading| reading.turns_ended.0.len())
                 .sum::<usize>();
             let flow = self.codex_flow_on(thread);
-            // The observed item or reconnect cut is a cause to read native
-            // receipts. The exact prior anchor, cohort and unique matching
-            // turn still govern settlement. The in-memory letter can leave
-            // the ledger before its durable attempt has been receipted.
-            if let Some(node) = &flow
-                && let Ok(Some(metaflow)) = self.store.metaflow_awake_as(&node.flow_id.0)
-            {
-                if announces_user_input {
-                    self.settle_turn_receipts(&metaflow.address);
-                } else if ended > 0
-                    && matches!(
-                        self.codex_turns.standing(thread),
-                        ThreadStanding::LetterAwaited(_)
-                    )
-                {
-                    self.reconcile_typed(&metaflow.address);
-                }
-            }
             let after = self.codex_turns.standing(thread);
             let rested = readings.iter().any(|reading| reading.rest_reached.0)
                 || (before != ThreadStanding::AtRest && after == ThreadStanding::AtRest);

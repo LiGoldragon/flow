@@ -1434,6 +1434,17 @@ fn a_protected_seat_past_its_threshold_is_kept_and_handed_its_work() {
     use crate::store::context::JudgesCompaction;
     let fixture = NexusFixture::new();
     fable_seat_past_its_threshold(&fixture, vec![fable_address("core")]);
+    // Its work is an Order, a request that starts its next turn.
+    let mut seated = fixture
+        .nexus
+        .store
+        .metaflow(&fable_address("core"))
+        .unwrap()
+        .expect("metaflow held");
+    seated.queue.0[0].delivery = flow_ethos::Delivery::Wake;
+    seated.queue.0[0].message =
+        signal_flow::Message::Soft(Request::Order("Kept for this flow.".into()));
+    fixture.nexus.store.seed_metaflow(seated);
     assert_eq!(
         fixture.nexus.store.threshold_standing(CLAUDE_SEAT).unwrap(),
         ThresholdStanding::Protected {

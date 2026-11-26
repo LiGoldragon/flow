@@ -1,7 +1,7 @@
 //! Wake and drain against the fixture Herdr: an idle seat of any model and
 //! either harness keeps its pane and stays Awake, and work queued for it is
 //! handed into that pane; a seat whose pane is gone is Asleep, and a queued
-//! request wakes a fresh flow composed from the metaflow's last launch;
+//! request wakes a fresh flow composed from the metaflow's declaration;
 //! queued work remains durable until native history receipts it.
 
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
@@ -155,6 +155,69 @@ pub(super) fn maintain(fixture: &NexusFixture, address: Address) {
             },
         ]))
         .expect("metaflow declared Maintained");
+}
+
+/// Declares the permaflow at `address` OnDemand with the fixture's modules,
+/// beside every other declaration.
+pub(super) fn declare_on_demand(fixture: &NexusFixture, address: Address) {
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Permaflow(
+            meta_signal_flow::ConfigureMetaflow {
+                effort: meta_signal_flow::Effort::Default,
+                leave_outs: signal_flow::LeaveOuts(Vec::new()),
+                root_option: None,
+                address,
+                system_modules: signal_flow::SystemModules(vec![
+                    signal_flow::ModuleIdentity("spirit:core:0".into()),
+                    signal_flow::ModuleIdentity("intent:flow:0".into()),
+                ]),
+                prompt_modules: signal_flow::PromptModules(vec![signal_flow::ModuleIdentity(
+                    "knowledge:main-flow:0".into(),
+                )]),
+                flow_kind: signal_flow::FlowKind::Regular,
+                tool_set: signal_flow::ToolSet::Default,
+                continuity: meta_signal_flow::Continuity::OnDemand,
+                refresh_mode: meta_signal_flow::RefreshMode::Automatic,
+                purpose: meta_signal_flow::Purpose(String::new()),
+                records: meta_signal_flow::Records(vec![]),
+            },
+        ))
+        .expect("the permaflow is declared");
+}
+
+/// Declares the permaflow a launch of record started, OnDemand, with the
+/// modules, kind and tools that launch named, beside every other
+/// declaration: a wake composes its fresh flow from a declaration alone.
+pub(super) fn declare_launched(fixture: &NexusFixture, profile: &LaunchProfile) {
+    use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
+    if matches!(
+        fixture.nexus.store.metaflow_declaration(&profile.address),
+        Ok(Some(_))
+    ) {
+        return;
+    }
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Permaflow(
+            meta_signal_flow::ConfigureMetaflow {
+                effort: meta_signal_flow::Effort::Default,
+                leave_outs: signal_flow::LeaveOuts(Vec::new()),
+                root_option: None,
+                address: profile.address.clone(),
+                system_modules: profile.system_modules.clone(),
+                prompt_modules: profile.prompt_modules.clone(),
+                flow_kind: profile.flow_kind.clone(),
+                tool_set: profile.tool_set.clone(),
+                continuity: meta_signal_flow::Continuity::OnDemand,
+                refresh_mode: meta_signal_flow::RefreshMode::Automatic,
+                purpose: meta_signal_flow::Purpose(String::new()),
+                records: meta_signal_flow::Records(vec![]),
+            },
+        ))
+        .expect("the launched permaflow is declared");
 }
 
 pub(super) fn stored(fixture: &NexusFixture, model: Model) -> Metaflow {
@@ -968,6 +1031,7 @@ fn an_order_wakes_an_asleep_primary_fresh() {
         vec!["abc123"],
         queue.clone(),
     ));
+    declare_on_demand(&fixture, at.clone());
     let world = fixture.fresh_claude_world();
     fixture
         .nexus
@@ -1236,12 +1300,11 @@ fn the_store_sleeps_and_awakens_removing_only_the_confirmed_startup_batch() {
     };
     assert!(
         store
-            .settle_wake_startup_receipts(
+            .record_hand_over(
                 &at,
                 "bbbbbb",
                 &startup,
-                Some(&receipt),
-                crate::generated::transitions::ReceiptTurn::Running
+                signal_flow::DeliveryState::Delivered(receipt.clone())
             )
             .unwrap()
     );
@@ -1282,8 +1345,11 @@ fn the_store_sleeps_and_awakens_removing_only_the_confirmed_startup_batch() {
     );
 }
 
+/// A hand-over records the requests it carried and takes exactly them
+/// from the head of the queue, in one commit; the request behind them
+/// stays queued.
 #[test]
-fn a_wake_receipt_settles_its_logical_prefix_atomically_and_preserves_the_suffix() {
+fn a_hand_over_takes_its_logical_prefix_atomically_and_preserves_the_suffix() {
     let fixture = NexusFixture::new();
     let store = &fixture.nexus.store;
     let at = address(Model::Luna);
@@ -1318,89 +1384,24 @@ fn a_wake_receipt_settles_its_logical_prefix_atomically_and_preserves_the_suffix
         native_prompt_id: signal_flow::NativePromptId("prompt-receipt".into()),
     };
 
+    let delivered = signal_flow::DeliveryState::Delivered(receipt.clone());
     assert!(
         !store
-            .settle_wake_startup_receipts(
-                &at,
-                "notbbb",
-                &startup,
-                Some(&receipt),
-                crate::generated::transitions::ReceiptTurn::Running
-            )
+            .record_hand_over(&at, "notbbb", &startup, delivered.clone())
             .unwrap(),
         "a different flow changes neither lifecycle nor queue"
     );
     assert_eq!(store.metaflow(&at).unwrap().unwrap().queue, queued);
     assert!(
         !store
-            .settle_wake_startup_receipts(
-                &at,
-                "bbbbbb",
-                &startup[1..],
-                Some(&receipt),
-                crate::generated::transitions::ReceiptTurn::Running
-            )
+            .record_hand_over(&at, "bbbbbb", &startup[1..], delivered.clone())
             .unwrap(),
         "a non-prefix changes neither lifecycle nor queue"
     );
     assert_eq!(store.metaflow(&at).unwrap().unwrap().queue, queued);
     assert!(
         store
-            .settle_wake_startup_receipts(
-                &at,
-                "bbbbbb",
-                &startup,
-                None,
-                crate::generated::transitions::ReceiptTurn::Running
-            )
-            .is_err(),
-        "logical deliveries require an exact receipt"
-    );
-    assert_eq!(store.metaflow(&at).unwrap().unwrap().queue, queued);
-
-    // Reconcile the partial shape an older split settlement could leave:
-    // one exact receipt is durable while its queue entry remains.
-    store
-        .transition_logical_delivery(
-            &startup[0].logical_delivery_id,
-            signal_flow::DeliveryState::Delivered(receipt.clone()),
-        )
-        .unwrap();
-    let conflicting = signal_flow::NativeReceipt {
-        harness_kind: HarnessKind::Claude,
-        native_session_id: signal_flow::NativeSessionId("other-session".into()),
-        native_prompt_id: signal_flow::NativePromptId("other-prompt".into()),
-    };
-    assert!(
-        store
-            .settle_wake_startup_receipts(
-                &at,
-                "bbbbbb",
-                &startup,
-                Some(&conflicting),
-                crate::generated::transitions::ReceiptTurn::Running
-            )
-            .is_err(),
-        "a conflicting receipt cannot rewrite evidence or drain the queue"
-    );
-    assert_eq!(store.metaflow(&at).unwrap().unwrap().queue, queued);
-    assert!(matches!(
-        store
-            .logical_delivery_snapshot(&startup[1].logical_delivery_id)
-            .unwrap()
-            .unwrap()
-            .delivery_state,
-        signal_flow::DeliveryState::Queued
-    ));
-    assert!(
-        store
-            .settle_wake_startup_receipts(
-                &at,
-                "bbbbbb",
-                &startup,
-                Some(&receipt),
-                crate::generated::transitions::ReceiptTurn::Running
-            )
+            .record_hand_over(&at, "bbbbbb", &startup, delivered)
             .unwrap()
     );
     let settled = store.metaflow(&at).unwrap().unwrap();
@@ -1445,10 +1446,9 @@ fn a_wake_receipt_settles_its_logical_prefix_atomically_and_preserves_the_suffix
     }
 }
 
-/// The context a wake composes a fresh flow from: the module identities and
-/// leave-outs of the metaflow's last launch, whatever that flow's end, in
-/// the Herdr session the Nexus declares.
-fn last_launch_context() -> WakePlan {
+/// The context a wake composes a fresh flow from: the module identities of
+/// the metaflow's declaration, in the Herdr session the Nexus declares.
+fn declared_context() -> WakePlan {
     WakePlan::Fresh(FreshContext {
         herdr_session_name: signal_flow::HerdrSessionName("fixture-session".into()),
         system_modules: signal_flow::SystemModules(vec![
@@ -1465,24 +1465,23 @@ fn last_launch_context() -> WakePlan {
     })
 }
 
-/// Every wake is fresh: a metaflow whose last flow Stopped, Exited or was
-/// Retired wakes as a new flow composed from that flow's launch.
+/// An undeclared Address is never woken: a metaflow whose last flow was
+/// launched and ended has no fallback to that launch, and wakes only from
+/// its declaration.
 #[test]
-fn every_wake_composes_a_fresh_flow_from_the_last_launch_whatever_its_end() {
+fn an_undeclared_address_is_never_woken_from_its_last_launch() {
     let asleep = metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]);
-    let stopped = NexusFixture::new();
-    ended_claude(&stopped);
-    assert_eq!(stopped.nexus.wake_plan(&asleep), last_launch_context());
-
-    let exited = NexusFixture::new();
-    launched_claude_ended_by(&exited, |store| store.record_exited("abc123").unwrap());
-    assert_eq!(exited.nexus.wake_plan(&asleep), last_launch_context());
-
-    let retired = NexusFixture::new();
-    launched_claude_ended_by(&retired, |store| {
-        store.record_active("abc123").unwrap() && store.record_retired("abc123").unwrap()
-    });
-    assert_eq!(retired.nexus.wake_plan(&asleep), last_launch_context());
+    let fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    assert_eq!(fixture.nexus.wake_plan(&asleep), declared_context());
+    // Its declaration removed, the Address is never woken, whatever its
+    // last flow's launch named.
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![]))
+        .expect("the declarations are removed");
+    assert_eq!(fixture.nexus.wake_plan(&asleep), WakePlan::Unplaceable);
 }
 
 #[test]
@@ -1777,6 +1776,7 @@ fn launched_claude_ended_by_with(
         flow_id: flow_ethos::FlowId("caller".into()),
         session_id: signal_flow::SessionId("caller-session".into()),
     });
+    declare_launched(fixture, &profile);
     fixture
         .nexus
         .store
@@ -2041,15 +2041,6 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
     assert_eq!(old.flow_lifecycle, FlowLifecycle::Stopped);
 }
 
-/// The Psyche core Opus, which sends the direct requests below.
-fn psyche_core_opus() -> Address {
-    Address {
-        aspect: Aspect::Psyche,
-        topic: flow_ethos::Topic("core".into()),
-        model: Model::Opus,
-    }
-}
-
 /// The rows a woken flow's first prompt was taken with, which the fixture
 /// Claude held (`startup-rows-later`), written to its transcript now.
 fn startup_rows_land(fixture: &NexusFixture, world: &FreshWorld) {
@@ -2085,417 +2076,6 @@ fn startup_prompts(world: &FreshWorld) -> usize {
         .unwrap_or_default()
         .lines()
         .count()
-}
-
-/// A direct MiddleAbrupt Task to an asleep Claude metaflow wakes it, and the
-/// woken flow's first prompt carries the Task. Herdr answers that prompt
-/// submitted before Claude writes it to its transcript, so the wake finds
-/// no receipt yet, and Herdr refuses every later prompt into the busy pane.
-/// The Task is typed once: it leaves the queue awaiting its receipt, the
-/// reply is Sent once the transcript shows the prompt taken, and the woken
-/// flow's Done for it is admitted.
-#[test]
-fn a_direct_send_its_wake_carried_is_sent_on_the_receipt_that_lands_after_the_wake() {
-    use crate::sending::SendsRequests;
-    use crate::store::AnnouncesLaunchChanges;
-    use crate::store::queue_delivery::AccountsQueueDelivery;
-    use std::time::{Duration, Instant};
-    let mut fixture = NexusFixture::new();
-    ended_claude(&fixture);
-    let at = address(Model::Sol);
-    fixture
-        .nexus
-        .store
-        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
-    let world = fixture.fresh_claude_world();
-    fs::write(world.state.join("startup-rows-later"), "").unwrap();
-    fs::write(world.state.join("prompt-refused"), "").unwrap();
-    let sender = psyche_core_opus();
-    let peer = BoundPeer::spawn();
-    peer.bind(&fixture, sender.clone());
-
-    let task = Request::Task(flow_ethos::AnswerableTask {
-        minutes: flow_ethos::Minutes(300),
-        string: "Carry bead primary-rt9q.".into(),
-    });
-    let answer = std::thread::scope(|scope| {
-        let (fixture, world, at) = (&fixture, &world, &at);
-        // Claude writes the first prompt's rows once the wake has looked
-        // for their receipt: once an attempt holds the request.
-        let lands = scope.spawn(move || {
-            let store = &fixture.nexus.store;
-            assert!(
-                store.launch_changes.until_holds(
-                    Instant::now() + Duration::from_secs(60),
-                    &mut || !store
-                        .unsettled_deliveries(at)
-                        .unwrap_or_default()
-                        .is_empty(),
-                ),
-                "no attempt ever held the request; Herdr calls: {}",
-                world.calls()
-            );
-            startup_rows_land(fixture, world);
-        });
-        let answer = fixture.nexus.send_request(
-            signal_flow::SendRequest {
-                address: at.clone(),
-                sendable_message: super::sendable_message(Message::MiddleAbrupt(task)),
-            },
-            Some(&peer.process()),
-        );
-        lands.join().expect("the rows land");
-        answer
-    });
-
-    let signal_flow::Output::Sent(receipt) = &answer.response else {
-        panic!(
-            "the request the first prompt carried is Sent: {:?}; Herdr calls: {}",
-            answer.response,
-            world.calls()
-        );
-    };
-    assert_eq!(startup_prompts(&world), 1, "{}", world.calls());
-    assert!(
-        later_prompts(&world).is_empty(),
-        "the carried request is never typed again: {}",
-        world.calls()
-    );
-    let woken = stored(&fixture, Model::Sol);
-    let State::Awake(flow_id) = &woken.state else {
-        panic!("the woken flow receives: {woken:?}")
-    };
-    assert_ne!(flow_id.0, "abc123");
-    assert!(woken.queue.0.is_empty(), "{woken:?}");
-    let debugged = fixture
-        .nexus
-        .store
-        .debug_delivery(&receipt.0)
-        .unwrap()
-        .expect("the request is held");
-    assert!(
-        matches!(
-            debugged.delivery_snapshot.delivery_state,
-            signal_flow::DeliveryState::Delivered(_)
-        ),
-        "{debugged:?}"
-    );
-    assert!(
-        debugged
-            .receipt
-            .0
-            .as_ref()
-            .is_some_and(|native| native.native_session_id.0 == world.session()),
-        "{debugged:?}"
-    );
-
-    // The woken flow answers by the id the Task was delivered with.
-    let done = fixture
-        .nexus
-        .store
-        .resolve_sendable_message(signal_flow::SendableMessage::Soft(
-            signal_flow::SendableRequest::Done(signal_flow::SendableRequest_Done_Data {
-                request_id: receipt.0.clone(),
-                string: "Carried.".into(),
-            }),
-        ))
-        .expect("the Done resolves")
-        .expect("the Done names an open request");
-    let admitted = fixture.nexus.store.accept_logical_delivery(
-        &sender,
-        SentBy::Sender(at.clone()),
-        Delivery::Queue,
-        done,
-        None,
-    );
-    assert!(
-        matches!(
-            admitted,
-            Ok(signal_flow::PrivateSendResponse::SendAccepted(_))
-        ),
-        "{admitted:?}"
-    );
-    peer.end();
-}
-
-/// A direct Order to an asleep Claude metaflow wakes it, and the woken
-/// flow's first prompt carries the Order, its receipt not yet written. The
-/// store refuses the batch's hand-over record, so the wake started its seat
-/// and could not settle the batch. The Send was placed without its
-/// receipt: it is accepted Uncertain, no retry cause is written to the
-/// queue, and nothing is typed into the new pane after its first prompt.
-#[test]
-fn a_direct_send_whose_wake_started_its_seat_and_kept_its_batch_is_accepted_uncertain() {
-    use crate::sending::SendsRequests;
-    use crate::test_faults::{InjectsCrashes, RefusedWrite};
-    let mut fixture = NexusFixture::new();
-    ended_claude(&fixture);
-    let at = address(Model::Sol);
-    fixture
-        .nexus
-        .store
-        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
-    let world = fixture.fresh_claude_world();
-    fs::write(world.state.join("startup-rows-later"), "").unwrap();
-    let sender = psyche_core_opus();
-    let peer = BoundPeer::spawn();
-    peer.bind(&fixture, sender.clone());
-    fixture
-        .nexus
-        .store
-        .faults
-        .refuse_next(RefusedWrite::DeliveryPrepare);
-
-    let answer = fixture.nexus.send_request(
-        signal_flow::SendRequest {
-            address: at.clone(),
-            sendable_message: super::sendable_message(Message::MiddleAbrupt(Request::Order(
-                "Carry it.".into(),
-            ))),
-        },
-        Some(&peer.process()),
-    );
-
-    let signal_flow::PrivateSendResponse::SendAccepted(accepted) = &answer.private_response else {
-        panic!(
-            "the Send its wake's first prompt carried is accepted: {:?}; Herdr calls: {}",
-            answer.private_response,
-            world.calls()
-        );
-    };
-    assert_eq!(
-        accepted.delivery_state,
-        signal_flow::DeliveryState::Uncertain,
-        "{accepted:?}"
-    );
-    assert!(
-        matches!(
-            &answer.response,
-            signal_flow::Output::SendAccepted(visible)
-                if visible.visible_delivery_state == signal_flow::VisibleDeliveryState::Uncertain
-        ),
-        "{:?}",
-        answer.response
-    );
-    assert!(answer.pending.is_none(), "nothing is scheduled to type it");
-    let woken = stored(&fixture, Model::Sol);
-    assert!(
-        matches!(&woken.state, State::Awake(flow_id) if flow_id.0 != "abc123"),
-        "the wake started its seat: {woken:?}"
-    );
-    let snapshot = fixture
-        .nexus
-        .store
-        .logical_delivery_snapshot(&accepted.logical_delivery_id)
-        .unwrap()
-        .expect("the request is held");
-    assert!(
-        !matches!(
-            snapshot.delivery_state,
-            signal_flow::DeliveryState::Retryable(_) | signal_flow::DeliveryState::Failed(_)
-        ),
-        "no retry cause and no failure is written: {snapshot:?}"
-    );
-    assert_eq!(startup_prompts(&world), 1, "{}", world.calls());
-    assert!(later_prompts(&world).is_empty(), "{}", world.calls());
-    peer.end();
-}
-
-/// A direct Order to an asleep Claude metaflow wakes it, and the woken
-/// flow's first prompt carries the Order, its receipt not yet written. The
-/// store refuses the wake's record of the batch, so the Send records it:
-/// the Order leaves the queue as an Uncertain attempt at the session's
-/// start and the Send is accepted Uncertain. A drain after it types
-/// nothing, and once the first prompt's receipt lands a drain settles the
-/// Order Delivered on it, never typed into the pane.
-#[test]
-fn a_direct_send_whose_wake_kept_its_batch_records_it_uncertain_and_no_drain_types_it_again() {
-    use crate::sending::SendsRequests;
-    use crate::store::queue_delivery::AccountsQueueDelivery;
-    use crate::test_faults::{InjectsCrashes, RefusedWrite};
-    use crate::waking::AnchorsSessionStart;
-    let mut fixture = NexusFixture::new();
-    ended_claude(&fixture);
-    let at = address(Model::Sol);
-    fixture
-        .nexus
-        .store
-        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
-    let world = fixture.fresh_claude_world();
-    fs::write(world.state.join("startup-rows-later"), "").unwrap();
-    let sender = psyche_core_opus();
-    let peer = BoundPeer::spawn();
-    peer.bind(&fixture, sender.clone());
-    fixture
-        .nexus
-        .store
-        .faults
-        .refuse_next(RefusedWrite::DeliveryPrepare);
-
-    let answer = fixture.nexus.send_request(
-        signal_flow::SendRequest {
-            address: at.clone(),
-            sendable_message: super::sendable_message(Message::MiddleAbrupt(Request::Order(
-                "Carry it.".into(),
-            ))),
-        },
-        Some(&peer.process()),
-    );
-
-    let signal_flow::PrivateSendResponse::SendAccepted(accepted) = &answer.private_response else {
-        panic!(
-            "the Send its wake's first prompt carried is accepted: {:?}; Herdr calls: {}",
-            answer.private_response,
-            world.calls()
-        );
-    };
-    assert_eq!(
-        accepted.delivery_state,
-        signal_flow::DeliveryState::Uncertain,
-        "{accepted:?}"
-    );
-    assert!(answer.pending.is_none(), "nothing is scheduled to type it");
-    let snapshot = |fixture: &NexusFixture| {
-        fixture
-            .nexus
-            .store
-            .logical_delivery_snapshot(&accepted.logical_delivery_id)
-            .unwrap()
-            .expect("the Order is held")
-            .delivery_state
-    };
-    assert_eq!(snapshot(&fixture), signal_flow::DeliveryState::Uncertain);
-    let woken = stored(&fixture, Model::Sol);
-    assert!(
-        matches!(&woken.state, State::Awake(flow_id) if flow_id.0 != "abc123"),
-        "the wake started its seat: {woken:?}"
-    );
-    assert!(
-        woken.queue.0.is_empty(),
-        "no queued entry is left for a drain to type: {woken:?}"
-    );
-    let awaiting = fixture.nexus.store.unsettled_deliveries(&at).unwrap();
-    assert_eq!(awaiting.len(), 1, "{awaiting:?}");
-    assert_eq!(
-        awaiting[0].native_history_anchor,
-        HarnessKind::Claude.session_start_anchor(),
-        "the Order awaits the first prompt's receipt: {awaiting:?}"
-    );
-
-    // A drain before the receipt lands types nothing and settles nothing.
-    assert_eq!(
-        fixture.nexus.perform(Operation::Drain(at.clone())),
-        Outcome::Drained(Vec::new())
-    );
-    assert_eq!(snapshot(&fixture), signal_flow::DeliveryState::Uncertain);
-    assert!(later_prompts(&world).is_empty(), "{}", world.calls());
-
-    // The first prompt's receipt lands; the drain after it settles the
-    // Order on it and types nothing.
-    startup_rows_land(&fixture, &world);
-    for _ in 0..2 {
-        assert_eq!(
-            fixture.nexus.perform(Operation::Drain(at.clone())),
-            Outcome::Drained(Vec::new())
-        );
-    }
-    assert!(
-        matches!(snapshot(&fixture), signal_flow::DeliveryState::Delivered(_)),
-        "the Order settles on its first prompt's receipt: {:?}",
-        snapshot(&fixture)
-    );
-    assert_eq!(startup_prompts(&world), 1, "{}", world.calls());
-    assert!(
-        later_prompts(&world).is_empty(),
-        "the Order is never typed into the pane: {}",
-        world.calls()
-    );
-    peer.end();
-}
-
-/// As above, but the store refuses the Send's record of the batch too:
-/// the Send answers Failed with the store's refusal, not Uncertain, and
-/// writes no retry cause; the Order stays queued as it stood.
-#[test]
-fn a_direct_send_whose_record_of_its_wakes_batch_is_refused_answers_failed_store_refused() {
-    use crate::sending::SendsRequests;
-    use crate::test_faults::{InjectsCrashes, RefusedWrite};
-    let mut fixture = NexusFixture::new();
-    ended_claude(&fixture);
-    let at = address(Model::Sol);
-    fixture
-        .nexus
-        .store
-        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
-    let world = fixture.fresh_claude_world();
-    fs::write(world.state.join("startup-rows-later"), "").unwrap();
-    let sender = psyche_core_opus();
-    let peer = BoundPeer::spawn();
-    peer.bind(&fixture, sender.clone());
-    // The wake's record of its batch, then the Send's.
-    fixture
-        .nexus
-        .store
-        .faults
-        .refuse_times(RefusedWrite::DeliveryPrepare, 2);
-
-    let answer = fixture.nexus.send_request(
-        signal_flow::SendRequest {
-            address: at.clone(),
-            sendable_message: super::sendable_message(Message::MiddleAbrupt(Request::Order(
-                "Carry it.".into(),
-            ))),
-        },
-        Some(&peer.process()),
-    );
-
-    let signal_flow::PrivateSendResponse::Failed(signal_flow::SendFailure::Admitted(failed)) =
-        &answer.private_response
-    else {
-        panic!(
-            "the Send whose record was refused fails: {:?}; Herdr calls: {}",
-            answer.private_response,
-            world.calls()
-        );
-    };
-    assert_eq!(
-        failed.send_failure_reason,
-        signal_flow::SendFailureReason::NotSent(format!(
-            "{:?}",
-            Outcome::Failed(Failed_Data::StoreRefused)
-        )),
-        "{failed:?}"
-    );
-    assert!(answer.pending.is_none(), "nothing is scheduled to type it");
-    let woken = stored(&fixture, Model::Sol);
-    assert!(
-        matches!(&woken.state, State::Awake(flow_id) if flow_id.0 != "abc123"),
-        "the wake started its seat: {woken:?}"
-    );
-    assert!(
-        woken
-            .queue
-            .0
-            .iter()
-            .any(|entry| entry.logical_delivery_id == failed.logical_delivery_id),
-        "the refused record left the Order queued as it stood: {woken:?}"
-    );
-    let snapshot = fixture
-        .nexus
-        .store
-        .logical_delivery_snapshot(&failed.logical_delivery_id)
-        .unwrap()
-        .expect("the Order is held");
-    assert!(
-        !matches!(
-            snapshot.delivery_state,
-            signal_flow::DeliveryState::Retryable(_)
-        ),
-        "no retry cause is written: {snapshot:?}"
-    );
-    assert_eq!(startup_prompts(&world), 1, "{}", world.calls());
-    assert!(later_prompts(&world).is_empty(), "{}", world.calls());
-    peer.end();
 }
 
 /// A wake a queued request makes due, whose first prompt's receipt lands
@@ -4369,8 +3949,7 @@ fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends()
 
 /// A topic never dies: the Stop of the flow its metaflow is Awake as
 /// records the metaflow Asleep in the same write, the flow in Past, so a
-/// wake composes a fresh flow from its launch and a fresh Start may take
-/// the Address.
+/// fresh Start may take the Address.
 #[test]
 fn the_stop_of_a_confirmed_seat_leaves_its_metaflow_asleep_to_wake_fresh() {
     use crate::store::metaflow::TakesLaunchAddress;
@@ -4388,7 +3967,6 @@ fn the_stop_of_a_confirmed_seat_leaves_its_metaflow_asleep_to_wake_fresh() {
         slept.past,
         flow_ethos::Past(vec![flow_ethos::FlowId("abc123".to_owned())])
     );
-    assert_eq!(fixture.nexus.wake_plan(&slept), last_launch_context());
     let mut fresh = launched.profile.clone();
     fresh.launch_request_id = signal_flow::LaunchRequestId("fresh-after-stop".into());
     assert_eq!(
@@ -4424,7 +4002,6 @@ fn a_retired_seat_sleeps_its_metaflow_and_its_order_wakes_it_fresh() {
         .push(Request::Order("Carry on.".into()).unsent());
     fixture.nexus.store.seed_metaflow(retired.clone());
     assert!(fixture.nexus.wake_is_due(&retired));
-    assert_eq!(fixture.nexus.wake_plan(&retired), last_launch_context());
 }
 
 /// At the Nexus's start every metaflow left Awake as an ended flow is
@@ -4924,6 +4501,7 @@ impl SleepsCodex for NexusFixture {
                 Vec::<signal_flow::LeaveOut>::new(),
             )
             .unwrap();
+        declare_launched(fixture, &profile);
         fixture
             .nexus
             .store
@@ -5161,100 +4739,6 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
     assert_eq!(
         fs::read_to_string(world.state.join("label")).unwrap(),
         title.as_str()
-    );
-}
-
-/// A sleeping Codex address wakes fresh, and the new thread's first prompt
-/// carries the queued A. The receipt of a Codex first prompt is the rollout
-/// showing it and the flow's first answer, which Codex writes after the
-/// launch answers `Started`: the wake finds no receipt, and A leaves the
-/// queue as typed input awaiting it, so the wake answers `Woken`. Once the
-/// answer lands, the next drain settles A on the launch's receipt; no drain
-/// types A again, into the pane or through the app-server.
-#[test]
-fn a_codex_wake_carries_its_batch_until_its_first_answer_receipts_it() {
-    use crate::store::queue_delivery::AccountsQueueDelivery;
-    let mut fixture = NexusFixture::new();
-    let sleeping = fixture.sleeping_codex(vec![Request::Order("A".into())]);
-    sleeping.rollout(false);
-    let at = address(Model::Sol);
-    let carried = stored(&fixture, Model::Sol).queue.0[0].clone();
-    let fresh = flow_ethos::FlowId(FRESH_CODEX_FLOW.into());
-
-    let outcome = fixture.nexus.perform(Operation::Wake(at.clone()));
-    assert_eq!(
-        outcome,
-        Outcome::Woken(fresh.clone()),
-        "Herdr calls: {}; app-server invocations: {:?}",
-        sleeping.world.calls(),
-        fs::read_to_string(&sleeping.world.codex_invocations).ok()
-    );
-    let woken = stored(&fixture, Model::Sol);
-    assert_eq!(woken.state, State::Awake(fresh.clone()));
-    assert!(
-        woken.queue.0.is_empty(),
-        "the first prompt carried A: {woken:?}"
-    );
-    let awaiting = fixture.nexus.store.unsettled_deliveries(&at).unwrap();
-    assert!(
-        matches!(awaiting.as_slice(), [attempt]
-            if attempt.harness_kind == HarnessKind::Codex
-                && attempt.thread_id.0 == FRESH_THREAD
-                && attempt.native_history_anchor
-                    == crate::generated::memory::NativeHistoryAnchor::CodexTurns(None)),
-        "A awaits its receipt, anchored at the thread's start: {awaiting:?}"
-    );
-    let snapshot = |fixture: &NexusFixture| {
-        fixture
-            .nexus
-            .store
-            .logical_delivery_snapshot(&carried.logical_delivery_id)
-            .unwrap()
-            .expect("A is held")
-            .delivery_state
-    };
-    assert_eq!(snapshot(&fixture), signal_flow::DeliveryState::Uncertain);
-
-    // A drain before the answer lands finds nothing to type and settles
-    // nothing.
-    assert_eq!(
-        fixture.nexus.perform(Operation::Drain(at.clone())),
-        Outcome::Drained(Vec::new())
-    );
-    assert_eq!(snapshot(&fixture), signal_flow::DeliveryState::Uncertain);
-
-    // The flow's first answer lands; each drain after it types nothing.
-    sleeping.answer_lands();
-    for _ in 0..2 {
-        assert_eq!(
-            fixture.nexus.perform(Operation::Drain(at.clone())),
-            Outcome::Drained(Vec::new())
-        );
-    }
-    assert!(
-        matches!(snapshot(&fixture), signal_flow::DeliveryState::Delivered(_)),
-        "A settles on its first prompt's receipt: {:?}",
-        snapshot(&fixture)
-    );
-    assert!(
-        fixture
-            .nexus
-            .store
-            .unsettled_deliveries(&at)
-            .unwrap()
-            .is_empty(),
-        "nothing awaits a receipt"
-    );
-    assert!(
-        !sleeping.world.calls().contains("agent prompt"),
-        "A is never typed into the pane: {}",
-        sleeping.world.calls()
-    );
-    // The probe, the opening, the naming and the readback with the first
-    // turn: no later connection gave A a turn of its own.
-    assert_eq!(
-        fs::read_to_string(&sleeping.world.codex_invocations).unwrap(),
-        "4"
     );
 }
 
@@ -7531,16 +7015,15 @@ fn a_simplified_answer_uses_bound_transcript_b_and_never_hook_a() {
         fixture
             .nexus
             .store
-            .settle_wake_startup_receipts(
+            .record_hand_over(
                 &at,
                 "abc123",
                 &startup,
-                Some(&signal_flow::NativeReceipt {
+                signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
                     harness_kind: HarnessKind::Claude,
                     native_session_id: signal_flow::NativeSessionId(launched.session.clone()),
                     native_prompt_id: signal_flow::NativePromptId("bound-prompt".into()),
                 }),
-                crate::generated::transitions::ReceiptTurn::Running,
             )
             .unwrap()
     );
@@ -7968,12 +7451,11 @@ fn a_warned_codex_seat_is_refreshed_at_the_rest_after_its_warning() {
 
     // The warning's turn runs, its user message the warning typed, and
     // ends: that rest refreshes the seat.
-    let payload = super::codex_turns::typed_payload(&fixture.nexus, &address(Model::Sol));
     let refreshed_at = fixture.nexus.codex_events(
         &thread,
         vec![
             started("turn-warned"),
-            seen("turn-warned", "warning-item", &payload),
+            seen("turn-warned", "warning-item", &typed),
             completed("turn-warned"),
         ],
     );
@@ -8247,251 +7729,6 @@ fn a_current_codex_cut_repairs_an_uncommitted_rest_for_its_bound_thread_only() {
     );
     assert!(fixture.nexus.rests_now("908786"));
     assert_eq!(fixture.nexus.codex_events(&thread, vec![idle()]), None);
-}
-
-/// Every Herdr operation the fixture logged, in order.
-fn herdr_operations(fixture: &NexusFixture) -> String {
-    fs::read_to_string(fixture.directory.path().join("herdr-operations.log")).unwrap_or_default()
-}
-
-/// The HardAbrupt `oumv` queued for the OnDemand Codex seat.
-fn hard_abrupt_queued() -> QueueEntry {
-    QueueEntry {
-        logical_delivery_id: flow_ethos::LogicalDeliveryId("codex-cut-00".into()),
-        request_id: flow_ethos::RequestId("oumv".into()),
-        sent_by: SentBy::Unknown,
-        delivery: Delivery::Queue,
-        message: Message::HardAbrupt(Request::Notice("Stop and read this.".into())),
-    }
-}
-
-/// An OnDemand Codex seat 908786 at { Mind flow Sol } in turn `turn-a`,
-/// its pane Working, holding `queue`; its model's app-server is the fake,
-/// and { Mind gamma Sol } is Awake as a flow Flow does not hold, a target
-/// for its sends. Answers the thread and the fake.
-fn codex_seat_in_a_turn(
-    fixture: &mut NexusFixture,
-    queue: Vec<QueueEntry>,
-) -> (String, super::send_tool::FakeAppServer) {
-    use super::codex_turns::{idle, started};
-    use crate::codex_turns::SettlesRestingCodexSeats;
-    use crate::store::SeedsRole;
-    let thread = codex_rest_seat(fixture, Some(meta_signal_flow::Continuity::OnDemand), queue);
-    fixture.accept_pane_operations(
-        vec![fixture.current_agent()],
-        PromptFixture::Prompted("w1:p3"),
-    );
-    fixture.nexus.store.seed_role(signal_flow::CallerIdentity {
-        flow_id: flow_ethos::FlowId("908786".into()),
-        aspect: Aspect::Mind,
-        model_name: flow_ethos::ModelName("gpt-sol".into()),
-    });
-    let codex = super::send_tool::accepting_codex_endpoint(fixture, "gpt-sol", &thread);
-    fixture.nexus.store.seed_metaflow(Metaflow {
-        address: Address {
-            aspect: Aspect::Mind,
-            topic: flow_ethos::Topic("gamma".into()),
-            model: Model::Sol,
-        },
-        state: State::Awake(flow_ethos::FlowId("c0ffee".into())),
-        past: flow_ethos::Past(vec![]),
-        queue: flow_ethos::Queue(vec![]),
-    });
-    assert_eq!(
-        fixture
-            .nexus
-            .codex_events(&thread, vec![idle(), started("turn-a")]),
-        None,
-        "a turn that starts is no rest"
-    );
-    (thread, codex)
-}
-
-/// primary-k7jy, afc2ca through the Nexus: an OnDemand Codex seat in turn
-/// A is sent a HardAbrupt, which interrupts it and is typed. A's end,
-/// interrupted, neither sleeps the seat nor rests it: the letter waits for
-/// its receipt. A send from its thread is sent as its Address. B, the turn
-/// that carries the letter's user message, ends with nothing queued, and
-/// the seat sleeps.
-#[test]
-fn a_hard_abrupt_after_a_steered_letter_does_not_sleep_its_seat() {
-    use super::codex_turns::{completed, interrupted, seen, started, typed_payload};
-    use crate::codex_turns::SettlesRestingCodexSeats;
-    use crate::generated::send_tool::{HandlesSendCall, SendOutcome};
-    use crate::store::send_call::KeepsSendCalls;
-    let mut fixture = NexusFixture::new();
-    let (thread, codex) = codex_seat_in_a_turn(&mut fixture, vec![hard_abrupt_queued()]);
-    use super::send_tool::RunsFakeAppServer;
-
-    fixture.nexus.wake_due(address(Model::Sol));
-    let operations = herdr_operations(&fixture);
-    assert!(
-        operations.contains("pane send-keys w1:p3 esc"),
-        "the HardAbrupt interrupts the working seat: {operations}"
-    );
-    let typed = fixture.typed().expect("the HardAbrupt is typed");
-    assert!(typed.contains("Stop and read this."), "{typed}");
-    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
-    assert!(codex.queued_turn_texts().is_empty());
-    let payload = typed_payload(&fixture.nexus, &address(Model::Sol));
-
-    // A's end: interrupted, read once the delivery let the gate go.
-    let at_cut = fixture
-        .nexus
-        .codex_events(&thread, vec![interrupted("turn-a")]);
-    assert_eq!(at_cut, None, "the cut turn's end settles nothing");
-    assert!(!fixture.nexus.codex_resting("908786"));
-    assert!(!closes(&fixture), "the seat is not closed");
-    assert_eq!(
-        stored(&fixture, Model::Sol).state,
-        State::Awake(flow_ethos::FlowId("908786".into()))
-    );
-    // B runs: what its thread sends is sent as the seat's Address.
-    assert_eq!(
-        fixture.nexus.store.thread_sender(&thread).unwrap(),
-        SentBy::Sender(address(Model::Sol))
-    );
-    let sent = fixture.nexus.handle_send_call(super::send_tool::tool_call(
-        &thread,
-        "call-in-b",
-        "Sent from turn B.",
-    ));
-    assert!(
-        matches!(&sent, SendOutcome::Accepted(accepted)
-            if accepted.sent_by == SentBy::Sender(address(Model::Sol))),
-        "{sent:?}"
-    );
-    assert_eq!(
-        fixture.nexus.codex_events(
-            &thread,
-            vec![started("turn-b"), seen("turn-b", "item-b", &payload)]
-        ),
-        None
-    );
-    fixture.accept_pane_operations(
-        vec![fixture.settled_agent()],
-        PromptFixture::Prompted("w1:p3"),
-    );
-    assert_eq!(
-        fixture
-            .nexus
-            .codex_events(&thread, vec![completed("turn-b")]),
-        Some(AtStop::Slept(address(Model::Sol))),
-        "the letter's own turn rests the seat, and it sleeps"
-    );
-    assert!(closes(&fixture));
-    assert_eq!(stored(&fixture, Model::Sol).state, State::Asleep);
-}
-
-/// primary-k7jy, the same with A's end read after B's start: neither A's
-/// end, B's start nor the letter's receipt rests the seat; B's end does.
-#[test]
-fn a_hard_abrupt_whose_cut_turn_ends_after_the_next_start_does_not_sleep_its_seat() {
-    use super::codex_turns::{completed, interrupted, seen, started, typed_payload};
-    use crate::codex_turns::SettlesRestingCodexSeats;
-    let mut fixture = NexusFixture::new();
-    let (thread, _codex) = codex_seat_in_a_turn(&mut fixture, vec![hard_abrupt_queued()]);
-    fixture.nexus.wake_due(address(Model::Sol));
-    assert!(
-        fixture
-            .typed()
-            .is_some_and(|typed| typed.contains("Stop and read this."))
-    );
-    let payload = typed_payload(&fixture.nexus, &address(Model::Sol));
-    assert_eq!(
-        fixture.nexus.codex_events(
-            &thread,
-            vec![
-                started("turn-b"),
-                interrupted("turn-a"),
-                seen("turn-b", "item-b", &payload),
-            ]
-        ),
-        None
-    );
-    assert!(!fixture.nexus.codex_resting("908786"));
-    assert!(!closes(&fixture));
-    fixture.accept_pane_operations(
-        vec![fixture.settled_agent()],
-        PromptFixture::Prompted("w1:p3"),
-    );
-    assert_eq!(
-        fixture
-            .nexus
-            .codex_events(&thread, vec![completed("turn-b")]),
-        Some(AtStop::Slept(address(Model::Sol)))
-    );
-}
-
-/// primary-k7jy: a MiddleAbrupt typed into the seat's running turn A
-/// presses no interrupt and is steered into A, its user message there; A's
-/// end rests the seat, and with nothing queued it sleeps. A letter with no
-/// receipt keeps the seat: A's end alone rests nothing.
-#[test]
-fn a_steered_letter_sleeps_its_seat_at_its_turn_end_only_with_its_receipt() {
-    use super::codex_turns::{completed, seen, typed_payload};
-    use crate::codex_turns::SettlesRestingCodexSeats;
-    let mut fixture = NexusFixture::new();
-    let mut steered = hard_abrupt_queued();
-    steered.message = Message::MiddleAbrupt(Request::Notice("Read this next.".into()));
-    let (thread, _codex) = codex_seat_in_a_turn(&mut fixture, vec![steered]);
-
-    fixture.nexus.wake_due(address(Model::Sol));
-    assert!(
-        !herdr_operations(&fixture).contains("send-keys"),
-        "no interrupt: {}",
-        herdr_operations(&fixture)
-    );
-    assert!(
-        fixture
-            .typed()
-            .is_some_and(|typed| typed.contains("Read this next."))
-    );
-    let payload = typed_payload(&fixture.nexus, &address(Model::Sol));
-    assert!(!fixture.nexus.codex_resting("908786"));
-
-    fixture.accept_pane_operations(
-        vec![fixture.settled_agent()],
-        PromptFixture::Prompted("w1:p3"),
-    );
-    assert_eq!(
-        fixture.nexus.codex_events(
-            &thread,
-            vec![seen("turn-a", "item-a", &payload), completed("turn-a")]
-        ),
-        Some(AtStop::Slept(address(Model::Sol))),
-        "the turn the letter was steered into rests the seat"
-    );
-    assert!(closes(&fixture));
-}
-
-/// primary-k7jy: a letter whose receipt never comes keeps its seat awake
-/// past its turn's end; nothing interrupts it, and the seat is not closed.
-#[test]
-fn a_letter_without_a_receipt_keeps_its_seat() {
-    use super::codex_turns::completed;
-    use crate::codex_turns::SettlesRestingCodexSeats;
-    let mut fixture = NexusFixture::new();
-    let mut steered = hard_abrupt_queued();
-    steered.message = Message::MiddleAbrupt(Request::Notice("Read this next.".into()));
-    let (thread, _codex) = codex_seat_in_a_turn(&mut fixture, vec![steered]);
-    fixture.nexus.wake_due(address(Model::Sol));
-    fixture.accept_pane_operations(
-        vec![fixture.settled_agent()],
-        PromptFixture::Prompted("w1:p3"),
-    );
-    assert_eq!(
-        fixture
-            .nexus
-            .codex_events(&thread, vec![completed("turn-a")]),
-        None
-    );
-    assert!(!fixture.nexus.codex_resting("908786"));
-    assert!(!closes(&fixture));
-    assert_eq!(
-        stored(&fixture, Model::Sol).state,
-        State::Awake(flow_ethos::FlowId("908786".into()))
-    );
 }
 
 /// primary-k7jy, F2: the first turn, opened from turn/start's answer, is

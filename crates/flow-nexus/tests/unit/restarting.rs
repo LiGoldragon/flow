@@ -2700,7 +2700,6 @@ impl OpensSecondNexus for NexusFixture {
                 std::sync::Arc::new(crate::composition::FixtureSuccessorRecovery::default()),
             )),
             dispatch_gate: std::sync::Mutex::new(()),
-            queue_writes: Default::default(),
             pane_leases: crate::delivery::lease::PaneLeases::default(),
             waking: crate::waking::WakingMetaflows::default(),
             stopped_at_confirmation: crate::waking::StoppedAtConfirmation::default(),

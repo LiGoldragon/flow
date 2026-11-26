@@ -33,8 +33,7 @@ use crate::store::metaflow::SleepsMetaflows;
 use crate::store::queue_delivery::{AccountsQueueDelivery, ShowsQueueDelivery};
 use crate::store::{ReadsFlowRows, RebindsNativeSession};
 use crate::waking::{
-    CorrelatesNativeEvents, ParksCohort, QueuesSimplifiedAnswers, ReconcilesQueueDelivery,
-    SimplifiedAnswer, SleepsAndWakesSeats,
+    CorrelatesNativeEvents, QueuesSimplifiedAnswers, SimplifiedAnswer, SleepsAndWakesSeats,
 };
 use meta_signal_flow::{
     EventsRead_Data, QueueDeliveriesRead_Data, QueueDeliveryResolution, QueueDeliveryResolved_Data,
@@ -144,12 +143,6 @@ impl RecordsReports for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Event::Stopped(stop) = event
-                && self.correlated_stop(&flow_id.0, stop)
-                && let Ok(Some(metaflow)) = self.store.metaflow_awake_as(&flow_id.0)
-            {
-                self.settle_turn_receipts(&metaflow.address);
-            }
             self.claude_event(ClaudeReport {
                 flow_id: flow_id.clone(),
                 hook_event: event.clone(),
@@ -170,6 +163,9 @@ impl RecordsReports for RunningNexus {
             self.drain_awake(&metaflow.address);
         }
         match event {
+            // A prompt the flow's own session took was its writer's word
+            // above, and settles nothing more.
+            Event::PromptSubmitted(_) => {}
             // The flow's own Claude session ended: it has exited, its locks
             // go with it, and a Maintained metaflow is owed its successor.
             // Observe's Gone remains the fallback for an exit no hook
@@ -262,11 +258,6 @@ impl RecordsReports for RunningNexus {
                     );
                 }
             }
-            Event::PromptSubmitted(prompt) => {
-                if self.correlated_prompt(&flow_id.0, prompt) {
-                    self.settle_submitted_prompt(&flow_id.0, prompt);
-                }
-            }
             // A cleared session is not an exit: the harness goes on in the
             // session the next Started names.
             Event::ToolUsed(_) => {
@@ -349,21 +340,6 @@ impl RecordsReports for RunningNexus {
                     "flow-nexus: a queued delivery was resolved {:?} by the owner",
                     resolution.queue_resolution_outcome
                 );
-                // The owner settled it: a Codex letter leaves its thread's
-                // ledger, and the seat it leaves at rest is settled.
-                if attempt.harness_kind == signal_flow::HarnessKind::Codex {
-                    use crate::codex_turns::TracksCodexTurns;
-                    let reading = self.codex_turns.apply(
-                        &attempt.thread_id.0,
-                        crate::generated::turn_ledger::LedgerEvent::LetterSettled(
-                            attempt.queue_attempt_id.clone(),
-                        ),
-                    );
-                    if reading.rest_reached.0 {
-                        use crate::waking::NotesStopsAtConfirmation;
-                        self.stopped_at_confirmation.note(&attempt.flow_id.0);
-                    }
-                }
                 meta_signal_flow::Output::QueueDeliveryResolved(QueueDeliveryResolved_Data {
                     address: attempt.address,
                     visible_queue_delivery_resolution:

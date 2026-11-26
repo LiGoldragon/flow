@@ -791,17 +791,19 @@ pub(crate) trait RecordsLogicalDeliveries {
         queue: &[QueueEntry],
         cause: signal_flow::RetryCause,
     ) -> Result<usize, StoreError>;
-    /// Under one durable commit, records the exact native receipt for every
-    /// logical request in a fresh wake's fixed startup prefix and removes
-    /// only that prefix from the metaflow queue; each arrives folded with
-    /// `receipt_turn`, the turn the first prompt lies in.
-    fn settle_wake_startup_receipts(
+    /// Under one durable commit, takes `handed`, the head of the metaflow's
+    /// queue one hand-over to flow `flow_id` carried, out of the queue and
+    /// records `state`, the pane writer's own result, on each request it
+    /// carried. A Delivered request arrives at the flow in the same commit,
+    /// in a turn that runs. A request whose record is already final keeps
+    /// it. False, and nothing written, when the metaflow is not Awake as
+    /// the flow or its queue does not start with `handed`.
+    fn record_hand_over(
         &self,
         address: &Address,
         flow_id: &str,
-        startup: &[QueueEntry],
-        receipt: Option<&signal_flow::NativeReceipt>,
-        receipt_turn: crate::generated::transitions::ReceiptTurn,
+        handed: &[QueueEntry],
+        state: DeliveryState,
     ) -> Result<bool, StoreError>;
     /// The deliveries of one sender.
     fn read_logical_delivery_snapshots(
@@ -1126,6 +1128,12 @@ impl RecordsLogicalDeliveries for FlowStore {
             }
             None => (commit, None),
         };
+        // A request handed over Uncertain holds no attempt and no queue
+        // entry: ending it abandons it.
+        let terminal = match (&terminal, &current.delivery_snapshot.delivery_state) {
+            (None, DeliveryState::Uncertain) if ending.is_some() => Some(DeliveryState::Abandoned),
+            _ => terminal,
+        };
         if !matches!(
             current.delivery_snapshot.delivery_state,
             DeliveryState::Delivered(_)
@@ -1276,13 +1284,12 @@ impl RecordsLogicalDeliveries for FlowStore {
             logical_delivery_id_vector,
         })
     }
-    fn settle_wake_startup_receipts(
+    fn record_hand_over(
         &self,
         address: &Address,
         flow_id: &str,
-        startup: &[QueueEntry],
-        receipt: Option<&signal_flow::NativeReceipt>,
-        receipt_turn: crate::generated::transitions::ReceiptTurn,
+        handed: &[QueueEntry],
+        state: DeliveryState,
     ) -> Result<bool, StoreError> {
         let _guard = self
             .logical_deliveries
@@ -1293,26 +1300,25 @@ impl RecordsLogicalDeliveries for FlowStore {
             return Ok(false);
         };
         if stored.metaflow.state != flow_ethos::State::Awake(flow_ethos::FlowId(flow_id.to_owned()))
-            || !stored.metaflow.queue.0.starts_with(startup)
+            || !stored.metaflow.queue.0.starts_with(handed)
         {
             return Ok(false);
         }
-
         let allocation = self.allocate_logical_cursor()?;
         let mut next_cursor = allocation.cursor;
         let mut changed = false;
         let mut commit = self.engine.begin_atomic_commit();
         let mut seen = std::collections::HashSet::new();
-        // Each request the woken flow received arrives there.
+        // Each request Delivered to the flow arrives there.
         let mut arrived = Vec::new();
-        for entry in startup {
+        for entry in handed {
             let records = self.engine.match_records(QueryPlan::key(
                 self.logical_deliveries.current,
                 RecordKey::new(entry.logical_delivery_id.clone().0),
             ))?;
             let Some(current) = records.records().first() else {
                 // A legacy queue entry has no logical lifecycle row. Its
-                // exact prefix position is still consumed by this receipt.
+                // exact prefix position is still taken by this hand-over.
                 continue;
             };
             if !seen.insert(entry.logical_delivery_id.clone()) {
@@ -1324,29 +1330,26 @@ impl RecordsLogicalDeliveries for FlowStore {
             if current.delivery_snapshot.address != *address {
                 return Err(StoreError::StateInvariant);
             }
-            let delivered =
-                DeliveryState::Delivered(receipt.cloned().ok_or(StoreError::StateInvariant)?);
-            if current.delivery_snapshot.delivery_state == delivered {
-                // Reconcile the historical partial shape: the receipt was
-                // durable but the exact prefix had not yet been removed.
-                continue;
-            }
+            // A request whose record is already final, as a hand-over a
+            // crash left unrecorded may find it, keeps that record.
             if matches!(
                 current.delivery_snapshot.delivery_state,
                 DeliveryState::Delivered(_)
-            ) {
-                return Err(StoreError::StateInvariant);
-            }
-            if !matches!(
-                current.delivery_snapshot.delivery_state,
-                DeliveryState::Queued | DeliveryState::Retryable(_)
-            ) {
-                return Err(StoreError::StateInvariant);
+                    | DeliveryState::Read
+                    | DeliveryState::Failed(_)
+                    | DeliveryState::Withdrawn
+                    | DeliveryState::Archived
+                    | DeliveryState::Abandoned
+            ) || current.delivery_snapshot.delivery_state == state
+            {
+                continue;
             }
             let mut snapshot = current.delivery_snapshot.clone();
             snapshot.delivery_cursor = signal_flow::DeliveryCursor(next_cursor);
-            snapshot.delivery_state = delivered;
-            arrived.push(snapshot.request_id.clone());
+            snapshot.delivery_state = state.clone();
+            if matches!(state, DeliveryState::Delivered(_)) {
+                arrived.push(snapshot.request_id.clone());
+            }
             next_cursor = next_cursor
                 .checked_add(1)
                 .ok_or(StoreError::StateInvariant)?;
@@ -1377,7 +1380,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 commit.assert(self.logical_deliveries.counter, counter)
             };
         }
-        stored.metaflow.queue.0.drain(..startup.len());
+        stored.metaflow.queue.0.drain(..handed.len());
         commit = commit.mutate(self.metaflows, stored);
         let _transitions = self
             .transitions_gate
@@ -1404,7 +1407,8 @@ impl RecordsLogicalDeliveries for FlowStore {
                         cause: crate::generated::memory::Cause::Arrived(request_id),
                         moment,
                     },
-                    receipt_turn: receipt_turn.clone(),
+                    // The hand-over is typed now: the turn it starts runs.
+                    receipt_turn: crate::generated::transitions::ReceiptTurn::Running,
                 })
                 .collect();
             let mut commit = commit;
@@ -2781,96 +2785,6 @@ impl AllocatesLogicalCursor for FlowStore {
             }),
             _ => Err(StoreError::StateInvariant),
         }
-    }
-}
-
-/// Several requests' moves written into one commit the caller owns.
-pub(crate) trait StagesLogicalTransitions {
-    /// Adds to `commit` each request's move through `states`, in order: one
-    /// event per state at consecutive cursors, and the cursor counter after
-    /// them. A state that makes a request arrive is refused, since no
-    /// arrival is written here. The caller holds the logical delivery write
-    /// gate and commits.
-    fn stage_logical_transitions(
-        &self,
-        ids: &[LogicalDeliveryId],
-        states: &[DeliveryState],
-        commit: AtomicCommit,
-    ) -> Result<AtomicCommit, StoreError>;
-}
-
-impl StagesLogicalTransitions for FlowStore {
-    fn stage_logical_transitions(
-        &self,
-        ids: &[LogicalDeliveryId],
-        states: &[DeliveryState],
-        commit: AtomicCommit,
-    ) -> Result<AtomicCommit, StoreError> {
-        if states
-            .iter()
-            .any(|state| matches!(state, DeliveryState::Delivered(_) | DeliveryState::Read))
-        {
-            return Err(StoreError::StateInvariant);
-        }
-        let allocation = self.allocate_logical_cursor()?;
-        let mut next = allocation.cursor;
-        let mut commit = commit;
-        for id in ids {
-            let records = self.engine.match_records(QueryPlan::key(
-                self.logical_deliveries.current,
-                RecordKey::new(id.clone().0),
-            ))?;
-            let [current] = records.records() else {
-                return Err(StoreError::StateInvariant);
-            };
-            if current.archived_cursor.0.is_some() {
-                return Err(StoreError::StateInvariant);
-            }
-            let mut snapshot = current.delivery_snapshot.clone();
-            for state in states {
-                if snapshot.delivery_state == *state {
-                    continue;
-                }
-                if matches!(
-                    snapshot.delivery_state,
-                    DeliveryState::Delivered(_)
-                        | DeliveryState::Read
-                        | DeliveryState::Failed(_)
-                        | DeliveryState::Withdrawn
-                        | DeliveryState::Archived
-                ) {
-                    return Err(StoreError::StateInvariant);
-                }
-                snapshot.delivery_cursor = signal_flow::DeliveryCursor(next);
-                snapshot.delivery_state = state.clone();
-                next = next.checked_add(1).ok_or(StoreError::StateInvariant)?;
-                commit = commit.assert(
-                    self.logical_deliveries.events,
-                    LogicalDeliveryEvent {
-                        delivery_snapshot: snapshot.clone(),
-                    },
-                );
-            }
-            commit = commit.mutate(
-                self.logical_deliveries.current,
-                CurrentLogicalDelivery {
-                    delivery_snapshot: snapshot,
-                    archived_cursor: crate::generated::memory::ArchivedCursor(None),
-                    delivery_admission: current.delivery_admission.clone(),
-                },
-            );
-        }
-        if next == allocation.cursor {
-            return Ok(commit);
-        }
-        let counter = LogicalDeliveryCounter {
-            next_cursor: crate::generated::memory::NextCursor(next),
-        };
-        Ok(if allocation.existing {
-            commit.mutate(self.logical_deliveries.counter, counter)
-        } else {
-            commit.assert(self.logical_deliveries.counter, counter)
-        })
     }
 }
 

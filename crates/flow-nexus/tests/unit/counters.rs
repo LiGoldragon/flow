@@ -8,15 +8,11 @@
 //! datom text, as flow-meta does.
 
 use super::NexusFixture;
-use super::waking::{CLAUDE_SEAT, address, claude_seat};
+use super::waking::address;
 use crate::Dispatches;
 use crate::store::ManagesMetaflowState;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::SeedsMetaflow;
-use crate::store::metaflow::SleepsMetaflows;
-use crate::store::queue_delivery::{
-    AccountsQueueDelivery, NativeHistoryAnchor, PrepareQueueDelivery,
-};
 use crate::store::send_outcome::RecordsSendOutcomes;
 use flow_ethos::State;
 use signal_flow::{Message, Metaflow, Model, Request, SendAcceptance, SentBy};
@@ -228,42 +224,12 @@ fn declared_counters_name_the_next_ids_and_a_record_ends_the_empty_store() {
         flow_ethos::LogicalDeliveryId("logical-delivery-00000000000000000130".into())
     );
 
-    claude_seat(&fixture, 40_000);
-    let queue = fixture
-        .nexus
-        .store
-        .metaflow(&seat)
-        .expect("metaflow reads")
-        .expect("metaflow held")
-        .queue;
-    fixture.nexus.store.seed_metaflow(Metaflow {
-        address: seat.clone(),
-        state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
-        past: flow_ethos::Past(vec![]),
-        queue,
-    });
-    let PrepareQueueDelivery::Prepared(attempt) = fixture
-        .nexus
-        .store
-        .prepare_oldest_delivery(
-            &seat,
-            CLAUDE_SEAT,
-            "c1a0de00-0000-4000-8000-000000000001",
-            signal_flow::HarnessKind::Claude,
-            NativeHistoryAnchor::CodexTurns(None),
-        )
-        .expect("prepared")
-    else {
-        panic!("the oldest request is prepared")
-    };
-    assert_eq!(attempt.queue_attempt_id.0, "queue-attempt-0000000000000032");
     // The logical delivery counter is the delivery cursor every lifecycle
-    // event draws from: the admission took 130, the hand-over's Attempting
-    // took 131.
-    assert_eq!(counters(&fixture), "{ 132 51 311 } 64 3");
+    // event draws from: the admission took 130.
+    assert_eq!(counters(&fixture), "{ 131 50 311 } 64 3");
     assert_eq!(
         ask(&fixture, "Configure.Counters.{ 500 500 500 }"),
         "ConfigureRefused.CountersRefused.NotEmpty"
     );
-    assert_eq!(counters(&fixture), "{ 132 51 311 } 64 3");
+    assert_eq!(counters(&fixture), "{ 131 50 311 } 64 3");
 }

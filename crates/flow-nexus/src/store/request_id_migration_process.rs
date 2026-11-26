@@ -14,9 +14,7 @@ use super::{
 use crate::CarriesSignalFrames;
 use crate::store::logical_delivery::{MintsRequestIds, RequestClosure, RequestIdBinding};
 use crate::store::metaflow::SleepsMetaflows;
-use crate::store::queue_delivery::{
-    AccountsQueueDelivery, NativeDeliveryReceipt, NativeHistoryAnchor, PrepareQueueDelivery,
-};
+use crate::store::queue_delivery::AccountsQueueDelivery;
 use sema_engine::{Engine, EngineOpen, QueryPlan, SchemaVersion};
 use std::{
     os::unix::net::UnixStream,
@@ -363,51 +361,46 @@ fn request_binding_for(store: &FlowStore, logical_id: &str) -> RequestIdBinding 
         .unwrap_or_else(|| panic!("request binding for {logical_id}"))
 }
 
+/// Hands the oldest request queued at `address` to the flow it is awakened
+/// as, as a drain does: the pane writer's result recorded Delivered in the
+/// commit that takes it from the queue. Answers its logical delivery id.
+fn hand_over_oldest(store: &FlowStore, address: &signal_flow::Address, label: &str) -> String {
+    let oldest = store
+        .metaflow(address)
+        .expect("migrated metaflow reads")
+        .expect("migrated metaflow held")
+        .queue
+        .0
+        .first()
+        .cloned()
+        .expect("a migrated request is queued");
+    assert!(
+        store
+            .record_hand_over(
+                address,
+                "current-delivery-flow",
+                std::slice::from_ref(&oldest),
+                signal_flow::DeliveryState::Delivered(signal_flow::NativeReceipt {
+                    harness_kind: signal_flow::HarnessKind::Codex,
+                    native_session_id: signal_flow::NativeSessionId(format!("{label}-thread")),
+                    native_prompt_id: signal_flow::NativePromptId(label.to_owned()),
+                }),
+            )
+            .expect("migrated hand-over records")
+    );
+    oldest.logical_delivery_id.0
+}
+
 fn deliver_oldest_migrated(
     store: &FlowStore,
     address: &signal_flow::Address,
     expected_logical_id: &str,
     label: &str,
 ) {
-    let PrepareQueueDelivery::Prepared(attempt) = store
-        .prepare_oldest_delivery(
-            address,
-            "current-delivery-flow",
-            &format!("{label}-thread"),
-            signal_flow::HarnessKind::Codex,
-            NativeHistoryAnchor::CodexTurns(None),
-        )
-        .expect("migrated delivery prepares")
-    else {
-        panic!("the expected migrated request is the oldest prepared delivery")
-    };
-    let meta_signal_flow::QueueEvidence::Logical(entry) = &attempt.queue_evidence else {
-        panic!("the migrated request retains its logical queue evidence")
-    };
-    assert_eq!(entry.logical_delivery_id.0, expected_logical_id);
-    assert!(
-        store
-            .record_delivery_receipt(
-                &attempt.queue_attempt_id.0,
-                NativeDeliveryReceipt {
-                    native_request_id: attempt.native_request_id,
-                    thread_id: attempt.thread_id.clone(),
-                    turn_id: crate::generated::memory::TurnId(format!("{label}-turn")),
-                    native_receipt_text: crate::generated::memory::NativeReceiptText(format!(
-                        r#"{{"id":{},"result":{{}}}}"#,
-                        attempt.native_request_id.0
-                    )),
-                },
-            )
-            .expect("migrated delivery receipt records")
-    );
-    assert!(
-        store
-            .settle_recorded_delivery(
-                &attempt.queue_attempt_id.0,
-                crate::generated::transitions::ReceiptTurn::Running,
-            )
-            .expect("migrated delivered request leaves its queue")
+    assert_eq!(
+        hand_over_oldest(store, address, label),
+        expected_logical_id,
+        "the expected migrated request is the oldest queued"
     );
 }
 
@@ -418,49 +411,7 @@ fn deliver_through_migrated(
     label: &str,
 ) {
     for ordinal in 0..32 {
-        let PrepareQueueDelivery::Prepared(attempt) = store
-            .prepare_oldest_delivery(
-                address,
-                "current-delivery-flow",
-                &format!("{label}-{ordinal}-thread"),
-                signal_flow::HarnessKind::Codex,
-                NativeHistoryAnchor::CodexTurns(None),
-            )
-            .expect("migrated delivery prefix prepares")
-        else {
-            panic!("the expected migrated request remains in the delivery prefix")
-        };
-        let meta_signal_flow::QueueEvidence::Logical(entry) = &attempt.queue_evidence else {
-            panic!("the migrated request retains its logical queue evidence")
-        };
-        let delivered_logical_id = entry.logical_delivery_id.clone();
-        assert!(
-            store
-                .record_delivery_receipt(
-                    &attempt.queue_attempt_id.0,
-                    NativeDeliveryReceipt {
-                        native_request_id: attempt.native_request_id,
-                        thread_id: attempt.thread_id.clone(),
-                        turn_id: crate::generated::memory::TurnId(format!(
-                            "{label}-{ordinal}-turn"
-                        )),
-                        native_receipt_text: crate::generated::memory::NativeReceiptText(format!(
-                            r#"{{"id":{},"result":{{}}}}"#,
-                            attempt.native_request_id.0
-                        )),
-                    },
-                )
-                .expect("migrated delivery prefix receipt records")
-        );
-        assert!(
-            store
-                .settle_recorded_delivery(
-                    &attempt.queue_attempt_id.0,
-                    crate::generated::transitions::ReceiptTurn::Running,
-                )
-                .expect("migrated delivered prefix leaves its queue")
-        );
-        if delivered_logical_id.0 == expected_logical_id {
+        if hand_over_oldest(store, address, &format!("{label}-{ordinal}")) == expected_logical_id {
             return;
         }
     }

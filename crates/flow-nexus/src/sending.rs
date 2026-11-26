@@ -27,20 +27,17 @@ use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::herdr::launch::ConstructsHarnessCommand;
 use crate::launching::ReadsHarnessArguments;
 use crate::performing::Performs;
-use crate::queue_write_fence::LendsQueueDispatch;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::effort_configuration::ReadsEffort;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::{PreparesDeclaredMetaflow, SleepsMetaflows, TakesLaunchAddress};
 use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
-use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::{ExistingSeatAdoption, NamesConfiguredModel, RegistersExistingFlow};
 #[cfg(test)]
 use crate::waking::HoldsSoftForIdle;
 use crate::waking::{
-    HoldsWakingMetaflows, PerformsWakeAndDrain, ReconcilesQueueDelivery, RestsEndedAwake,
-    SleepsAndWakesSeats,
+    HoldsWakingMetaflows, PerformsWakeAndDrain, RestsEndedAwake, SleepsAndWakesSeats,
 };
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
@@ -481,7 +478,10 @@ impl AnswersSend for RunningNexus {
                         self,
                         recipient.clone(),
                     ) && !crate::generated::overriding::HeedsOverrides::held(self)
-                        && (abrupt || live.as_ref().is_some_and(|flow_id| self.rests_now(flow_id)));
+                        && (abrupt
+                            || live.as_ref().is_some_and(|flow_id| {
+                                self.due_now(std::slice::from_ref(&message), flow_id)
+                            }));
                     if requested {
                         match self.direct_send_lease(&recipient) {
                             Ok(lease) => lease
@@ -1253,7 +1253,6 @@ impl AdoptsSeat for RunningNexus {
 /// A direct reply is based on native receipt evidence, never admission,
 /// placement, an interrupt, or a successful bridge submission.
 pub(crate) trait CompletesDirectSends {
-    fn direct_receipt_watch(&self, address: &Address) -> Option<notify::RecommendedWatcher>;
     /// The caller holds the dispatch gate until admission completes. None
     /// while the metaflow is held, by a refresh, a threshold refresh
     /// starting its successor or a waking: the request is then queued on
@@ -1263,57 +1262,19 @@ pub(crate) trait CompletesDirectSends {
         &self,
         address: &Address,
     ) -> Result<Option<crate::waking::WakingLease>, Box<PrivateSendResponse>>;
+    /// Hands the admitted request over now, waking its recipient when it
+    /// sleeps, and answers what the hand-over recorded: Sent once it is
+    /// Delivered, accepted Uncertain when the pane writer could not tell,
+    /// accepted and pending while it stays queued for its seat.
     fn complete_direct_send(
         &self,
         address: &Address,
         acceptance: signal_flow::SendAcceptance,
         lease: &crate::waking::WakingLease,
     ) -> SendAnswer;
-    /// Whether the request `logical_id` still waits in the queue of the
-    /// metaflow at `address`.
-    fn queued_here(&self, address: &Address, logical_id: &signal_flow::LogicalDeliveryId) -> bool;
-    /// The attempt still to settle that carried `logical_id`: the one
-    /// outstanding, else the latest parked once its payload was typed.
-    fn carrying_attempt(
-        &self,
-        address: &Address,
-        logical_id: &str,
-    ) -> Option<crate::store::queue_delivery::QueueDeliveryAttempt>;
 }
 
 impl CompletesDirectSends for RunningNexus {
-    fn direct_receipt_watch(&self, address: &Address) -> Option<notify::RecommendedWatcher> {
-        use crate::store::{AnnouncesLaunchChanges, ReadsFlowRows};
-        use crate::waking::ReadsClaudeDelivery;
-        use notify::Watcher;
-        let flow_id = self.live_awake_flow(address)?;
-        let node = self.store.flow_node(&flow_id).ok()??;
-        if node.harness_kind != HarnessKind::Claude {
-            return None;
-        }
-        let transcript = self.claude_transcript(&node)?;
-        let directory = transcript.parent()?.to_path_buf();
-        let changes = self.store.launch_changes.clone();
-        let mut watcher =
-            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                if let Ok(event) = event
-                    && matches!(
-                        event.kind,
-                        notify::EventKind::Create(_)
-                            | notify::EventKind::Modify(_)
-                            | notify::EventKind::Remove(_)
-                    )
-                    && event.paths.iter().any(|path| path == &transcript)
-                {
-                    changes.announce();
-                }
-            })
-            .ok()?;
-        watcher
-            .watch(&directory, notify::RecursiveMode::NonRecursive)
-            .ok()?;
-        Some(watcher)
-    }
     fn direct_send_lease(
         &self,
         address: &Address,
@@ -1371,9 +1332,8 @@ impl CompletesDirectSends for RunningNexus {
                 ))));
             }
         }
-        if !matches!(self.store.outstanding_delivery(address), Ok(None))
-            || flow_id.as_ref().is_some_and(|flow_id| {
-                !matches!(self.store.address_hold(flow_id), Ok(None))
+        if flow_id.as_ref().is_some_and(|flow_id| {
+            !matches!(self.store.address_hold(flow_id), Ok(None))
                     // A restart holds the Address: the request queues for
                     // the resumed seat.
                     || !matches!(
@@ -1383,36 +1343,10 @@ impl CompletesDirectSends for RunningNexus {
                         ),
                         Ok(None)
                     )
-            })
-        {
+        }) {
             return Ok(None);
         }
         Ok(Some(lease))
-    }
-    fn queued_here(&self, address: &Address, logical_id: &signal_flow::LogicalDeliveryId) -> bool {
-        matches!(
-            self.store.metaflow(address),
-            Ok(Some(metaflow)) if metaflow
-                .queue
-                .0
-                .iter()
-                .any(|entry| entry.logical_delivery_id == *logical_id)
-        )
-    }
-    fn carrying_attempt(
-        &self,
-        address: &Address,
-        logical_id: &str,
-    ) -> Option<crate::store::queue_delivery::QueueDeliveryAttempt> {
-        if let Ok(Some(attempt)) = self.store.outstanding_delivery(address) {
-            return Some(attempt);
-        }
-        self.store
-            .unsettled_deliveries(address)
-            .ok()?
-            .into_iter()
-            .rev()
-            .find(|attempt| attempt.queue_request_id.0 == logical_id)
     }
     fn complete_direct_send(
         &self,
@@ -1420,248 +1354,91 @@ impl CompletesDirectSends for RunningNexus {
         acceptance: signal_flow::SendAcceptance,
         lease: &crate::waking::WakingLease,
     ) -> SendAnswer {
-        use crate::store::AnnouncesLaunchChanges;
         use signal_flow::{DeliveryState, SendFailure, SendFailureReason};
-        use std::time::{Duration, Instant};
         let logical_id = acceptance.logical_delivery_id.clone();
         // A configured sleeping recipient starts through the existing
-        // fresh Curriculum composition. The Address lease prevents another
-        // wake or submission while this direct operation owns its request.
-        // The fresh flow's first prompt carries the queue, this request
-        // with it: what the wake answers is this request's hand-over.
-        let woken = self
-            .live_awake_flow(address)
-            .is_none()
-            .then(|| self.wake(address.clone()));
-        // A wake refused after it left its seat Awake started that seat and
-        // could not record what the seat's first prompt carried: the prompt
-        // was submitted, carrying the head of the queue.
-        let started_unsettled =
-            matches!(woken, Some(crate::generated::operation::Outcome::Failed(_)))
-                .then(|| self.live_awake_flow(address))
-                .flatten();
-        // Subscribe before input. File events only schedule the existing
-        // exact session/inode/cursor/content correlation, never delivery.
-        let _receipt_watch = self.direct_receipt_watch(address);
-        let outcome = match woken {
-            // Its first prompt carried the request: it is never typed again.
-            Some(woken @ crate::generated::operation::Outcome::Woken(_))
-                if !self.queued_here(address, &logical_id) =>
-            {
-                woken
-            }
-            // A wake that did not start the flow, or started it and could
-            // not record what its first prompt carried, types nothing more.
-            Some(refused @ crate::generated::operation::Outcome::Failed(_)) => refused,
-            _ => {
+        // fresh Curriculum composition, its first prompt carrying the
+        // queue, this request with it. The Address lease keeps any other
+        // wake or hand-over out while this direct operation owns it.
+        let outcome = match self.live_awake_flow(address) {
+            None => self.wake(address.clone()),
+            Some(_) => {
                 let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
-                let mut dispatch =
-                    crate::queue_write_fence::QueueDispatch::new(&self.dispatch_gate, _turn);
-                crate::waking::DrainsHeldSeats::drain_all_held(
-                    self,
-                    address.clone(),
-                    lease,
-                    Some(&mut dispatch),
-                )
+                crate::waking::DrainsHeldSeats::drain_all_held(self, address.clone(), lease)
             }
         };
-        // Waiting is a disposition, not a failed attempt: admission already
-        // made the request durable. Preserve its exact acceptance while no
-        // native attempt exists, and let the ordinary pending path schedule
-        // the Address again after this reply.
-        if matches!(
-            outcome,
-            crate::generated::operation::Outcome::WaitingForTurn(_)
-        ) && matches!(
-            self.store.logical_delivery_snapshot(&logical_id),
-            Ok(Some(signal_flow::DeliverySnapshot {
-                delivery_state: DeliveryState::Queued,
-                ..
-            }))
-        ) && self.carrying_attempt(address, &logical_id.0).is_none()
-        {
-            let private_response = PrivateSendResponse::SendAccepted(acceptance);
-            return SendAnswer {
-                response: crate::message_projection::ProjectsSendResponse::visible_send_response(
-                    &private_response,
-                ),
-                private_response,
-                pending: Some(PendingSend {
-                    address: address.clone(),
-                    pane_input: None,
-                }),
-                _pending_answer: None,
-            };
-        }
-        // This budget bounds waiting, not evidence. Expiry is uncertainty,
-        // never proof of absence and never permission for a new attempt.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let changes = self.store.launch_changes.clone();
-        loop {
-            let seen = changes.current();
-            let state = {
-                let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
-                let mut dispatch =
-                    crate::queue_write_fence::QueueDispatch::new(&self.dispatch_gate, _turn);
-                if let Some(attempt) = self.carrying_attempt(address, &logical_id.0) {
-                    let _ = self.reconcile_delivery_during_dispatch(&attempt, Some(&mut dispatch));
-                }
-                self.store.logical_delivery_snapshot(&logical_id)
-            };
-            if let Ok(Some(snapshot)) = state {
-                if let Some(response) = snapshot
-                    .delivery_state
-                    .completed_direct_response(&acceptance)
-                {
-                    return response.into();
-                }
-                match snapshot.delivery_state {
-                    DeliveryState::Attempting | DeliveryState::Uncertain
-                        if Instant::now() < deadline && changes.until(seen, deadline) =>
-                    {
-                        continue;
-                    }
-                    _ => {}
-                }
-            }
-            break;
-        }
-        let observed = format!("{outcome:?}");
-        if matches!(
-            self.store.logical_delivery_snapshot(&logical_id),
-            Ok(Some(signal_flow::DeliverySnapshot {
-                delivery_state: DeliveryState::Queued,
-                ..
-            }))
-        ) && self.carrying_attempt(address, &logical_id.0).is_none()
-        {
-            // The wake started its seat and could not record what the
-            // seat's first prompt carried. What it carried is recorded now
-            // as placed without its receipt, as a typed payload is: no drain
-            // types it again, and the launch's receipt settles it. Nothing
-            // failed before the native submission, so no retry cause is
-            // written. A request the prompt carried is accepted Uncertain;
-            // one queued behind the prompt waits for the seat's turn, as
-            // any queued request does; a refused record is a refused Send.
-            if let Some(flow_id) = started_unsettled {
-                let (carried, still_queued) = {
-                    let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
-                    let carried =
-                        crate::waking::CarriesStartup::carry_left_queued(self, address, &flow_id);
-                    let still_queued = match self.store.metaflow(address) {
-                        Ok(Some(metaflow)) => Some(
-                            metaflow
-                                .queue
-                                .0
-                                .iter()
-                                .any(|entry| entry.logical_delivery_id == logical_id),
-                        ),
-                        _ => None,
-                    };
-                    (carried, still_queued)
-                };
-                return match (carried, still_queued) {
-                    (_, Some(false)) => {
-                        PrivateSendResponse::SendAccepted(signal_flow::SendAcceptance {
-                            delivery_state: DeliveryState::Uncertain,
-                            ..acceptance
-                        })
-                        .into()
-                    }
-                    (Some(_), Some(true)) => {
-                        let private_response = PrivateSendResponse::SendAccepted(acceptance);
-                        SendAnswer {
-                            response:
-                                crate::message_projection::ProjectsSendResponse::visible_send_response(
-                                    &private_response,
-                                ),
-                            private_response,
-                            pending: Some(PendingSend {
-                                address: address.clone(),
-                                pane_input: None,
-                            }),
-                            _pending_answer: None,
-                        }
-                    }
-                    _ => PrivateSendResponse::Failed(SendFailure::Admitted(
-                        signal_flow::SendFailure_Admitted_Data {
-                            logical_delivery_id: logical_id,
-                            request_id: acceptance.request_id.clone(),
-                            send_failure_reason: SendFailureReason::NotSent(format!(
-                                "{:?}",
-                                crate::generated::operation::Outcome::Failed(
-                                    crate::generated::operation::Failed_Data::StoreRefused
-                                )
-                            )),
-                        },
-                    ))
-                    .into(),
-                };
-            }
-            // Starting the next flow failed before any native submission.
-            // The existing metaflow still owns the same admitted request;
-            // report this attempt truthfully without parking or discarding
-            // work that a later configured wake can take up.
-            let rejection = if matches!(self.store.metaflow_declaration(address), Ok(None)) {
-                signal_flow::StartRejection::Undeclared
-            } else {
-                signal_flow::StartRejection::CompositionRefused(
-                    signal_flow::CompositionRefusal::Unconfigured,
-                )
-            };
-            if let Ok(Some(metaflow)) = self.store.metaflow(address) {
-                let _ = self.store.mark_queue_retryable(
-                    &metaflow.queue.0,
-                    signal_flow::RetryCause::WakeRefused(rejection),
-                );
-            }
-            return PrivateSendResponse::Failed(SendFailure::Admitted(
-                signal_flow::SendFailure_Admitted_Data {
-                    logical_delivery_id: logical_id,
-                    request_id: acceptance.request_id.clone(),
-                    send_failure_reason: SendFailureReason::NotSent(observed),
-                },
-            ))
-            .into();
-        }
-        let state = {
-            let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
-            // A native transcript can land without a harness hook. One
-            // final correlated reconciliation follows the bounded event
-            // wait; timeout alone is never evidence of absence.
-            let mut dispatch =
-                crate::queue_write_fence::QueueDispatch::new(&self.dispatch_gate, _turn);
-            if let Some(attempt) = self.carrying_attempt(address, &logical_id.0) {
-                let _ = self.reconcile_delivery_during_dispatch(&attempt, Some(&mut dispatch));
-            }
-            self.store
-                .finish_failed_direct(address, &logical_id.0, &observed)
-        };
-        if let Ok(delivery_state) = &state
-            && let Some(response) = delivery_state.completed_direct_response(&acceptance)
-        {
-            return response.into();
-        }
-        let reason = match state {
-            Ok(delivery_state @ (DeliveryState::Uncertain | DeliveryState::Attempting)) => {
-                return PrivateSendResponse::SendAccepted(signal_flow::SendAcceptance {
-                    logical_delivery_id: logical_id,
-                    request_id: acceptance.request_id.clone(),
-                    delivery_cursor: acceptance.delivery_cursor,
-                    delivery_state,
-                })
+        let state = match self.store.logical_delivery_snapshot(&logical_id) {
+            Ok(Some(snapshot)) => snapshot.delivery_state,
+            Ok(None) => {
+                return PrivateSendResponse::Refused(Refusal::Store(
+                    "the admitted request has no delivery record".into(),
+                ))
                 .into();
             }
-            Ok(_) => SendFailureReason::NotSent(observed),
-            Err(error) => SendFailureReason::Refused(Refusal::Store(error.to_string())),
+            Err(error) => {
+                return PrivateSendResponse::Refused(Refusal::Store(error.to_string())).into();
+            }
         };
-        PrivateSendResponse::Failed(SendFailure::Admitted(
-            signal_flow::SendFailure_Admitted_Data {
-                logical_delivery_id: logical_id,
-                request_id: acceptance.request_id.clone(),
-                send_failure_reason: reason,
-            },
-        ))
-        .into()
+        if let Some(response) = state.completed_direct_response(&acceptance) {
+            return response.into();
+        }
+        let failed = |send_failure_reason| -> SendAnswer {
+            PrivateSendResponse::Failed(SendFailure::Admitted(
+                signal_flow::SendFailure_Admitted_Data {
+                    logical_delivery_id: logical_id.clone(),
+                    request_id: acceptance.request_id.clone(),
+                    send_failure_reason,
+                },
+            ))
+            .into()
+        };
+        match state {
+            DeliveryState::Uncertain => {
+                PrivateSendResponse::SendAccepted(signal_flow::SendAcceptance {
+                    delivery_state: DeliveryState::Uncertain,
+                    ..acceptance
+                })
+                .into()
+            }
+            // Still queued for a seat that is Awake: it is handed over at the
+            // seat's next due event, as any queued request is.
+            DeliveryState::Queued | DeliveryState::Retryable(_)
+                if self.live_awake_flow(address).is_some() =>
+            {
+                let private_response = PrivateSendResponse::SendAccepted(acceptance);
+                SendAnswer {
+                    response:
+                        crate::message_projection::ProjectsSendResponse::visible_send_response(
+                            &private_response,
+                        ),
+                    private_response,
+                    pending: Some(PendingSend {
+                        address: address.clone(),
+                        pane_input: None,
+                    }),
+                    _pending_answer: None,
+                }
+            }
+            // Starting the next flow failed before any native submission.
+            // The existing metaflow still owns the same admitted request; a
+            // later configured wake takes it up.
+            DeliveryState::Queued | DeliveryState::Retryable(_) => {
+                let rejection = if matches!(self.store.metaflow_declaration(address), Ok(None)) {
+                    signal_flow::StartRejection::Undeclared
+                } else {
+                    signal_flow::StartRejection::CompositionRefused(
+                        signal_flow::CompositionRefusal::Unconfigured,
+                    )
+                };
+                if let Ok(Some(metaflow)) = self.store.metaflow(address) {
+                    let _ = self.store.mark_queue_retryable(
+                        &metaflow.queue.0,
+                        signal_flow::RetryCause::WakeRefused(rejection),
+                    );
+                }
+                failed(SendFailureReason::NotSent(format!("{outcome:?}")))
+            }
+            _ => failed(SendFailureReason::NotSent(format!("{outcome:?}"))),
+        }
     }
 }

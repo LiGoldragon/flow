@@ -21,13 +21,9 @@ use super::{
 use crate::event_wait::AwaitsPath;
 use crate::fixture_executable::{FixtureExecutable, HoldsLatch, InstallsScript, Latch};
 use crate::generated::operation::{Operation, Outcome};
-use crate::handover_reminding::RemindsHandoverCallers;
 use crate::performing::Performs;
 use crate::sending::{IdentifiesSender, SendsRequests};
-use crate::store::SeedsRole;
 use crate::store::context::{JudgesThreshold, RecordsContextSize};
-use crate::store::handover::HoldsHandovers as _;
-use crate::store::handover_reminders::SchedulesHandoverReminders as _;
 use crate::store::logical_delivery::RecordsLogicalDeliveries as _;
 use crate::store::metaflow::{MutatesMetaflows, SeedsMetaflow, SleepsMetaflows};
 use crate::store::successor::{OwesSuccessors, SuccessionCause, SuccessorIntent};
@@ -36,9 +32,7 @@ use crate::waking::{HoldsWakingMetaflows, SleepsAndWakesSeats};
 use crate::{Dispatches, DispatchesSerially};
 use flow_ethos::Delivery;
 use flow_ethos::State;
-use meta_signal_flow::{
-    ConfigurationChange, ConfigureMetaflow, ConfigureThreshold, Continuity, HandoverPolicy,
-};
+use meta_signal_flow::{ConfigurationChange, ConfigureMetaflow, Continuity};
 use signal_flow::{
     Address, FlowLifecycle, HerdrRouteSelection, Input, Message, Metaflow, Model, Origin, Output,
     RefreshRejection, Refreshed, Refusal, ReplaceRejection, Request, SendRequest, SentBy,
@@ -644,8 +638,8 @@ fn refreshable_with_staged_successor(
 /// A refresh of a Maintained metaflow, or of one whose queue holds a request
 /// that asks for a wake, starts the successor in the same event: it is
 /// started and its receipt confirmed before the ending flow is reaped, the
-/// metaflow is Awake as it, the queue is kept for it, and the answer still
-/// names the flow that ended. Nothing is typed into the ending flow.
+/// metaflow is Awake as it, the queue is its successor's, and the answer
+/// still names the flow that ended. Nothing is typed into the ending flow.
 #[test]
 fn a_refresh_owed_a_successor_starts_it_before_the_ending_flow_is_reaped() {
     for (continuity, delivery) in [
@@ -677,10 +671,23 @@ fn a_refresh_owed_a_successor_starts_it_before_the_ending_flow_is_reaped() {
             metaflow.past,
             flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.to_owned())])
         );
+        assert!(
+            typing_calls(&fixture)
+                .iter()
+                .all(|call| !call.contains("w1:p3")),
+            "nothing is typed into the ending flow: {:?}",
+            typing_calls(&fixture)
+        );
+        // The queue is the successor's: a Soft request waits for its idle
+        // event, a MiddleAbrupt one is handed to it at once.
+        let kept_for_the_successor = match delivery {
+            flow_ethos::Delivery::Queue => vec![Request::Order("For the successor.".into())],
+            flow_ethos::Delivery::Wake => Vec::new(),
+        };
         assert_eq!(
             requests(&metaflow),
-            vec![Request::Order("For the successor.".into())],
-            "the queue waits for the successor"
+            kept_for_the_successor,
+            "{continuity:?} {delivery:?}"
         );
         assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped);
         assert!(
@@ -689,7 +696,6 @@ fn a_refresh_owed_a_successor_starts_it_before_the_ending_flow_is_reaped() {
                 .contains("pane close w1:p3"),
             "the ending flow's pane is closed"
         );
-        assert_eq!(typing_calls(&fixture), Vec::<String>::new());
         assert_eq!(
             fixture
                 .nexus
@@ -794,28 +800,19 @@ fn an_abrupt_send_to_a_held_metaflow_is_queued_never_refused_busy() {
 }
 
 /// A HardAbrupt or MiddleAbrupt Send to an ordinary Awake queue drains its
-/// whole cohort immediately. An outstanding delivery or threshold refresh
-/// still owns the Address, so the newly admitted work waits behind it.
+/// whole cohort immediately, and so does one to a seat past its refresh
+/// threshold.
 #[test]
 fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
     use crate::store::context::JudgesThreshold as _;
     use crate::store::context::RecordsContextSize as _;
     use crate::store::logical_delivery::RecordsLogicalDeliveries as _;
-    use crate::store::queue_delivery::{
-        AccountsQueueDelivery, NativeHistoryAnchor, PrepareQueueDelivery,
-    };
-    use signal_flow::HarnessKind;
     #[derive(Clone, Copy, Debug)]
     enum Busy {
         QueueNotEmpty,
-        DeliveryOutstanding,
         PastThreshold,
     }
-    for busy in [
-        Busy::QueueNotEmpty,
-        Busy::DeliveryOutstanding,
-        Busy::PastThreshold,
-    ] {
+    for busy in [Busy::QueueNotEmpty, Busy::PastThreshold] {
         for abrupt in [
             Message::HardAbrupt as fn(Request) -> Message,
             Message::MiddleAbrupt,
@@ -832,7 +829,7 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
             awake_seat(
                 &fixture,
                 match busy {
-                    Busy::QueueNotEmpty | Busy::DeliveryOutstanding | Busy::PastThreshold => {
+                    Busy::QueueNotEmpty | Busy::PastThreshold => {
                         vec![Request::Order("Already waiting.".into())]
                     }
                 },
@@ -840,30 +837,6 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
             declare(&fixture, seat_address());
             match busy {
                 Busy::QueueNotEmpty => {}
-                Busy::DeliveryOutstanding => {
-                    let PrepareQueueDelivery::Prepared(_) = fixture
-                        .nexus
-                        .store
-                        .prepare_oldest_delivery(
-                            &seat_address(),
-                            CLAUDE_SEAT,
-                            "c1a0de00-0000-4000-8000-000000000001",
-                            HarnessKind::Claude,
-                            NativeHistoryAnchor::CodexTurns(None),
-                        )
-                        .expect("prepared")
-                    else {
-                        panic!("the oldest request is prepared")
-                    };
-                    assert!(
-                        fixture
-                            .nexus
-                            .store
-                            .outstanding_delivery(&seat_address())
-                            .unwrap()
-                            .is_some()
-                    );
-                }
                 Busy::PastThreshold => {
                     super::refresh_and_compaction::seat_refreshing_at(&fixture, 200_000);
                     fixture
@@ -874,7 +847,6 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
                     assert!(fixture.nexus.store.past_threshold(CLAUDE_SEAT).unwrap());
                 }
             }
-            let queued_before = stored(&fixture).queue.0.len();
             let caller = MarkedProcess::spawn("sleep", &["30"], "pane-1");
             let peer = FlowStore::process_identity_for_pid(caller.0.id()).unwrap();
             let sent = fixture.nexus.send_request(
@@ -895,22 +867,7 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
                     );
                     assert!(
                         stored(&fixture).queue.0.is_empty(),
-                        "the exact receipt settles all"
-                    );
-                }
-                Busy::DeliveryOutstanding => {
-                    let Output::SendAccepted(acceptance) = &sent.response else {
-                        panic!("{busy:?}: {:?}", sent.response)
-                    };
-                    assert_eq!(
-                        acceptance.visible_delivery_state,
-                        signal_flow::VisibleDeliveryState::Queued,
-                        "{busy:?}"
-                    );
-                    assert_eq!(
-                        stored(&fixture).queue.0.len(),
-                        queued_before + 1,
-                        "{busy:?}"
+                        "the writer's result settles all"
                     );
                 }
                 Busy::PastThreshold => {
@@ -1199,279 +1156,6 @@ fn an_idle_unwritable_claude_predecessor_yields_queued_work_to_its_ordered_succe
         1
     );
     assert!(calls.contains(&format!("agent prompt {}", route.herdr_pane_id.0)));
-}
-
-/// The production scheduler's first warning remains durable while an actual
-/// replacement holds the metaflow. A later tick admits no second warning;
-/// the first logical delivery drains once to the successor.
-#[test]
-fn scheduled_warning_stays_once_during_replace_and_drains_once_to_successor() {
-    use crate::message_projection::ProjectsQueueEntry;
-    use datom_codec::{Actualizing, Potential};
-
-    let (mut fixture, profile) =
-        refreshable_with_successor(Continuity::OnDemand, flow_ethos::Delivery::Queue);
-    let fixture_only_startup = stored(&fixture)
-        .queue
-        .0
-        .into_iter()
-        .next()
-        .expect("replacement fixture startup entry");
-    assert!(
-        fixture
-            .nexus
-            .store
-            .remove_oldest_queued(&seat_address(), &fixture_only_startup)
-            .unwrap()
-    );
-    fixture.nexus.store.seed_role(signal_flow::CallerIdentity {
-        flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
-        aspect: signal_flow::Aspect::Mind,
-        model_name: flow_ethos::ModelName("fixture-model".into()),
-    });
-    fixture
-        .nexus
-        .store
-        .configure_change(ConfigurationChange::Thresholds(vec![ConfigureThreshold {
-            model_name: flow_ethos::ModelName("fixture-model".into()),
-            refresh_threshold: meta_signal_flow::RefreshThreshold(100),
-        }]))
-        .unwrap();
-    fixture
-        .nexus
-        .store
-        .configure_change(ConfigurationChange::HandoverPolicies(vec![
-            HandoverPolicy {
-                model_name: flow_ethos::ModelName("fixture-model".into()),
-                warning_share_left: meta_signal_flow::WarningShareLeft(20),
-                reminder_text: meta_signal_flow::ReminderText(
-                    "flow Keep.{ WhatIAmStillTryingToDo «…» }".into(),
-                ),
-                every_minutes: meta_signal_flow::EveryMinutes(5),
-            },
-        ]))
-        .unwrap();
-    fixture
-        .nexus
-        .store
-        .record_context_size(CLAUDE_SEAT, 81)
-        .unwrap();
-    fixture
-        .nexus
-        .store
-        .ensure_live_handover(&seat_address(), CLAUDE_SEAT)
-        .unwrap();
-
-    fixture.nexus.send_due_handover_reminders(10);
-    let first = fixture
-        .nexus
-        .store
-        .handover_reminder(&seat_address(), 0)
-        .unwrap()
-        .expect("the scheduler created the timer");
-    assert_eq!((first.sent.0, first.next_due.0), (1, 310));
-    let first_warning_id = stored(&fixture)
-        .queue
-        .0
-        .iter()
-        .find(|entry| {
-            matches!(&entry.message, Message::MiddleAbrupt(Request::Notice(text))
-                if text.contains("flow Keep."))
-        })
-        .expect("the scheduler durably admitted its first warning")
-        .logical_delivery_id
-        .clone();
-    let predecessor_calls = typing_calls(&fixture).len();
-
-    let closing = fixture.directory.path().join("warning-close-reached");
-    let release = Latch::closed(fixture.directory.path().join("warning-close-release"));
-    let script = fs::read_to_string(&fixture.snapshot_program).expect("fixture Herdr");
-    let pattern = "  *\" pane close \"*) exit 0 ;;";
-    assert!(script.contains(pattern), "{script}");
-    FixtureExecutable {
-        path: fixture.snapshot_program.clone(),
-    }
-    .install(&script.replacen(
-        pattern,
-        &format!(
-            "  *\" pane close \"*) : > '{closing}'; : < '{release}'; exit 0 ;;",
-            closing = closing.display(),
-            release = release.path.display(),
-        ),
-        1,
-    ));
-
-    // The Replace answers once the reap is owed; the predecessor's close is
-    // its worker's. Exercise the later tick while that close is held.
-    let replaced = fixture.nexus.dispatch(Input::Replace(profile.clone()));
-    std::thread::scope(|scope| {
-        // Scope joins its children after this closure returns or unwinds.
-        // Keep the release guard inside the closure so an assertion releases
-        // the fixture's native close before that join can wait on it.
-        let _release_before_join = ReleasesFixtureOnDrop(&release);
-        let reaping = scope.spawn(|| super::reaping::finish_reaps(&fixture));
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        assert!(
-            closing.appeared_by(deadline),
-            "the reap never reached close"
-        );
-        let before_tick = fixture
-            .nexus
-            .store
-            .logical_delivery_snapshot(&first_warning_id)
-            .unwrap()
-            .unwrap();
-        fixture.nexus.send_due_handover_reminders(310);
-        assert_eq!(
-            stored(&fixture)
-                .queue
-                .0
-                .iter()
-                .filter(|entry| {
-                    matches!(&entry.message, Message::MiddleAbrupt(Request::Notice(text))
-                    if text.contains("flow Keep."))
-                })
-                .map(|entry| entry.logical_delivery_id.clone())
-                .collect::<Vec<_>>(),
-            vec![first_warning_id.clone()],
-            "replacement admits no second reminder"
-        );
-        let timer = fixture
-            .nexus
-            .store
-            .handover_reminder(&seat_address(), 0)
-            .unwrap()
-            .unwrap();
-        assert_eq!((timer.sent.0, timer.next_due.0), (1, 310));
-        let queued = fixture
-            .nexus
-            .store
-            .logical_delivery_snapshot(&first_warning_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            queued, before_tick,
-            "a later tick preserves the original delivery state"
-        );
-        assert_eq!(typing_calls(&fixture).len(), predecessor_calls);
-        release.release();
-        reaping.join().expect("the reap settled");
-    });
-
-    let Output::ReapPending(replaced) = replaced else {
-        panic!("replacement answered: {replaced:?}")
-    };
-    assert_eq!(replaced.predecessor.0.0, CLAUDE_SEAT);
-    let successor_flow_id = replaced.launched.flow_id;
-    assert_ne!(successor_flow_id.0, CLAUDE_SEAT);
-    assert_eq!(
-        stored(&fixture).state,
-        State::Awake(successor_flow_id.clone())
-    );
-    assert_eq!(typing_calls(&fixture).len(), predecessor_calls);
-    let successor = fixture
-        .nexus
-        .store
-        .flow_node(&successor_flow_id.0)
-        .unwrap()
-        .expect("replacement successor registered");
-    let HerdrRouteSelection::Available(successor_route) = successor.herdr_route_selection.clone()
-    else {
-        panic!("replacement successor has no Herdr route: {successor:?}")
-    };
-    let codex = accepting_codex_endpoint(&mut fixture, "fixture-model", &successor.session_id.0);
-    let successor_agent = serde_json::json!({
-        "agent":"codex",
-        "agent_status":"working",
-        "interactive_ready":true,
-        "name":successor_route.herdr_agent_name.0.clone(),
-        "pane_id":successor_route.herdr_pane_id.0.clone(),
-        "terminal_id":successor_route.herdr_terminal_id.0.clone(),
-        "agent_session":{
-            "source":"herdr:codex", "agent":"codex", "kind":"id",
-            "value":successor.session_id.0.clone()
-        }
-    });
-    let successor_operations = fixture.accept_pane_operations(
-        vec![successor_agent],
-        PromptFixture::Prompted(&successor_route.herdr_pane_id.0),
-    );
-    let successor_prompt = format!(
-        "--session {} agent prompt {}",
-        successor_route.herdr_session_name.0, successor_route.herdr_pane_id.0
-    );
-    let successor_input_count = || {
-        fs::read_to_string(&successor_operations)
-            .unwrap_or_default()
-            .lines()
-            .filter(|call| call.contains(&successor_prompt))
-            .count()
-    };
-    let queued_cohort = stored(&fixture).queue;
-    assert_eq!(
-        queued_cohort
-            .0
-            .iter()
-            .map(|entry| entry.logical_delivery_id.clone())
-            .collect::<Vec<_>>(),
-        vec![first_warning_id.clone()],
-        "the scheduler's first warning alone remains queued"
-    );
-    let expected_inputs = queued_cohort
-        .0
-        .iter()
-        .map(|entry| entry.visible_input(&seat_address()))
-        .collect::<Vec<_>>();
-    assert_eq!(successor_input_count(), 0);
-    assert_eq!(fixture.typed(), None);
-    let drained = fixture.nexus.perform(Operation::Drain(seat_address()));
-    let Outcome::Drained(drained_cohort) = drained else {
-        panic!("warning cohort did not drain: {drained:?}")
-    };
-    assert_eq!(
-        drained_cohort, queued_cohort.0,
-        "the one drain parks the first warning alone"
-    );
-    let cohort_input = fixture.typed().expect("warning cohort typed to successor");
-    let mut budget = datom_codec::Budget {
-        remaining: 65536,
-        reader: protos::ReaderBudget::try_from(65536).expect("a constant reader budget"),
-        depth: 0,
-        maximum_depth: 1024,
-    };
-    let observed_inputs =
-        Potential::<Vec<signal_flow::VisibleNativeInput>>::from(cohort_input.clone())
-            .actualize(&mut budget)
-            .unwrap_or_else(|error| panic!("{cohort_input}: {error:?}"));
-    assert_eq!(
-        observed_inputs, expected_inputs,
-        "one native cohort carries the first warning's exact visible input"
-    );
-    assert_eq!(successor_input_count(), 1);
-    {
-        let placed = fixture
-            .nexus
-            .store
-            .logical_delivery_snapshot(&first_warning_id)
-            .unwrap()
-            .unwrap();
-        assert!(
-            matches!(placed.delivery_state, signal_flow::DeliveryState::Uncertain),
-            "the cohort is durably placed, not fabricated as delivered: {placed:?}"
-        );
-    }
-    let _ = fixture.nexus.perform(Operation::Drain(seat_address()));
-    assert_eq!(fixture.typed(), Some(cohort_input));
-    assert_eq!(
-        successor_input_count(),
-        1,
-        "an extra drain produces no additional native input"
-    );
-    drop(codex);
-    assert!(
-        stored(&fixture).queue.0.is_empty(),
-        "the first warning leaves the queue"
-    );
 }
 
 /// A refresh owed a successor that cannot start answers Refresh's own

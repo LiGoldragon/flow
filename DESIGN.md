@@ -1001,8 +1001,11 @@ A missing record authorizes neither a pane write nor a wake; pending work
 stays queued. Reopening a store does not seed this record from history.
 
 Before serving at takeover the Nexus observes each bound seat against its
-native source. Codex's loaded threads and the matching thread's status,
-or Claude's session process together with its Herdr pane, establish the
-observation. A successful observation of absence establishes an end.
+native source. Codex's loaded threads, parent links and authoritative
+statuses determine family activity: an active descendant keeps an idle
+parent working. A native status broadcast, including a child's, prompts
+a new family reading. Claude's session process and native transcript
+determine its activity. Herdr locates the pane and carries writes, never
+determines harness activity or proves a harness ended. A successful observation of absence establishes an end.
 An unavailable source supplies no state: stale live knowledge must not
 survive that failure. A returning source may establish the missing record.

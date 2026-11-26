@@ -9011,18 +9011,22 @@ mod tests {
         assert_eq!(theirs.peer_process(), own);
     }
     #[test]
-    fn agent_connection_cancellation_releases_quiet_and_unanswered_subscriptions_without_exit() {
+    fn agent_connection_cancellation_releases_quiet_subscriptions_without_exit() {
         use crate::HoldsStopRequest;
-        use crate::event_wait::AwaitsDescriptors;
         use crate::observation_lifetime::ServesCancellableObservation;
         use crate::observe_agent::ObservesAgent;
-        use std::io::{BufRead, BufReader, Read, Write};
-        use std::os::fd::AsFd;
         use std::sync::mpsc;
-        for acknowledged in [false, true] {
+        {
             for stop in [false, true] {
                 let fixture = NexusFixture::new();
                 bind_existing_caller(&fixture, "a001", "pane-1");
+                use crate::generated::memory::{SeatActivity, SeatStanding};
+                use crate::store::current_seat::RecordsCurrentSeats;
+                fixture
+                    .nexus
+                    .store
+                    .record_observation("a001", Some(SeatStanding::Alive(SeatActivity::Working)))
+                    .unwrap();
                 fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
                 let (peer, client) = UnixStream::pair().unwrap();
                 let (sent, received) = mpsc::channel();
@@ -9048,35 +9052,10 @@ mod tests {
                             ..
                         })
                     ));
-                    assert!(
-                        [fixture._herdr_server.as_fd()]
-                            .ready(Some(std::time::Instant::now() + Duration::from_secs(3)))
-                            .unwrap()[0]
-                    );
-                    let (mut upstream, _) = fixture._herdr_server.accept().unwrap();
-                    upstream
-                        .set_read_timeout(Some(Duration::from_secs(3)))
-                        .unwrap();
-                    let mut request = String::new();
-                    BufReader::new(&upstream).read_line(&mut request).unwrap();
-                    assert!(request.contains("events.subscribe"));
-                    if acknowledged {
-                        upstream
-                            .write_all(b"{\"result\":{\"type\":\"subscription_started\"}}\n")
-                            .unwrap();
-                    }
                     if stop {
                         nexus.stopping.request();
                     } else {
                         drop(client);
-                    }
-                    let mut byte = [0];
-                    match upstream.read(&mut byte) {
-                        Ok(0) => {}
-                        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
-                        other => panic!(
-                            "upstream closes within its read timeout without data: {other:?}"
-                        ),
                     }
                     let result = observer.join().unwrap();
                     assert!(result.unwrap_err().contains(if stop {
@@ -9147,16 +9126,22 @@ mod tests {
     }
 
     #[test]
-    fn agent_subscription_delivers_state_and_genuine_gone_records_exit() {
-        use crate::event_wait::AwaitsDescriptors;
+    fn agent_subscription_ignores_herdr_activity_and_delivers_current_harness_events() {
+        use crate::generated::memory::{SeatActivity, SeatStanding};
         use crate::observation_lifetime::ServesCancellableObservation;
         use crate::observe_agent::ObservesAgent;
-        use std::io::{BufRead, BufReader, Write};
-        use std::os::fd::AsFd;
+        use crate::store::current_seat::RecordsCurrentSeats;
         use std::sync::mpsc;
         let fixture = NexusFixture::new();
         bind_existing_caller(&fixture, "a001", "pane-1");
-        fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
+        let mut pane = codex_agent_in("pane-1", "terminal-pane-1");
+        pane["agent_status"] = serde_json::json!("idle");
+        fixture.set_agents(vec![pane]);
+        fixture
+            .nexus
+            .store
+            .record_observation("a001", Some(SeatStanding::Alive(SeatActivity::Working)))
+            .unwrap();
         let (peer, _client) = UnixStream::pair().unwrap();
         let (sent, received) = mpsc::channel();
         let (done, finished) = mpsc::channel();
@@ -9180,23 +9165,11 @@ mod tests {
                     ..
                 })
             ));
-            assert!(
-                [fixture._herdr_server.as_fd()]
-                    .ready(Some(std::time::Instant::now() + Duration::from_secs(3)))
-                    .unwrap()[0]
-            );
-            let (mut upstream, _) = fixture._herdr_server.accept().unwrap();
-            upstream
-                .set_read_timeout(Some(Duration::from_secs(3)))
+            fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
+            nexus
+                .store
+                .record_observation("a001", Some(SeatStanding::Alive(SeatActivity::Resting)))
                 .unwrap();
-            BufReader::new(&upstream)
-                .read_line(&mut String::new())
-                .unwrap();
-            upstream.write_all(concat!(
-                "{\"result\":{\"type\":\"subscription_started\"}}\n",
-                "{\"event\":\"pane.agent_status_changed\",\"data\":{\"pane_id\":\"pane-1\",\"agent_status\":\"idle\"}}\n",
-                "{\"event\":\"pane.closed\",\"data\":{\"pane_id\":\"pane-1\"}}\n"
-            ).as_bytes()).unwrap();
             assert!(matches!(
                 received.recv_timeout(Duration::from_secs(3)).unwrap(),
                 Output::AgentObserved(signal_flow::AgentObservation {
@@ -9204,6 +9177,10 @@ mod tests {
                     ..
                 })
             ));
+            nexus
+                .store
+                .record_observation("a001", Some(SeatStanding::Ended))
+                .unwrap();
             assert!(matches!(
                 received.recv_timeout(Duration::from_secs(3)).unwrap(),
                 Output::AgentObserved(signal_flow::AgentObservation {
@@ -9219,55 +9196,26 @@ mod tests {
             );
             observer.join().unwrap();
         });
-        assert_eq!(fixture.lifecycle("a001"), FlowLifecycle::Exited);
     }
     #[test]
-    fn saturated_agent_admission_closes_each_attempt_and_preserves_the_live_flow() {
-        use crate::event_wait::AwaitsDescriptors;
-        use crate::observation_lifetime::ServesCancellableObservation;
+    fn a_missing_agent_record_does_not_ask_herdr_or_end_the_flow() {
         use crate::observe_agent::ObservesAgent;
-        use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
-        use std::os::fd::AsFd;
+        use crate::store::current_seat::RecordsCurrentSeats;
         let fixture = NexusFixture::new();
         bind_existing_caller(&fixture, "a001", "pane-1");
+        fixture
+            .nexus
+            .store
+            .record_observation("a001", None)
+            .unwrap();
         fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
-        let socket = fixture.directory.path().join("saturated-herdr.sock");
-        let descriptor = rustix::net::socket_with(
-            AddressFamily::UNIX,
-            SocketType::STREAM,
-            SocketFlags::CLOEXEC,
-            None,
-        )
-        .unwrap();
-        rustix::net::bind(&descriptor, &SocketAddrUnix::new(&socket).unwrap()).unwrap();
-        rustix::net::listen(&descriptor, 0).unwrap();
-        let listener = UnixListener::from(descriptor);
-        let _filler = UnixStream::connect(&socket).unwrap();
-        fixture.list_herdr_sessions(&[("messaging-build", socket)]);
-        for _ in 0..10 {
-            let (peer, _client) = UnixStream::pair().unwrap();
-            let mut connection = Connection::accepted(peer).unwrap();
-            let mut states = Vec::new();
-            let result = connection.serve_cancellable_observation(
-                &fixture.nexus,
-                &mut |cancellation, _peer| {
-                    fixture
-                        .nexus
-                        .observe_agent("a001", cancellation, &mut |response| {
-                            states.push(response.clone());
-                            Ok(())
-                        })
-                },
-            );
-            assert!(result.unwrap_err().contains("backlog saturated"));
-            assert_eq!(states.len(), 1, "only the initial state, never Gone");
-            assert_eq!(fixture.lifecycle("a001"), FlowLifecycle::Active);
-        }
-        let (_accepted_filler, _) = listener.accept().unwrap();
-        assert!(
-            ![listener.as_fd()]
-                .ready(Some(std::time::Instant::now()))
-                .unwrap()[0]
-        );
+        assert!(matches!(
+            fixture.nexus.agent_observation("a001"),
+            Output::AgentObserved(signal_flow::AgentObservation {
+                agent_state: signal_flow::AgentState::Unknown,
+                ..
+            })
+        ));
+        assert_eq!(fixture.lifecycle("a001"), FlowLifecycle::Active);
     }
 }

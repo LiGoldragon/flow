@@ -1339,6 +1339,53 @@ impl crate::generated::overriding::InterruptsCodexThreads for CodexAdapter {
     }
 }
 
+/// The server's loaded threads form a forest via parentThreadId. A child can
+/// be active after its parent's turn has ended.
+trait ReadsFamilyStanding {
+    fn standing_for(
+        &self,
+        id: &str,
+    ) -> Result<crate::generated::memory::SeatStanding, CodexAdapterUnavailable>;
+}
+
+impl ReadsFamilyStanding for std::collections::BTreeMap<String, (Option<String>, String)> {
+    fn standing_for(
+        &self,
+        id: &str,
+    ) -> Result<crate::generated::memory::SeatStanding, CodexAdapterUnavailable> {
+        use crate::generated::memory::{SeatActivity, SeatStanding};
+        let mut pending = vec![id];
+        let mut visited = std::collections::BTreeSet::new();
+        let mut unknown = false;
+        while let Some(member) = pending.pop() {
+            if !visited.insert(member) {
+                return Err(CodexAdapterUnavailable::Protocol(
+                    "cycle in thread family".into(),
+                ));
+            }
+            match self.get(member).map(|(_, status)| status.as_str()) {
+                Some("active") => return Ok(SeatStanding::Alive(SeatActivity::Working)),
+                Some("idle") => {}
+                Some("notLoaded") if member == id => return Ok(SeatStanding::Ended),
+                Some("notLoaded") => {}
+                _ => unknown = true,
+            }
+            pending.extend(
+                self.iter()
+                    .filter(|(_, (parent, _))| parent.as_deref() == Some(member))
+                    .map(|(id, _)| id.as_str()),
+            );
+        }
+        if unknown {
+            Err(CodexAdapterUnavailable::Protocol(
+                "thread status unavailable".into(),
+            ))
+        } else {
+            Ok(SeatStanding::Alive(SeatActivity::Resting))
+        }
+    }
+}
+
 pub(crate) trait ReadsThreadStanding {
     fn thread_standing(
         &self,
@@ -1350,13 +1397,14 @@ impl ReadsThreadStanding for CodexAdapter {
         &self,
         id: &str,
     ) -> Result<crate::generated::memory::SeatStanding, CodexAdapterUnavailable> {
-        use crate::generated::memory::{SeatActivity, SeatStanding};
+        use crate::generated::memory::SeatStanding;
         let mut session = self.initialize_bound_session()?;
         let result = (|| {
             // Only live server membership counts. A saved thread may have
             // history on disk even after it was closed on the server.
             let mut cursor: Option<String> = None;
             let mut seen = std::collections::BTreeSet::new();
+            let mut ids = std::collections::BTreeSet::new();
             loop {
                 let page = session.request(
                     2,
@@ -1364,19 +1412,21 @@ impl ReadsThreadStanding for CodexAdapter {
                     serde_json::json!({"cursor":cursor}),
                     self.timeout,
                 )?;
-                let ids = page["data"].as_array().ok_or_else(|| {
+                let entries = page["data"].as_array().ok_or_else(|| {
                     CodexAdapterUnavailable::Protocol("invalid loaded thread list".into())
                 })?;
-                if ids.iter().any(|entry| entry.as_str() == Some(id)) {
-                    break;
-                }
-                if !ids.iter().all(serde_json::Value::is_string) {
-                    return Err(CodexAdapterUnavailable::Protocol(
-                        "invalid loaded thread id".into(),
-                    ));
+                for entry in entries {
+                    ids.insert(
+                        entry
+                            .as_str()
+                            .ok_or_else(|| {
+                                CodexAdapterUnavailable::Protocol("invalid loaded thread id".into())
+                            })?
+                            .to_owned(),
+                    );
                 }
                 match page.get("nextCursor") {
-                    Some(serde_json::Value::Null) => return Ok(SeatStanding::Ended),
+                    Some(serde_json::Value::Null) => break,
                     Some(serde_json::Value::String(next)) if seen.insert(next.clone()) => {
                         cursor = Some(next.clone());
                     }
@@ -1387,32 +1437,44 @@ impl ReadsThreadStanding for CodexAdapter {
                     }
                 }
             }
-            let reply = session.request(
-                3,
-                "thread/read",
-                serde_json::json!({"threadId":id,"includeTurns":false}),
-                self.timeout,
-            )?;
-            if reply
-                .pointer("/thread/id")
-                .and_then(serde_json::Value::as_str)
-                != Some(id)
-            {
-                return Err(CodexAdapterUnavailable::Protocol(
-                    "thread/read returned another thread".into(),
-                ));
+            if !ids.contains(id) {
+                return Ok(SeatStanding::Ended);
             }
-            match reply
-                .pointer("/thread/status/type")
-                .and_then(serde_json::Value::as_str)
-            {
-                Some("active") => Ok(SeatStanding::Alive(SeatActivity::Working)),
-                Some("idle") => Ok(SeatStanding::Alive(SeatActivity::Resting)),
-                Some("notLoaded") => Ok(SeatStanding::Ended),
-                _ => Err(CodexAdapterUnavailable::Protocol(
-                    "thread status unavailable".into(),
-                )),
+            let mut family = std::collections::BTreeMap::new();
+            for (index, loaded) in ids.iter().enumerate() {
+                let reply = session.request(
+                    3 + index as u64,
+                    "thread/read",
+                    serde_json::json!({"threadId":loaded,"includeTurns":false}),
+                    self.timeout,
+                )?;
+                let record = &reply["thread"];
+                if record["id"].as_str() != Some(loaded) {
+                    return Err(CodexAdapterUnavailable::Protocol(
+                        "thread/read returned another thread".into(),
+                    ));
+                }
+                let parent = match &record["parentThreadId"] {
+                    serde_json::Value::Null => None,
+                    serde_json::Value::String(parent) => Some(parent.to_owned()),
+                    _ => {
+                        return Err(CodexAdapterUnavailable::Protocol(
+                            "invalid thread parent".into(),
+                        ));
+                    }
+                };
+                family.insert(
+                    loaded.clone(),
+                    (
+                        parent,
+                        record["status"]["type"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                    ),
+                );
             }
+            family.standing_for(id)
         })();
         session.stop_proxy();
         result
@@ -2384,6 +2446,26 @@ mod tests {
             Err(mpsc::RecvTimeoutError::Disconnected)
         ));
         let _ = child.wait();
+    }
+
+    #[test]
+    fn idle_parent_remains_working_until_last_active_descendant_rests() {
+        use crate::generated::memory::{SeatActivity, SeatStanding};
+        let mut family = std::collections::BTreeMap::from([
+            ("parent".into(), (None, "idle".into())),
+            ("child".into(), (Some("parent".into()), "idle".into())),
+            ("worker".into(), (Some("child".into()), "active".into())),
+            ("unrelated".into(), (None, "active".into())),
+        ]);
+        assert_eq!(
+            family.standing_for("parent").unwrap(),
+            SeatStanding::Alive(SeatActivity::Working)
+        );
+        family.get_mut("worker").unwrap().1 = "idle".into();
+        assert_eq!(
+            family.standing_for("parent").unwrap(),
+            SeatStanding::Alive(SeatActivity::Resting)
+        );
     }
 
     #[test]

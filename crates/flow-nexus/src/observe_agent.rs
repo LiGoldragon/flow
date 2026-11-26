@@ -1,27 +1,12 @@
-//! Observe.Agent: a flow's agent state as Herdr shows it, on open and then
-//! on every change Herdr announces, until the flow's pane is gone.
-//!
-//! The subscription is Herdr's own `events.subscribe` on the session's
-//! socket (newline-delimited JSON): `pane.agent_status_changed` for the
-//! flow's pane, and `pane.closed` / `pane.exited`. Nothing is re-read on a
-//! timer; a flow whose agent does not change sends nothing.
-//!
-//! A pane Herdr shows gone, or announces closed, is a witness of the flow's
-//! fate: a live flow whose pane is gone is recorded Exited, which puts its
-//! metaflow Asleep and retracts every lock it holds as a sender, and a
-//! Maintained metaflow so ended is woken into its successor.
+//! Observe.Agent projects changes of the authoritative current harness record.
 
 use crate::RunningNexus;
 use crate::herdr::HerdrCli;
 use crate::herdr::events::{HerdrCue, HerdrEvents, SubscribesHerdrEvents};
-use crate::herdr::pane::ReadsAgentStatus;
-use crate::herdr::pane::{PaneAgent, WritesPane};
 use crate::observation_lifetime::{CancelsObservation, ObservationCancellation};
-use crate::store::ReadsFlowRows;
 use crate::store::current_seat::RecordsCurrentSeats;
-use signal_flow::{
-    AgentObservation, AgentState, FlowNode, HerdrRoute, HerdrRouteSelection, Output,
-};
+use crate::store::{AnnouncesLaunchChanges, metaflow_watch::WatchesMetaflows};
+use signal_flow::{AgentObservation, AgentState, Output};
 use std::path::PathBuf;
 
 /// Answers and streams a flow's agent state.
@@ -119,46 +104,21 @@ impl ReportsAgentState for AgentState {
     }
 }
 
-trait FindsObservableFlow {
-    /// The live, routed flow, or None when it has nothing to observe.
-    fn observable(&self, flow_id: &str) -> Option<(FlowNode, HerdrRoute)>;
-}
-
-impl FindsObservableFlow for RunningNexus {
-    fn observable(&self, flow_id: &str) -> Option<(FlowNode, HerdrRoute)> {
-        let node = self.store.flow_node(flow_id).ok()??;
-        let HerdrRouteSelection::Available(route) = node.herdr_route_selection.clone() else {
-            return None;
-        };
-        Some((node, route))
-    }
-}
-
 impl ObservesAgent for RunningNexus {
     fn agent_observation(&self, flow_id: &str) -> Output {
-        use crate::generated::memory::SeatStanding;
+        use crate::generated::memory::{SeatActivity, SeatStanding};
         use crate::store::current_seat::SeatDecision;
         match self.store.seat_decision(flow_id) {
-            Ok(SeatDecision::Observed(SeatStanding::Alive(_))) => {}
-            Ok(SeatDecision::Observed(SeatStanding::Ended)) => {
-                return AgentState::Gone.observed_of(flow_id);
+            Ok(SeatDecision::Observed(SeatStanding::Alive(SeatActivity::Working))) => {
+                AgentState::Working
             }
-            Ok(SeatDecision::NoRecord) | Err(_) => return AgentState::Unknown.observed_of(flow_id),
+            Ok(SeatDecision::Observed(SeatStanding::Alive(SeatActivity::Resting))) => {
+                AgentState::Idle
+            }
+            Ok(SeatDecision::Observed(SeatStanding::Ended)) => AgentState::Gone,
+            Ok(SeatDecision::NoRecord) | Err(_) => AgentState::Unknown,
         }
-        let Some((node, _)) = self.observable(flow_id) else {
-            return AgentState::Unknown.observed_of(flow_id);
-        };
-        let agent_state = match self.herdr.pane_agent(&node) {
-            PaneAgent::Present { agent_state, .. } => agent_state,
-            PaneAgent::Absent => {
-                if node.harness_kind == signal_flow::HarnessKind::Claude {
-                    self.exited_as_witnessed(flow_id);
-                }
-                AgentState::Gone
-            }
-            PaneAgent::Unreadable => AgentState::Unknown,
-        };
-        agent_state.observed_of(flow_id)
+        .observed_of(flow_id)
     }
 
     fn observe_agent(
@@ -167,60 +127,29 @@ impl ObservesAgent for RunningNexus {
         cancellation: &ObservationCancellation,
         send: &mut dyn FnMut(&Output) -> Result<(), String>,
     ) -> Result<(), String> {
-        cancellation.check()?;
-        let opening = self.agent_observation(flow_id);
-        cancellation.check()?;
-        send(&opening)?;
-        let Output::AgentObserved(AgentObservation {
-            agent_state: mut last,
-            ..
-        }) = opening
-        else {
-            return Ok(());
-        };
-        if matches!(last, AgentState::Gone | AgentState::Unknown) {
-            return Ok(());
-        }
-        let Some((node, route)) = self.observable(flow_id) else {
-            return Ok(());
-        };
-        // What this subscription watches: a Gone it reads acts only while
-        // the flow still runs there, as the seat it was opened on.
-        let witness = {
-            use crate::restarting::FencesSeatEvents;
-            self.seat_witness(flow_id)
-        };
-        let socket = self
-            .herdr
-            .session_socket(&route.herdr_session_name.0)
-            .ok_or("Herdr session socket not found")?;
-        let mut events = PaneEvents::subscribe(
-            &socket,
-            &route.herdr_pane_id.0,
-            PaneObservation::AgentStatus,
-            cancellation,
-        )?;
+        self.store
+            .watch_metaflows()
+            .map_err(|error| error.to_string())?;
+        let changes = &self.store.launch_changes;
+        let mut last = None;
         loop {
-            let Some(event) = events.next_event(cancellation)? else {
-                // End-of-stream is loss of the observation source, not a witnessed exit.
-                return send(&AgentState::Unknown.observed_of(flow_id));
-            };
-            let agent_state = match event {
-                PaneEvent::Status(status) => Some(status.as_str()).agent_state(),
-                PaneEvent::Gone => AgentState::Gone,
-                PaneEvent::Updated => continue,
-            };
-            if agent_state == last {
-                continue;
-            }
-            send(&agent_state.clone().observed_of(flow_id))?;
-            if agent_state == AgentState::Gone {
-                if node.harness_kind == signal_flow::HarnessKind::Claude {
-                    self.exited_as_witnessed_by(flow_id, witness.as_ref());
+            let seen = changes.current();
+            cancellation.check()?;
+            let current = self.agent_observation(flow_id);
+            if last.as_ref() != Some(&current) {
+                send(&current)?;
+                if matches!(
+                    current,
+                    Output::AgentObserved(AgentObservation {
+                        agent_state: AgentState::Gone | AgentState::Unknown,
+                        ..
+                    })
+                ) {
+                    return Ok(());
                 }
-                return Ok(());
+                last = Some(current);
             }
-            last = agent_state;
+            changes.after_while(seen, &|| cancellation.cause().is_none());
         }
     }
 }
@@ -248,11 +177,6 @@ pub(crate) enum PaneEvent {
     Gone,
 }
 
-pub(crate) enum PaneObservation {
-    AgentStatus,
-    InputReadiness,
-}
-
 /// The observed pane's stream: Herdr's events of it, waited on with its
 /// connection's cancellation.
 pub(crate) struct PaneEvents {
@@ -264,7 +188,6 @@ pub(crate) trait ReadsPaneEvents: Sized {
     fn subscribe(
         socket: &std::path::Path,
         pane_id: &str,
-        observation: PaneObservation,
         cancellation: &ObservationCancellation,
     ) -> Result<Self, String>;
     /// The next event about this pane; None when Herdr closes the stream,
@@ -280,18 +203,14 @@ impl ReadsPaneEvents for PaneEvents {
     fn subscribe(
         socket: &std::path::Path,
         pane_id: &str,
-        observation: PaneObservation,
         cancellation: &ObservationCancellation,
     ) -> Result<Self, String> {
-        let mut subscriptions = vec![
+        let subscriptions = vec![
             serde_json::json!({"type": "pane.agent_status_changed", "pane_id": pane_id}),
             serde_json::json!({"type": "pane.closed"}),
             serde_json::json!({"type": "pane.exited"}),
+            serde_json::json!({"type": "pane.updated"}),
         ];
-        if let PaneObservation::InputReadiness = observation {
-            // A managed agent can become interactive without changing status.
-            subscriptions.push(serde_json::json!({"type": "pane.updated"}));
-        }
         let events = HerdrEvents::subscribe(
             socket,
             "flow-nexus:observe-agent",

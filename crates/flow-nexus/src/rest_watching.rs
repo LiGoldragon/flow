@@ -5,9 +5,7 @@ use crate::herdr::pane::{PaneAgent, ReadsAgentStatus, WritesPane};
 use crate::observation_lifetime::{
     CancelsObservation, ObservationCancellation, ObservationCancellationCause,
 };
-use crate::observe_agent::{
-    LocatesHerdrSession, PaneEvent, PaneEvents, PaneObservation, ReadsPaneEvents,
-};
+use crate::observe_agent::{LocatesHerdrSession, PaneEvent, PaneEvents, ReadsPaneEvents};
 use crate::restarting::{FencesSeatEvents, SeatWitness};
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::metaflow_watch::WatchesMetaflows;
@@ -217,12 +215,7 @@ impl ObservesBoundRest for RunningNexus {
             .herdr
             .session_socket(&route.herdr_session_name.0)
             .ok_or("Herdr session socket not found")?;
-        let mut events = PaneEvents::subscribe(
-            &socket,
-            &route.herdr_pane_id.0,
-            PaneObservation::InputReadiness,
-            cancellation,
-        )?;
+        let mut events = PaneEvents::subscribe(&socket, &route.herdr_pane_id.0, cancellation)?;
         // The opening read covers readiness reached before subscription.
         if self.drain_bound_rest(rest) {
             return Ok(());

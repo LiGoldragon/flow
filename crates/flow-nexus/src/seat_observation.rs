@@ -1,16 +1,15 @@
 //! Takeover observes the native source before the Nexus serves. A later
 //! source-availability announcement retries only a seat without a record.
 use crate::RunningNexus;
-use crate::claude::ReadsClaudeSessions;
+use crate::claude::{ReadsClaudeSessions, ReadsClaudeTurns};
 use crate::codex::{ReadsThreadStanding, SelectsCodexEndpoint};
-use crate::generated::memory::{SeatActivity, SeatStanding};
-use crate::herdr::pane::{PaneAgent, WritesPane};
-use crate::herdr::{PanePresence, ReadsHerdrPanes};
+use crate::generated::memory::SeatStanding;
 use crate::live::HoldsLiveValue;
 use crate::store::current_seat::CurrentSeatRead;
 use crate::store::current_seat::RecordsCurrentSeats;
 use crate::store::{ManagesMetaflowState, ReadsFlowRoles, ReadsFlowRows};
-use signal_flow::{AgentState, FlowNode, HarnessKind, HerdrRouteSelection};
+use crate::waking::ReadsClaudeDelivery;
+use signal_flow::{FlowNode, HarnessKind};
 
 pub trait ObservesCurrentSeats {
     fn observe_takeover(&self) -> Result<(), crate::store::StoreError>;
@@ -57,7 +56,7 @@ impl ObservesCurrentSeats for RunningNexus {
     }
 }
 
-trait ReadsNativeStanding {
+pub(crate) trait ReadsNativeStanding {
     fn read_native_standing(&self, node: &FlowNode) -> Option<SeatStanding>;
 }
 impl ReadsNativeStanding for RunningNexus {
@@ -73,68 +72,17 @@ impl ReadsNativeStanding for RunningNexus {
                     .thread_standing(&node.session_id.0)
                     .ok()
             }
-            HarnessKind::Claude => {
-                let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
-                    return None;
-                };
-                match self.herdr.pane_presence(node) {
-                    PanePresence::Absent => {
-                        return match self
-                            .herdr
-                            .claude_sessions
-                            .session_is_live(&node.session_id.0)
-                        {
-                            Some(false) => Some(Ended),
-                            // A live session without its pane has no observed activity.
-                            Some(true) | None => None,
-                        };
-                    }
-                    PanePresence::Unknown => return None,
-                    PanePresence::Bare | PanePresence::Present => {}
-                }
-                let processes = self.herdr.foreground_processes(route)?;
-                let mut unidentified_claude = false;
-                let present = processes.iter().any(|process| {
-                    if process.arguments.windows(2).any(|pair| {
-                        matches!(pair[0].as_str(), "--session-id" | "--resume" | "resume")
-                            && pair[1] == node.session_id.0
-                    }) {
-                        return true;
-                    }
-                    match self.herdr.claude_sessions.session_of(process.process_id) {
-                        Some(session) => session == node.session_id.0,
-                        None => {
-                            unidentified_claude |=
-                                process.arguments.iter().any(|arg| arg.contains("claude"));
-                            false
-                        }
-                    }
-                });
-                if !present {
-                    return if !unidentified_claude
-                        && self
-                            .herdr
-                            .claude_sessions
-                            .session_is_live(&node.session_id.0)
-                            == Some(false)
-                    {
-                        Some(Ended)
-                    } else {
-                        None
-                    };
-                }
-                match self.herdr.pane_agent(node) {
-                    PaneAgent::Present {
-                        agent_state: AgentState::Idle | AgentState::Done,
-                        ..
-                    } => Some(Alive(SeatActivity::Resting)),
-                    PaneAgent::Present {
-                        agent_state: AgentState::Working | AgentState::Blocked,
-                        ..
-                    } => Some(Alive(SeatActivity::Working)),
-                    _ => None,
-                }
-            }
+            HarnessKind::Claude => match self
+                .herdr
+                .claude_sessions
+                .session_is_live(&node.session_id.0)?
+            {
+                false => Some(Ended),
+                true => self
+                    .claude_transcript(node)?
+                    .main_turn_activity(&node.session_id.0)
+                    .map(Alive),
+            },
         }
     }
 }

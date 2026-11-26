@@ -70,6 +70,12 @@ impl WatchesMetaflows for FlowStore {
             QueryPlan::all(self.meta_configuration_tables.metaflows),
             declarations,
         )?;
+        self.engine.subscribe(
+            QueryPlan::all(self.current_seats),
+            Arc::new(MetaflowChangeSink {
+                changes: self.launch_changes.clone(),
+            }),
+        )?;
         *watched = true;
         Ok(())
     }

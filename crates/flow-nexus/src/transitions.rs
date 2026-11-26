@@ -154,7 +154,9 @@ impl ReportsEvents for RunningNexus {
         let event = match codex_report {
             // Token accounting never changes the flow's activity.
             CodexReport::Measured(_) => None,
-            other => other.codex_event(last),
+            other => other
+                .codex_event(last)
+                .filter(|event| !matches!(event, Event::Idle(_))),
         };
         match event {
             Some(event) => self.report_event(ReportedEvent { flow_id, event }),

@@ -206,6 +206,10 @@ pub trait ReadsClaudeTurns {
     /// `stop_sequence` as a synthetic API-error or login reply carries,
     /// `max_tokens`). A row with no stop reason is still streaming.
     fn main_turn_ended(&self, session_id: &str) -> bool;
+    fn main_turn_activity(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::generated::memory::SeatActivity>;
     fn main_turn_unstarted(&self, session_id: &str) -> bool;
     /// The answer that ended the main turn the input row `native_prompt_id`
     /// opened: the text of that turn's last assistant row, when that row
@@ -288,27 +292,42 @@ impl ReadsClaudeTurns for Path {
     }
 
     fn main_turn_ended(&self, session_id: &str) -> bool {
-        fs::read_to_string(self).ok().is_some_and(|transcript| {
-            transcript.lines().fold(None, |state, line| {
-                let Ok(row) = serde_json::from_str::<Value>(line) else {
-                    return state;
-                };
-                if row.get("sessionId").and_then(Value::as_str) != Some(session_id)
-                    || row.get("isSidechain").and_then(Value::as_bool) == Some(true)
-                {
-                    return state;
-                }
-                match row.get("type").and_then(Value::as_str) {
-                    Some("user") => Some(false),
-                    Some("assistant") => Some(
-                        row.pointer("/message/stop_reason")
+        self.main_turn_activity(session_id) == Some(crate::generated::memory::SeatActivity::Resting)
+    }
+
+    fn main_turn_activity(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::generated::memory::SeatActivity> {
+        use crate::generated::memory::SeatActivity::{Resting, Working};
+        let transcript = fs::read_to_string(self).ok()?;
+        let mut activity = None;
+        for line in transcript.lines() {
+            let row = serde_json::from_str::<Value>(line).ok()?;
+            if row.get("sessionId").and_then(Value::as_str) != Some(session_id)
+                || row.get("isSidechain").and_then(Value::as_bool) == Some(true)
+            {
+                continue;
+            }
+            match row.get("type").and_then(Value::as_str) {
+                Some("user") => activity = Some(Working),
+                Some("assistant") => {
+                    activity = Some(
+                        if row
+                            .pointer("/message/stop_reason")
                             .and_then(Value::as_str)
-                            .is_some_and(|reason| reason != "tool_use"),
-                    ),
-                    _ => state,
+                            .is_some_and(|reason| reason != "tool_use")
+                        {
+                            Resting
+                        } else {
+                            Working
+                        },
+                    )
                 }
-            }) == Some(true)
-        })
+                _ => {}
+            }
+        }
+        activity
     }
 }
 

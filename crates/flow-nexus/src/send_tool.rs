@@ -741,6 +741,7 @@ pub(crate) trait RespondsToSendCalls {
     /// tool call, and answers it; then, whether the answer was written or
     /// not, asks Flow to wake the target whose persisted delivery policy is
     /// Wake. Err when the answer could not be written.
+    fn observe_thread_family(&self, thread: &str);
     fn answer_request(
         &self,
         subscription: &mut ThreadSubscription,
@@ -751,6 +752,29 @@ pub(crate) trait RespondsToSendCalls {
 impl AwaitsAppServerSocket for RunningNexus {}
 
 impl RespondsToSendCalls for RunningNexus {
+    fn observe_thread_family(&self, thread: &str) {
+        use crate::seat_observation::ReadsNativeStanding;
+        use crate::store::metaflow::SleepsMetaflows;
+        let Some(node) = self.codex_flow_on(thread) else {
+            return;
+        };
+        if node.flow_lifecycle != signal_flow::FlowLifecycle::Active {
+            return;
+        }
+        let observed = self.read_native_standing(&node);
+        if matches!(self.store.current_seat(&node.flow_id.0), Ok(crate::store::current_seat::CurrentSeatRead::Known(row)) if Some(&row.seat_standing) == observed.as_ref())
+        {
+            return;
+        }
+        if let Err(error) = self.store.record_observation(&node.flow_id.0, observed) {
+            eprintln!("flow-nexus: could not record Codex family for {thread}: {error}");
+            return;
+        }
+        if let Ok(Some(seat)) = self.store.metaflow_awake_as(&node.flow_id.0) {
+            self.defer_wake(seat.address);
+        }
+    }
+
     fn respond_for(
         &self,
         thread: &str,
@@ -853,6 +877,7 @@ impl RespondsToSendCalls for RunningNexus {
                     cut.push(LedgerEvent::BackgroundTerminals(
                         terminals.background_terminals(),
                     ));
+                    self.observe_thread_family(thread);
                     self.codex_events(thread, cut);
                     let mut open = pending.into_iter().all(|request| {
                         self.answer_request(&mut subscription, request)
@@ -902,6 +927,17 @@ impl RespondsToSendCalls for RunningNexus {
         request: serde_json::Value,
     ) -> Result<(), crate::codex::CodexAdapterUnavailable> {
         if let Some(thread) = subscription.thread.clone() {
+            // Codex broadcasts status changes, including children's changes
+            // after their parent turn has ended. Read its live family, not
+            // the last event of the parent's turn ledger.
+            if request.get("id").is_none()
+                && matches!(
+                    request["method"].as_str(),
+                    Some("thread/status/changed" | "thread/started" | "thread/closed")
+                )
+            {
+                self.observe_thread_family(&thread);
+            }
             let events = request.ledger_events(&thread);
             if !events.is_empty() {
                 self.codex_events(&thread, events);

@@ -1015,8 +1015,10 @@ seats, pending rests, launch-title waits and reap workers follow cursors on
 that subscription. The owner receives the subscription acknowledgement before
 a consumer takes its opening pane snapshot. An event invalidates the named
 pane's snapshot; the consumer reads ownership again before acting. A closed
-stream means transport unavailable, not a closed pane. Socket recreation
-starts a new subscription and invalidates all cursors. No timer retries it.
+stream means transport unavailable, not a closed pane. Loss of a connected stream permits one immediate attempt at the same socket.
+If that connection also fails, the owner waits for a socket availability event;
+no timer retries it. The next acknowledgement invalidates all cursors. A
+readable session roster retires owners whose session sockets no longer exist.
 
 Pane disappearance may settle an already authorized pane-cleanup obligation;
 neither it nor a reused pane, Herdr activity, or stream loss ends a native

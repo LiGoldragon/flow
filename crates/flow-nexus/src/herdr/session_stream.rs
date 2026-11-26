@@ -90,6 +90,8 @@ pub(crate) struct SessionCursor {
 }
 
 pub(crate) trait SharesSessionStreams {
+    fn retain_listed(&self, sockets: &std::collections::BTreeSet<PathBuf>);
+    fn is_connected(&self, socket: &Path) -> bool;
     fn announce_to(&self, notices: LaunchChanges);
     fn follow(
         &self,
@@ -98,6 +100,21 @@ pub(crate) trait SharesSessionStreams {
     ) -> Result<SessionCursor, HerdrSubscriptionFailure>;
 }
 impl SharesSessionStreams for SessionStreams {
+    fn retain_listed(&self, sockets: &std::collections::BTreeSet<PathBuf>) {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|path, _| sockets.contains(path));
+    }
+    fn is_connected(&self, socket: &Path) -> bool {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(socket)
+            .is_some_and(|owner| {
+                owner.view.lock().unwrap_or_else(|e| e.into_inner()).state == SourceState::Connected
+            })
+    }
     fn announce_to(&self, notices: LaunchChanges) {
         self.notices
             .lock()
@@ -128,14 +145,17 @@ impl SharesSessionStreams for SessionStreams {
                 let changes = view.clone();
                 let socket = socket.to_owned();
                 std::thread::Builder::new().name("herdr-session".into()).spawn(move || {
+                    let mut retry_on_loss = true;
                     while cancel.cause().is_none() {
                         let Ok(appeared) = Announcement::open().map(Arc::new) else { break };
                         let cue = appeared.clone();
                         let watch = NameWatch::arm(&socket, Box::new(move || { cue.announce(); true }));
                         // Arm before connect. A replacement that occurs during
                         // a failed connection is the next attempt's cause.
+                        let mut lost_connected_stream = false;
                         if let Ok(mut events) = HerdrEvents::subscribe(&socket, "flow-nexus:session",
                             serde_json::json!([{"type":"pane.updated"},{"type":"pane.created"},{"type":"pane.agent_detected"},{"type":"pane.closed"},{"type":"pane.exited"}]), None, Some(&cancel)) {
+                            lost_connected_stream = true;
                             if changes.changed(SourceState::Connected,None).is_err() { break; }
                             while let Ok(HerdrCue::Event(event)) = events.next_cue(&[], None, Some(&cancel)) {
                                 if changes.changed(SourceState::Connected,event.event_pane()).is_err() { return; }
@@ -143,7 +163,15 @@ impl SharesSessionStreams for SessionStreams {
                         }
                         let _ = changes.changed(SourceState::Unavailable,None);
                         if watch.is_err() || cancel.cause().is_some() { break; }
+                        // A dropped healthy connection is itself a cause for one new
+                        // attempt on the same pathname. An immediately flapping or
+                        // refusing source must not sustain an autonomous retry loop.
+                        if lost_connected_stream && retry_on_loss {
+                            retry_on_loss = false;
+                            continue;
+                        }
                         if !matches!([cancel.descriptor(), appeared.descriptor()].ready(None), Ok(ready) if !ready[0] && ready[1]) { break; }
+                        retry_on_loss = true;
                     }
                     let _ = changes.changed(SourceState::Unavailable,None);
                 })?
@@ -317,7 +345,26 @@ mod tests {
             SessionCue::Unavailable
         );
         assert!(!one.available());
-        // Only actual socket recreation starts another connection.
+        // Healthy EOF starts one reconnect even if the listening name is unchanged.
+        assert_eq!([listener.as_fd()].ready(deadline()).unwrap(), [true]);
+        let (mut same, _) = listener.accept().unwrap();
+        same.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        request.clear();
+        BufReader::new(&same).read_line(&mut request).unwrap();
+        writeln!(same, r#"{{"result":{{"type":"subscription_started"}}}}"#).unwrap();
+        one.connected(deadline(), None).unwrap();
+        drop(same);
+        assert_eq!(
+            one.next_change(&[], deadline(), None).unwrap(),
+            SessionCue::Unavailable
+        );
+        assert_eq!(
+            [listener.as_fd()]
+                .ready(Some(Instant::now() + Duration::from_millis(50)))
+                .unwrap(),
+            [false]
+        );
+        // Further attempts require actual source availability.
         drop(listener);
         std::fs::remove_file(&socket).unwrap();
         let replacement = UnixListener::bind(&socket).unwrap();

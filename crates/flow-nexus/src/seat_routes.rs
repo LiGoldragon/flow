@@ -1,11 +1,12 @@
 //! Bound routes hold their session stream even with no client observer.
 //! An event invalidates transport ownership; only the native source can end
 //! a seat. All validated Claude process descriptors share the same wait.
+use crate::caller::KnowsHerdrServers;
 use crate::claude::ReadsClaudeSessions;
 use crate::event_wait::{AnnouncesOnce, AwaitsDescriptors, OpensExitDescriptor};
 use crate::herdr::session_stream::{ReadsSessionChanges, SessionCursor, SharesSessionStreams};
 use crate::herdr::{PaneOwnership, ReadsHerdrPanes};
-use crate::observe_agent::{LocatesHerdrSession, RecordsWitnessedExit};
+use crate::observe_agent::RecordsWitnessedExit;
 use crate::restarting::{FencesSeatEvents, SeatWitness};
 use crate::store::current_seat::{CurrentSeatRead, RecordsCurrentSeats};
 use crate::store::metaflow_watch::WatchesMetaflows;
@@ -80,6 +81,17 @@ impl ServesBoundRoutes for RunningNexus {
             let Ok(changed) = changes.next_descriptor() else {
                 return;
             };
+            let sessions = self.herdr.herdr_sessions().map(|items| {
+                items
+                    .into_iter()
+                    .map(|item| (item.name, item.socket))
+                    .collect::<BTreeMap<_, _>>()
+            });
+            if let Some(sessions) = &sessions {
+                self.herdr
+                    .session_streams
+                    .retain_listed(&sessions.values().cloned().collect());
+            }
             let mut present = BTreeSet::new();
             let mut processes = Vec::new();
             let Ok(seats) = self.store.list_metaflows() else {
@@ -104,7 +116,11 @@ impl ServesBoundRoutes for RunningNexus {
                     processes.push(fd);
                 }
                 let route = &witness.route;
-                let Some(socket) = self.herdr.session_socket(&route.herdr_session_name.0) else {
+                let Some(socket) = sessions
+                    .as_ref()
+                    .and_then(|list| list.get(&route.herdr_session_name.0))
+                    .cloned()
+                else {
                     continue;
                 };
                 if views

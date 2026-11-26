@@ -3858,65 +3858,66 @@ fn a_stop_that_leaves_its_seat_names_why() {
     );
 }
 
-/// The hook's Report is answered and its connection closed before the
-/// settling waits on Herdr: the harness waits on its hook, so a wait on
-/// the harness while the hook is connected would wait on itself. Here the
-/// wait cannot finish until the hook has seen its answer and the close.
+/// A committed Stop answers and closes its peer before a post-report pane
+/// write can block. The only release of that write is the peer's observed EOF.
 #[test]
 fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends() {
-    use crate::{CarriesSignalFrames, ServesOrdinary};
+    use crate::event_wait::AwaitsPath;
+    use crate::{CarriesSignalFrames, Connection, ServesConnection};
     use std::io::Read;
     use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
-
-    let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
-    use crate::fixture_executable::{HoldsLatch, Latch};
-    let released = Latch::closed(fixture.directory.path().join("hook-closed"));
-    let log = herdr_working_until_waited(fixture, &released);
-    claude_seat(fixture, 40_000);
-    fixture.nexus.store.seed_metaflow(metaflow(
+    let fixture = NexusFixture::new();
+    let release = fixture.directory.path().join("hook-closed");
+    fixture.accept_pane_operations(
+        vec![working_claude_agent(&fixture)],
+        PromptFixture::Stalled("w1:p3", &release),
+    );
+    claude_seat(&fixture, 40_000);
+    append_main_rows(&fixture, &[end_turn("confirmed-native-rest")]);
+    let mut queued = metaflow(
         Model::Sol,
         State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         vec![],
         vec![],
-    ));
-    let socket = fixture.directory.path().join("ordinary.sock");
-    let served = socket.clone();
-    std::thread::spawn(move || fixture.nexus.serve_ordinary(&served));
-    // The name is moved in only once the socket listens.
-    assert!(
-        crate::event_wait::AwaitsPath::appeared_by(
-            socket.as_path(),
-            Instant::now() + Duration::from_secs(2)
-        ),
-        "ordinary socket listens"
     );
-    let mut hook = UnixStream::connect(&socket).expect("ordinary socket listens");
+    queued.queue = flow_ethos::Queue(vec![Request::Order("socket-hook-test".into())].unsent());
+    fixture.nexus.store.seed_metaflow(queued);
+    let (peer, mut hook) = UnixStream::pair().unwrap();
     hook.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    super::GreetsOrdinarySocket::greet_ordinary(&mut hook);
     let marker = "SOCKET-HOOK-assistant-marker-雪";
-    let mut event = claude_stop(fixture);
+    let mut event = claude_stop(&fixture);
     let signal_flow::Event::Stopped(stop) = &mut event else {
         unreachable!()
     };
     stop.last_assistant_message_option =
         signal_flow::LastAssistantMessageOption(Some(marker.repeat(4096)));
-    hook.write_query(&signal_flow::Input::Report(signal_flow::Report_Data {
-        flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
-        process_option: None,
-        event,
-    }))
-    .unwrap();
-    assert_eq!(
-        hook.read_response().expect("the hook has its answer"),
-        signal_flow::Output::Reported
-    );
-    let mut rest = Vec::new();
-    assert_eq!(
-        hook.read_to_end(&mut rest)
-            .expect("the connection closes while the wait still runs"),
-        0
-    );
+    std::thread::scope(|scope| {
+        let nexus = &fixture.nexus;
+        let serving =
+            scope.spawn(move || Connection::accepted(peer).unwrap().serve_ordinary(nexus));
+        // On an I/O error, release the fixture before unwinding or joining.
+        let receipt = (|| -> Result<_, String> {
+            super::GreetsOrdinarySocket::greet_ordinary(&mut hook);
+            hook.write_query(&signal_flow::Input::Report(signal_flow::Report_Data {
+                flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+                process_option: None,
+                event,
+            }))?;
+            let reply = hook.read_response()?;
+            let eof = hook
+                .read_to_end(&mut Vec::new())
+                .map_err(|e| e.to_string())?;
+            let entered = release
+                .with_extension("entered")
+                .appeared_by(Instant::now() + Duration::from_secs(5));
+            Ok((reply, eof, entered))
+        })();
+        std::fs::write(&release, "").unwrap();
+        drop(hook);
+        serving.join().unwrap().unwrap();
+        assert_eq!(receipt.unwrap(), (signal_flow::Output::Reported, 0, true));
+    });
     use datom_codec::Datomizable;
     use protos::{Compactable, Protosizable};
     let metadata = fixture
@@ -3927,24 +3928,11 @@ fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends()
         .compact();
     assert!(
         !metadata.contains(marker),
-        "real Report socket stores and serves metadata alone"
+        "Report stores and serves metadata alone"
     );
-    released.release();
-
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let calls = || fs::read_to_string(&log).unwrap_or_default();
-    let directory = log.parent().expect("the log's directory");
     assert!(
-        crate::event_wait::AwaitsDirectory::until_holds(directory, deadline, &mut || {
-            let calls = calls();
-            calls.contains("wait released") || calls.contains("wait timed out")
-        }),
-        "the rest wait never ended"
-    );
-    let calls = calls();
-    assert!(
-        calls.contains("wait released by the closed hook"),
-        "{calls}"
+        stored(&fixture, Model::Sol).queue.0.is_empty(),
+        "the released write settled"
     );
 }
 
@@ -4269,6 +4257,12 @@ esac
                     let _ = stream.write_all(
                         b"{\"id\":\"flow-nexus:title\",\"result\":{\"type\":\"subscription_started\"}}\n",
                     );
+                    // A standing session stream outlives title readback. Let
+                    // other ordinary calls proceed while the client holds it.
+                    std::thread::spawn(move || {
+                        use std::io::Read;
+                        let _ = stream.read(&mut [0_u8; 1]);
+                    });
                     continue;
                 }
                 let text = request

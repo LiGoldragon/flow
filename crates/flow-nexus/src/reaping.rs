@@ -63,6 +63,7 @@ use crate::herdr::{
 use crate::observation_lifetime::{
     CancelsObservation, ObservationCancellation, ObservationCancellationCause,
 };
+use crate::observe_agent::LocatesHerdrSession;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::handover::{ClosesHandovers, HoldsHandovers, JudgesHandoverOwner};
 use crate::store::metaflow::{ReadsSuccession, SleepsMetaflows};
@@ -1167,7 +1168,20 @@ impl<'scope> PassesPaneWatches<'scope> for ReapedPaneWatches<'scope> {
         // A rearm asked by a bearing event cancels a waiting worker and
         // arms a lapsed one; a wanted key with no entry gets one worker.
         for (key, row) in &wanted {
-            let rearmed = nexus.pane_watch_rearms.taken(key);
+            let source_returned = match self.watches.get(key) {
+                Some(PaneWatchEntry::Lapsed {
+                    armed,
+                    lapse:
+                        PaneWatchLapse::StreamClosedPanePresent | PaneWatchLapse::SubscriptionRefused(_),
+                    ..
+                }) => armed
+                    .route
+                    .as_ref()
+                    .and_then(|route| nexus.herdr.session_socket(&route.herdr_session_name.0))
+                    .is_some_and(|socket| nexus.herdr.session_streams.is_connected(&socket)),
+                _ => false,
+            };
+            let rearmed = nexus.pane_watch_rearms.taken(key) || source_returned;
             match self.watches.get(key) {
                 Some(PaneWatchEntry::Watching { .. }) if rearmed => {
                     if let Some(PaneWatchEntry::Watching {
@@ -1265,6 +1279,7 @@ impl<'scope> PassesPaneWatches<'scope> for ReapedPaneWatches<'scope> {
 impl ServesReapedPaneWatches for RunningNexus {
     fn serve_reaped_pane_watches<'scope, 'env>(&'env self, scope: &'scope Scope<'scope, 'env>) {
         let changes = self.store.launch_changes.clone();
+        self.herdr.session_streams.announce_to(changes.clone());
         let mut watches = ReapedPaneWatches::default();
         loop {
             let seen = changes.current();
@@ -1323,10 +1338,14 @@ impl WatchesReapedPane for RunningNexus {
             .herdr
             .session_streams
             .follow(&socket, Some(&route.herdr_pane_id.0))
-            .and_then(|mut cursor| {
-                cursor.connected(None, Some(cancellation))?;
-                Ok(cursor)
-            }) {
+            .and_then(
+                |mut cursor| match cursor.next_change(&[], None, Some(cancellation))? {
+                    SessionCue::Changed => Ok(cursor),
+                    _ => Err(crate::herdr::events::HerdrSubscriptionFailure::Protocol(
+                        "Herdr session unavailable".into(),
+                    )),
+                },
+            ) {
             Ok(events) => events,
             Err(crate::herdr::events::HerdrSubscriptionFailure::Cancelled(cause)) => {
                 return PaneWatchEnd::Cancelled(cause);
@@ -1432,14 +1451,13 @@ impl WatchesReapedPane for RunningNexus {
                     }
                 }
                 Ok(SessionCue::Unavailable) => {
-                    if let Err(end) = self.worker_rewrite(
-                        predecessor,
-                        armed,
-                        cancellation,
-                        ReapStanding::HerdrUnavailable,
-                    ) {
-                        return end;
-                    }
+                    return match self.herdr.pane_ownership_until(&node, cancellation) {
+                        Err(cause) => PaneWatchEnd::Cancelled(cause),
+                        Ok(PaneOwnership::Absent) => {
+                            self.worker_act(predecessor, armed, cancellation)
+                        }
+                        Ok(_) => PaneWatchEnd::Lapsed(PaneWatchLapse::StreamClosedPanePresent),
+                    };
                 }
                 Ok(SessionCue::Deadline | SessionCue::Other) => {}
             }

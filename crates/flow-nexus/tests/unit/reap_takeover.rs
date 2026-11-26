@@ -13,8 +13,8 @@
 //! events server's subscriptions.
 
 use super::reaping::{
-    LogicalState, NamesHerdrFiles, PREDECESSOR, PREDECESSOR_PANE, PaneShown, ReapWorld, SUCCESSOR,
-    StagesReap, delivery_rejected, is_reap_pending, vetted, with_supervisor,
+    LogicalState, NamesHerdrFiles, PREDECESSOR, PaneShown, ReapWorld, SUCCESSOR, StagesReap,
+    delivery_rejected, is_reap_pending, vetted, with_supervisor,
 };
 use crate::Dispatches;
 use crate::generated::memory::{
@@ -263,7 +263,7 @@ fn settle_unrecorded(world: &ReapWorld) {
         .refuse_next(RefusedWrite::ReapSettle);
     assert!(is_reap_pending(&world.replace(), ReapStanding::Owed));
     world.until("the close", &mut || world.closes() == 1);
-    world.events.emit_gone(PREDECESSOR_PANE);
+    world.predecessor_pane_gone();
     world.until("the refused settlement", &mut || {
         world.standing() == Some(ReapStanding::SettleUnrecorded)
     });
@@ -474,7 +474,7 @@ fn a_pane_owed_reap_at_its_successors_stop_is_held_by_the_address_and_settled_by
     let ends = with_supervisor(&world.fixture, || {
         held_by_the_address(&world, PaneShown::SessionUnreported);
         assert_eq!(world.closes(), 1, "only the first worker's refused close");
-        world.events.emit_gone(PREDECESSOR_PANE);
+        world.predecessor_pane_gone();
         world.until("the reap settled", &mut || world.row().is_none());
     });
     assert_eq!(world.closes(), 1, "exactly one close across both workers");
@@ -612,7 +612,7 @@ fn a_crash_after_the_successor_end_commit_is_recovered_from_the_rows_once() {
             .store
             .faults
             .refuse_next(RefusedWrite::ReapSettle);
-        world.events.emit_gone(PREDECESSOR_PANE);
+        world.predecessor_pane_gone();
         world.until("the refused settlement", &mut || {
             world.standing() == Some(ReapStanding::SettleUnrecorded)
         });
@@ -1103,7 +1103,7 @@ fn a_taken_over_reap_survives_a_restart_under_its_owner() {
         world.until("one close of the Owned pane", &mut || {
             world.closes() == closes + 1
         });
-        world.events.emit_gone(PREDECESSOR_PANE);
+        world.predecessor_pane_gone();
         world.until("the reap settled", &mut || world.row().is_none());
     });
     assert_eq!(world.closes(), closes + 1);
@@ -1213,7 +1213,7 @@ fn a_stale_worker_held_at_revalidation_writes_nothing() {
                 world.two_passes();
                 let held = world.armed().last().cloned().expect("a waiting worker");
                 hooks.revalidation_hold.arm();
-                world.events.emit_gone(PREDECESSOR_PANE);
+                world.predecessor_pane_gone();
                 assert!(
                     hooks.revalidation_hold.arrived_by(1, deadline()),
                     "{case}: the worker consumed its cue and holds before the gate"
@@ -1351,7 +1351,7 @@ fn delivery_to_a_new_successor_is_never_held_by_a_predecessor_reap() {
         world.until("the worker under N", &mut || world.armed().len() == 3);
         world.two_passes();
         unheld("the row taken over, its worker waiting");
-        world.events.emit_gone(PREDECESSOR_PANE);
+        world.predecessor_pane_gone();
         world.until("the reap settled", &mut || world.row().is_none());
         unheld("the reap settled");
     });

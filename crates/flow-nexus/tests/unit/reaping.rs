@@ -213,6 +213,9 @@ impl ServesEventsStream for EventsShared {
         append(&self.log, "events.subscribe");
         {
             let mut state = self.state.lock().unwrap();
+            if state.close_streams {
+                return;
+            }
             state.subscriptions += 1;
             self.changed.notify_all();
             while state.withhold {
@@ -334,6 +337,8 @@ pub(super) trait StagesReap {
     fn staged(id: &str) -> Self;
     /// What the next `api snapshot` shows of the predecessor's pane.
     fn show(&self, shown: PaneShown);
+    /// The source changes first. Its edge tells the watcher to inspect that snapshot.
+    fn predecessor_pane_gone(&self);
     /// The exit status of the next `pane close`.
     fn close_exits(&self, status: i32);
     /// The process `pane process-info` shows in the predecessor's
@@ -396,6 +401,11 @@ impl StagesReap for ReapWorld {
         world
     }
 
+    fn predecessor_pane_gone(&self) {
+        self.show(PaneShown::Absent);
+        self.events.emit_gone(PREDECESSOR_PANE);
+    }
+
     fn show(&self, shown: PaneShown) {
         // The successor's own pane is shown until a test takes it away.
         let mut agents = if self.fixture.file("successor-gone").exists() {
@@ -455,7 +465,9 @@ impl StagesReap for ReapWorld {
                 "type":"session_snapshot"}
             })
         };
-        fs::write(self.fixture.file("snapshot.json"), snapshot.to_string()).unwrap();
+        let temporary = self.fixture.file("snapshot.next");
+        fs::write(&temporary, snapshot.to_string()).unwrap();
+        fs::rename(temporary, self.fixture.file("snapshot.json")).unwrap();
     }
 
     fn foreground(&self, pid: u32) {
@@ -735,6 +747,8 @@ pub(super) fn finish_reaps(fixture: &NexusFixture) {
             HerdrRouteSelection::Unavailable => None,
         };
         if let Some(route) = &route {
+            use super::ControlsHerdrSnapshot;
+            fixture.set_agents(vec![fixture.successor_agent()]);
             events.emit_gone(&route.herdr_pane_id.0);
         }
         let cancellation =
@@ -853,7 +867,7 @@ fn a_reap_is_answered_pending_as_soon_as_it_is_owed_and_closed_outside_the_gate(
                 .events
                 .wait_for("the subscription", |subscribed, _| subscribed >= 1);
             world.until("the close", &mut || world.closes() == 1);
-            world.events.emit_gone(PREDECESSOR_PANE);
+            world.predecessor_pane_gone();
             world.until("the reap settled", &mut || {
                 world
                     .fixture
@@ -968,7 +982,7 @@ fn a_pending_reap_is_taken_up_at_the_successors_next_rest() {
             assert_eq!(world.calls().len(), calls_before, "the rest calls no Herdr");
         }
         world.until("a second close", &mut || world.closes() == 2);
-        world.events.emit_gone(PREDECESSOR_PANE);
+        world.predecessor_pane_gone();
         world.until("the reap settled", &mut || world.standing().is_none());
     });
     assert!(matches!(
@@ -996,7 +1010,7 @@ fn a_pending_reap_is_taken_up_when_the_predecessors_pane_is_seen_gone() {
             world.standing() == Some(ReapStanding::CloseRefused)
         });
         let closes = world.closes();
-        world.events.emit_gone(PREDECESSOR_PANE);
+        world.predecessor_pane_gone();
         world.until("the reap settled", &mut || world.standing().is_none());
         assert_eq!(world.closes(), closes, "no close after the event");
     });
@@ -1076,7 +1090,7 @@ fn a_refused_reap_owing_commit_leaves_only_the_successor_receiving() {
         assert_eq!(world.closes(), 0, "W3 is written with no Herdr close");
         with_supervisor(&world.fixture, || {
             world.until("the close", &mut || world.closes() == 1);
-            world.events.emit_gone(PREDECESSOR_PANE);
+            world.predecessor_pane_gone();
             world.until("the reap settled", &mut || world.standing().is_none());
         });
         assert!(matches!(
@@ -1201,7 +1215,7 @@ fn a_crash_at_each_replacement_point_recovers_the_reap_once() {
             assert!(is_reap_pending(&world.replace(), ReapStanding::Owed));
             with_supervisor(&world.fixture, || {
                 world.until("the close", &mut || world.closes() == 1);
-                world.events.emit_gone(PREDECESSOR_PANE);
+                world.predecessor_pane_gone();
                 assert!(
                     world
                         .fixture
@@ -1245,7 +1259,7 @@ fn a_crash_at_each_replacement_point_recovers_the_reap_once() {
         if point != CrashPoint::AfterReaped {
             with_supervisor(&world.fixture, || {
                 world.until("the close", &mut || world.closes() == 1);
-                world.events.emit_gone(PREDECESSOR_PANE);
+                world.predecessor_pane_gone();
                 world.until("the reap settled", &mut || world.standing().is_none());
             });
             assert_eq!(world.closes(), 1, "{point:?}: one close");
@@ -1278,7 +1292,7 @@ fn a_crash_after_the_pane_closed_settles_from_the_opening_snapshot_without_a_sec
         let ends = with_supervisor(&world.fixture, || {
             world.until("the close", &mut || world.closes() == 1);
             if point == CrashPoint::WatchAfterGone {
-                world.events.emit_gone(PREDECESSOR_PANE);
+                world.predecessor_pane_gone();
             }
             assert!(
                 world
@@ -1348,7 +1362,7 @@ fn a_pane_running_another_session_is_never_closed() {
             world.launch_status(),
             LaunchStatusOutcome::ReapPending(_)
         ));
-        world.events.emit_gone(PREDECESSOR_PANE);
+        world.predecessor_pane_gone();
         world.until("the reap settled", &mut || world.standing().is_none());
     });
     assert_eq!(world.closes(), 0, "another session's pane is never closed");
@@ -1452,9 +1466,19 @@ fn a_retracted_obligation_cancels_and_joins_its_watch() {
                 .reaped(PREDECESSOR, closing)
                 .unwrap();
         }
-        world
-            .events
-            .wait_for("the subscription closed", |_, closed| closed >= 1);
+        use crate::reaping::RunsPaneWatchHooks;
+        assert!(
+            world
+                .fixture
+                .nexus
+                .pane_watch_hooks
+                .workers_joined_by(1, Instant::now() + Duration::from_secs(20))
+        );
+        assert_eq!(
+            world.events.subscriptions(),
+            1,
+            "retracting a cursor leaves the shared wire standing"
+        );
         assert_eq!(
             world.fixture.nexus.store.faults.attempts().len(),
             attempts + 1,
@@ -1627,9 +1651,22 @@ fn a_rearmed_worker_is_joined_once_and_its_late_completion_joins_no_other() {
             let _turn = world.fixture.nexus.dispatch_gate.lock().unwrap();
             world.fixture.nexus.take_up_at_rest(SUCCESSOR);
         }
-        world
-            .events
-            .wait_for("the rearmed subscription", |subscribed, _| subscribed >= 2);
+        world.until("the obligation worker rearmed", &mut || {
+            world
+                .fixture
+                .nexus
+                .pane_watch_hooks
+                .spawned
+                .lock()
+                .unwrap()
+                .len()
+                >= 2
+        });
+        assert_eq!(
+            world.events.subscriptions(),
+            1,
+            "rearming a worker does not create a session wire"
+        );
         // Two passes in turn: the second runs wholly after the rearm's own
         // pass, so it has drained the first worker's completion.
         for _ in 0..2 {
@@ -1646,7 +1683,7 @@ fn a_rearmed_worker_is_joined_once_and_its_late_completion_joins_no_other() {
             1,
             "the first worker's late completion joins no other"
         );
-        world.events.emit_gone(PREDECESSOR_PANE);
+        world.predecessor_pane_gone();
         world.until("the reap settled", &mut || world.standing().is_none());
     });
     assert_eq!(hooks.spawned.lock().unwrap().len(), 2);
@@ -1697,9 +1734,22 @@ fn a_lapsed_watch_is_armed_again_only_by_a_bearing_event() {
             let _turn = world.fixture.nexus.dispatch_gate.lock().unwrap();
             world.fixture.nexus.take_up_at_rest(SUCCESSOR);
         }
-        world
-            .events
-            .wait_for("the rearmed subscription", |subscribed, _| subscribed >= 2);
+        world.until("the obligation worker rearmed", &mut || {
+            world
+                .fixture
+                .nexus
+                .pane_watch_hooks
+                .spawned
+                .lock()
+                .unwrap()
+                .len()
+                >= 2
+        });
+        assert_eq!(
+            world.events.subscriptions(),
+            1,
+            "rearming a worker does not create a session wire"
+        );
     });
     assert!(
         ends.iter()
@@ -1720,7 +1770,7 @@ fn a_stale_worker_writes_nothing_and_the_address_keeps_one_receiving_flow() {
             world.standing() == Some(ReapStanding::CloseRefused)
         });
         let turn = world.fixture.nexus.dispatch_gate.lock().unwrap();
-        world.events.emit_gone(PREDECESSOR_PANE);
+        world.predecessor_pane_gone();
         // While the test holds the gate, the row settles by the store's own
         // record, and its successor ends.
         let closing =
@@ -1780,7 +1830,7 @@ fn a_refused_worker_commit_keeps_the_successor_the_only_receiving_flow() {
             .refuse_next(RefusedWrite::ReapSettle);
         assert!(is_reap_pending(&world.replace(), ReapStanding::Owed));
         world.until("the close", &mut || world.closes() == 1);
-        world.events.emit_gone(PREDECESSOR_PANE);
+        world.predecessor_pane_gone();
         world.until("the refused settlement", &mut || {
             world.standing() == Some(ReapStanding::SettleUnrecorded)
         });
@@ -1820,7 +1870,7 @@ fn a_watch_whose_act_is_refused_is_not_armed_again_by_its_own_announcement() {
         faults.refuse_next(RefusedWrite::ReapRewrite);
         assert!(is_reap_pending(&world.replace(), ReapStanding::Owed));
         world.until("the close", &mut || world.closes() == 1);
-        world.events.emit_gone(PREDECESSOR_PANE);
+        world.predecessor_pane_gone();
         world.until("the refused act", &mut || {
             world
                 .fixture
@@ -1862,7 +1912,7 @@ fn a_panicked_watch_lapses_and_is_not_rearmed_by_the_pass() {
         world
             .events
             .wait_for("the subscription", |subscribed, _| subscribed >= 1);
-        world.events.emit_gone("another-pane");
+        world.predecessor_pane_gone();
         // The worker panics at the event; the next pass joins it Lapsed.
         assert!(
             world.fixture.nexus.store.launch_changes.until_holds(
@@ -3423,7 +3473,7 @@ fn a_pane_watch_subscribes_before_its_opening_snapshot() {
         );
         world.events.release_acknowledgement();
         world.until("the close", &mut || world.closes() == 1);
-        world.events.emit_gone(PREDECESSOR_PANE);
+        world.predecessor_pane_gone();
         world.until("the reap settled", &mut || world.standing().is_none());
     });
     let calls = world.calls();
@@ -3445,7 +3495,7 @@ fn an_unreadable_snapshot_writes_herdr_unavailable_and_waits_for_the_event() {
             world.standing() == Some(ReapStanding::HerdrUnavailable)
         });
         assert_eq!(inspected_reap(&world), Some(ReapStanding::HerdrUnavailable));
-        world.events.emit_gone(PREDECESSOR_PANE);
+        world.predecessor_pane_gone();
         world.until("the reap settled", &mut || world.standing().is_none());
     });
     assert_eq!(world.closes(), 0);

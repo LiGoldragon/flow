@@ -9197,6 +9197,48 @@ mod tests {
             observer.join().unwrap();
         });
     }
+    /// Reads the store owner's authorized regular-file export. Only the
+    /// private copy under the test tempdir is passed to the store engine.
+    /// No process, service loop, dispatch or live endpoint is started.
+    #[test]
+    #[ignore = "requires the store owner's restricted 0.60.7 snapshot"]
+    fn takeover_of_disposable_store_snapshot_preserves_queues_without_native_sources() {
+        use crate::seat_observation::ObservesCurrentSeats;
+        use crate::store::current_seat::{CurrentSeatRead, RecordsCurrentSeats};
+        use crate::store::logical_delivery::MintsRequestIds;
+        use crate::store::{ManagesMetaflowState, ReadsFlowRows};
+        let snapshot =
+            std::env::var_os("FLOW_RECOVERY_STORE_SNAPSHOT").expect("authorized snapshot");
+        let snapshot = Path::new(&snapshot);
+        assert!(snapshot.is_absolute() && fs::symlink_metadata(snapshot).unwrap().is_file());
+        let fixture = NexusFixture::with_store(|destination| {
+            assert!(!destination.exists());
+            fs::copy(snapshot, destination).expect("copy restricted export to disposable store");
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(destination, fs::Permissions::from_mode(0o600)).unwrap();
+        });
+        let store = &fixture.nexus.store;
+        assert_eq!(store.store_identity().unwrap().0, "7551gjk27y7nagmi");
+        let before = store.list_metaflows().unwrap();
+        let mut seats = 0;
+        fixture.nexus.observe_takeover().unwrap();
+        for seat in &before {
+            if let flow_ethos::State::Awake(id) = &seat.state {
+                assert!(store.flow_node(&id.0).unwrap().is_some());
+                assert!(matches!(
+                    store.current_seat(&id.0).unwrap(),
+                    CurrentSeatRead::NoRecord
+                ));
+                seats += 1;
+            }
+        }
+        assert!(seats > 0, "copy contained no bound seats");
+        assert_eq!(before, store.list_metaflows().unwrap());
+        println!(
+            "store 7551gjk27y7nagmi: {seats} bound seats; unavailable sources, no fabricated state; all queues unchanged"
+        );
+    }
+
     #[test]
     fn a_missing_agent_record_does_not_ask_herdr_or_end_the_flow() {
         use crate::observe_agent::ObservesAgent;

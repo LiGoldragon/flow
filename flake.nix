@@ -157,6 +157,18 @@
               inherit (flowEthosWithDatom) dependencies;
             };
           };
+          # Recovery runs the same test binaries with rustc, independently
+          # of the project's ordinary clippy-driver test builds.
+          behaviorBuilds = lib.mapAttrs (_: build:
+            (build.override { useClippy = false; }).overrideAttrs (old: {
+              preBuild = (old.preBuild or "") + ''
+                EXTRA_RUSTC_FLAGS=
+              '';
+            })
+          ) (removeAttrs testBuilds untested);
+          behaviorChecks = lib.mapAttrs (
+            name: tests: crateCheck name tests (checkEnvironments.${name} or { })
+          ) behaviorBuilds;
           # The binaries of builds copied into one bin directory: the daemon,
           # flow-nexus-daemon, finds flow-hook beside its own resolved
           # executable.
@@ -497,6 +509,8 @@
             members
             commands
             testBuilds
+            behaviorBuilds
+            behaviorChecks
             findTest
             binaries
             crateCheck
@@ -536,8 +550,8 @@
           # test kept out of every check (one that needs a store no repository
           # holds, named at run time) can be run by name where a build runs.
           store-proof = pkgs.runCommand "flow-nexus-store-proof" { } ''
-            ${context.findTest "binary" context.testBuilds.flow-nexus
-              "store::request_id_migration_process::actual_predecessor_memory_evolves_serves_and_refuses_malformed_policy_without_writing"
+            ${context.findTest "binary" context.behaviorBuilds.flow-nexus
+              "tests::takeover_of_disposable_store_snapshot_preserves_queues_without_native_sources"
             }
             mkdir -p "$out/bin"
             cp "$binary" "$out/bin/flow-nexus-store-proof"
@@ -581,6 +595,16 @@
       # Every check, the base's cargo-nix with the ones above; checks.default
       # is all of them, so a green default is the whole gate.
       checks = forSystems (system: (mkContext system).workspace.checks);
+
+      # The Director's recovery-specific gate; the ordinary project checks
+      # above remain intact. The restricted snapshot proof is run separately
+      # by the store owner with packages.store-proof, never copied into Nix.
+      recoveryChecks = forSystems (system:
+        let c = mkContext system; in c.behaviorChecks // {
+          inherit (c.workspace.checks) cargo-nix flow-request-id-immutable-contract-pins
+            no-free-functions no-inherent-methods;
+        });
+      recoveryLint = forSystems (system: (mkContext system).testBuilds.flow-nexus);
 
       devShells = forSystems (
         system:

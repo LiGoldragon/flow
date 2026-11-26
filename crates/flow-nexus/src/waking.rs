@@ -81,7 +81,7 @@
 //! that arrive while the wake runs are handed to the woken flow once it is
 //! up, oldest first.
 //!
-//! Each choice of when a seat rests is one function of [`WakePolicy`].
+//! The decision record names whether the seat rests.
 //!
 //! Whether a metaflow is due a wake is read from Flow's records alone
 //! ([`SleepsAndWakesSeats::wake_is_due`]): it is Asleep and holds work that
@@ -139,22 +139,11 @@ use crate::store::successor::{OwesSuccessors, ReadsContinuity, SuccessionCause, 
 use crate::store::{ManagesMetaflowState, ReadsFlowRows, ReadsLaunchAttempt};
 use meta_signal_flow::Continuity;
 use signal_flow::{
-    Address, AgentState, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile,
-    Metaflow, NativePrompt, Origin, Output, QueueEntry,
+    Address, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile, Metaflow,
+    NativePrompt, Origin, Output, QueueEntry,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Condvar, Mutex};
-
-/// The choices of rest and wake, each in one place.
-pub trait WakePolicy {
-    /// A Claude seat that reported Stopped rests when Herdr shows it Idle
-    /// or Done. Working, Blocked or unreadable is not resting.
-    fn rests_at(agent_state: &AgentState) -> bool {
-        matches!(agent_state, AgentState::Idle | AgentState::Done)
-    }
-}
-
-impl WakePolicy for RunningNexus {}
 
 /// A request's priority, read for its hand-over.
 pub trait ReadsPriority {
@@ -969,64 +958,16 @@ pub(crate) trait WakesInParts {
     fn successor_refused(&self, flow_id: &str, reason: &KeptAtStop);
 }
 
-/// Whether a launch opens its seat with no first prompt: a Simplified seat
-/// with no instruction, whose first model turn is the queued request a
-/// drain types.
-pub(crate) trait OpensWithoutPrompt {
-    fn opens_without_prompt(&self) -> bool;
-}
-
-impl OpensWithoutPrompt for LaunchProfile {
-    fn opens_without_prompt(&self) -> bool {
-        self.flow_kind == signal_flow::FlowKind::Simplified
-            && self.instruction_prompt.0.trim().is_empty()
-    }
-}
-
 pub(crate) trait ReadsClaudeDelivery {
-    fn simplified_first_input_ready(&self, node: &FlowNode) -> bool;
     fn claude_transcript(&self, node: &FlowNode) -> Option<std::path::PathBuf>;
-    fn claude_main_turn_ended(&self, node: &FlowNode) -> bool;
 }
 
 impl ReadsClaudeDelivery for RunningNexus {
-    fn simplified_first_input_ready(&self, node: &FlowNode) -> bool {
-        if node.harness_kind != HarnessKind::Claude
-            || node.flow_lifecycle != signal_flow::FlowLifecycle::Active
-            || !self
-                .last_launch_profile(&node.flow_id.0)
-                .is_some_and(|profile| profile.opens_without_prompt())
-        {
-            return false;
-        }
-        let Ok(events) = self.store.events(&node.flow_id.0) else {
-            return false;
-        };
-        if events.unwrap_or_default().iter().any(|event| {
-            matches!(
-                event,
-                RecordedHarnessEvent::PromptSubmitted(_) | RecordedHarnessEvent::Stopped(_)
-            )
-        }) {
-            return false;
-        }
-        self.claude_transcript(node)
-            .is_none_or(|path| path.main_turn_unstarted(&node.session_id.0))
-    }
-
     fn claude_transcript(&self, node: &FlowNode) -> Option<std::path::PathBuf> {
         self.herdr
             .native_transcript_root(&HarnessKind::Claude, "")
             .ok()?
             .session_transcript(&node.session_id.0)
-    }
-
-    fn claude_main_turn_ended(&self, node: &FlowNode) -> bool {
-        node.harness_kind == HarnessKind::Claude
-            && (self.simplified_first_input_ready(node)
-                || self
-                    .claude_transcript(node)
-                    .is_some_and(|transcript| transcript.main_turn_ended(&node.session_id.0)))
     }
 }
 

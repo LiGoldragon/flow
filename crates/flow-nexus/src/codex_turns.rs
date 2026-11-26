@@ -790,9 +790,6 @@ pub trait SettlesRestingCodexSeats {
     fn codex_flow_on(&self, thread: &str) -> Option<FlowNode>;
     /// Whether the flow is a Codex flow whose thread stands at rest.
     fn codex_resting(&self, flow_id: &str) -> bool;
-    /// Whether the flow is a Codex flow whose thread holds a turn, an item
-    /// or a letter open.
-    fn codex_in_turn(&self, flow_id: &str) -> bool;
     /// The Codex flow a metaflow is Awake as, its launch confirmed, no wake
     /// holding it, its thread resting: the flow whose rest is settled.
     fn resting_codex_seat(&self, address: &Address) -> Option<FlowId>;
@@ -928,15 +925,6 @@ impl SettlesRestingCodexSeats for RunningNexus {
             && matches!(
                 self.store.state_of(AskedFlow(FlowId(flow_id.into()))),
                 Ok(Some(meta_signal_flow::State::Resting))
-            )
-    }
-
-    fn codex_in_turn(&self, flow_id: &str) -> bool {
-        use crate::generated::transitions::{AskedFlow, RecordsTransitions};
-        matches!(self.store.flow_node(flow_id), Ok(Some(node)) if node.harness_kind == HarnessKind::Codex)
-            && matches!(
-                self.store.state_of(AskedFlow(FlowId(flow_id.into()))),
-                Ok(Some(meta_signal_flow::State::Acting))
             )
     }
 

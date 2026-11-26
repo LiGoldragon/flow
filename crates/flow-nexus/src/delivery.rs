@@ -192,28 +192,34 @@ pub trait ReadsLeasedPane {
     /// The agent's state when the pane may be written: bound, ready, not
     /// Blocked, and its composer blank. A pane Herdr shows gone records the
     /// flow Exited, where that observation is made.
+    fn harness_input_state(&self, target: &DeliveryTarget) -> Result<AgentState, PaneRefusal>;
     fn writable_state(&self, target: &DeliveryTarget) -> Result<AgentState, PaneRefusal>;
 }
 
 impl ReadsLeasedPane for RunningNexus {
-    fn writable_state(&self, target: &DeliveryTarget) -> Result<AgentState, PaneRefusal> {
-        let agent_state = match self.herdr.pane_agent(&target.node) {
+    fn harness_input_state(&self, target: &DeliveryTarget) -> Result<AgentState, PaneRefusal> {
+        use crate::generated::memory::{SeatActivity, SeatStanding};
+        use crate::store::current_seat::SeatDecision;
+        match self.herdr.pane_agent(&target.node) {
             PaneAgent::Present {
-                agent_state,
                 ready: true,
-            } => agent_state,
-            PaneAgent::Present { ready: false, .. } => {
-                eprintln!(
-                    "flow-nexus: Herdr preflight flow={} ready=false",
-                    target.node.flow_id.0
-                );
-                return Err(PaneRefusal::RouteUnavailable);
+                agent_state: AgentState::Blocked,
+            } => return Ok(AgentState::Blocked),
+            PaneAgent::Present { ready: true, .. } => {}
+            _ => return Err(PaneRefusal::RouteUnavailable),
+        }
+        match self.store.seat_decision(&target.node.flow_id.0) {
+            Ok(SeatDecision::Observed(SeatStanding::Alive(SeatActivity::Working))) => {
+                Ok(AgentState::Working)
             }
-            PaneAgent::Unreadable => {
-                return Err(PaneRefusal::RouteUnavailable);
+            Ok(SeatDecision::Observed(SeatStanding::Alive(SeatActivity::Resting))) => {
+                Ok(AgentState::Idle)
             }
-            PaneAgent::Absent => return Err(PaneRefusal::RouteUnavailable),
-        };
+            _ => Err(PaneRefusal::RouteUnavailable),
+        }
+    }
+    fn writable_state(&self, target: &DeliveryTarget) -> Result<AgentState, PaneRefusal> {
+        let agent_state = self.harness_input_state(target)?;
         if agent_state == AgentState::Blocked {
             return Err(PaneRefusal::RecipientBlocked);
         }
@@ -698,23 +704,7 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         // interrupted; what the interrupt puts back is settled below.
         let mut composer_was_blank = false;
         let mut agent_state = if hard {
-            let agent_state = match self.nexus.herdr.pane_agent(&self.target.node) {
-                PaneAgent::Present {
-                    agent_state,
-                    ready: true,
-                } => agent_state,
-                PaneAgent::Present { ready: false, .. } => {
-                    eprintln!(
-                        "flow-nexus: Herdr preflight flow={} ready=false",
-                        self.target.node.flow_id.0
-                    );
-                    return Err(DeliveryRejection::RouteUnavailable);
-                }
-                PaneAgent::Unreadable => {
-                    return Err(DeliveryRejection::RouteUnavailable);
-                }
-                PaneAgent::Absent => return Err(DeliveryRejection::RouteUnavailable),
-            };
+            let agent_state = self.nexus.harness_input_state(self.target)?;
             match self
                 .nexus
                 .herdr

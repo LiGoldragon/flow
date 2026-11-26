@@ -38,7 +38,7 @@ use crate::reminding::CountsUnixSeconds;
 use crate::store::delivery::{RecordsDeliveries, SelectsHarnessProfile};
 use crate::store::{ReadsFlowRoles, ReadsFlowRows};
 use meta_signal_flow::{Output, Refused_Data, State, StoreFailure};
-use signal_flow::{AgentState, HarnessKind, HerdrRouteSelection};
+use signal_flow::{HarnessKind, HerdrRouteSelection};
 
 impl HeedsOverrides for RunningNexus {
     /// A switch Memory cannot read is no Hold: the Nexus acts as it did.
@@ -132,18 +132,23 @@ impl InterruptsRunningTurns for RunningNexus {
             Ok(None) => return TurnInterruption::Rested,
             Err(error) => return TurnInterruption::StoreRefused(error.to_string()),
         };
+        use crate::generated::memory::{SeatActivity, SeatStanding};
+        use crate::store::current_seat::{RecordsCurrentSeats, SeatDecision};
+        match self.store.seat_decision(&seat.flow_id.0) {
+            Ok(SeatDecision::Observed(SeatStanding::Alive(SeatActivity::Working))) => {}
+            Ok(SeatDecision::NoRecord) => return TurnInterruption::PaneUnreadable,
+            Ok(_) => return TurnInterruption::Rested,
+            Err(error) => return TurnInterruption::StoreRefused(error.to_string()),
+        }
         match node.harness_kind {
             HarnessKind::Claude => {
                 let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
                     return TurnInterruption::Rested;
                 };
                 match self.herdr.pane_agent(&node) {
-                    PaneAgent::Present {
-                        agent_state: AgentState::Working | AgentState::Blocked,
-                        ..
-                    } => {}
-                    PaneAgent::Present { .. } | PaneAgent::Absent => {
-                        return TurnInterruption::Rested;
+                    PaneAgent::Present { ready: true, .. } => {}
+                    PaneAgent::Absent | PaneAgent::Present { ready: false, .. } => {
+                        return TurnInterruption::PaneUnreadable;
                     }
                     PaneAgent::Unreadable => return TurnInterruption::PaneUnreadable,
                 }

@@ -1,7 +1,7 @@
 //! A confirmed Claude Stop can precede Herdr's writable pane. Keep the
 //! existing queue indexed by its bound rest until the pane announces ready.
 use crate::generated::overriding::{HeedsOverrides, SerializesPermaflowEffects};
-use crate::herdr::pane::{PaneAgent, ReadsAgentStatus, WritesPane};
+use crate::herdr::pane::{PaneAgent, WritesPane};
 use crate::observation_lifetime::{
     CancelsObservation, ObservationCancellation, ObservationCancellationCause,
 };
@@ -13,7 +13,7 @@ use crate::store::transitions::ReadsRestEpoch;
 use crate::store::{AnnouncesLaunchChanges, LaunchChanges, ReadsFlowRows};
 use crate::waking::{DrainsHeldSeats, HoldsSoftForIdle, HoldsWakingMetaflows};
 use crate::{HoldsStopRequest, RunningNexus};
-use signal_flow::{Address, AgentState, HarnessKind};
+use signal_flow::{Address, HarnessKind};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::thread::{Scope, ScopedJoinHandle};
@@ -222,23 +222,12 @@ impl ObservesBoundRest for RunningNexus {
         }
         while let Some(event) = events.next_event(cancellation)? {
             match event {
-                PaneEvent::Status(status)
-                    if matches!(
-                        Some(status.as_str()).agent_state(),
-                        AgentState::Idle | AgentState::Done
-                    ) =>
-                {
-                    if self.drain_bound_rest(rest) {
-                        return Ok(());
-                    }
-                }
-                PaneEvent::Updated => {
+                PaneEvent::Status(_) | PaneEvent::Updated => {
                     if self.drain_bound_rest(rest) {
                         return Ok(());
                     }
                 }
                 PaneEvent::Gone => return Ok(()),
-                PaneEvent::Status(_) => {}
             }
         }
         Ok(())
@@ -254,10 +243,7 @@ impl ObservesBoundRest for RunningNexus {
         };
         if !matches!(
             self.herdr.pane_agent(&node),
-            PaneAgent::Present {
-                agent_state: AgentState::Idle | AgentState::Done,
-                ready: true,
-            }
+            PaneAgent::Present { ready: true, .. }
         ) {
             return false;
         }

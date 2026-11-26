@@ -76,7 +76,6 @@ use crate::RunningNexus;
 use crate::generated::memory::SeatBirth;
 use crate::generated::operation::{Failed_Data, Open_Data, Operation, Outcome, PaneLaunch};
 use crate::herdr::launch::{HoldsSystemPrompt, WaitsForPaneRest};
-use crate::herdr::pane::{PaneAgent, WritesPane};
 use crate::herdr::{HerdrCli, PaneOwnership, PanePresence, ReadsHerdrPanes};
 use crate::performing::Performs;
 use crate::store::effort_configuration::ReadsEffort;
@@ -692,7 +691,7 @@ impl RestartsInSteps for RunningNexus {
         use crate::store::NamesConfiguredModel;
         use crate::store::address_hold::HoldsLaunchAddress;
         use crate::store::metaflow::SleepsMetaflows;
-        use crate::waking::{HoldsWakingMetaflows, ReadsClaudeDelivery, WakePolicy};
+        use crate::waking::{HoldsWakingMetaflows, ReadsClaudeDelivery};
         let refused = |refusal: fn(signal_flow::FlowId) -> RestartRefusal| {
             Err(Box::new(Output::RestartRefused(refusal(
                 signal_flow::FlowId(flow_id.to_owned()),
@@ -808,18 +807,13 @@ impl RestartsInSteps for RunningNexus {
             // A working seat is restarted at its next idle event: asked
             // now, the restart is ordered for it and answered RestartQueued.
             PanePresence::Present if !at_idle_event => {
-                use crate::codex_turns::SettlesRestingCodexSeats;
-                let resting = match node.harness_kind {
-                    // A Codex seat rests as its app-server's thread does.
-                    HarnessKind::Codex => {
-                        !self.codex_in_turn(flow_id) && self.codex_resting(flow_id)
+                use crate::generated::memory::{SeatActivity, SeatStanding};
+                use crate::store::current_seat::{RecordsCurrentSeats, SeatDecision};
+                let resting = match self.store.seat_decision(flow_id) {
+                    Ok(SeatDecision::Observed(SeatStanding::Alive(activity))) => {
+                        activity == SeatActivity::Resting
                     }
-                    HarnessKind::Claude => {
-                        (match self.herdr.pane_agent(&node) {
-                            PaneAgent::Present { agent_state, .. } => Self::rests_at(&agent_state),
-                            PaneAgent::Absent | PaneAgent::Unreadable => false,
-                        }) && self.claude_main_turn_ended(&node)
-                    }
+                    _ => return refused(RestartRefusal::Busy),
                 };
                 if !resting {
                     return Err(Box::new(self.queue_restart(&address, flow_id)));

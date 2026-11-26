@@ -28,7 +28,7 @@ use crate::store::{
 };
 use crate::waking::{
     AnswersWakeRefusal, AtStop, FreshContext, HoldsWakingMetaflows, IdentifiesWakingLease,
-    KeptAtStop, PerformsWakeAndDrain, SleepsAndWakesSeats, WakePlan, WakePolicy, WakeRefusal,
+    KeptAtStop, PerformsWakeAndDrain, SleepsAndWakesSeats, WakePlan, WakeRefusal,
 };
 use flow_ethos::{Delivery, State};
 use signal_flow::{
@@ -1244,10 +1244,6 @@ fn a_flow_that_stopped_while_working_or_awaited_is_kept() {
 /// makes a wake due without judging its request kind.
 #[test]
 fn an_entry_marked_wake_makes_a_wake_due_at_every_layer() {
-    assert!(RunningNexus::rests_at(&signal_flow::AgentState::Idle));
-    assert!(RunningNexus::rests_at(&signal_flow::AgentState::Done));
-    assert!(!RunningNexus::rests_at(&signal_flow::AgentState::Working));
-
     let fixture = NexusFixture::new();
     for model in [Model::Astra, Model::Sol, Model::Luna, Model::Terra] {
         assert!(

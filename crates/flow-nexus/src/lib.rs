@@ -3814,6 +3814,8 @@ mod tests {
     enum PromptFixture<'a> {
         /// The text is typed and the reply is `agent_prompted` for this pane.
         Prompted(&'a str),
+        /// Blocks in the writer until the test releases it.
+        Stalled(&'a str, &'a Path),
         /// As Prompted, but a Claude seat's transcript records nothing yet:
         /// its receipt comes later, from its hook or its transcript.
         PromptedUnrecorded(&'a str),
@@ -3845,6 +3847,12 @@ mod tests {
                 )
             };
             match self {
+                Self::Stalled(pane, release) => format!(
+                    "touch '{}'; while [ ! -f '{}' ]; do sleep 0.01; done; {}",
+                    release.with_extension("entered").display(),
+                    release.display(),
+                    PromptFixture::Prompted(pane).shell(typed, agents, claude_receipt),
+                ),
                 Self::Prompted(pane) | Self::PromptedUnrecorded(pane) => {
                     // Herdr answers with the prompted pane's own AgentInfo,
                     // which the roster already holds; a pane the roster does

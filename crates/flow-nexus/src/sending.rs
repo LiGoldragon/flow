@@ -286,10 +286,10 @@ impl SendsRequests for RunningNexus {
         if let Err(error) = self.store.force_queue_wake(&address) {
             return Output::Refused(Refusal::Store(error.to_string()));
         }
+        drop(turn);
         if !asleep {
             self.drain_all(address.clone());
         }
-        drop(turn);
         if asleep {
             self.wake_due(address.clone());
         }
@@ -1362,10 +1362,7 @@ impl CompletesDirectSends for RunningNexus {
         // wake or hand-over out while this direct operation owns it.
         let outcome = match self.live_awake_flow(address) {
             None => self.wake(address.clone()),
-            Some(_) => {
-                let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
-                crate::waking::DrainsHeldSeats::drain_all_held(self, address.clone(), lease)
-            }
+            Some(_) => crate::waking::DrainsHeldSeats::drain_all_held(self, address.clone(), lease),
         };
         let state = match self.store.logical_delivery_snapshot(&logical_id) {
             Ok(Some(snapshot)) => snapshot.delivery_state,

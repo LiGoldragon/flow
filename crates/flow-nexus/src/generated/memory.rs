@@ -593,6 +593,7 @@ pub enum RequestState {
     Settled,
     Unsent,
     Parked,
+    InFlight,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

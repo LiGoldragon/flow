@@ -6,7 +6,7 @@ use super::ManagesMetaflowState;
 use super::handover::HoldsHandovers;
 use super::handover_reminders::SchedulesHandoverReminders;
 use super::metaflow::SleepsMetaflows;
-use super::queue_delivery::AccountsQueueDelivery;
+use super::queue_delivery::{AccountsQueueDelivery, QueueDeliveryAttempt, RequestState};
 use super::reminder::RecordsReminders;
 use super::*;
 pub(crate) use crate::generated::memory::StoredStoreIdentity;
@@ -28,6 +28,342 @@ use signal_flow::{
     Address, DeliverySnapshot, DeliveryState, Lock, LogicalDeliveryId, NativeReceipt, Refusal,
     Request, SendAcceptance, SendObservation, SentBy, Unknown_Data,
 };
+
+/// The existing launch settlement and the two exits of a marked pane write
+/// share one atomic queue/lifecycle commit.
+enum QueueOutcome<'a> {
+    Started(&'a str, DeliveryState),
+    Written(&'a str, Option<DeliveryState>),
+    Interrupted(Vec<QueueDeliveryAttempt>),
+}
+
+pub(crate) trait RecordsQueueWrites {
+    fn queue_entry_is_writable(&self, entry: &QueueEntry) -> Result<bool, StoreError>;
+    fn begin_queue_write(
+        &self,
+        address: &Address,
+        flow_id: &str,
+        entries: &[QueueEntry],
+    ) -> Result<bool, StoreError>;
+    fn finish_queue_write(
+        &self,
+        address: &Address,
+        flow_id: &str,
+        entries: &[QueueEntry],
+        state: Option<DeliveryState>,
+    ) -> Result<bool, StoreError>;
+    fn recover_queue_writes(&self) -> Result<(), StoreError>;
+}
+
+impl RecordsQueueWrites for FlowStore {
+    fn queue_entry_is_writable(&self, entry: &QueueEntry) -> Result<bool, StoreError> {
+        Ok(matches!(
+            self.queue_request_state(&entry.logical_delivery_id.0)?,
+            None | Some(RequestState::Queued | RequestState::Unsent)
+        ) && self
+            .logical_delivery_snapshot(&entry.logical_delivery_id)?
+            .is_none_or(|snapshot| {
+                matches!(
+                    snapshot.delivery_state,
+                    DeliveryState::Queued | DeliveryState::Retryable(_)
+                )
+            }))
+    }
+
+    fn begin_queue_write(
+        &self,
+        address: &Address,
+        flow_id: &str,
+        entries: &[QueueEntry],
+    ) -> Result<bool, StoreError> {
+        let _guard = self
+            .logical_deliveries
+            .write_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(stored) = self.stored_metaflow(address)? else {
+            return Ok(false);
+        };
+        if entries.is_empty()
+            || stored.metaflow.state
+                != flow_ethos::State::Awake(flow_ethos::FlowId(flow_id.to_owned()))
+            || !stored.metaflow.queue.0.starts_with(entries)
+        {
+            return Ok(false);
+        }
+        let mut commit = self.engine.begin_atomic_commit();
+        for entry in entries {
+            if !self.queue_entry_is_writable(entry)? {
+                return Ok(false);
+            }
+            commit =
+                self.stage_queue_request_state(address, entry, RequestState::InFlight, commit)?;
+        }
+        self.engine.commit_atomic(commit)?;
+        Ok(true)
+    }
+
+    fn finish_queue_write(
+        &self,
+        address: &Address,
+        flow_id: &str,
+        entries: &[QueueEntry],
+        state: Option<DeliveryState>,
+    ) -> Result<bool, StoreError> {
+        self.commit_queue_outcome(address, entries, QueueOutcome::Written(flow_id, state))
+    }
+
+    fn recover_queue_writes(&self) -> Result<(), StoreError> {
+        let mut by_request = std::collections::HashMap::<_, Vec<_>>::new();
+        for attempt in self.unfinished_queue_attempts()? {
+            if let meta_signal_flow::QueueEvidence::Logical(entry) = &attempt.queue_evidence {
+                by_request
+                    .entry((attempt.address.clone(), entry.logical_delivery_id.clone()))
+                    .or_default()
+                    .push(attempt);
+            }
+        }
+        for metaflow in self.list_metaflows()? {
+            let address = metaflow.address;
+            let mut interrupted = Vec::new();
+            let mut attempts = Vec::new();
+            for entry in metaflow.queue.0 {
+                let stock =
+                    by_request.remove(&(address.clone(), entry.logical_delivery_id.clone()));
+                if stock.is_some()
+                    || self.queue_request_state(&entry.logical_delivery_id.0)?
+                        == Some(RequestState::InFlight)
+                {
+                    interrupted.push(entry);
+                    attempts.extend(stock.into_iter().flatten());
+                }
+            }
+            if !interrupted.is_empty()
+                && !self.commit_queue_outcome(
+                    &address,
+                    &interrupted,
+                    QueueOutcome::Interrupted(attempts),
+                )?
+            {
+                return Err(StoreError::StateInvariant);
+            }
+        }
+        Ok(())
+    }
+}
+
+trait CommitsQueueOutcomes {
+    fn commit_queue_outcome(
+        &self,
+        address: &Address,
+        handed: &[QueueEntry],
+        outcome: QueueOutcome<'_>,
+    ) -> Result<bool, StoreError>;
+}
+
+impl CommitsQueueOutcomes for FlowStore {
+    fn commit_queue_outcome(
+        &self,
+        address: &Address,
+        handed: &[QueueEntry],
+        outcome: QueueOutcome<'_>,
+    ) -> Result<bool, StoreError> {
+        let _guard = self
+            .logical_deliveries
+            .write_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(mut stored) = self.stored_metaflow(address)? else {
+            return Ok(false);
+        };
+        let queue = &mut stored.metaflow.queue.0;
+        let (state, flow_id, request_state, attempts) = match outcome {
+            QueueOutcome::Started(flow_id, state) => {
+                if stored.metaflow.state
+                    != flow_ethos::State::Awake(flow_ethos::FlowId(flow_id.to_owned()))
+                    || !queue.starts_with(handed)
+                {
+                    return Ok(false);
+                }
+                (state, Some(flow_id), None, Vec::new())
+            }
+            QueueOutcome::Written(flow_id, state) => {
+                if !queue.starts_with(handed) {
+                    return Ok(false);
+                }
+                for entry in handed {
+                    if self.queue_request_state(&entry.logical_delivery_id.0)?
+                        != Some(RequestState::InFlight)
+                    {
+                        return Ok(false);
+                    }
+                }
+                let (state, request_state) = match state {
+                    Some(state) => (state, RequestState::Settled),
+                    None => (DeliveryState::Queued, RequestState::Queued),
+                };
+                (state, Some(flow_id), Some(request_state), Vec::new())
+            }
+            QueueOutcome::Interrupted(attempts) => {
+                if !handed.iter().all(|entry| queue.contains(entry)) {
+                    return Ok(false);
+                }
+                (
+                    DeliveryState::Uncertain,
+                    None,
+                    Some(RequestState::Settled),
+                    attempts,
+                )
+            }
+        };
+        let allocation = self.allocate_logical_cursor()?;
+        let mut next_cursor = allocation.cursor;
+        let mut changed = false;
+        let mut commit = self.engine.begin_atomic_commit();
+        for attempt in attempts {
+            commit = self.stage_interrupted_queue_attempt(attempt, commit)?;
+        }
+        let mut seen = std::collections::HashSet::new();
+        // Each request Delivered to the flow arrives there.
+        let mut arrived = Vec::new();
+        for entry in handed {
+            if let Some(request_state) = &request_state {
+                commit =
+                    self.stage_queue_request_state(address, entry, request_state.clone(), commit)?;
+            }
+            let records = self.engine.match_records(QueryPlan::key(
+                self.logical_deliveries.current,
+                RecordKey::new(entry.logical_delivery_id.clone().0),
+            ))?;
+            let Some(current) = records.records().first() else {
+                // A legacy queue entry has no logical lifecycle row. Its
+                // exact prefix position is still taken by this hand-over.
+                continue;
+            };
+            if !seen.insert(entry.logical_delivery_id.clone()) {
+                return Err(StoreError::StateInvariant);
+            }
+            if records.records().len() != 1 {
+                return Err(StoreError::StateInvariant);
+            }
+            if current.delivery_snapshot.address != *address {
+                return Err(StoreError::StateInvariant);
+            }
+            // A request whose record is already final, as a hand-over a
+            // crash left unrecorded may find it, keeps that record.
+            if matches!(
+                current.delivery_snapshot.delivery_state,
+                DeliveryState::Uncertain
+                    | DeliveryState::Delivered(_)
+                    | DeliveryState::Read
+                    | DeliveryState::Failed(_)
+                    | DeliveryState::Withdrawn
+                    | DeliveryState::Archived
+                    | DeliveryState::Abandoned
+            ) || current.delivery_snapshot.delivery_state == state
+            {
+                continue;
+            }
+            let mut snapshot = current.delivery_snapshot.clone();
+            snapshot.delivery_cursor = signal_flow::DeliveryCursor(next_cursor);
+            snapshot.delivery_state = state.clone();
+            if matches!(state, DeliveryState::Delivered(_)) {
+                arrived.push(snapshot.request_id.clone());
+            }
+            next_cursor = next_cursor
+                .checked_add(1)
+                .ok_or(StoreError::StateInvariant)?;
+            commit = commit
+                .mutate(
+                    self.logical_deliveries.current,
+                    CurrentLogicalDelivery {
+                        delivery_snapshot: snapshot.clone(),
+                        archived_cursor: crate::generated::memory::ArchivedCursor(None),
+                        delivery_admission: current.delivery_admission.clone(),
+                    },
+                )
+                .assert(
+                    self.logical_deliveries.events,
+                    LogicalDeliveryEvent {
+                        delivery_snapshot: snapshot,
+                    },
+                );
+            changed = true;
+        }
+        if changed {
+            let counter = LogicalDeliveryCounter {
+                next_cursor: crate::generated::memory::NextCursor(next_cursor),
+            };
+            commit = if allocation.existing {
+                commit.mutate(self.logical_deliveries.counter, counter)
+            } else {
+                commit.assert(self.logical_deliveries.counter, counter)
+            };
+        }
+        let receiver_is_current = flow_id.is_some_and(|id| {
+            matches!(&stored.metaflow.state, flow_ethos::State::Awake(current) if current.0 == id)
+        });
+        if state != DeliveryState::Queued {
+            let ids: std::collections::HashSet<_> = handed
+                .iter()
+                .map(|entry| &entry.logical_delivery_id)
+                .collect();
+            queue.retain(|entry| !ids.contains(&entry.logical_delivery_id));
+            commit = commit.mutate(self.metaflows, stored);
+        }
+        let _transitions = self
+            .transitions_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(flow_id) = flow_id
+            && !arrived.is_empty()
+        {
+            use crate::generated::transitions::{
+                Arrival, AskedFlow, Caused, ReceiptTurn, RecordsTransitions, TransitionWrite,
+            };
+            let moment = crate::generated::memory::Moment(
+                crate::reminding::CountsUnixSeconds::seconds_since_epoch(
+                    &std::time::SystemTime::now(),
+                ),
+            );
+            let seat = crate::generated::overriding::Seat {
+                flow_id: signal_flow::FlowId(flow_id.to_owned()),
+                address: address.clone(),
+            };
+            // An exit can win the dispatch gate while Herdr writes. The
+            // receipt still belongs to its original seat, but cannot put
+            // that ended seat back into an acting state.
+            let receipt_turn = if !receiver_is_current
+                || self.state_of(AskedFlow(seat.flow_id.clone()))?
+                    == Some(meta_signal_flow::State::Asleep)
+            {
+                ReceiptTurn::Ended
+            } else {
+                ReceiptTurn::Running
+            };
+            let arrivals = arrived
+                .into_iter()
+                .map(|request_id| Arrival {
+                    caused: Caused {
+                        seat: seat.clone(),
+                        cause: crate::generated::memory::Cause::Arrived(request_id),
+                        moment,
+                    },
+                    receipt_turn: receipt_turn.clone(),
+                })
+                .collect();
+            for write in self.arrivals(arrivals)? {
+                commit = match write {
+                    TransitionWrite::Appended(flow) => commit.mutate(self.flow_transitions, flow),
+                    TransitionWrite::Opened(flow) => commit.assert(self.flow_transitions, flow),
+                };
+            }
+        }
+        self.engine.commit_atomic(commit)?;
+        self.launch_changes.announce();
+        Ok(true)
+    }
+}
 
 const COUNTER_KEY: &str = "counter";
 const COUNTER_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_counter");
@@ -992,13 +1328,20 @@ impl RecordsLogicalDeliveries for FlowStore {
         if self.admission_answer_is_pending(&binding.request_id) {
             return Ok(Err(ArchiveRejection::NotYet(ArchiveHold::AdmissionPending)));
         }
+        let queue_state = self.queue_request_state(&binding.logical_delivery_id.0)?;
+        if queue_state == Some(RequestState::InFlight) {
+            return Ok(Err(ArchiveRejection::NotYet(
+                ArchiveHold::AttemptUnfinished,
+            )));
+        }
         use super::queue_delivery::EndsQueueDeliveryPhase;
         let unfinished: Vec<_> = self
             .delivery_attempts_for(&binding.logical_delivery_id.0)?
             .into_iter()
             .filter(|attempt| !attempt.queue_delivery_phase.is_finished())
             .collect();
-        if !unfinished.is_empty() && ending.is_none() {
+        if !unfinished.is_empty() && ending.is_none() && queue_state != Some(RequestState::Settled)
+        {
             return Ok(Err(ArchiveRejection::NotYet(
                 ArchiveHold::AttemptUnfinished,
             )));
@@ -1291,138 +1634,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         handed: &[QueueEntry],
         state: DeliveryState,
     ) -> Result<bool, StoreError> {
-        let _guard = self
-            .logical_deliveries
-            .write_gate
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let Some(mut stored) = self.stored_metaflow(address)? else {
-            return Ok(false);
-        };
-        if stored.metaflow.state != flow_ethos::State::Awake(flow_ethos::FlowId(flow_id.to_owned()))
-            || !stored.metaflow.queue.0.starts_with(handed)
-        {
-            return Ok(false);
-        }
-        let allocation = self.allocate_logical_cursor()?;
-        let mut next_cursor = allocation.cursor;
-        let mut changed = false;
-        let mut commit = self.engine.begin_atomic_commit();
-        let mut seen = std::collections::HashSet::new();
-        // Each request Delivered to the flow arrives there.
-        let mut arrived = Vec::new();
-        for entry in handed {
-            let records = self.engine.match_records(QueryPlan::key(
-                self.logical_deliveries.current,
-                RecordKey::new(entry.logical_delivery_id.clone().0),
-            ))?;
-            let Some(current) = records.records().first() else {
-                // A legacy queue entry has no logical lifecycle row. Its
-                // exact prefix position is still taken by this hand-over.
-                continue;
-            };
-            if !seen.insert(entry.logical_delivery_id.clone()) {
-                return Err(StoreError::StateInvariant);
-            }
-            if records.records().len() != 1 {
-                return Err(StoreError::StateInvariant);
-            }
-            if current.delivery_snapshot.address != *address {
-                return Err(StoreError::StateInvariant);
-            }
-            // A request whose record is already final, as a hand-over a
-            // crash left unrecorded may find it, keeps that record.
-            if matches!(
-                current.delivery_snapshot.delivery_state,
-                DeliveryState::Delivered(_)
-                    | DeliveryState::Read
-                    | DeliveryState::Failed(_)
-                    | DeliveryState::Withdrawn
-                    | DeliveryState::Archived
-                    | DeliveryState::Abandoned
-            ) || current.delivery_snapshot.delivery_state == state
-            {
-                continue;
-            }
-            let mut snapshot = current.delivery_snapshot.clone();
-            snapshot.delivery_cursor = signal_flow::DeliveryCursor(next_cursor);
-            snapshot.delivery_state = state.clone();
-            if matches!(state, DeliveryState::Delivered(_)) {
-                arrived.push(snapshot.request_id.clone());
-            }
-            next_cursor = next_cursor
-                .checked_add(1)
-                .ok_or(StoreError::StateInvariant)?;
-            commit = commit
-                .mutate(
-                    self.logical_deliveries.current,
-                    CurrentLogicalDelivery {
-                        delivery_snapshot: snapshot.clone(),
-                        archived_cursor: crate::generated::memory::ArchivedCursor(None),
-                        delivery_admission: current.delivery_admission.clone(),
-                    },
-                )
-                .assert(
-                    self.logical_deliveries.events,
-                    LogicalDeliveryEvent {
-                        delivery_snapshot: snapshot,
-                    },
-                );
-            changed = true;
-        }
-        if changed {
-            let counter = LogicalDeliveryCounter {
-                next_cursor: crate::generated::memory::NextCursor(next_cursor),
-            };
-            commit = if allocation.existing {
-                commit.mutate(self.logical_deliveries.counter, counter)
-            } else {
-                commit.assert(self.logical_deliveries.counter, counter)
-            };
-        }
-        stored.metaflow.queue.0.drain(..handed.len());
-        commit = commit.mutate(self.metaflows, stored);
-        let _transitions = self
-            .transitions_gate
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        commit = {
-            use crate::generated::transitions::{
-                Arrival, Caused, RecordsTransitions, TransitionWrite,
-            };
-            let moment = crate::generated::memory::Moment(
-                crate::reminding::CountsUnixSeconds::seconds_since_epoch(
-                    &std::time::SystemTime::now(),
-                ),
-            );
-            let seat = crate::generated::overriding::Seat {
-                flow_id: signal_flow::FlowId(flow_id.to_owned()),
-                address: address.clone(),
-            };
-            let arrivals = arrived
-                .into_iter()
-                .map(|request_id| Arrival {
-                    caused: Caused {
-                        seat: seat.clone(),
-                        cause: crate::generated::memory::Cause::Arrived(request_id),
-                        moment,
-                    },
-                    // The hand-over is typed now: the turn it starts runs.
-                    receipt_turn: crate::generated::transitions::ReceiptTurn::Running,
-                })
-                .collect();
-            let mut commit = commit;
-            for write in self.arrivals(arrivals)? {
-                commit = match write {
-                    TransitionWrite::Appended(flow) => commit.mutate(self.flow_transitions, flow),
-                    TransitionWrite::Opened(flow) => commit.assert(self.flow_transitions, flow),
-                };
-            }
-            commit
-        };
-        self.engine.commit_atomic(commit)?;
-        self.launch_changes.announce();
-        Ok(true)
+        self.commit_queue_outcome(address, handed, QueueOutcome::Started(flow_id, state))
     }
     fn bind_simplified_reply(&self, binding: SimplifiedReplyBinding) -> Result<(), StoreError> {
         let _guard = self
@@ -1871,6 +2083,8 @@ impl RecordsLogicalDeliveries for FlowStore {
         let mut changed = false;
         for entry in &mut stored.metaflow.queue.0 {
             if entry.delivery == flow_ethos::Delivery::Wake
+                || self.queue_request_state(&entry.logical_delivery_id.0)?
+                    == Some(RequestState::InFlight)
                 || handed_over.as_ref().map(|id| id.0.as_str())
                     == Some(entry.logical_delivery_id.0.as_str())
             {

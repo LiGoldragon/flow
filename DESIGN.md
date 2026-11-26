@@ -22,6 +22,29 @@ pruning a bundle copy) is one `Operation`, performed through `Performs` on
 catalogs) are not operations, and delivery's own lease and delivery records
 are not yet.
 
+An existing-pane queue hand-over has three steps. Under the dispatch gate,
+Flow marks the selected queue prefix `InFlight` in its retained request
+records. The Address lease excludes another hand-over at that Address, but the
+pane writer runs without the dispatch gate. Admission can append to the queue,
+hooks can record, and meta can inspect while the pane writer waits. Queue
+withdrawal, request closure and queue-policy changes cannot invalidate the
+claimed prefix. Under the gate again, one store commit clears the claim and
+records the writer's result: Presented or Transported becomes Delivered;
+Uncertain leaves the active queue without a retry; a rejection before
+submission returns the request to Queued.
+
+Both store opens settle claimed queue entries and entries still queued with an
+outstanding stock attempt as Uncertain before a queue consumer can act. The
+stock attempt records remain as historical evidence; a settled queue record
+cannot be replayed or automatically abandoned on retirement. The existing
+stored request state carries the claim; no fence or attempt table is written
+for a new queue hand-over. The ordinary and meta contracts do not change.
+
+A fresh first prompt still uses the launch protocol. The fresh queue selector
+excludes claimed and final entries, and rechecks its prefix before Start.
+This does not close the separate crash window after a fresh first prompt was
+accepted but before its launch batch was accounted for.
+
 Every harness event reaches Flow through the harness's hooks, which call the
 socket of the place whose Nexus launched the flow through the Flow client.
 The hook command Flow writes is the configuration's `HarnessHook`, the

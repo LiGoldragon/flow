@@ -5,6 +5,7 @@ use crate::store::attempt_membership::{KeepsAttemptMemberships, MembershipOwner}
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::queue_delivery::{
     AccountsQueueDelivery, EndsQueueDeliveryPhase, QueueDeliveryAttempt, QueueDeliveryPhase,
+    RequestState,
 };
 use crate::store::{AnnouncesLaunchChanges, FlowStore, LaunchChanges, StoreError, StoredMetaflow};
 use crate::{HoldsStopRequest, RunningNexus};
@@ -198,7 +199,12 @@ impl SettlesRetiredAttempt for RunningNexus {
         else {
             return Ok(());
         };
-        if attempt.queue_delivery_phase.is_finished() {
+        if attempt.queue_delivery_phase.is_finished()
+            || self
+                .store
+                .queue_request_state(&attempt.queue_request_id.0)?
+                == Some(RequestState::Settled)
+        {
             return Ok(());
         }
         // An attempt a retired seat leaves is settled on the receipt it

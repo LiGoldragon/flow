@@ -10,10 +10,18 @@ use super::waking::{
     end_turn, stored, working_claude_agent,
 };
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
+use crate::DispatchesSerially;
+use crate::generated::operation::{Failed_Data, Operation, Outcome};
+use crate::performing::Performs;
 use crate::reporting::RecordsReports;
-use crate::store::logical_delivery::RecordsLogicalDeliveries;
+use crate::sending::SendsRequests;
+use crate::store::logical_delivery::{RecordsLogicalDeliveries, RecordsQueueWrites};
 use crate::store::metaflow::SeedsMetaflow;
-use crate::waking::SettlesStopsAtConfirmation;
+use crate::store::queue_delivery::{
+    AccountsQueueDelivery, NativeHistoryAnchor, QueueDeliveryAttempt, QueueDeliveryPhase,
+    RequestState, SeedsStockQueueAttempts,
+};
+use crate::waking::{HoldsWakingMetaflows, SettlesStopsAtConfirmation};
 use flow_ethos::Delivery;
 use flow_ethos::State;
 use meta_signal_flow::{ProcessIdentity, ResolverIdentity};
@@ -246,6 +254,227 @@ fn a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop() {
         stored(&fixture, Model::Sol).state,
         State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
     );
+}
+
+#[test]
+fn a_hung_queue_pane_write_leaves_admission_hooks_and_meta_running() {
+    let fixture = NexusFixture::new();
+    let release = fixture.directory.path().join("release-writer");
+    fixture.accept_pane_operations(
+        vec![working_claude_agent(&fixture)],
+        PromptFixture::Stalled("w1:p3", &release),
+    );
+    let first = from_core("stalling-pane-input");
+    seat(&fixture, vec![first.clone()]);
+    append_main_rows(&fixture, &[end_turn("before blocked write")]);
+    let target = address(Model::Sol);
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(|| report(&fixture, claude_stop(&fixture)));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let entered = release.with_extension("entered");
+        while !entered.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let was_in_flight = entered.exists()
+            && matches!(
+                fixture
+                    .nexus
+                    .store
+                    .queue_request_state(&first.logical_delivery_id),
+                Ok(Some(RequestState::InFlight))
+            );
+        let (sent, received) = std::sync::mpsc::channel();
+        let fixture = &fixture;
+        let target = &target;
+        scope.spawn(move || {
+            let admission = fixture.nexus.admit_ordinary_send(
+                signal_flow::SendRequest {
+                    address: target.clone(),
+                    sendable_message: signal_flow::SendableMessage::Soft(
+                        signal_flow::SendableRequest::Notice("while writer waits".into()),
+                    ),
+                },
+                None,
+            );
+            report(
+                fixture,
+                Event::PromptSubmitted(signal_flow::NativePrompt {
+                    native_session_id_option: Some(signal_flow::NativeSessionId(
+                        CLAUDE_SESSION.into(),
+                    )),
+                    prompt_id_option: None,
+                    prompt_sha256: signal_flow::PromptSha256("0".repeat(64)),
+                }),
+            );
+            let meta = fixture
+                .nexus
+                .dispatch_meta_serially(meta_signal_flow::Input::Inspect(target.clone()), None);
+            sent.send((admission.response, meta)).unwrap();
+        });
+        let reply = received.recv_timeout(std::time::Duration::from_secs(5));
+        // Always let the child exit, including when a regression held the gate.
+        std::fs::write(&release, "").unwrap();
+        writer.join().unwrap();
+        assert!(
+            was_in_flight,
+            "writer began before its in-flight mark was durable"
+        );
+        let (admission, meta) = reply.expect("all three replies while the writer is stalled");
+        assert!(matches!(admission, Output::SendAccepted(_)));
+        assert!(matches!(meta, meta_signal_flow::Output::Inspected(_)));
+    });
+    assert_eq!(typed_count(&fixture, "stalling-pane-input"), 1);
+    assert_eq!(typed_count(&fixture, "while writer waits"), 0);
+}
+
+fn reopen(fixture: &mut NexusFixture) {
+    use crate::store::{FlowStore, OpensFlowStore};
+    let path = fixture.directory.path().join("flow.sema");
+    let placeholder = FlowStore::open(&fixture.directory.path().join("placeholder.sema")).unwrap();
+    drop(std::mem::replace(
+        &mut fixture.nexus.store,
+        placeholder.into(),
+    ));
+    let mut store = FlowStore::open(&path).unwrap();
+    store.set_native_owner_environment_for_tests(crate::store::NativeOwnerEnvironment {
+        host_id: "isolated-test-host".into(),
+        boot_id: "isolated-test-boot".into(),
+    });
+    fixture.nexus.store = store.into();
+}
+
+fn mark(fixture: &NexusFixture, request: &TestRequest) {
+    let _turn = fixture.nexus.dispatch_gate.lock().unwrap();
+    assert!(
+        fixture
+            .nexus
+            .store
+            .begin_queue_write(&address(Model::Sol), CLAUDE_SEAT, &[queue_entry(request)],)
+            .unwrap()
+    );
+}
+
+#[test]
+fn restart_settles_an_in_flight_request_uncertain_without_typing_it() {
+    let mut fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![working_claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    let request = from_core("in-flight across restart");
+    seat(&fixture, vec![request.clone()]);
+    mark(&fixture, &request);
+
+    reopen(&mut fixture);
+    let id = flow_ethos::LogicalDeliveryId(request.logical_delivery_id);
+    let snapshot = fixture
+        .nexus
+        .store
+        .logical_delivery_snapshot(&id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        snapshot.delivery_state,
+        signal_flow::DeliveryState::Uncertain
+    );
+    assert!(queue(&fixture).is_empty());
+    assert!(matches!(
+        fixture.nexus.perform(Operation::Drain(address(Model::Sol))),
+        Outcome::Drained(entries) if entries.is_empty()
+    ));
+    assert_eq!(typed_count(&fixture, "in-flight across restart"), 0);
+
+    reopen(&mut fixture);
+    assert_eq!(
+        fixture.nexus.store.logical_delivery_snapshot(&id).unwrap(),
+        Some(snapshot)
+    );
+}
+
+#[test]
+fn restart_settles_a_queued_stock_attempt_without_typing_it() {
+    use crate::generated::memory::{
+        Device, Inode, NativeRequestId, NativeTranscriptCursor, Offset, ThreadId,
+    };
+    let mut fixture = NexusFixture::new();
+    let first = from_core("ordinary queued input");
+    let old = from_core("old native attempt");
+    fixture.accept_pane_operations(
+        vec![working_claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    seat(&fixture, vec![first.clone(), old.clone()]);
+    let target = address(Model::Sol);
+    let attempt_id = meta_signal_flow::QueueAttemptId("0000000000000003".into());
+    fixture
+        .nexus
+        .store
+        .seed_stock_queue_attempt(QueueDeliveryAttempt {
+            queue_request_id: meta_signal_flow::QueueRequestId(old.logical_delivery_id.clone()),
+            queue_attempt_id: attempt_id.clone(),
+            native_request_id: NativeRequestId(3),
+            flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+            thread_id: ThreadId(CLAUDE_SESSION.into()),
+            harness_kind: signal_flow::HarnessKind::Claude,
+            native_history_anchor: NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
+                device: Device(1),
+                inode: Inode(2),
+                offset: Offset(0),
+            }),
+            address: target.clone(),
+            queue_evidence: meta_signal_flow::QueueEvidence::Logical(queue_entry(&old)),
+            queue_delivery_phase: QueueDeliveryPhase::Prepared,
+        });
+
+    reopen(&mut fixture);
+    assert_eq!(queue(&fixture), vec![first]);
+    assert!(matches!(
+        fixture
+            .nexus
+            .store
+            .queue_delivery_attempt(&attempt_id.0)
+            .unwrap()
+            .unwrap()
+            .queue_delivery_phase,
+        QueueDeliveryPhase::Uncertain(_)
+    ));
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .logical_delivery_snapshot(&flow_ethos::LogicalDeliveryId(old.logical_delivery_id))
+            .unwrap()
+            .unwrap()
+            .delivery_state,
+        signal_flow::DeliveryState::Uncertain
+    );
+    assert!(matches!(
+        fixture.nexus.perform(Operation::Drain(target)),
+        Outcome::Drained(entries) if entries.len() == 1
+    ));
+    assert_eq!(typed_count(&fixture, "ordinary queued input"), 1);
+    assert_eq!(typed_count(&fixture, "old native attempt"), 0);
+}
+
+#[test]
+fn a_fresh_wake_does_not_select_a_pane_writers_request() {
+    let fixture = NexusFixture::new();
+    let request = from_core("not a fresh launch input");
+    seat(&fixture, vec![request.clone()]);
+    mark(&fixture, &request);
+    // As after the original seat exits and its writer has no committed outcome.
+    let target = address(Model::Sol);
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        state: State::Asleep,
+        ..stored(&fixture, Model::Sol)
+    });
+    let _lease = fixture.nexus.waking.hold(&target).unwrap();
+    assert!(matches!(
+        fixture.nexus.perform(Operation::Wake(target)),
+        Outcome::Failed(Failed_Data::StoreRefused)
+    ));
+    assert_eq!(queue(&fixture), vec![request]);
+    assert_eq!(typed_count(&fixture, "not a fresh launch input"), 0);
 }
 
 /// Two queued requests go into the pane at one turn end as one payload, in

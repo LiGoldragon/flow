@@ -253,26 +253,23 @@ impl ObservesBoundRest for RunningNexus {
 
     fn drain_bound_rest(&self, rest: &BoundRest) -> bool {
         let _effect = self.waking.effect(rest.address.clone());
-        let completed = {
+        if !self.rest_still_bound(rest) || self.stopping.requested() {
+            return true;
+        }
+        let Ok(Some(node)) = self.store.flow_node(&rest.flow_id) else {
+            return false;
+        };
+        if !matches!(
+            self.herdr.pane_agent(&node),
+            PaneAgent::Present {
+                agent_state: AgentState::Idle | AgentState::Done,
+                ready: true,
+            }
+        ) {
+            return false;
+        }
+        let lease = {
             let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
-            if !self.rest_still_bound(rest) || self.stopping.requested() {
-                return true;
-            }
-            if self.held() || self.permaflow_held(rest.address.clone()) {
-                return false;
-            }
-            let Ok(Some(node)) = self.store.flow_node(&rest.flow_id) else {
-                return false;
-            };
-            if !matches!(
-                self.herdr.pane_agent(&node),
-                PaneAgent::Present {
-                    agent_state: AgentState::Idle | AgentState::Done,
-                    ready: true,
-                }
-            ) {
-                return false;
-            }
             if !self.rest_still_bound(rest) || self.stopping.requested() {
                 return true;
             }
@@ -288,9 +285,19 @@ impl ObservesBoundRest for RunningNexus {
             let Some(lease) = self.waking.hold(&rest.address) else {
                 return false;
             };
-            let _outcome = self.drain_all_held(rest.address.clone(), &lease);
-            !self.rest_still_bound(rest)
+            lease
         };
+        use crate::generated::operation::Outcome;
+        use crate::waking::SleepsAndWakesSeats;
+        if matches!(
+            self.drain_held(rest.address.clone(), &lease),
+            Outcome::Drained(entries) if !entries.is_empty()
+        ) {
+            self.drain_due_held(&rest.address, lease);
+        } else {
+            drop(lease);
+        }
+        let completed = !self.rest_still_bound(rest);
         use crate::send_tool::ServesLaunchCalls;
         self.wake_deferred();
         completed

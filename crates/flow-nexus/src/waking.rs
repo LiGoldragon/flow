@@ -124,7 +124,7 @@ use crate::store::events::RecordsHarnessEvents;
 use crate::store::events::{IdentifiesNativeStop, RecordedStop};
 use crate::store::handover::HoldsHandovers;
 use crate::store::logical_delivery::{
-    HoldsAdmissionAnswers, RecordsLogicalDeliveries, SimplifiedReplyBinding,
+    HoldsAdmissionAnswers, RecordsLogicalDeliveries, RecordsQueueWrites, SimplifiedReplyBinding,
     SimplifiedReplyStanding,
 };
 use crate::store::metaflow::{PreparesDeclaredMetaflow, SleepsMetaflows};
@@ -134,6 +134,7 @@ use crate::store::ordered_replacement::{
     ShowsWaitingAttempt,
 };
 use crate::store::pending_reap::RecordsPendingReaps;
+use crate::store::queue_delivery::{AccountsQueueDelivery, RequestState};
 use crate::store::successor::{OwesSuccessors, ReadsContinuity, SuccessionCause, SuccessorIntent};
 use crate::store::{ManagesMetaflowState, NamesLiveFlow, ReadsFlowRows, ReadsLaunchAttempt};
 use meta_signal_flow::Continuity;
@@ -834,10 +835,9 @@ pub trait SleepsAndWakesSeats {
     /// Whether Flow's records show the metaflow due a wake: Asleep and
     /// holding work that wakes it.
     fn wake_is_due(&self, metaflow: &Metaflow) -> bool;
-    /// Types what arrived during a wake into the woken flow, oldest first,
-    /// until the queue is seen empty under the gate; the hold is released
-    /// there.
-    fn drain_woken(&self, address: &Address, lease: WakingLease);
+    /// Hands over newly due work and releases the Address lease under the
+    /// gate when no more work is due.
+    fn drain_due_held(&self, address: &Address, lease: WakingLease);
     /// Which way an Asleep metaflow is woken.
     fn wake_plan(&self, metaflow: &Metaflow) -> WakePlan;
     /// At the Nexus's start: wakes every metaflow due a wake, as a wake the
@@ -1359,57 +1359,70 @@ impl SleepsAndWakesSeats for RunningNexus {
         if self.held() {
             return;
         }
+        let (flow_id, node, lease) =
+            {
+                let _turn = self
+                    .dispatch_gate
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let Ok(Some(metaflow)) = self.store.metaflow(address) else {
+                    return;
+                };
+                let flow_ethos::State::Awake(flow_id) = metaflow.state else {
+                    return;
+                };
+                if metaflow.queue.0.is_empty()
+                    || metaflow.queue.0.first().is_some_and(|entry| {
+                        self.store.pane_input_waits_for_reply(&entry.request_id)
+                    })
+                    || self.waking.is_waking(address)
+                    || !matches!(self.store.address_hold(&flow_id.0), Ok(None))
+                    || !matches!(
+                        crate::store::restart::RecordsRestarts::restart_record(
+                            &*self.store,
+                            &flow_id.0
+                        ),
+                        Ok(None)
+                    )
+                {
+                    return;
+                }
+                let Ok(Some(node)) = self.store.flow_node(&flow_id.0) else {
+                    return;
+                };
+                let Some(lease) = self.waking.hold(address) else {
+                    return;
+                };
+                (flow_id, node, lease)
+            };
+        // Herdr I/O is not part of the dispatch turn. The waking lease keeps
+        // other queue hand-overs out until this seat is checked and drained.
+        let presence = self.herdr.pane_presence(&node);
         {
             let _turn = self
                 .dispatch_gate
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let Ok(Some(metaflow)) = self.store.metaflow(address) else {
+                .unwrap_or_else(|error| error.into_inner());
+            let Ok(Some(current)) = self.store.metaflow(address) else {
                 return;
             };
-            let flow_ethos::State::Awake(flow_id) = metaflow.state else {
-                return;
-            };
-            if metaflow.queue.0.is_empty()
-                || metaflow
-                    .queue
-                    .0
-                    .first()
-                    .is_some_and(|entry| self.store.pane_input_waits_for_reply(&entry.request_id))
-                || self.waking.is_waking(address)
-                || !matches!(self.store.address_hold(&flow_id.0), Ok(None))
-                || !matches!(
-                    crate::store::restart::RecordsRestarts::restart_record(
-                        &*self.store,
-                        &flow_id.0
-                    ),
-                    Ok(None)
-                )
+            if current.state != flow_ethos::State::Awake(flow_id.clone())
+                || !matches!(self.store.flow_node(&flow_id.0), Ok(Some(current))
+                    if current.session_id == node.session_id && current.herdr_route_selection == node.herdr_route_selection)
             {
                 return;
             }
-            let Ok(Some(node)) = self.store.flow_node(&flow_id.0) else {
-                return;
-            };
-            let Some(lease) = self.waking.hold(address) else {
-                return;
-            };
-            if matches!(
-                self.herdr.pane_presence(&node),
-                PanePresence::Absent | PanePresence::Bare
-            ) {
+            if matches!(presence, PanePresence::Absent | PanePresence::Bare) {
                 let _ = self.perform(Operation::Record(Record_Data::Exited(flow_id)));
                 return;
             }
-            // Pressing work is handed over now, the Soft work queued before
-            // it included; the delivery engine interrupts only for
-            // HardAbrupt. Soft work waits for the seat's idle event, and a
-            // queue of Soft Notices alone for the next waking request.
-            if !self.due_now(&metaflow.queue.0, &flow_id.0) {
+            // When pressing work is due, the Soft work queued before it
+            // rides along. Only HardAbrupt interrupts a working seat.
+            if !self.due_now(&current.queue.0, &flow_id.0) {
                 return;
             }
-            let _ = self.drain_all_held(address.clone(), &lease);
         }
+        self.drain_due_held(address, lease);
         self.wake_deferred();
     }
 
@@ -1450,19 +1463,19 @@ impl SleepsAndWakesSeats for RunningNexus {
         }
         // A refused wake has logged its reason; its work stays queued.
         if let Outcome::Woken(_) = self.perform(Operation::Wake(address.clone())) {
-            self.drain_woken(&address, lease);
+            self.drain_due_held(&address, lease);
         }
         self.settle_stops_at_confirmation();
     }
 
-    fn drain_woken(&self, address: &Address, lease: WakingLease) {
+    fn drain_due_held(&self, address: &Address, lease: WakingLease) {
         loop {
             let _turn = self
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            // What queued while the woken flow started waits, as for any
-            // seat, until it is due.
+            // What queued while the previous native operation ran waits
+            // until it is due for this seat.
             let due = match self.store.metaflow(address) {
                 Ok(Some(Metaflow {
                     state: flow_ethos::State::Awake(flow_id),
@@ -1475,6 +1488,7 @@ impl SleepsAndWakesSeats for RunningNexus {
                 drop(lease);
                 return;
             }
+            drop(_turn);
             match self.drain_held(address.clone(), &lease) {
                 Outcome::Drained(typed) if typed.is_empty() => {
                     drop(lease);
@@ -1482,7 +1496,7 @@ impl SleepsAndWakesSeats for RunningNexus {
                 }
                 Outcome::Drained(_) => {}
                 _outcome => {
-                    eprintln!("flow-nexus: work queued during a wake stays queued");
+                    eprintln!("flow-nexus: work not handed over stays queued");
                     drop(lease);
                     return;
                 }
@@ -2427,8 +2441,8 @@ impl PerformsWakeAndDrain for RunningNexus {
 }
 
 pub(crate) trait DrainsHeldSeats {
-    /// Under the dispatch gate the caller holds, with the metaflow's waking
-    /// lease: hands the queue of the seat `address` is Awake as to its pane
+    /// With the metaflow's waking lease and no caller-held dispatch turn:
+    /// hands the queue of the seat `address` is Awake as to its pane
     /// in one payload, oldest first, and records the pane writer's own
     /// result in the one store commit that takes those requests from the
     /// queue. Presented or Transported is Delivered and Uncertain is
@@ -2494,164 +2508,191 @@ impl ReadsReportedPrompt for RunningNexus {
 
 impl DrainsHeldSeats for RunningNexus {
     fn drain_held(&self, address: Address, lease: &WakingLease) -> Outcome {
-        if self.permaflow_held(address.clone()) || self.held() {
-            return Outcome::Drained(Vec::new());
-        }
-        let flow_id = match self.store.metaflow(&address) {
-            Ok(Some(Metaflow {
-                state: flow_ethos::State::Awake(flow_id),
-                ..
-            })) => flow_id,
-            Ok(_) => return Outcome::Failed(Failed_Data::NotAwake),
-            Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
-        };
-        let node = match self.store.flow_node(&flow_id.0) {
-            Ok(Some(node)) => node,
-            _ => return Outcome::Failed(Failed_Data::StoreRefused),
-        };
-        // A simplified seat's answer to the input it was bound to is queued
-        // once its transcript shows it, so the binding is free for the
-        // request now oldest.
-        self.queue_simplified_answer(&flow_id.0);
-        let queue = match self.store.metaflow(&address) {
-            Ok(Some(metaflow)) => metaflow.queue,
-            _ => return Outcome::Failed(Failed_Data::StoreRefused),
-        };
-        let Some(oldest) = queue.0.first().cloned() else {
-            return Outcome::Drained(Vec::new());
-        };
-        if self.store.pane_input_waits_for_reply(&oldest.request_id) {
-            return Outcome::WaitingForTurn(oldest.logical_delivery_id);
-        }
-        let response_request = matches!(
-            &oldest.message,
-            signal_flow::Message::HardAbrupt(
-                signal_flow::Request::Order(_)
-                    | signal_flow::Request::Question(_)
-                    | signal_flow::Request::Living(_)
-                    | signal_flow::Request::Task(_)
-            ) | signal_flow::Message::MiddleAbrupt(
-                signal_flow::Request::Order(_)
-                    | signal_flow::Request::Question(_)
-                    | signal_flow::Request::Living(_)
-                    | signal_flow::Request::Task(_)
-            ) | signal_flow::Message::Soft(
-                signal_flow::Request::Order(_)
-                    | signal_flow::Request::Question(_)
-                    | signal_flow::Request::Living(_)
-                    | signal_flow::Request::Task(_)
-            )
-        );
-        if response_request
-            && self
-                .last_launch_profile(&flow_id.0)
-                .is_some_and(|profile| profile.flow_kind == signal_flow::FlowKind::Simplified)
-            && let signal_flow::SentBy::Sender(recipient) = &oldest.sent_by
-        {
-            let binding = SimplifiedReplyBinding {
-                flow_id: flow_id.clone(),
-                input_delivery_id: crate::generated::memory::InputDeliveryId(
-                    oldest.logical_delivery_id.clone().0,
-                ),
-                source: crate::generated::memory::Source(address.clone()),
-                recipient: crate::generated::memory::Recipient(recipient.clone()),
-                completed: crate::generated::memory::Completed(false),
+        let (flow_id, node, cohort, delivery_id, digest, request) = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if self.permaflow_held(address.clone()) || self.held() {
+                return Outcome::Drained(Vec::new());
+            }
+            let flow_id = match self.store.metaflow(&address) {
+                Ok(Some(Metaflow {
+                    state: flow_ethos::State::Awake(flow_id),
+                    ..
+                })) => flow_id,
+                Ok(_) => return Outcome::Failed(Failed_Data::NotAwake),
+                Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
             };
-            if self.store.bind_simplified_reply(binding).is_err() {
+            let node = match self.store.flow_node(&flow_id.0) {
+                Ok(Some(node)) => node,
+                _ => return Outcome::Failed(Failed_Data::StoreRefused),
+            };
+            // A simplified seat's answer to the input it was bound to is queued
+            // once its transcript shows it, so the binding is free for the
+            // request now oldest.
+            self.queue_simplified_answer(&flow_id.0);
+            let queue = match self.store.metaflow(&address) {
+                Ok(Some(metaflow)) => metaflow.queue,
+                _ => return Outcome::Failed(Failed_Data::StoreRefused),
+            };
+            let Some(oldest) = queue.0.first().cloned() else {
+                return Outcome::Drained(Vec::new());
+            };
+            if self.store.pane_input_waits_for_reply(&oldest.request_id)
+                || matches!(
+                    self.store
+                        .queue_request_state(&oldest.logical_delivery_id.0),
+                    Ok(Some(RequestState::InFlight))
+                )
+            {
                 return Outcome::WaitingForTurn(oldest.logical_delivery_id);
             }
-        }
-        // One injection carries every queued message, oldest first: the
-        // triggering one and all held behind it. A Simplified seat binds its
-        // reply to one input, so it takes its oldest alone.
-        let simplified = self
-            .last_launch_profile(&flow_id.0)
-            .is_some_and(|profile| profile.flow_kind == signal_flow::FlowKind::Simplified);
-        let cohort: Vec<QueueEntry> = if simplified {
-            vec![oldest.clone()]
-        } else {
-            queue
-                .0
-                .into_iter()
-                .take_while(|entry| !self.store.pane_input_waits_for_reply(&entry.request_id))
-                .collect()
-        };
-        // One Waking carries the whole cohort, every input under its own id,
-        // sender and priority. Every priority uses the same pane delivery;
-        // only a cohort containing HardAbrupt interrupts a working seat.
-        use crate::message_projection::ProjectsQueueEntry;
-        let waking = cohort
-            .iter()
-            .map(|entry| entry.visible_input(&address))
-            .collect::<Vec<_>>();
-        let visible_sender = oldest.visible_input(&address).visible_sender;
-        let letter = meta_signal_flow::Letter {
-            visible_sender,
-            content: meta_signal_flow::Content::Waking(waking),
-        };
-        let message = if let Some(pushed) = lease.pushed() {
-            // A Push delivers the whole queue at the priority it names.
-            match pushed {
-                signal_flow::Priority::HardAbrupt => meta_signal_flow::Message::HardAbrupt(letter),
-                signal_flow::Priority::MiddleAbrupt => {
-                    meta_signal_flow::Message::MiddleAbrupt(letter)
+            let response_request = matches!(
+                &oldest.message,
+                signal_flow::Message::HardAbrupt(
+                    signal_flow::Request::Order(_)
+                        | signal_flow::Request::Question(_)
+                        | signal_flow::Request::Living(_)
+                        | signal_flow::Request::Task(_)
+                ) | signal_flow::Message::MiddleAbrupt(
+                    signal_flow::Request::Order(_)
+                        | signal_flow::Request::Question(_)
+                        | signal_flow::Request::Living(_)
+                        | signal_flow::Request::Task(_)
+                ) | signal_flow::Message::Soft(
+                    signal_flow::Request::Order(_)
+                        | signal_flow::Request::Question(_)
+                        | signal_flow::Request::Living(_)
+                        | signal_flow::Request::Task(_)
+                )
+            );
+            if response_request
+                && self
+                    .last_launch_profile(&flow_id.0)
+                    .is_some_and(|profile| profile.flow_kind == signal_flow::FlowKind::Simplified)
+                && let signal_flow::SentBy::Sender(recipient) = &oldest.sent_by
+            {
+                let binding = SimplifiedReplyBinding {
+                    flow_id: flow_id.clone(),
+                    input_delivery_id: crate::generated::memory::InputDeliveryId(
+                        oldest.logical_delivery_id.clone().0,
+                    ),
+                    source: crate::generated::memory::Source(address.clone()),
+                    recipient: crate::generated::memory::Recipient(recipient.clone()),
+                    completed: crate::generated::memory::Completed(false),
+                };
+                if self.store.bind_simplified_reply(binding).is_err() {
+                    return Outcome::WaitingForTurn(oldest.logical_delivery_id);
                 }
-                signal_flow::Priority::Soft => meta_signal_flow::Message::Soft(letter),
             }
-        } else if cohort
-            .iter()
-            .any(|entry| matches!(entry.message, signal_flow::Message::HardAbrupt(_)))
-        {
-            meta_signal_flow::Message::HardAbrupt(letter)
-        } else if cohort
-            .iter()
-            .any(|entry| matches!(entry.message, signal_flow::Message::MiddleAbrupt(_)))
-        {
-            meta_signal_flow::Message::MiddleAbrupt(letter)
-        } else {
-            meta_signal_flow::Message::Soft(letter)
+            // One injection carries every queued message, oldest first: the
+            // triggering one and all held behind it. A Simplified seat binds its
+            // reply to one input, so it takes its oldest alone.
+            let simplified = self
+                .last_launch_profile(&flow_id.0)
+                .is_some_and(|profile| profile.flow_kind == signal_flow::FlowKind::Simplified);
+            let cohort: Vec<QueueEntry> = if simplified {
+                vec![oldest.clone()]
+            } else {
+                queue
+                    .0
+                    .into_iter()
+                    .take_while(|entry| !self.store.pane_input_waits_for_reply(&entry.request_id))
+                    .collect()
+            };
+            // One Waking carries the whole cohort, every input under its own id,
+            // sender and priority. Every priority uses the same pane delivery;
+            // only a cohort containing HardAbrupt interrupts a working seat.
+            use crate::message_projection::ProjectsQueueEntry;
+            let waking = cohort
+                .iter()
+                .map(|entry| entry.visible_input(&address))
+                .collect::<Vec<_>>();
+            let visible_sender = oldest.visible_input(&address).visible_sender;
+            let letter = meta_signal_flow::Letter {
+                visible_sender,
+                content: meta_signal_flow::Content::Waking(waking),
+            };
+            let message = if let Some(pushed) = lease.pushed() {
+                // A Push delivers the whole queue at the priority it names.
+                match pushed {
+                    signal_flow::Priority::HardAbrupt => {
+                        meta_signal_flow::Message::HardAbrupt(letter)
+                    }
+                    signal_flow::Priority::MiddleAbrupt => {
+                        meta_signal_flow::Message::MiddleAbrupt(letter)
+                    }
+                    signal_flow::Priority::Soft => meta_signal_flow::Message::Soft(letter),
+                }
+            } else if cohort
+                .iter()
+                .any(|entry| matches!(entry.message, signal_flow::Message::HardAbrupt(_)))
+            {
+                meta_signal_flow::Message::HardAbrupt(letter)
+            } else if cohort
+                .iter()
+                .any(|entry| matches!(entry.message, signal_flow::Message::MiddleAbrupt(_)))
+            {
+                meta_signal_flow::Message::MiddleAbrupt(letter)
+            } else {
+                meta_signal_flow::Message::Soft(letter)
+            };
+            // The pane write is named by the oldest request it carries.
+            let delivery_id = oldest.logical_delivery_id.0.clone();
+            let digest = {
+                use crate::delivery::body::{RendersPaneText, ShowsPaneText};
+                use flow_native::DigestsPrompt;
+                message.pane_text().as_str().prompt_sha256()
+            };
+            let request = meta_signal_flow::DeliveryRequest {
+                delivery_id: meta_signal_flow::DeliveryId(delivery_id.clone()),
+                flow_id: flow_id.clone(),
+                message,
+            };
+            if !matches!(
+                self.store.begin_queue_write(&address, &flow_id.0, &cohort),
+                Ok(true)
+            ) {
+                return Outcome::Failed(Failed_Data::StoreRefused);
+            }
+            (flow_id, node, cohort, delivery_id, digest, request)
         };
-        // The pane write is named by the oldest request it carries.
-        let delivery_id = oldest.logical_delivery_id.0.clone();
-        let digest = {
-            use crate::delivery::body::{RendersPaneText, ShowsPaneText};
-            use flow_native::DigestsPrompt;
-            message.pane_text().as_str().prompt_sha256()
-        };
-        let request = meta_signal_flow::DeliveryRequest {
-            delivery_id: meta_signal_flow::DeliveryId(delivery_id.clone()),
-            flow_id: flow_id.clone(),
-            message,
-        };
-        let delivery = match self.deliver_while_waking(request, lease) {
-            meta_signal_flow::Output::MessageTyped(delivery) => delivery,
+        let state = match self.deliver_while_waking(request, lease) {
+            meta_signal_flow::Output::MessageTyped(delivery) => {
+                // A Claude seat that took the text named its prompt in its
+                // UserPromptSubmit. Other hand-overs use the pane write id.
+                let prompt = match (&delivery.delivery_grade, &node.harness_kind) {
+                    (meta_signal_flow::DeliveryGrade::Presented, HarnessKind::Claude) => {
+                        self.reported_prompt(&flow_id.0, Some(&digest))
+                    }
+                    _ => None,
+                }
+                .unwrap_or(delivery_id);
+                Some(delivery.handed_over_state(&node, prompt))
+            }
             refused => {
                 eprintln!(
-                    "flow-nexus: HerdrRefused flow={} request={} outcome={refused:?}; it stays queued",
-                    flow_id.0, oldest.request_id.0
+                    "flow-nexus: HerdrRefused flow={} delivery={delivery_id} outcome={refused:?}; it stays queued",
+                    flow_id.0
                 );
-                return Outcome::Failed(Failed_Data::HerdrRefused);
+                None
             }
         };
-        // A Claude seat that took the text named its prompt in its own
-        // UserPromptSubmit, the word its writer waited for; any other
-        // hand-over is named by its pane write.
-        let prompt = match (&delivery.delivery_grade, &node.harness_kind) {
-            (meta_signal_flow::DeliveryGrade::Presented, HarnessKind::Claude) => {
-                self.reported_prompt(&flow_id.0, Some(&digest))
-            }
-            _ => None,
-        }
-        .unwrap_or(delivery_id);
-        let state = delivery.handed_over_state(&node, prompt);
+        let _turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let rejected = state.is_none();
         match self
             .store
-            .record_hand_over(&address, &flow_id.0, &cohort, state)
+            .finish_queue_write(&address, &flow_id.0, &cohort, state)
         {
+            Ok(true) if rejected => Outcome::Failed(Failed_Data::HerdrRefused),
             Ok(true) => Outcome::Drained(cohort),
             answer => {
                 eprintln!(
-                    "flow-nexus: a hand-over to flow {} was typed and not recorded: {answer:?}",
+                    "flow-nexus: pane write outcome for flow {} was not recorded: {answer:?}; it stays in flight",
                     flow_id.0
                 );
                 Outcome::Failed(Failed_Data::StoreRefused)
@@ -2738,7 +2779,16 @@ impl WakesInParts for RunningNexus {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             self.rest_ended_awake(address);
             match self.store.metaflow(address) {
-                Ok(Some(metaflow)) if metaflow.state == flow_ethos::State::Asleep => metaflow,
+                Ok(Some(metaflow)) if metaflow.state == flow_ethos::State::Asleep => {
+                    // A store refusal after a pane write leaves its marker
+                    // intact. No fresh prompt may carry that request again.
+                    for entry in &metaflow.queue.0 {
+                        if !matches!(self.store.queue_entry_is_writable(entry), Ok(true)) {
+                            return Err(WakeRefusal::StoreUnreadable);
+                        }
+                    }
+                    metaflow
+                }
                 Ok(_) => return Err(WakeRefusal::NotAsleep),
                 Err(_) => return Err(WakeRefusal::StoreUnreadable),
             }
@@ -2805,6 +2855,30 @@ impl WakesInParts for RunningNexus {
         let WakePlan::Fresh(fresh) = plan else {
             return Err(WakeRefusal::Unplaceable);
         };
+        {
+            // Planning and native preflight run off the gate. Recheck the
+            // selected prefix before starting: an older snapshot grants no
+            // permission to submit a removed or non-writable request. The
+            // caller's waking lease excludes another writer through Start.
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let Ok(Some(current)) = self.store.metaflow(address) else {
+                return Err(WakeRefusal::StoreUnreadable);
+            };
+            if current.state != flow_ethos::State::Asleep {
+                return Err(WakeRefusal::NotAsleep);
+            }
+            if !current.queue.0.starts_with(&startup.0)
+                || startup
+                    .0
+                    .iter()
+                    .any(|entry| !matches!(self.store.queue_entry_is_writable(entry), Ok(true)))
+            {
+                return Err(WakeRefusal::StoreUnreadable);
+            }
+        }
         let started = match self.start_fresh(&metaflow, fresh, &startup_text) {
             Ok(started) => started,
             Err(FreshRefusal::Failed(failure)) => {
@@ -3131,9 +3205,7 @@ impl WakesInParts for RunningNexus {
             Ok(crate::store::context::ThresholdStanding::Past { .. })
         );
         let compact = first && past && harness == Some(HarnessKind::Claude);
-        {
-            // The seat rests now: what is queued is handed to it here, as
-            // its turn's end would, under the gate.
+        let drain_due = {
             let _turn = self
                 .dispatch_gate
                 .lock()
@@ -3172,12 +3244,19 @@ impl WakesInParts for RunningNexus {
                     ),
                 }
             }
-            if matches!(
+            matches!(
                 self.store.metaflow(&address),
                 Ok(Some(metaflow)) if self.due_at_rest(&metaflow.queue.0)
-            ) {
-                let _ = self.perform(Operation::Drain(address.clone()));
-            }
+            )
+        };
+        if drain_due {
+            let _ = self.perform(Operation::Drain(address.clone()));
+        }
+        {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             // The compaction types into the pane and may record the flow
             // Exited when its pane is gone: it runs under the same gate hold,
             // as a meta Command does (the gate is not reentrant, and
@@ -3561,10 +3640,11 @@ impl WakesInParts for RunningNexus {
             let Some(lease) = self.waking.hold(&address) else {
                 return AtStop::Kept(KeptAtStop::Waking);
             };
-            let handed = self.drain_held(address, &lease);
             drop(turn);
+            let handed = self.drain_held(address.clone(), &lease);
             return match handed {
                 Outcome::Drained(mut typed) if !typed.is_empty() => {
+                    self.drain_due_held(&address, lease);
                     AtStop::Drained(typed.remove(0))
                 }
                 outcome => AtStop::Kept(KeptAtStop::DrainRefused(Box::new(outcome))),

@@ -328,7 +328,7 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
     }
 
     fn push(&self, address: &Address, priority: &Priority) -> Output {
-        let (before, asleep) = {
+        let (before, asleep, lease) = {
             let _turn = self
                 .dispatch_gate
                 .lock()
@@ -356,11 +356,16 @@ impl OperatesOnRequestsAndQueues for RunningNexus {
             // mark its admission recorded (`request_waking`); a Push adds no
             // mark, so a queue of Notices leaves the metaflow asleep.
             let asleep = metaflow.state == flow_ethos::State::Asleep;
-            if !asleep && let Some(lease) = self.waking.hold(address) {
-                let _ = self.drain_all_held(address.clone(), &lease.pushed_at(priority.clone()));
-            }
-            (before, asleep)
+            let lease = if asleep {
+                None
+            } else {
+                self.waking.hold(address)
+            };
+            (before, asleep, lease)
         };
+        if let Some(lease) = lease {
+            let _ = self.drain_all_held(address.clone(), &lease.pushed_at(priority.clone()));
+        }
         if asleep {
             self.wake_due(address.clone());
         }

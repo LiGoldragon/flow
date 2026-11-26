@@ -210,8 +210,9 @@ Memory
   ; have reached the seat; it is still queued and a later attempt carries
   ; it. Parked: native history could not resolve it; it stays in the
   ; journal as Uncertain, no longer an active queue item, never handed over
-  ; again automatically.
-  RequestState.[ Queued Settled Unsent Parked ]
+  ; again automatically. InFlight: the writer may have reached native
+  ; input, but its outcome has not been committed.
+  RequestState.[ Queued Settled Unsent Parked InFlight ]
   ; One queued request, keyed by its id.
   StoredDeliveryRequest.{ QueueRequestId Address QueueEvidence RequestState }
   ; A native receipt: the native request, thread and turn, and the native

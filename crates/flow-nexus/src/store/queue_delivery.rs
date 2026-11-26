@@ -219,6 +219,29 @@ pub(crate) struct RetainedLogicalRequest {
 }
 
 pub trait AccountsQueueDelivery {
+    /// The private delivery state carried by the retained queue record.
+    fn queue_request_state(&self, id: &str) -> Result<Option<RequestState>, StoreError>;
+
+    /// Stages a state change on the existing request record. Queue producers
+    /// without retained evidence acquire the same record before a write.
+    fn stage_queue_request_state(
+        &self,
+        address: &Address,
+        entry: &flow_ethos::QueueEntry,
+        state: RequestState,
+        commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError>;
+
+    /// Outstanding stock attempts, before any restart settlement changes them.
+    fn unfinished_queue_attempts(&self) -> Result<Vec<QueueDeliveryAttempt>, StoreError>;
+
+    /// Retains a stock attempt as uncertain, with no receipt to replay.
+    fn stage_interrupted_queue_attempt(
+        &self,
+        attempt: QueueDeliveryAttempt,
+        commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError>;
+
     fn delivery_attempts_for(
         &self,
         logical_delivery_id: &str,
@@ -374,7 +397,7 @@ impl ReadsQueueDelivery for FlowStore {
         let attempts = self.member_attempts(MembershipOwner::UnfinishedAt(address))?;
         let mut matching = attempts.into_iter().filter_map(|attempt| {
             match self.request_state(&attempt.queue_request_id.0) {
-                Ok(Some(RequestState::Parked)) => None,
+                Ok(Some(RequestState::Parked | RequestState::Settled)) => None,
                 Ok(_) => Some(Ok(attempt)),
                 Err(error) => Some(Err(error)),
             }
@@ -399,6 +422,64 @@ impl ReadsQueueDelivery for FlowStore {
 }
 
 impl AccountsQueueDelivery for FlowStore {
+    fn queue_request_state(&self, id: &str) -> Result<Option<RequestState>, StoreError> {
+        self.request_state(id)
+    }
+
+    fn stage_queue_request_state(
+        &self,
+        address: &Address,
+        entry: &flow_ethos::QueueEntry,
+        state: RequestState,
+        commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError> {
+        let id = &entry.logical_delivery_id.0;
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.queue_delivery.requests,
+            RecordKey::new(id.clone()),
+        ))?;
+        match rows.records() {
+            [] => Ok(commit.assert(
+                self.queue_delivery.requests,
+                StoredDeliveryRequest {
+                    queue_request_id: meta_signal_flow::QueueRequestId(id.clone()),
+                    address: address.clone(),
+                    queue_evidence: QueueEvidence::Logical(entry.clone()),
+                    request_state: state,
+                },
+            )),
+            [request]
+                if request.address == *address
+                    && matches!(&request.queue_evidence, QueueEvidence::Logical(held)
+                    if held.logical_delivery_id == entry.logical_delivery_id) =>
+            {
+                let mut request = request.clone();
+                request.request_state = state;
+                Ok(commit.mutate(self.queue_delivery.requests, request))
+            }
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
+    fn unfinished_queue_attempts(&self) -> Result<Vec<QueueDeliveryAttempt>, StoreError> {
+        self.member_attempts(MembershipOwner::Unfinished)
+    }
+
+    fn stage_interrupted_queue_attempt(
+        &self,
+        mut attempt: QueueDeliveryAttempt,
+        commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError> {
+        match attempt.queue_delivery_phase {
+            QueueDeliveryPhase::Uncertain(_) => Ok(commit),
+            QueueDeliveryPhase::Prepared | QueueDeliveryPhase::ReceiptRecorded(_) => {
+                attempt.queue_delivery_phase = QueueDeliveryPhase::Uncertain(None);
+                self.commit_attempt(commit, attempt)
+            }
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
     fn delivery_attempts_for(
         &self,
         logical_delivery_id: &str,
@@ -653,6 +734,9 @@ impl AccountsQueueDelivery for FlowStore {
         held: &mut StoredMetaflow,
         commit: AtomicCommit,
     ) -> Result<AtomicCommit, StoreError> {
+        if self.request_state(logical_delivery_id)? == Some(RequestState::Settled) {
+            return Ok(commit);
+        }
         let mut unfinished = self
             .delivery_attempts_for(logical_delivery_id)?
             .into_iter()
@@ -710,7 +794,7 @@ impl AccountsQueueDelivery for FlowStore {
                 metaflow.metaflow.queue.0.remove(0);
             }
             RequestState::Parked => {}
-            RequestState::Settled | RequestState::Unsent => {
+            RequestState::Settled | RequestState::Unsent | RequestState::InFlight => {
                 return Err(StoreError::StateInvariant);
             }
         }
@@ -979,9 +1063,11 @@ impl AccountsQueueDelivery for FlowStore {
     fn recover_outstanding_deliveries(&self) -> Result<Vec<QueueDeliveryAttempt>, StoreError> {
         let mut outstanding = Vec::new();
         for mut attempt in self.member_attempts(MembershipOwner::Unfinished)? {
-            if self.request_state(&attempt.queue_request_id.0)? == Some(RequestState::Parked)
-                && (matches!(attempt.queue_evidence, QueueEvidence::Legacy(_))
-                    || attempt.queue_request_id.0.starts_with("legacy:"))
+            let state = self.request_state(&attempt.queue_request_id.0)?;
+            if state == Some(RequestState::Settled)
+                || (state == Some(RequestState::Parked)
+                    && (matches!(attempt.queue_evidence, QueueEvidence::Legacy(_))
+                        || attempt.queue_request_id.0.starts_with("legacy:")))
             {
                 continue;
             }
@@ -1101,7 +1187,7 @@ impl AccountsQueueDelivery for FlowStore {
                     .mutate(self.metaflows, stored)
                     .mutate(self.queue_delivery.requests, parked);
             }
-            RequestState::Unsent | RequestState::Settled => {
+            RequestState::Unsent | RequestState::Settled | RequestState::InFlight => {
                 return Err(StoreError::StateInvariant);
             }
         }
@@ -1134,6 +1220,9 @@ impl AccountsQueueDelivery for FlowStore {
         else {
             return Ok(Err(WithdrawRejected_Data::NotQueued));
         };
+        if self.request_state(id)? == Some(RequestState::InFlight) {
+            return Ok(Err(WithdrawRejected_Data::NotQueued));
+        }
         if let Some(attempt) = self.outstanding_for(address)?
             && matches!(&attempt.queue_evidence,
                 QueueEvidence::Logical(entry) if entry.logical_delivery_id.0 == id)
@@ -1500,5 +1589,20 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+}
+
+#[cfg(test)]
+pub(crate) trait SeedsStockQueueAttempts {
+    fn seed_stock_queue_attempt(&self, attempt: QueueDeliveryAttempt);
+}
+
+#[cfg(test)]
+impl SeedsStockQueueAttempts for FlowStore {
+    fn seed_stock_queue_attempt(&self, attempt: QueueDeliveryAttempt) {
+        let commit = self
+            .commit_attempt(self.engine.begin_atomic_commit(), attempt)
+            .unwrap();
+        self.engine.commit_atomic(commit).unwrap();
     }
 }

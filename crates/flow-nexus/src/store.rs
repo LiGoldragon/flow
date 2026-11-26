@@ -2991,6 +2991,7 @@ impl OpensFlowStore for FlowStore {
         store.align_followed_requests()?;
         store.seed_store_identity()?;
         store.seed_missing_queued_deliveries()?;
+        logical_delivery::RecordsQueueWrites::recover_queue_writes(&store)?;
         request_id_upgrade::RunsRequestIdAnnouncements::run_request_id_announcements(&store)?;
         <FlowStore as crate::generated::transitions::RecordsTransitions>::seed_reported_transitions(&store)?;
         Ok(store)
@@ -3235,6 +3236,7 @@ impl OpensFlowStore for FlowStore {
         store.archive_legacy_queue()?;
         store.align_followed_requests()?;
         store.seed_missing_queued_deliveries()?;
+        logical_delivery::RecordsQueueWrites::recover_queue_writes(&store)?;
         <FlowStore as crate::generated::transitions::RecordsTransitions>::seed_reported_transitions(&store)?;
         if store
             .engine
@@ -8714,6 +8716,65 @@ mod tests {
         PromptDeliveryIntent, PromptDeliveryResult, RegistrationAcknowledgement,
         TargetReceiptRequest,
     };
+
+    #[test]
+    fn configured_open_recovers_a_marked_queue_before_returning_the_store() {
+        use crate::store::logical_delivery::{RecordsLogicalDeliveries, RecordsQueueWrites};
+        use crate::store::metaflow::SeedsMetaflow;
+        let mem = StoreFixture::new();
+        mem.configured();
+        let address = Address {
+            aspect: Aspect::Mind,
+            topic: "recoveryTarget".into(),
+            model: Model::Sol,
+        };
+        let flow_id = signal_flow::FlowId("12abcd".into());
+        let store = mem.configured_store();
+        store.seed_metaflow(signal_flow::Metaflow {
+            address: address.clone(),
+            state: flow_ethos::State::Awake(flow_id.clone()),
+            past: flow_ethos::Past(vec![]),
+            queue: flow_ethos::Queue(vec![]),
+        });
+        let signal_flow::PrivateSendResponse::SendAccepted(admitted) = store
+            .accept_logical_delivery(
+                &address,
+                signal_flow::SentBy::Unbound,
+                flow_ethos::Delivery::Queue,
+                signal_flow::Message::Soft(signal_flow::Request::Order("configured reopen".into())),
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("request admitted")
+        };
+        let before = store.metaflow(&address).unwrap().unwrap();
+        assert!(
+            store
+                .begin_queue_write(&address, &flow_id.0, &before.queue.0)
+                .unwrap()
+        );
+        drop(store);
+
+        let reopened = mem.configured_store();
+        assert!(
+            reopened
+                .metaflow(&address)
+                .unwrap()
+                .unwrap()
+                .queue
+                .0
+                .is_empty()
+        );
+        assert_eq!(
+            reopened
+                .logical_delivery_snapshot(&admitted.logical_delivery_id)
+                .unwrap()
+                .unwrap()
+                .delivery_state,
+            signal_flow::DeliveryState::Uncertain
+        );
+    }
 
     struct StoreFixture {
         directory: tempfile::TempDir,

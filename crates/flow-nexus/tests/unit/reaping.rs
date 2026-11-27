@@ -1738,9 +1738,15 @@ fn a_completion_between_the_pass_and_the_wait_is_not_lost() {
     let hooks = &world.fixture.nexus.pane_watch_hooks;
     let ends = with_supervisor(&world.fixture, || {
         assert!(is_reap_pending(&world.replace(), ReapStanding::Owed));
-        world
-            .events
-            .wait_for("the subscription", |subscribed, _| subscribed >= 1);
+        // Arrival of a subscription request is not acceptance. Closing the
+        // fake stream before its opening snapshot tests handshake refusal
+        // rather than the completed watch the supervisor must join.
+        assert!(
+            hooks
+                .opened_snapshots
+                .until(0, Instant::now() + Duration::from_secs(20)),
+            "the worker consumed the opening snapshot"
+        );
         let events = world.events.clone();
         *hooks.between.lock().unwrap() = Some(Box::new(move |nexus| {
             events.close_streams();

@@ -229,7 +229,7 @@ fn ordinary_send_to_working_codex(
     use crate::message_projection::ProjectsQueueEntry as _;
     use crate::sending::SendsRequests as _;
     use crate::store::metaflow::SleepsMetaflows as _;
-    use crate::waking::SleepsAndWakesSeats as _;
+    use crate::waking::{HoldsWakingMetaflows as _, SleepsAndWakesSeats as _};
     use signal_flow::{Input, Message as SignalMessage, Output, Request, SendRequest};
 
     let fake = FakeAppServer::install(vec![]);
@@ -243,6 +243,11 @@ fn ordinary_send_to_working_codex(
     )
     .unwrap();
 
+    let lease = fixture
+        .nexus
+        .waking
+        .hold(&address)
+        .expect("test holds delivery until its native replies are staged");
     let answer = fixture.nexus.send_request(
         SendRequest {
             address: address.clone(),
@@ -255,7 +260,6 @@ fn ordinary_send_to_working_codex(
     let Output::SendAccepted(accepted) = answer.response else {
         panic!("ordinary Send admitted: {:?}", answer.response)
     };
-    let pending = answer.pending.expect("admitted request schedules its delivery");
     let metaflow = fixture
         .nexus
         .store
@@ -290,7 +294,8 @@ fn ordinary_send_to_working_codex(
         )
         .unwrap();
     }
-    fixture.nexus.wake_due(pending.address);
+    drop(lease);
+    fixture.nexus.wake_due(address.clone());
 
     let Output::SendsObserved(observed) = fixture.nexus.dispatch(Input::ObserveSends(None)) else {
         panic!("ordinary send outcome is observable")

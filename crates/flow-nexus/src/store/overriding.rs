@@ -445,6 +445,30 @@ impl DescribesOverrideTable for crate::generated::memory::StoredHeldLaunch {
         )
     }
 }
+pub(super) trait PositionsHeldLaunches {
+    fn next_held_launch(
+        &self,
+        id: &signal_flow::LaunchRequestId,
+    ) -> Result<crate::generated::memory::StoredHeldLaunch, StoreError>;
+}
+impl PositionsHeldLaunches for FlowStore {
+    fn next_held_launch(
+        &self,
+        id: &signal_flow::LaunchRequestId,
+    ) -> Result<crate::generated::memory::StoredHeldLaunch, StoreError> {
+        use crate::generated::overriding::ParksHeldLaunches;
+        let position = self
+            .held_launches()?
+            .last()
+            .map(|row| row.held_launch_position.0)
+            .map_or(Some(0), |position| position.checked_add(1))
+            .ok_or(StoreError::StateInvariant)?;
+        Ok(crate::generated::memory::StoredHeldLaunch {
+            launch_request_id: id.clone(),
+            held_launch_position: crate::generated::memory::HeldLaunchPosition(position),
+        })
+    }
+}
 impl crate::generated::overriding::ParksHeldLaunches for FlowStore {
     fn held_launches(&self) -> Result<Vec<crate::generated::memory::StoredHeldLaunch>, StoreError> {
         let mut rows = self
@@ -486,16 +510,7 @@ impl crate::generated::overriding::ParksHeldLaunches for FlowStore {
                 },
             );
         }
-        let position = self
-            .held_launches()?
-            .last()
-            .map(|row| row.held_launch_position.0)
-            .map_or(Some(0), |position| position.checked_add(1))
-            .ok_or(StoreError::StateInvariant)?;
-        let marker = crate::generated::memory::StoredHeldLaunch {
-            launch_request_id: attempt.launch_request_id.clone(),
-            held_launch_position: crate::generated::memory::HeldLaunchPosition(position),
-        };
+        let marker = self.next_held_launch(&attempt.launch_request_id)?;
         let commit = self
             .engine
             .begin_atomic_commit()

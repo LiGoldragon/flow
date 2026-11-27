@@ -8043,6 +8043,7 @@ fn a_fresh_launch_crash_never_retypes_a_possible_submission_or_consumes_the_tail
     use crate::test_faults::{CrashPoint, InjectsCrashes};
     for (point, possible) in [
         (CrashPoint::AfterFreshClaim, false),
+        (CrashPoint::AfterFreshReservation, false),
         (CrashPoint::AfterFreshSubmission, true),
     ] {
         let mut fixture = NexusFixture::new();
@@ -8124,6 +8125,45 @@ fn a_fresh_launch_crash_never_retypes_a_possible_submission_or_consumes_the_tail
             let _ = fixture.nexus.perform(Operation::Wake(at.clone()));
             assert_eq!(world.claude_starts(), 1);
             assert_eq!(startup_prompts(&world), 1);
+        } else if point == CrashPoint::AfterFreshReservation {
+            use crate::generated::overriding::{ParksHeldLaunches, ResumesHeldLaunches};
+            use crate::store::ReadsLaunchAttempt;
+            assert!(
+                fixture
+                    .nexus
+                    .store
+                    .marked_held_launch(launch.clone())
+                    .unwrap()
+            );
+            assert_eq!(queue, vec![first.clone(), tail.clone()]);
+            assert_eq!(world.claude_starts(), 0);
+            assert!(fixture.nexus.resume_held_launches(at.clone()));
+            assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+            assert_eq!(startup_prompts(&world), 1);
+            let same = fixture
+                .nexus
+                .store
+                .launch_attempt(&launch.0)
+                .unwrap()
+                .unwrap();
+            assert!(same.native_launch_binding_option.is_some());
+            assert!(
+                !fixture
+                    .nexus
+                    .store
+                    .marked_held_launch(launch.clone())
+                    .unwrap()
+            );
+            assert!(fixture.nexus.store.fresh_cohort(&at).unwrap().is_none());
+            assert_eq!(
+                stored(&fixture, Model::Sol)
+                    .queue
+                    .0
+                    .iter()
+                    .map(|entry| &entry.logical_delivery_id)
+                    .collect::<Vec<_>>(),
+                vec![&tail]
+            );
         } else {
             assert_eq!(state(&first), signal_flow::DeliveryState::Queued);
             assert_eq!(queue, vec![first.clone(), tail.clone()]);

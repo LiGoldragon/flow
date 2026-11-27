@@ -17,6 +17,7 @@ use std::sync::{Condvar, Mutex};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum CrashPoint {
     AfterFreshClaim,
+    AfterFreshReservation,
     AfterFreshSubmission,
     /// K0: W1 landed; the successor holds its Address, unconfirmed.
     AfterAcknowledgement,

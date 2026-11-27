@@ -479,6 +479,11 @@ impl LaunchesFlows for RunningNexus {
             None => launch,
         };
         let harness_kind = launch.harness_kind.clone();
+        #[cfg(test)]
+        crate::test_faults::InjectsCrashes::crash_if_armed(
+            &self.store.faults,
+            crate::test_faults::CrashPoint::AfterFreshReservation,
+        );
         let response = self.launch_reserved(
             launch,
             origin,
@@ -1306,6 +1311,13 @@ impl crate::generated::overriding::ResumesHeldLaunches for RunningNexus {
                 ));
             } else {
                 let _ = self.settle(&marker.launch_request_id.0, response);
+            }
+            use crate::store::fresh_launch::TracksFreshLaunches;
+            if let Ok(Some(claim)) = self.store.fresh_cohort(&address)
+                && claim.launch_request_id == marker.launch_request_id
+                && self.store.reconcile_fresh(&claim).is_err()
+            {
+                return false;
             }
         }
         true

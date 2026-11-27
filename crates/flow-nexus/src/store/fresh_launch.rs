@@ -129,6 +129,26 @@ impl TracksFreshLaunches for FlowStore {
             .match_records(QueryPlan::all(self.fresh_launch_cohorts))?
             .records()
         {
+            use super::overriding::PositionsHeldLaunches;
+            use crate::generated::overriding::ParksHeldLaunches;
+            let id = &claim.launch_request_id;
+            if let Some(attempt) = self.launch_attempt(&id.0)?
+                && attempt.launch_profile.address == claim.address
+                && attempt.launch_attempt_phase == signal_flow::LaunchAttemptPhase::Reserved
+                && attempt.native_launch_intent_option.is_none()
+                && attempt.prompt_delivery_intent_option.is_none()
+                && self.launch_outcome(&id.0)?.is_none()
+                && !self.marked_held_launch(id.clone())?
+            {
+                // Reserve precedes the durable native intent, itself written
+                // before Open. Resume the exact reservation through the same
+                // ordered startup path as a previously parked one.
+                self.engine.commit_atomic(
+                    self.engine
+                        .begin_atomic_commit()
+                        .assert(self.held_launches, self.next_held_launch(id)?),
+                )?;
+            }
             self.reconcile_fresh(claim)?;
         }
         Ok(())

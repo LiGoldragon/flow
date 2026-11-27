@@ -109,7 +109,10 @@ impl RoutesAnswers for FlowStore {
             .find(|retained| retained.entry.logical_delivery_id == binding.logical_delivery_id)
             .map(|retained| retained.entry.sent_by);
         Ok(match sender {
-            Some(SentBy::Sender(address)) => AnswerRoute::To(address),
+            Some(SentBy::Sender(address)) => {
+                use super::address_succession::ReadsAddressSuccessions;
+                AnswerRoute::To(self.current_address(&address)?)
+            }
             Some(SentBy::Unbound | SentBy::Flow | SentBy::Unknown) => AnswerRoute::Kept(binding),
             None => AnswerRoute::Unanswering,
         })

@@ -27,6 +27,7 @@ pub(crate) mod kept_answer;
 pub(crate) mod launch_cleanup;
 pub(crate) mod leave_out_upgrade;
 use effort_configuration::{RegistersModelEfforts, StoredModelEffort};
+pub(crate) mod address_succession;
 mod delivery_attempt_upgrade;
 pub mod delivery_retirement;
 pub(crate) mod living_upgrade;
@@ -223,6 +224,7 @@ const OPTIONAL_TURN_RETENTION_TABLE: &str = "flow_nexus_meta_turn_retention_conf
 const OPTIONAL_FLOW_TRANSITIONS_TABLE: &str = overriding::TRANSITIONS_TABLE;
 const OPTIONAL_HOLD_TABLE: &str = overriding::HOLD_TABLE;
 const OPTIONAL_PERMAFLOW_HOLD_TABLE: &str = overriding::PERMAFLOW_HOLD_TABLE;
+const OPTIONAL_ADDRESS_SUCCESSION_TABLE: &str = address_succession::TABLE;
 const OPTIONAL_HELD_LAUNCH_TABLE: &str = overriding::HELD_LAUNCH_TABLE;
 /// Added in 0.60.0 with CloseRequest: a store written before holds no
 /// closed request, and is opened with the family registered empty.
@@ -346,6 +348,7 @@ const RUNNING_TABLES: &[&str] = &[
     OPTIONAL_FLOW_TRANSITIONS_TABLE,
     OPTIONAL_HOLD_TABLE,
     OPTIONAL_PERMAFLOW_HOLD_TABLE,
+    OPTIONAL_ADDRESS_SUCCESSION_TABLE,
     OPTIONAL_HELD_LAUNCH_TABLE,
     OPTIONAL_CLOSED_REQUEST_TABLE,
     OPTIONAL_ATTEMPT_MEMBERSHIP_TABLE,
@@ -1783,6 +1786,7 @@ pub struct FlowStore {
     transitions_gate: Mutex<()>,
     hold: TableReference<crate::generated::memory::StoredHold>,
     permaflow_holds: TableReference<crate::generated::memory::StoredPermaflowHold>,
+    address_successions: TableReference<crate::generated::memory::StoredAddressSuccession>,
     held_launches: TableReference<crate::generated::memory::StoredHeldLaunch>,
     closed_requests: TableReference<closed_request::ClosedRequest>,
     queue_delivery: QueueDeliveryTables,
@@ -2901,6 +2905,7 @@ impl OpensFlowStore for FlowStore {
         let permaflow_holds = engine.register_table(
             <crate::generated::memory::StoredPermaflowHold as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
         )?;
+        let address_successions = engine.register_table(<crate::generated::memory::StoredAddressSuccession as address_succession::AddressSuccessionTable>::descriptor())?;
         let held_launches = engine.register_table(
             <crate::generated::memory::StoredHeldLaunch as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
         )?;
@@ -2949,6 +2954,7 @@ impl OpensFlowStore for FlowStore {
             transitions_gate: Mutex::new(()),
             hold,
             permaflow_holds,
+            address_successions,
             held_launches,
             closed_requests,
             attempt_memberships,
@@ -3152,6 +3158,7 @@ impl OpensFlowStore for FlowStore {
         let permaflow_holds = engine.register_table(
             <crate::generated::memory::StoredPermaflowHold as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
         )?;
+        let address_successions = engine.register_table(<crate::generated::memory::StoredAddressSuccession as address_succession::AddressSuccessionTable>::descriptor())?;
         let held_launches = engine.register_table(
             <crate::generated::memory::StoredHeldLaunch as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
         )?;
@@ -3200,6 +3207,7 @@ impl OpensFlowStore for FlowStore {
             transitions_gate: Mutex::new(()),
             hold,
             permaflow_holds,
+            address_successions,
             held_launches,
             closed_requests,
             attempt_memberships,
@@ -5684,6 +5692,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                 overriding::TRANSITIONS_SCHEMA,
             ),
             "flow_nexus_hold" => (overriding::HOLD_FAMILY, overriding::HOLD_SCHEMA),
+            address_succession::TABLE => (address_succession::FAMILY, address_succession::SCHEMA),
             "flow_nexus_permaflow_holds" => (
                 overriding::PERMAFLOW_HOLD_FAMILY,
                 overriding::PERMAFLOW_HOLD_SCHEMA,
@@ -6076,6 +6085,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                     || *name == OPTIONAL_FLOW_TRANSITIONS_TABLE
                     || *name == OPTIONAL_HOLD_TABLE
                     || *name == OPTIONAL_PERMAFLOW_HOLD_TABLE
+                    || *name == OPTIONAL_ADDRESS_SUCCESSION_TABLE
                     || *name == OPTIONAL_HELD_LAUNCH_TABLE
                     || *name == OPTIONAL_CLOSED_REQUEST_TABLE
                     || *name == OPTIONAL_ATTEMPT_MEMBERSHIP_TABLE

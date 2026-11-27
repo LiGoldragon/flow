@@ -339,6 +339,16 @@ impl SendsRequests for RunningNexus {
                     }
                 }
             };
+            use crate::store::address_succession::ReadsAddressSuccessions;
+            match self.store.retired_address(&recipient) {
+                Ok(Some(succession)) => {
+                    return PrivateSendResponse::Refused(Refusal::Retired(succession)).into();
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return PrivateSendResponse::Refused(Refusal::Store(error.to_string())).into();
+                }
+            }
             self.rest_ended_awake(&recipient);
             // Own the address until the direct call has a receipt or a
             // durable non-retryable failure. Background drain/wake may not

@@ -582,14 +582,22 @@ impl HoldsOpenRequests for FlowStore {
     }
 
     fn open_requests(&self, address: &Address) -> Result<Vec<QueueEntry>, StoreError> {
+        use super::address_succession::ReadsAddressSuccessions;
         let mut open = Vec::new();
+        let mut ownership = std::collections::HashMap::new();
         for retained in self.retained_logical_requests()? {
-            if retained.address != *address
-                || !matches!(retained.entry.sent_by, SentBy::Sender(_) | SentBy::Unbound)
+            if !matches!(retained.entry.sent_by, SentBy::Sender(_) | SentBy::Unbound)
+                || !retained.entry.message.takes_answer()
             {
                 continue;
             }
-            if !retained.entry.message.takes_answer() {
+            let owned = match ownership.entry(retained.address.clone()) {
+                std::collections::hash_map::Entry::Occupied(current) => *current.get(),
+                std::collections::hash_map::Entry::Vacant(unknown) => {
+                    *unknown.insert(self.current_address(&retained.address)? == *address)
+                }
+            };
+            if !owned {
                 continue;
             }
             let bound_open = self
@@ -1636,6 +1644,15 @@ impl RecordsLogicalDeliveries for FlowStore {
             content_sha256: crate::generated::send_tool::ContentSha256(content_sha256.to_owned()),
             send_outcome,
         };
+        use super::address_succession::ReadsAddressSuccessions;
+        if let Some(succession) = self.retired_address(&target.0)? {
+            let outcome = ToolSendOutcome::Refused(ToolSendRefusal::Retired(
+                crate::generated::send_tool::Target(succession.second_address),
+            ));
+            self.engine
+                .assert(Assertion::new(self.send_calls, record(outcome.clone())))?;
+            return Ok(outcome);
+        }
         let Some(mut stored) = self.stored_metaflow(&target.0)? else {
             let outcome =
                 ToolSendOutcome::Refused(ToolSendRefusal::UnknownRecipient(target.clone()));
@@ -2058,6 +2075,12 @@ impl RecordsLogicalDeliveries for FlowStore {
             .handover_write_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        use super::address_succession::ReadsAddressSuccessions;
+        if let Some(succession) = self.retired_address(address)? {
+            return Ok(signal_flow::PrivateSendResponse::Refused(Refusal::Retired(
+                succession,
+            )));
+        }
         let LogicalDeliveryTransition {
             purpose,
             handover_reminder,

@@ -70,7 +70,8 @@ Library
                 TopicRefused.Topic
                 Unresolved
                 RequestIdSpaceFull
-                RequestIdDrawsCollided ]
+                RequestIdDrawsCollided
+                Retired.Target ]
   ; Accepted is a durable logical delivery, never a claim of delivery.
   ; LegacyUnknown preserves historical calls which predate logical IDs.
   ; An outcome names its sender, the type every sender is recorded as.

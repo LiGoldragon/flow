@@ -110,7 +110,11 @@ impl RemembersOverrides for FlowStore {
         &self,
         input: N,
     ) -> Result<bool, StoreError> {
+        use super::address_succession::ReadsAddressSuccessions;
         let address = input.address();
+        if self.address_succession(&address)?.is_some() {
+            return Ok(true);
+        }
         Ok(!self
             .engine
             .match_records(QueryPlan::key(

@@ -394,6 +394,7 @@ Memory
   StoredHold.{ Moment }
   ; One nonexpiring manual hold per Address. Absent means released.
   StoredPermaflowHold.{ Address }
+  StoredAddressSuccession.{ Address Address }
   ; Admission order belongs only to the parked marker, not the attempt.
   HeldLaunchPosition.Integer
   StoredHeldLaunch.{ LaunchRequestId HeldLaunchPosition }

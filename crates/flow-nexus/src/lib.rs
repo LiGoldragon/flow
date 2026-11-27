@@ -1433,6 +1433,58 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         }
     }
 
+    fn succeed(
+        &self,
+        succession: &signal_flow::AddressSuccession,
+    ) -> Result<signal_flow::AddressSuccession, meta_signal_flow::Output> {
+        use crate::store::address_succession::{
+            ReadsAddressSuccessions, RecordsAddressSuccessions,
+        };
+        use meta_signal_flow::{Output, StoreFailure, SucceedRefused_Data};
+        if succession.first_address == succession.second_address {
+            self.renew(&succession.second_address)?;
+            return Ok(succession.clone());
+        }
+        let (installed, owner) = {
+            let _dispatch = self
+                .nexus
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let store_failure = |error: store::StoreError| {
+                Output::SucceedRefused(SucceedRefused_Data::StoreRefused(StoreFailure(
+                    error.to_string(),
+                )))
+            };
+            let installed = self
+                .nexus
+                .store
+                .record_address_succession(succession)
+                .map_err(store_failure)?
+                .map_err(Output::SucceedRefused)?;
+            let owner = self
+                .nexus
+                .store
+                .current_address(&installed.second_address)
+                .map_err(store_failure)?;
+            (installed, owner)
+        };
+        self.nexus.wake_due(owner);
+        Ok(installed)
+    }
+
+    fn read_succession(
+        &self,
+        address: &signal_flow::Address,
+    ) -> Result<Option<signal_flow::AddressSuccession>, meta_signal_flow::Output> {
+        use crate::store::address_succession::ReadsAddressSuccessions;
+        self.nexus.store.retired_address(address).map_err(|error| {
+            meta_signal_flow::Output::Refused(meta_signal_flow::Refused_Data::StoreRefused(
+                meta_signal_flow::StoreFailure(error.to_string()),
+            ))
+        })
+    }
+
     fn abandon_queue_delivery(
         &self,
         request: &meta_signal_flow::AbandonQueueDelivery_Data,
@@ -3259,7 +3311,8 @@ impl DispatchesSerially for RunningNexus {
         | meta_signal_flow::Input::Hold
         | meta_signal_flow::Input::Resume
         | meta_signal_flow::Input::HoldPermaflow(_)
-        | meta_signal_flow::Input::ReleasePermaflow(_) = &query
+        | meta_signal_flow::Input::ReleasePermaflow(_)
+        | meta_signal_flow::Input::Succeed(_) = &query
         {
             let response = self.dispatch_meta_from(query, resolver);
             {

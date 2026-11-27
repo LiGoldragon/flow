@@ -42,6 +42,7 @@ impl ProjectsRefusal for signal_flow::Refusal {
             Refusal::RequestIdDrawsCollided => VisibleRefusal::RequestIdDrawsCollided,
             Refusal::MinutesRefused(value) => VisibleRefusal::MinutesRefused(value.clone()),
             Refusal::PermaflowHeld(value) => VisibleRefusal::PermaflowHeld(value.clone()),
+            Refusal::Retired(succession) => VisibleRefusal::Retired(succession.clone()),
         }
     }
 }

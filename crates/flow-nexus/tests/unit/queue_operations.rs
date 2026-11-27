@@ -1782,3 +1782,85 @@ fn startup_settles_stranded_attempts_without_waking_their_metaflow() {
         );
     }
 }
+
+#[test]
+fn address_succession_moves_an_existing_queue_and_inherits_open_receipts() {
+    use crate::generated::overriding::HeedsOverrides;
+    use crate::store::logical_delivery::HoldsOpenRequests;
+    let fixture = NexusFixture::new();
+    let old = at("predecessor");
+    let new = at("successor");
+    let elsewhere = at("elsewhere");
+    for address in [&old, &new, &elsewhere] {
+        asleep(&fixture, address);
+    }
+    let inbound = admitted(
+        &fixture,
+        &old,
+        SentBy::Sender(elsewhere.clone()),
+        Request::Question("An inherited question.".into()),
+    );
+    delivered(&fixture, &old, &inbound);
+    let receipt = fixture
+        .nexus
+        .store
+        .logical_delivery_snapshot(&inbound.logical_delivery_id)
+        .unwrap()
+        .unwrap();
+    let already_queued = admitted(
+        &fixture,
+        &old,
+        SentBy::Sender(elsewhere.clone()),
+        Request::Notice("Already admitted before succession.".into()),
+    );
+    let edge = signal_flow::AddressSuccession {
+        first_address: old.clone(),
+        second_address: new.clone(),
+    };
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(meta_signal_flow::Input::Succeed(edge.clone())),
+        meta_signal_flow::Output::Succeeded(edge.clone())
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(meta_signal_flow::Input::ReadSuccession(old.clone())),
+        meta_signal_flow::Output::SuccessionRead(Some(edge.clone()))
+    );
+    assert!(fixture.nexus.permaflow_held(old.clone()));
+    assert!(queued(&fixture, &old).is_empty());
+    assert_eq!(
+        queued(&fixture, &new)[0].logical_delivery_id,
+        already_queued.logical_delivery_id
+    );
+    assert_eq!(
+        queued(&fixture, &new)[0].request_id,
+        already_queued.request_id
+    );
+    let inherited = fixture.nexus.store.open_requests(&new).unwrap();
+    assert_eq!(inherited.len(), 1);
+    assert_eq!(inherited[0].request_id, inbound.request_id);
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .logical_delivery_snapshot(&inbound.logical_delivery_id)
+            .unwrap(),
+        Some(receipt)
+    );
+    assert!(fixture.nexus.store.open_requests(&old).unwrap().is_empty());
+    assert!(matches!(
+        fixture.nexus.store.accept_logical_delivery(
+            &old,
+            SentBy::Unbound,
+            flow_ethos::Delivery::Queue,
+            Message::Soft(Request::Notice("New mail.".into())),
+            None,
+        ).unwrap(),
+        PrivateSendResponse::Refused(signal_flow::Refusal::Retired(succession)) if succession == edge
+    ));
+    assert!(queued(&fixture, &old).is_empty());
+    assert_eq!(queued(&fixture, &new).len(), 1);
+}

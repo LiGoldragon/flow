@@ -2216,7 +2216,7 @@ fn a_due_wake_whose_receipt_lands_late_never_types_its_carried_request_again() {
             transcript.display().to_string(),
         )),
         background_work: signal_flow::BackgroundWork(vec![]),
-        last_assistant_message_option: None,
+        last_assistant_message_option: signal_flow::LastAssistantMessageOption(None),
     });
     assert_eq!(
         fixture.nexus.report(signal_flow::Report_Data {

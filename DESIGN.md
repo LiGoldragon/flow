@@ -672,8 +672,15 @@ Awake. A direct Send that woke its recipient answers `Sent` from it; one
 whose request stays queued behind the batch waits for the seat's next due
 event.
 
-A Codex seat runs no hook and reports no Stop; its turn ends are its
-app-server's. Every connection Flow keeps on a Codex thread (the launch's
+A Codex seat runs no hook and reports no Stop; its turn ends and delivery
+receipts are its app-server's. For a soft placement into a Working thread,
+Flow subscribes the exact bound thread. Its `thread/resume` reply sets the
+cut before a single pane placement. A subsequent `item/started` on that
+thread must carry a user message with exactly one text part matching the
+letter. A completion for old identical text, another thread, multipart text
+or an unreadable notification is not evidence. Once placed, an unproven
+letter is `Uncertain` and is never placed again. No polling is needed.
+Every connection Flow keeps on a Codex thread (the launch's
 opening connection, then the Nexus's responder) reads that thread's
 `turn/started`, `turn/completed` and `thread/status/changed`, and the
 `thread/resume` that subscribes a responder answers the thread's status as
@@ -865,7 +872,13 @@ metaflow's Past.
 
 `Hold` is kept in Memory (`flow_nexus_hold`), so a Nexus that starts held
 stays held: its start reconciles deliveries and obligations and takes up
-nothing else. While held, `settle_stopped`, `drain_awake`, `wake_due` and
+nothing else. `ReleasePermaflow` changes nothing when launches are parked and
+returns their actual request IDs. `ReleaseParkedLaunches` must name that exact
+cohort and `Start` or `Drop`; the decision commits under the hold before any
+drain. Start resumes only those IDs and Drop settles each as
+`ParkedLaunchDropped`. Repetition, disconnect and recovery are idempotent:
+none can mint another launch or revive a dropped one. While held,
+`settle_stopped`, `drain_awake`, `wake_due` and
 the reminder and heartbeat clocks do nothing, and a Send is queued, not
 typed. Everything a caller or the owner asks is answered and done, a
 `Deliver` handing an Awake seat its queue among it; an Asleep metaflow is
@@ -1003,7 +1016,8 @@ stays queued. Reopening a store does not seed this record from history.
 Before serving at takeover the Nexus observes each bound seat against its
 native source. Codex's loaded threads, parent links and authoritative
 statuses determine family activity: an active descendant keeps an idle
-parent working. A native status broadcast, including a child's, prompts
+parent working, and `Observe.Agent` projects that standing as `Working`
+rather than the root thread's idle status. A native status broadcast, including a child's, prompts
 a new family reading. Claude's session process and native transcript
 determine its activity. Herdr locates the pane and carries writes, never
 determines harness activity or proves a harness ended. A successful
@@ -1076,6 +1090,8 @@ launch identity until confirmation: another wake cannot create a duplicate.
 An observed receipt can complete the same stored attempt without resubmission.
 Takeover also rejects undeclared parked reservations and discards undeclared
 successor and replacement obligations, preserving the Address's durable queue.
+A declared parked launch remains inert until an exact explicit Start
+disposition; merely releasing or recovering the hold never runs it.
 
 A hookless Claude's main transcript is also an event source. Flow watches the
 native registry, projects root and project directories before reading the

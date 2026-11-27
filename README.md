@@ -13,7 +13,10 @@ The wire contracts are independent repositories:
 - `signal-flow` defines `Start`, `Refresh`, `Stop`,
   `List`, `ResolveRecipient` for Message Nexus routing, `ResolveCaller`,
   which names the flow, aspect and model of the process that calls,
-  and `Observe.Agent`, a flow's Herdr agent state on open and on each change.
+  and `Observe.Agent`, a flow's authoritative seat state on open and on each
+  change. For Codex, the whole loaded parent/child family is read: an active
+  descendant keeps an otherwise idle parent `Working` until the last active
+  descendant rests.
   A frame that decodes as no Input, an earlier hook's Report among them, is
   answered `FrameRefused` with its caller's process and seat and recorded;
   `Observe.Undecodable` shows every record and each new one.
@@ -26,8 +29,14 @@ The wire contracts are independent repositories:
   (`MetaflowGone`); `Metaflows` stays the one-shot read.
   Nothing on the ordinary socket writes into a pane.
   Ordinary `Send` returns `SendAccepted` when the request is durably
-  admitted. Keep its request ID and cursor. Read delivery through
-  `ObserveSends`, matching that ID; delivery is a later observation.
+  admitted. Keep its request ID and cursor. `ObserveSends.None` opens a
+  stream with the current durable snapshot; `ObserveSends.Some.<cursor>`
+  opens it with changes after that cursor, and later changes keep arriving.
+  For one bounded read use `SnapshotSends.None` or
+  `SnapshotSends.Some.<cursor>` instead. It returns exactly one
+  `SendsSnapshotted.VisibleSendObservation` frame and the connection closes.
+  Both forms expose the same public Address projection and durable cursor;
+  match the original request ID rather than sending the request again.
 - `meta-signal-flow` defines `Configure`, reset-credit consumption, the
   override panel at its root (`SetState`, `CrystallizeNow`, `Renew`,
   `Close`, `Deliver`, `Unlock`, `Forget`, `Hold`, `Resume`), and the pane
@@ -198,7 +207,19 @@ terminal the route names, never the agent's label, which Herdr omits for panes
 it was never given a name for. `Transported` means Herdr accepted the text,
 `Uncertain` that it may have been typed and was not observed; Uncertain is
 never retried, and a delivery a crash left under its lease settles Uncertain
-when the Nexus opens. `Deliver` is idempotent on its DeliveryId. A Pending row
+when the Nexus opens. For a soft letter steered into a Working Codex thread, Flow
+subscribes the exact bound thread and waits for its app-server `thread/resume`
+reply before the single pane placement. It reports `Presented` only for a
+subsequent `item/started` user message on that thread whose sole text part
+exactly matches the letter. A prior item, its later `item/completed`, another
+thread, malformed or multipart input, or a missed notification does not prove
+presentation: the delivery is `Uncertain` and is never placed again. If the
+subscription cannot be established before placement, conservative transport
+observation remains available: Herdr acceptance may be `Transported` without a
+native receipt. The pane lease serializes Flow placements, but Codex exposes no
+TUI client-message ID before placement: byte-identical input an external actor
+enters on the same thread after the cut cannot be distinguished. `Read` is a
+separate later acknowledgement. `Deliver` is idempotent on its DeliveryId. A Pending row
 becomes Active when the flow is witnessed live: on a `Presented` Deliver, or
 when `List` finds its bound pane present in Herdr. Presented is not Read.
 `Stop` closes the flow's recorded Herdr pane when a fresh snapshot still
@@ -241,6 +262,30 @@ flow-meta 'Renew.{ Mind core Sol }'   # Renewed.<fresh flow>
 flow-meta 'Resume'                # Resumed
 ```
 
+Releasing a hold is deliberately separate from deciding the fate of launches
+parked behind it. First try the ordinary release:
+
+```sh
+flow-meta 'ReleasePermaflow.{ Mind flow Sol }'
+```
+
+If it answers
+`ParkedLaunchReleaseRejected.{ { Mind flow Sol } [ first second ] }`, copy the
+complete returned launch-request-ID cohort and choose explicitly:
+
+```sh
+flow-meta 'ReleaseParkedLaunches.{ { Mind flow Sol } Start [ first second ] }'
+flow-meta 'ReleaseParkedLaunches.{ { Mind flow Sol } Drop [ first second ] }'
+```
+
+The complete set is compared while the hold is locked; duplicate, missing or
+unexpected IDs change nothing. `Start` records permission before draining and
+means neither that a process started nor that launch succeeded, so follow
+`LaunchStatus` for every original ID. `Drop` records each terminal
+`StartRejected.ParkedLaunchDropped` before clearing the hold. Repeating either
+release, disconnecting, or restarting cannot mint a second launch or revive a
+dropped one.
+
 `Start` carries a typed `LaunchProfile` alone. A profile names the module
 identities of its system prompt and of its first USER message, the launched
 flow's Address (aspect, topic, Model), model, effort, predecessor, remembered
@@ -272,12 +317,20 @@ forms are rejected.
 
 A metaflow declaration sets `FlowKind` (`Regular` or `Simplified`) and
 `ToolSet` (`Default` or `Explicit.[ ... ]`). A simplified flow carries its
-own system modules. Claude receives a declared tool set exactly as declared
-(the empty set as `--tools ""`) and the default as no tool flag at all,
-whatever the flow's kind. A simplified flow's first queued request is
-submitted after the idle native seat is bound, without a synthetic startup
-turn. The Stop
-hook's `last_assistant_message` becomes a `Result` to the sender of the
+own system modules. `Default` keeps the harness's ordinary catalog. An
+explicit Claude catalog is admitted only when a local harness authority can
+enforce and read back the exact model-visible catalog before any provider or
+pane is opened. Stock Claude supplies no such authority, so it fails closed,
+for example
+`StartRejected.ToolCatalogRefused.Unenforceable.{ Claude { [ Bash Read ] [] None } }`:
+the fields are declared tools, configured unavoidable fixed tools, and the
+observed catalog (`None` means it could not be read). Provider, plugin and MCP
+tools are never silently treated as fixed. Codex and Default launches retain
+their existing catalog behavior. A Simplified Default launch or refresh with
+no instruction and no queued request starts an idle native session without
+submitting a turn. Its first real request is the first input, even after a
+Nexus restart. A request already queued is submitted after the idle native
+seat is bound, also without a synthetic startup turn. The Stop hook's `last_assistant_message` becomes a `Result` to the sender of the
 consumed request. The response binding follows that request's native
 receipt, rather than whichever sender wrote most recently.
 

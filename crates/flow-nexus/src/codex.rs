@@ -273,6 +273,19 @@ pub trait ReadsCodexTurnHistory {
     fn newest_turn(&self, thread_id: &str) -> Result<Option<String>, CodexAdapterUnavailable>;
 }
 
+/// A user-message item currently present in a Codex thread.  This is a
+/// read-only receipt: it never starts, steers, or retries a turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexUserItem {
+    pub turn_id: String,
+    pub item_id: String,
+    pub text: String,
+}
+
+pub trait ReadsCodexUserItems {
+    fn user_items(&self, thread_id: &str) -> Result<Vec<CodexUserItem>, CodexAdapterUnavailable>;
+}
+
 /// Opens a launch's Codex thread through the app-server before any TUI
 /// attaches to it: the thread starts with the composed system prompt as its
 /// base instructions and the launch's exclusions in its config, and what the
@@ -1520,6 +1533,59 @@ impl ReadsCodexTurnHistory for CodexAdapter {
     }
 }
 
+impl ReadsCodexUserItems for CodexAdapter {
+    fn user_items(&self, thread_id: &str) -> Result<Vec<CodexUserItem>, CodexAdapterUnavailable> {
+        use crate::codex_turns::{ReadsThreadItem, ReadsTurnReport};
+        let mut session = self.initialize_bound_session()?;
+        let result = session
+            .request(
+                2,
+                "thread/turns/list",
+                serde_json::json!({
+                    "threadId": thread_id,
+                    "limit": 20,
+                    "sortDirection": "desc",
+                    "itemsView": "full"
+                }),
+                self.timeout,
+            )
+            .and_then(|listed| {
+                let turns = listed
+                    .get("data")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| {
+                        CodexAdapterUnavailable::Protocol("thread/turns/list has no data".into())
+                    })?;
+                let mut items = Vec::new();
+                for turn in turns {
+                    let Some(report) = turn.turn_report() else { continue };
+                    let Some(values) = turn.get("items").and_then(serde_json::Value::as_array)
+                    else { continue };
+                    for item in values {
+                        if item.get("type").and_then(serde_json::Value::as_str)
+                            != Some("userMessage")
+                        {
+                            continue;
+                        }
+                        let seen = item.seen_letter(&report.codex_turn_id).ok_or_else(|| {
+                            CodexAdapterUnavailable::Protocol(
+                                "a userMessage item has malformed content".into(),
+                            )
+                        })?;
+                        items.push(CodexUserItem {
+                            turn_id: seen.codex_turn_id.0,
+                            item_id: seen.codex_item_id.0,
+                            text: seen.payload_text.0,
+                        });
+                    }
+                }
+                Ok(items)
+            });
+        session.stop_proxy();
+        result
+    }
+}
+
 /// Reads an app-server refusal of a `thread/start` that declared the send
 /// tool: the refusal codex 0.161.0-alpha.2 gives a connection without the
 /// experimental API (JSON-RPC -32600, "thread/start.dynamicTools requires
@@ -2211,6 +2277,25 @@ mod tests {
             timeout: Duration::from_secs(5),
             ..adapter()
         }
+    }
+
+    #[test]
+    fn user_items_reads_full_native_items_without_starting_a_turn() {
+        let _guard = FAKE_PROXY_LOCK.lock().unwrap();
+        let fake = FakeProxy;
+        let frames = [
+            fake.websocket_frame(r#"{"id":1,"result":{}}"#),
+            fake.websocket_frame(r#"{"id":2,"result":{"data":[{"id":"turn-2","status":"inProgress","items":[{"type":"userMessage","id":"item-old","content":[{"type":"text","text":"old"}]},{"type":"userMessage","id":"item-new","content":[{"type":"text","text":"new"}]}]}],"nextCursor":null}}"#),
+        ];
+        let (_directory, executable) = fake.install(&frames);
+        let adapter = adapter_at(executable);
+        assert_eq!(
+            adapter.user_items("thread-bound").unwrap(),
+            vec![
+                CodexUserItem { turn_id: "turn-2".into(), item_id: "item-old".into(), text: "old".into() },
+                CodexUserItem { turn_id: "turn-2".into(), item_id: "item-new".into(), text: "new".into() },
+            ]
+        );
     }
 
     fn endpoints() -> CodexEndpoints {

@@ -32,11 +32,13 @@ use crate::compacting::WatchesCompactions;
 use crate::generated::operation::{Operation, Record_Data};
 use crate::herdr::pane::{Interruption, NamesKeys, PaneAgent, Placement, Submission, WritesPane};
 use crate::performing::Performs;
-use crate::store::ReadsFlowRows;
+use crate::store::{ReadsFlowRows, NamesConfiguredModel};
 use crate::store::context::JudgesCompaction;
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries, SelectsHarnessProfile};
 use crate::store::metaflow::{ReadsSuccession, Succession};
 use crate::submission::{SeatSubmission, WitnessesSubmissions};
+use crate::codex::{ReadsCodexUserItems, CodexUserItem, SelectsCodexEndpoint};
+use crate::live::HoldsLiveValue;
 use crate::waking::{HoldsWakingMetaflows, IdentifiesWakingLease, WakingLease};
 use body::{RecognizesLetter, RendersPaneText, VetsBody};
 use flow_native::DigestsPrompt;
@@ -534,6 +536,12 @@ trait RunsLeasedDelivery<'run> {
     /// interrupt cancelled, which its writer had already submitted. It is
     /// never deleted; the letter follows it.
     fn resubmitted_cancelled_prompt(&self) -> bool;
+    fn codex_user_items(&self) -> Option<Vec<CodexUserItem>>;
+    fn fresh_codex_item(
+        before: Option<&[CodexUserItem]>,
+        after: Option<&[CodexUserItem]>,
+        text: &str,
+    ) -> bool;
     fn run(&self) -> Result<Delivery, DeliveryRejection>;
 }
 
@@ -560,6 +568,44 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
                 lease_step,
             })
             .map_err(|_| DeliveryRejection::PersistenceRefused)
+    }
+
+    /// Read the bound Codex thread's user items without submitting anything.
+    /// The item list is the native receipt for a steer into a working thread.
+    fn codex_user_items(&self) -> Option<Vec<CodexUserItem>> {
+        if self.target.node.harness_kind != HarnessKind::Codex
+            || self.target.node.session_id.0.is_empty()
+        {
+            return None;
+        }
+        let address = self
+            .nexus
+            .store
+            .metaflow_awake_as(&self.target.node.flow_id)
+            .ok()??
+            .address;
+        let model = self.nexus.store.configured_model(&address).ok()??;
+        self.nexus
+            .codex_endpoints
+            .current()
+            .adapter_for(&model)
+            .ok()?
+            .user_items(&self.target.node.session_id.0)
+            .ok()
+    }
+
+    fn fresh_codex_item(
+        before: Option<&[CodexUserItem]>,
+        after: Option<&[CodexUserItem]>,
+        text: &str,
+    ) -> bool {
+        let Some(after) = after else { return false };
+        after.iter().any(|item| {
+            item.text == text
+                && before
+                    .map(|items| !items.iter().any(|old| old.item_id == item.item_id))
+                    .unwrap_or(false)
+        })
     }
 
     fn refuse(&self, rejection: DeliveryRejection) -> Result<Delivery, DeliveryRejection> {
@@ -766,6 +812,12 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         }
         let observe = matches!(agent_state, AgentState::Idle | AgentState::Done);
         let text = self.request.message.pane_text();
+        // For a working Codex seat, capture the native item baseline before
+        // the one Herdr placement.  No submit/retry is performed here.
+        let codex_before = (self.target.node.harness_kind == HarnessKind::Codex
+            && agent_state == AgentState::Working
+            && !hard)
+            .then(|| self.codex_user_items());
         // A resting seat reports taking the text; a working one announces
         // nothing until it takes its input, so only its composer shows the
         // submission. The mark is taken before any key.
@@ -784,6 +836,29 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             Placement::Placed { observed } => Some(observed),
         };
         let _ = self.step(LeaseStep::Placed);
+
+        // A working Codex steer does not create a new turn and therefore
+        // cannot be witnessed by the ordinary turn-start hook.  Read the
+        // thread items once after placement and accept only a fresh item on
+        // this exact bound thread whose text matches this letter.  An absent
+        // or unreadable native receipt remains Uncertain.
+        if self.target.node.harness_kind == HarnessKind::Codex
+            && agent_state == AgentState::Working
+            && !hard
+        {
+            let after = self.codex_user_items();
+            let before = codex_before.as_ref().and_then(|items| items.as_deref());
+            let receipt = Self::fresh_codex_item(before, after.as_deref(), text.as_str());
+            return self.settle(
+                interrupt_witness,
+                if receipt {
+                    DeliveryGrade::Presented
+                } else {
+                    DeliveryGrade::Uncertain
+                },
+            );
+        }
+
         if hard {
             let _ = self
                 .nexus
@@ -828,5 +903,51 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             )));
         }
         self.settle(interrupt_witness, DeliveryGrade::Presented)
+    }
+}
+
+#[cfg(test)]
+mod working_codex_receipt_tests {
+    use super::{CodexUserItem, RunsLeasedDelivery};
+
+    fn item(id: &str, text: &str) -> CodexUserItem {
+        CodexUserItem {
+            turn_id: "thread-turn".into(),
+            item_id: id.into(),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn fresh_matching_item_is_a_receipt() {
+        let before = [item("old", "same")];
+        let after = [item("old", "same"), item("new", "same")];
+        assert!(<super::LeasedDelivery<'static> as RunsLeasedDelivery>::fresh_codex_item(
+            Some(&before), Some(&after), "same"
+        ));
+    }
+
+    #[test]
+    fn stale_or_repeated_item_is_not_a_receipt() {
+        let before = [item("old", "same")];
+        let after = [item("old", "same")];
+        assert!(!<super::LeasedDelivery<'static> as RunsLeasedDelivery>::fresh_codex_item(
+            Some(&before), Some(&after), "same"
+        ));
+    }
+
+    #[test]
+    fn wrong_item_text_and_unreadable_history_are_not_receipts() {
+        let before = [item("old", "other")];
+        let after = [item("new", "other")];
+        assert!(!<super::LeasedDelivery<'static> as RunsLeasedDelivery>::fresh_codex_item(
+            Some(&before), Some(&after), "wanted"
+        ));
+        assert!(!<super::LeasedDelivery<'static> as RunsLeasedDelivery>::fresh_codex_item(
+            Some(&before), None, "wanted"
+        ));
+        assert!(!<super::LeasedDelivery<'static> as RunsLeasedDelivery>::fresh_codex_item(
+            None, Some(&after), "other"
+        ));
     }
 }

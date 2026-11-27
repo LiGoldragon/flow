@@ -7,12 +7,13 @@ use crate::claude_changes::{ClaudeDirectories, ReadsClaudeChanges};
 use crate::event_wait::{AnnouncesOnce, AwaitsDescriptors, OpensExitDescriptor};
 use crate::herdr::LocatesNativeTranscripts;
 use crate::herdr::session_stream::{ReadsSessionChanges, SessionCursor, SharesSessionStreams};
-use crate::herdr::{PaneOwnership, ReadsHerdrPanes};
+use crate::herdr::{PaneOwnership, ReadsHerdrPanes, ReadsHerdrRoster};
 use crate::observe_agent::RecordsWitnessedExit;
 use crate::restarting::{FencesSeatEvents, SeatWitness};
 use crate::seat_observation::ReadsNativeStanding;
 use crate::store::current_seat::{CurrentSeatRead, RecordsCurrentSeats};
 use crate::store::metaflow_watch::WatchesMetaflows;
+use crate::store::recipient_retries::RetriesRecipients;
 use crate::store::restart::RecordsRestarts;
 use crate::store::{AnnouncesLaunchChanges, LaunchChanges, ManagesMetaflowState, ReadsFlowRows};
 use crate::{HoldsStopRequest, RunningNexus};
@@ -25,6 +26,7 @@ struct BoundTransport {
     socket: PathBuf,
     events: SessionCursor,
     ownership: PaneOwnership,
+    writable: bool,
 }
 pub trait ServesBoundRoutes {
     fn serve_bound_routes(&self);
@@ -200,6 +202,7 @@ impl ServesBoundRoutes for RunningNexus {
                             socket,
                             events,
                             ownership: PaneOwnership::Unknown,
+                            writable: false,
                         },
                     );
                 }
@@ -213,6 +216,12 @@ impl ServesBoundRoutes for RunningNexus {
                     } else {
                         PaneOwnership::Unknown
                     };
+                    let writable = view.ownership == PaneOwnership::Owned
+                        && self.herdr.route_is_available(&node);
+                    if writable && !view.writable {
+                        self.route_ready(&seat.address, &id.0);
+                    }
+                    view.writable = writable;
                 }
             }
             native_seats.retain(|id, _| present_native.contains(id));

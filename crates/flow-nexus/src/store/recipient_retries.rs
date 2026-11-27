@@ -24,6 +24,7 @@ struct Targets {
     addresses: BTreeMap<String, Address>,
     seats: BTreeSet<String>,
     active: BTreeSet<String>,
+    route_ready: BTreeMap<String, String>,
 }
 #[derive(Default)]
 pub(crate) struct RecipientRetries {
@@ -82,6 +83,7 @@ impl SubscriptionSink<CurrentSeat> for RecipientRetries {
     }
 }
 pub trait RetriesRecipients {
+    fn route_ready(&self, address: &Address, flow_id: &str);
     fn watch_recipient_retries(&self) -> Result<(), StoreError>;
     fn serve_recipient_retries(&self);
 }
@@ -139,9 +141,26 @@ impl DispatchesRecipientRetries for RunningNexus {
             let Ok(Some(row)) = self.store.metaflow(address) else {
                 return;
             };
+            let route = self
+                .store
+                .recipient_retries
+                .targets
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .route_ready
+                .remove(&FlowStore::address_record_key(address));
+            if let State::Awake(id) = &row.state
+                && route.as_deref() == Some(id.0.as_str())
+                && crate::waking::ReadsRestedRefresh::refresh_due_on_route(self, &id.0, address)
+            {
+                drop(_turn);
+                self.settle_stopped(&id.0);
+                return;
+            }
             if row.queue.0.is_empty() {
                 return;
             }
+
             if let State::Awake(id) = row.state
                 && !matches!(
                     self.store.seat_decision(&id.0),
@@ -156,6 +175,15 @@ impl DispatchesRecipientRetries for RunningNexus {
 }
 
 impl RetriesRecipients for RunningNexus {
+    fn route_ready(&self, address: &Address, flow_id: &str) {
+        let retries = &self.store.recipient_retries;
+        let key = FlowStore::address_record_key(address);
+        let mut targets = retries.targets.lock().unwrap_or_else(|e| e.into_inner());
+        targets.route_ready.insert(key.clone(), flow_id.to_string());
+        targets.addresses.insert(key, address.clone());
+        drop(targets);
+        retries.changes.announce();
+    }
     fn watch_recipient_retries(&self) -> Result<(), StoreError> {
         let sink = &self.store.recipient_retries;
         let locks = Arc::new(ReleasedRecipients {

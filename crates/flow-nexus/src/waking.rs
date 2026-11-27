@@ -1138,6 +1138,78 @@ impl ClassifiesSuccessorCause for SuccessionCause {
     }
 }
 
+pub(crate) trait ReadsRestedRefresh {
+    fn refresh_standing(
+        &self,
+        flow_id: &str,
+        address: &Address,
+        warned: bool,
+    ) -> Option<(meta_signal_flow::RefreshMode, bool)>;
+    fn refresh_due_on_route(&self, flow_id: &str, address: &Address) -> bool;
+}
+impl ReadsRestedRefresh for RunningNexus {
+    fn refresh_due_on_route(&self, flow_id: &str, address: &Address) -> bool {
+        use crate::store::handover_reminders::SchedulesHandoverReminders;
+        if !self.rests_now(flow_id) {
+            return false;
+        }
+        if matches!(self.store.ordered_replacement(address),Ok(Some(order)) if order.predecessor.0==flow_id)
+        {
+            return true;
+        }
+        let Ok(warned) = self.store.warned(address, flow_id) else {
+            return false;
+        };
+        self.refresh_standing(flow_id, address, warned)
+            .is_some_and(|(_, due)| due)
+    }
+    fn refresh_standing(
+        &self,
+        flow_id: &str,
+        address: &Address,
+        warned: bool,
+    ) -> Option<(meta_signal_flow::RefreshMode, bool)> {
+        use crate::store::context::NamesFlowModel;
+        use crate::store::context_warnings::ReadsContextWarningConfiguration;
+        let warning_policy_configured = match self.store.flow_model(flow_id) {
+            Ok(Some(model)) => match self.store.context_warning_policy(&model) {
+                Ok(policy) => policy.is_some(),
+                Err(_) => return None,
+            },
+            Ok(None) => false,
+            Err(_) => return None,
+        };
+        let refresh_mode = match self.store.refresh_mode(address) {
+            Ok(mode) => mode,
+            Err(_) => return None,
+        };
+        let refresh_due = if refresh_mode == meta_signal_flow::RefreshMode::Manual {
+            false
+        } else {
+            match self.store.threshold_standing(flow_id) {
+                Ok(crate::store::context::ThresholdStanding::Past { .. }) => true,
+                Ok(crate::store::context::ThresholdStanding::Below { refresh, .. }) => {
+                    use crate::protecting::ProtectsFlows;
+                    let warned = !warning_policy_configured
+                        && (warned
+                            || match self.store.handover_green(address, flow_id, refresh) {
+                                Ok(green) => green,
+                                Err(_) => return None,
+                            });
+                    warned
+                        && match self.store.protected_address(flow_id) {
+                            Ok(protected) => protected.is_none(),
+                            Err(_) => return None,
+                        }
+                }
+                Ok(_) => false,
+                Err(_) => return None,
+            }
+        };
+        Some((refresh_mode, refresh_due))
+    }
+}
+
 impl SleepsAndWakesSeats for RunningNexus {
     fn settle_stopped(&self, flow_id: &str) -> AtStop {
         match self.store.flow_node(flow_id) {
@@ -3225,42 +3297,9 @@ impl WakesInParts for RunningNexus {
         // decision is taken under the dispatch gate, as a Soft Send's
         // hand-over at this idle event is: whichever comes first shuts out
         // the other.
-        use crate::store::context::NamesFlowModel;
-        use crate::store::context_warnings::ReadsContextWarningConfiguration;
-        let warning_policy_configured = match self.store.flow_model(flow_id) {
-            Ok(Some(model)) => match self.store.context_warning_policy(&model) {
-                Ok(policy) => policy.is_some(),
-                Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
-            },
-            Ok(None) => false,
-            Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
-        };
-        let refresh_mode = match self.store.refresh_mode(&address) {
-            Ok(mode) => mode,
-            Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
-        };
-        let refresh_due = if refresh_mode == meta_signal_flow::RefreshMode::Manual {
-            false
-        } else {
-            match self.store.threshold_standing(flow_id) {
-                Ok(crate::store::context::ThresholdStanding::Past { .. }) => true,
-                Ok(crate::store::context::ThresholdStanding::Below { refresh, .. }) => {
-                    use crate::protecting::ProtectsFlows;
-                    let warned = !warning_policy_configured
-                        && (warned
-                            || match self.store.handover_green(&address, flow_id, refresh) {
-                                Ok(green) => green,
-                                Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
-                            });
-                    warned
-                        && match self.store.protected_address(flow_id) {
-                            Ok(protected) => protected.is_none(),
-                            Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
-                        }
-                }
-                Ok(_) => false,
-                Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
-            }
+        let Some((refresh_mode, refresh_due)) = self.refresh_standing(flow_id, &address, warned)
+        else {
+            return AtStop::Kept(KeptAtStop::StoreUnreadable);
         };
         let stored_node = match self.store.flow_node(flow_id) {
             Ok(Some(node)) if node.session_id.0 == session => node,

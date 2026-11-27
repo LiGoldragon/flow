@@ -273,6 +273,49 @@ fn a_refresh_is_refused_locked_while_another_holds_the_metaflow() {
     );
 }
 
+/// An explicit Refresh with no queue may compose an independently empty
+/// Simplified successor. It opens and confirms that successor dry: no filler
+/// prompt is invented before or after reopening the Nexus.
+#[test]
+fn an_explicit_refresh_confirms_an_empty_simplified_successor_dry() {
+    let (mut fixture, world) = super::open_requests::resting_seat();
+    std::fs::remove_file(fixture.directory.path().join("flows/abc123/handover.md"))
+        .expect("the predecessor has no handover input");
+    fixture
+        .nexus
+        .store
+        .configure_change(ConfigurationChange::Amend(meta_signal_flow::Amend_Data {
+            address: seat_address(),
+            change: meta_signal_flow::Change::Kind(signal_flow::FlowKind::Simplified),
+        }))
+        .unwrap();
+
+    let refreshed = fixture
+        .nexus
+        .dispatch_serially(Input::Refresh(seat_address()), Origin::Unbound);
+    let Output::ReapPending(pending) = refreshed else {
+        panic!("the explicit Refresh confirms its dry successor: {refreshed:?}")
+    };
+    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+    assert!(world.user_turns(&fixture).is_empty(), "no filler prompt");
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .flow_node(&pending.launched.flow_id.0)
+            .unwrap()
+            .expect("the dry successor is registered")
+            .flow_lifecycle,
+        FlowLifecycle::Active
+    );
+
+    fixture.restarted();
+    assert!(
+        world.user_turns(&fixture).is_empty(),
+        "reopening a dry successor types nothing"
+    );
+}
+
 /// An explicit Refresh of an OnDemand metaflow with no queue and no owed
 /// successor creates and confirms exactly one successor itself. The predecessor
 /// is never given another turn and is reaped only after the successor is Awake.

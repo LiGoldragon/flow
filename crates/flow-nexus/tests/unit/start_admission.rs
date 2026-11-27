@@ -224,3 +224,56 @@ fn launch_with_a_bad_topic_is_topic_refused() {
         ))),
     );
 }
+
+#[test]
+fn an_explicit_claude_catalog_is_refused_publicly_before_any_native_effect() {
+    use super::ControlsHerdrSnapshot;
+    use signal_flow::{
+        DeclaredTools, FixedTools, HarnessKind, ToolCatalogObservation, ToolCatalogRefusal,
+        ToolSet, Unenforceable_Data,
+    };
+
+    let fixture = NexusFixture::new();
+    fixture.claims_flow_ids();
+    let _ = fs::remove_file(&fixture.snapshot_program);
+    configure(&fixture, &[(Model::Sol, "claude-sonnet-4")]);
+
+    let mut explicit = seat(
+        Aspect::Mind,
+        Model::Sol,
+        "claude-sonnet-4",
+        "explicit-catalog",
+    );
+    let declared = vec!["Bash".into(), "Read".into()];
+    explicit.tool_set = ToolSet::Explicit(declared.clone());
+    assert_eq!(
+        fixture.nexus.dispatch(Input::Start(explicit)),
+        Output::StartRejected(StartRejection::ToolCatalogRefused(
+            ToolCatalogRefusal::Unenforceable(Unenforceable_Data {
+                harness_kind: HarnessKind::Claude,
+                tool_catalog_observation: ToolCatalogObservation {
+                    declared_tools: DeclaredTools(declared),
+                    fixed_tools: FixedTools(vec![]),
+                    observed_tools_option: None,
+                },
+            })
+        ))
+    );
+    assert!(fixture.typed().is_none(), "no prompt reached a native pane");
+    assert!(
+        !fixture.directory.path().join("herdr-operations.log").exists(),
+        "no pane or provider command was attempted"
+    );
+
+    // Default Claude catalogs retain their previous path and reach Herdr.
+    let default = seat(
+        Aspect::Mind,
+        Model::Sol,
+        "claude-sonnet-4",
+        "default-catalog",
+    );
+    assert_eq!(
+        fixture.nexus.dispatch(Input::Start(default)),
+        Output::StartRejected(pane_unopened())
+    );
+}

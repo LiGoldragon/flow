@@ -496,7 +496,10 @@ impl crate::generated::overriding::ParksHeldLaunches for FlowStore {
         &self,
         input: N,
     ) -> Result<signal_flow::LaunchAttemptReservation, StoreError> {
-        use crate::store::ReadsFlowStore;
+        use crate::store::{ChecksEmptyPromptShape, ReadsFlowStore};
+        if !input.launch().has_consistent_empty_prompt_shape() {
+            return Ok(signal_flow::LaunchAttemptReservation::Conflict);
+        }
         let attempt = input.attempt();
         if let Some(existing) = self.stored_launch_attempt(&attempt.launch_request_id.0)? {
             return Ok(

@@ -1536,6 +1536,20 @@ fn restart_interrupted_stop_needs_quiesced_spawn() {
 /// abc123's metaflow declared with `system_modules`, the launch's own user
 /// modules, and `root_option`.
 fn declared(fixture: &NexusFixture, system_modules: &[&str], root_option: Option<String>) {
+    declared_with_tools(
+        fixture,
+        system_modules,
+        root_option,
+        signal_flow::ToolSet::Default,
+    );
+}
+
+fn declared_with_tools(
+    fixture: &NexusFixture,
+    system_modules: &[&str],
+    root_option: Option<String>,
+    tool_set: signal_flow::ToolSet,
+) {
     fixture
         .nexus
         .store
@@ -1555,7 +1569,7 @@ fn declared(fixture: &NexusFixture, system_modules: &[&str], root_option: Option
                     "knowledge:main-flow:0".into(),
                 )]),
                 flow_kind: signal_flow::FlowKind::Regular,
-                tool_set: signal_flow::ToolSet::Default,
+                tool_set,
                 continuity: meta_signal_flow::Continuity::OnDemand,
                 refresh_mode: meta_signal_flow::RefreshMode::Automatic,
                 purpose: meta_signal_flow::Purpose(String::new()),
@@ -1645,6 +1659,43 @@ fn restart_composition_refused_old_harness_untouched() {
 
 /// The declared root is no directory: ResumeRefused RootRefused, before
 /// anything is closed or written; the old harness as it was.
+#[test]
+fn restart_explicit_claude_catalog_is_typed_and_old_harness_untouched() {
+    use signal_flow::{
+        DeclaredTools, FixedTools, ToolCatalogObservation, ToolCatalogRefusal,
+        ToolCatalogRefused_Data, Unenforceable_Data,
+    };
+
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(true);
+    let old = world.old_harness();
+    let declared_tools = vec!["Bash".into(), "Read".into()];
+    declared_with_tools(
+        &fixture,
+        &["spirit:core:0", "intent:flow:0"],
+        None,
+        signal_flow::ToolSet::Explicit(declared_tools.clone()),
+    );
+
+    assert_eq!(
+        restarted(&fixture),
+        Output::RestartRefused(RestartRefusal::ToolCatalogRefused(
+            ToolCatalogRefused_Data {
+                flow_id: flow_ethos::FlowId(FLOW.into()),
+                tool_catalog_refusal: ToolCatalogRefusal::Unenforceable(Unenforceable_Data {
+                    harness_kind: signal_flow::HarnessKind::Claude,
+                    tool_catalog_observation: ToolCatalogObservation {
+                        declared_tools: DeclaredTools(declared_tools),
+                        fixed_tools: FixedTools(vec![]),
+                        observed_tools_option: None,
+                    },
+                }),
+            },
+        )),
+    );
+    old_seat_untouched(&world, &fixture, &old, None);
+}
+
 #[test]
 fn restart_root_refused_old_harness_untouched() {
     let mut fixture = NexusFixture::new();

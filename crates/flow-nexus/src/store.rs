@@ -4271,12 +4271,34 @@ impl ReadsFlowRoles for FlowStore {
     }
 }
 
+/// A zero-part launch is proven at the boundary that still holds the exact
+/// composed payload. Once reserved, a launch attempt retains its aggregate
+/// hash but not the part vector, so every reservation path must reject a
+/// mixture of empty and non-empty prompt-shape markers before persisting it.
+pub(crate) trait ChecksEmptyPromptShape {
+    fn has_consistent_empty_prompt_shape(&self) -> bool;
+}
+
+impl ChecksEmptyPromptShape for ComposedLaunch {
+    fn has_consistent_empty_prompt_shape(&self) -> bool {
+        use sha2::{Digest, Sha256};
+        let empty_hash = format!("{:x}", Sha256::digest([]));
+        let body_empty = self.first_prompt_payload.first_prompt_body.0.is_empty();
+        let parts_empty = self.first_prompt_payload.prompt_part_vector.is_empty();
+        let hash_empty = self.first_prompt_payload.prompt_sha256.0 == empty_hash;
+        body_empty == parts_empty && parts_empty == hash_empty
+    }
+}
+
 impl ReservesLaunchAttempt for FlowStore {
     fn reserve_launch_attempt(
         &self,
         launch: &ComposedLaunch,
         origin: Origin,
     ) -> Result<LaunchAttemptReservation, StoreError> {
+        if !launch.has_consistent_empty_prompt_shape() {
+            return Ok(LaunchAttemptReservation::Conflict);
+        }
         let launch_request_id = launch.launch_profile.launch_request_id.clone();
         let prompt_sha256 = launch.first_prompt_payload.prompt_sha256.clone();
         if let Some(existing) = self.stored_launch_attempt(&launch_request_id.0)? {
@@ -4308,6 +4330,23 @@ impl ReservesLaunchAttempt for FlowStore {
     }
 }
 
+/// Both native and prompt intent records must agree on which profiles can
+/// legitimately compose no first turn. Explicit empty preserves the shape
+/// of historical records; permission for a new native launch is separate.
+trait AllowsEmptyComposition {
+    fn allows_empty_composition(&self) -> bool;
+}
+impl AllowsEmptyComposition for signal_flow::LaunchProfile {
+    fn allows_empty_composition(&self) -> bool {
+        self.flow_kind == signal_flow::FlowKind::Simplified
+            && self.instruction_prompt.0.is_empty()
+            && match &self.tool_set {
+                signal_flow::ToolSet::Default => true,
+                signal_flow::ToolSet::Explicit(tools) => tools.is_empty(),
+            }
+    }
+}
+
 impl RecordsNativeLaunchIntent for FlowStore {
     fn record_native_launch_intent(&self, intent: NativeLaunchIntent) -> Result<bool, StoreError> {
         use sha2::{Digest, Sha256};
@@ -4315,15 +4354,10 @@ impl RecordsNativeLaunchIntent for FlowStore {
             return Ok(false);
         };
         let empty_simplified_start = intent.prompt_sha256_vector.is_empty()
-            && stored.launch_attempt.launch_profile.flow_kind == signal_flow::FlowKind::Simplified
-            && matches!(&stored.launch_attempt.launch_profile.tool_set,
-                signal_flow::ToolSet::Explicit(tools) if tools.is_empty())
             && stored
                 .launch_attempt
                 .launch_profile
-                .instruction_prompt
-                .0
-                .is_empty()
+                .allows_empty_composition()
             && intent.prompt_sha256.0 == format!("{:x}", Sha256::digest([]));
         if stored.launch_attempt.launch_attempt_phase != LaunchAttemptPhase::Reserved
             || stored.launch_attempt.prompt_sha256 != intent.prompt_sha256
@@ -4471,15 +4505,10 @@ impl RecordsPromptDeliveryIntent for FlowStore {
         let empty_simplified_start = native_intent.prompt_sha256_vector.is_empty()
             && native_intent.prompt_sha256.0 == format!("{:x}", Sha256::digest([]))
             && intent.prompt_sha256 == native_intent.prompt_sha256
-            && stored.launch_attempt.launch_profile.flow_kind == signal_flow::FlowKind::Simplified
-            && matches!(&stored.launch_attempt.launch_profile.tool_set,
-                signal_flow::ToolSet::Explicit(tools) if tools.is_empty())
             && stored
                 .launch_attempt
                 .launch_profile
-                .instruction_prompt
-                .0
-                .is_empty();
+                .allows_empty_composition();
         let valid_parts = intent.prompt_sha256_vector == native_intent.prompt_sha256_vector
             && if native_intent.prompt_sha256_vector.is_empty() {
                 empty_simplified_start && intent.parts_submitted == signal_flow::PartsSubmitted(0)
@@ -9056,7 +9085,7 @@ mod tests {
     fn zero_part_intent_requires_a_proven_empty_tool_free_simplified_launch() {
         use sha2::{Digest, Sha256};
         let empty_hash = format!("{:x}", Sha256::digest([]));
-        for case in 0..6 {
+        for case in 0..8 {
             let fixture = StoreFixture::new();
             let store = fixture.store();
             let mut launch = fixture.composed_launch("idle-judgment", &empty_hash);
@@ -9067,25 +9096,42 @@ mod tests {
             launch.first_prompt_payload.first_prompt_body.0.clear();
             launch.first_prompt_payload.prompt_part_vector.clear();
             match case {
-                1 => launch.launch_profile.flow_kind = signal_flow::FlowKind::Regular,
-                2 => {
+                // A fresh empty Simplified launch uses Default. Explicit([])
+                // remains readable here for launch attempts stored before
+                // exact Claude catalog enforcement was introduced.
+                1 => launch.launch_profile.tool_set = signal_flow::ToolSet::Default,
+                2 => launch.launch_profile.flow_kind = signal_flow::FlowKind::Regular,
+                3 => {
                     launch.launch_profile.instruction_prompt =
                         signal_flow::InstructionPrompt("Actual request".into())
                 }
-                3 => launch.launch_profile.tool_set = signal_flow::ToolSet::Default,
-                4 => launch.harness_kind = HarnessKind::Codex,
-                5 => {
+                4 => {
+                    launch.launch_profile.tool_set =
+                        signal_flow::ToolSet::Explicit(vec!["Read".into()])
+                }
+                5 => launch.harness_kind = HarnessKind::Codex,
+                6 => {
                     launch.first_prompt_payload.prompt_sha256 =
                         signal_flow::PromptSha256("1".repeat(64))
                 }
+                7 => launch
+                    .first_prompt_payload
+                    .prompt_part_vector
+                    .push(signal_flow::PromptPart {
+                        prompt_part_text: signal_flow::PromptPartText(String::new()),
+                        prompt_sha256: signal_flow::PromptSha256(empty_hash.clone()),
+                    }),
                 _ => {}
             }
-            assert!(matches!(
-                store
-                    .reserve_launch_attempt(&launch, fixture.origin())
-                    .unwrap(),
-                LaunchAttemptReservation::Reserved(_)
-            ));
+            let reservation = store
+                .reserve_launch_attempt(&launch, fixture.origin())
+                .unwrap();
+            if matches!(case, 6 | 7) {
+                assert_eq!(reservation, LaunchAttemptReservation::Conflict);
+                assert_eq!(store.launch_attempt("idle-judgment").unwrap(), None);
+                continue;
+            }
+            assert!(matches!(reservation, LaunchAttemptReservation::Reserved(_)));
             let intent = NativeLaunchIntent {
                 launch_request_id: launch.launch_profile.launch_request_id.clone(),
                 prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
@@ -9097,19 +9143,71 @@ mod tests {
             };
             assert_eq!(
                 store.record_native_launch_intent(intent).unwrap(),
-                case == 0 || case == 4,
-                "only the proven empty simplified startup is admitted, case {case}"
+                matches!(case, 0 | 1 | 5),
+                "only a proven empty Simplified startup is admitted, case {case}"
             );
             let attempt = store.launch_attempt("idle-judgment").unwrap().unwrap();
             assert_eq!(
                 attempt.launch_attempt_phase,
-                if case == 0 || case == 4 {
+                if matches!(case, 0 | 1 | 5) {
                     LaunchAttemptPhase::NativeLaunchIntentRecorded
                 } else {
                     LaunchAttemptPhase::Reserved
                 }
             );
         }
+    }
+
+    #[test]
+    fn held_empty_reservations_and_their_replays_recheck_the_exact_composed_shape() {
+        use crate::generated::operation::LaunchReservation;
+        use crate::generated::overriding::ParksHeldLaunches;
+        use sha2::{Digest, Sha256};
+
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let empty_hash = format!("{:x}", Sha256::digest([]));
+        let mut launch = fixture.composed_launch("held-empty", &empty_hash);
+        launch.launch_profile.flow_kind = signal_flow::FlowKind::Simplified;
+        launch.launch_profile.tool_set = signal_flow::ToolSet::Default;
+        launch.launch_profile.instruction_prompt.0.clear();
+        launch.first_prompt_payload.first_prompt_body.0.clear();
+        launch.first_prompt_payload.prompt_part_vector.clear();
+        let origin = fixture.origin();
+        assert!(matches!(
+            store
+                .park_held_launch(LaunchReservation {
+                    composed_launch: launch.clone(),
+                    origin: origin.clone(),
+                })
+                .unwrap(),
+            LaunchAttemptReservation::Reserved(_)
+        ));
+        assert!(
+            store
+                .marked_held_launch(launch.launch_profile.launch_request_id.clone())
+                .unwrap()
+        );
+
+        let mut forged = launch;
+        forged
+            .first_prompt_payload
+            .prompt_part_vector
+            .push(signal_flow::PromptPart {
+                prompt_part_text: signal_flow::PromptPartText(String::new()),
+                prompt_sha256: signal_flow::PromptSha256(empty_hash),
+            });
+        assert_eq!(
+            store
+                .park_held_launch(LaunchReservation {
+                    composed_launch: forged,
+                    origin,
+                })
+                .unwrap(),
+            LaunchAttemptReservation::Conflict,
+            "replay validates the exact shape before returning Existing"
+        );
+        assert_eq!(store.held_launches().unwrap().len(), 1);
     }
 
     #[test]

@@ -105,6 +105,7 @@ pub mod submission;
 #[cfg(test)]
 mod test_faults;
 pub mod title;
+mod tool_catalog;
 pub mod transitions;
 pub mod turn_ends;
 pub mod undecodable;

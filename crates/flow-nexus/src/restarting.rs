@@ -81,13 +81,15 @@ use crate::performing::Performs;
 use crate::store::effort_configuration::ReadsEffort;
 use crate::store::restart::RecordsRestarts;
 use crate::store::{FlowStore, NamesLiveFlow, ReadsFlowMemory, ReadsFlowRows, StoreError};
+use crate::tool_catalog::AuthorizesToolCatalog;
 use meta_signal_flow::{
     FlowBinding, FlowBindingRefusalReason, OldSeat, ProcessIdentity, RestartFailure, RestartPhase,
     RestartRecord,
 };
 use signal_flow::{
     FlowNode, HarnessKind, HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, Output, Process,
-    Refusal, RestartRefusal, ResumeRefused_Data, StopRejection,
+    Refusal, RestartRefusal, ResumeRefused_Data, StopRejection, ToolCatalogRefusal,
+    ToolCatalogRefused_Data,
 };
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -109,6 +111,34 @@ enum MissingExit {
     ExitUnwitnessed,
     /// The harness seen there is not proven exited by its birth.
     ExitUnproven,
+}
+
+/// A pre-effect resume refusal. Ordinary restart failures may become durable
+/// for recovery; an unenforceable tool catalog is answered directly and is
+/// never misrecorded as a failed native resume.
+enum ResumeLaunchRefusal {
+    Restart(RestartFailure),
+    ToolCatalog(ToolCatalogRefusal),
+}
+
+impl From<RestartFailure> for ResumeLaunchRefusal {
+    fn from(value: RestartFailure) -> Self {
+        Self::Restart(value)
+    }
+}
+
+impl AnswersRestartFailure for ResumeLaunchRefusal {
+    fn answer(&self, flow_id: &str) -> Output {
+        match self {
+            Self::Restart(failure) => failure.answer(flow_id),
+            Self::ToolCatalog(tool_catalog_refusal) => Output::RestartRefused(
+                RestartRefusal::ToolCatalogRefused(ToolCatalogRefused_Data {
+                    flow_id: signal_flow::FlowId(flow_id.to_owned()),
+                    tool_catalog_refusal: tool_catalog_refusal.clone(),
+                }),
+            ),
+        }
+    }
 }
 
 /// The route of a pane a restart created.
@@ -557,7 +587,7 @@ trait RestartsInSteps {
     /// flow's own Model, this Nexus's hooks; no brief. Composed, its root
     /// and harness flags read, and its command line rehearsed; nothing is
     /// written and no pane is touched.
-    fn resume_launch(&self, record: &RestartRecord) -> Result<ResumeLaunch, RestartFailure>;
+    fn resume_launch(&self, record: &RestartRecord) -> Result<ResumeLaunch, ResumeLaunchRefusal>;
     /// The resume's command line built as the spawn builds it, with its
     /// title, its settings and its session, and checked as the spawn checks
     /// it; only the pane, which does not exist yet, is a placeholder.
@@ -907,7 +937,12 @@ impl RestartsInSteps for RunningNexus {
                 record,
                 resume_launch,
             }),
-            Err(failure) => Err(Box::new(self.failed(record, failure))),
+            Err(ResumeLaunchRefusal::Restart(failure)) => {
+                Err(Box::new(self.failed(record, failure)))
+            }
+            Err(refusal @ ResumeLaunchRefusal::ToolCatalog(_)) => {
+                Err(Box::new(refusal.answer(&record.flow_id.0)))
+            }
         }
     }
 
@@ -1136,8 +1171,11 @@ impl RestartsInSteps for RunningNexus {
             Some(resume_launch) => resume_launch,
             None => match self.resume_launch(&reopening) {
                 Ok(resume_launch) => resume_launch,
-                Err(failure) => {
+                Err(ResumeLaunchRefusal::Restart(failure)) => {
                     return Reopening::Refused(Box::new(self.failed(reopening, failure)));
+                }
+                Err(refusal @ ResumeLaunchRefusal::ToolCatalog(_)) => {
+                    return Reopening::Refused(Box::new(refusal.answer(&reopening.flow_id.0)));
                 }
             },
         };
@@ -1202,10 +1240,12 @@ impl RestartsInSteps for RunningNexus {
             .0
     }
 
-    fn resume_launch(&self, record: &RestartRecord) -> Result<ResumeLaunch, RestartFailure> {
+    fn resume_launch(&self, record: &RestartRecord) -> Result<ResumeLaunch, ResumeLaunchRefusal> {
         use crate::launching::{ReadsHarnessArguments, ResolvesLaunchRoot};
         use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
-        let refused = |category: &str| RestartFailure::ResumeRefused(category.into());
+        let refused = |category: &str| {
+            ResumeLaunchRefusal::Restart(RestartFailure::ResumeRefused(category.into()))
+        };
         let last = self.last_profile(&record.flow_id.0);
         let declared = self
             .store
@@ -1263,13 +1303,19 @@ impl RestartsInSteps for RunningNexus {
             Outcome::Composed(launch) => launch,
             _ => return Err(refused("NotComposed")),
         };
+        Self::authorize_tool_catalog(
+            &composed_launch.harness_kind,
+            &composed_launch.launch_profile.tool_set,
+        )
+        .map_err(ResumeLaunchRefusal::ToolCatalog)?;
         let root = self
             .launch_root(&record.address)
             .map_err(|_| refused("RootRefused"))?;
         let harness_arguments = self
             .harness_arguments(&record.address)
             .map_err(|_| refused("MalformedHarnessFlags"))?;
-        self.rehearsed(record, &composed_launch, &harness_arguments)?;
+        self.rehearsed(record, &composed_launch, &harness_arguments)
+            .map_err(ResumeLaunchRefusal::Restart)?;
         Ok(ResumeLaunch {
             composed_launch,
             root,

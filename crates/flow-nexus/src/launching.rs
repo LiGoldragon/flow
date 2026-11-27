@@ -18,6 +18,7 @@ use crate::performing::ClassifiesNativeLaunchFailure;
 use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
 use crate::store::ManagesMetaflowState;
+use crate::tool_catalog::AuthorizesToolCatalog;
 use crate::store::NamesLiveFlow;
 use crate::store::ReadsLaunchInspectionRecords;
 use crate::store::address_hold::HoldsLaunchAddress;
@@ -518,6 +519,12 @@ impl LaunchesFlows for RunningNexus {
         root: meta_signal_flow::Root,
         harness_arguments: Vec<String>,
     ) -> Output {
+        if let Err(refusal) = Self::authorize_tool_catalog(
+            &launch.harness_kind,
+            &launch.launch_profile.tool_set,
+        ) {
+            return Output::StartRejected(StartRejection::ToolCatalogRefused(refusal));
+        }
         let persistence = || Output::StartRejected(StartRejection::LaunchPersistenceRefused);
         let native_intent = NativeLaunchIntent {
             launch_request_id: launch.launch_profile.launch_request_id.clone(),

@@ -209,7 +209,15 @@ pub(super) fn declare_launched(fixture: &NexusFixture, profile: &LaunchProfile) 
                 system_modules: profile.system_modules.clone(),
                 prompt_modules: profile.prompt_modules.clone(),
                 flow_kind: profile.flow_kind.clone(),
-                tool_set: profile.tool_set.clone(),
+                // The launch-of-record fixture preserves the historical
+                // explicit empty set required by its stored zero-part intent.
+                // Fresh Simplified behavior is exercised with Default; exact
+                // explicit Claude denial has separate Start/Restart tests.
+                tool_set: if profile.flow_kind == signal_flow::FlowKind::Simplified {
+                    signal_flow::ToolSet::Default
+                } else {
+                    profile.tool_set.clone()
+                },
                 continuity: meta_signal_flow::Continuity::OnDemand,
                 refresh_mode: meta_signal_flow::RefreshMode::Automatic,
                 purpose: meta_signal_flow::Purpose(String::new()),
@@ -2435,6 +2443,103 @@ fn waking_lease_requires_its_exact_registry_owner() {
     let lease = first.hold(&at).expect("first registry owns the address");
     assert!(lease.owned_by(&first));
     assert!(!lease.owned_by(&second));
+}
+
+/// A direct empty Simplified Start with the ordinary Default tool policy
+/// opens and confirms a dry session without a user turn. The durable zero-part
+/// intent survives a Nexus restart; the first real delivery is the session's
+/// first user turn, exactly once.
+#[test]
+fn an_empty_simplified_default_start_is_dry_until_its_first_delivery_after_reopen() {
+    use crate::Dispatches;
+    use signal_flow::{Input, Output, ToolSet};
+
+    let mut fixture = NexusFixture::new();
+    let world = fixture.fresh_claude_world();
+    let mut profile =
+        super::model::seat(Aspect::Mind, Model::Sol, "claude-fixture", "dry-simplified");
+    profile.flow_kind = signal_flow::FlowKind::Simplified;
+    profile.tool_set = ToolSet::Default;
+    profile.instruction_prompt.0.clear();
+    let at = profile.address.clone();
+
+    let Output::Started(started) = fixture.nexus.dispatch(Input::Start(profile)) else {
+        panic!("the independently empty launch starts: {}", world.calls())
+    };
+    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+    assert!(world.user_turns(&fixture).is_empty(), "no synthetic turn");
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .flow_node(&started.flow_id.0)
+            .unwrap()
+            .expect("the dry flow is registered")
+            .flow_lifecycle,
+        FlowLifecycle::Active,
+        "a dry session is Started, not resting"
+    );
+
+    fixture.restarted();
+    assert!(
+        world.user_turns(&fixture).is_empty(),
+        "reopen types nothing"
+    );
+    let sender = Address {
+        aspect: Aspect::Psyche,
+        topic: flow_ethos::Topic("core".into()),
+        model: Model::Opus,
+    };
+    let signal_flow::PrivateSendResponse::SendAccepted(accepted) = fixture
+        .nexus
+        .store
+        .accept_logical_delivery(
+            &at,
+            SentBy::Sender(sender),
+            Delivery::Queue,
+            Message::MiddleAbrupt(Request::Order("the first real input".into())),
+            None,
+        )
+        .unwrap()
+    else {
+        panic!("the first real delivery is accepted")
+    };
+
+    fixture.nexus.wake_due(at.clone());
+    fixture.nexus.wake_due(at.clone());
+    fixture.restarted();
+    fixture.nexus.wake_due(at);
+
+    let turns = world.user_turns(&fixture);
+    assert_eq!(turns.len(), 1, "the delivery is typed once: {turns:?}");
+    assert!(turns[0].contains("the first real input"), "{turns:?}");
+    let crate::store::logical_delivery::SimplifiedReplyStanding::Received(binding, receipt) =
+        fixture
+            .nexus
+            .store
+            .simplified_reply_receipt(&started.flow_id.0)
+            .unwrap()
+    else {
+        panic!("the first real input has a durable native receipt")
+    };
+    assert_eq!(
+        binding.input_delivery_id,
+        crate::generated::memory::InputDeliveryId(accepted.logical_delivery_id.0.clone())
+    );
+    assert_eq!(receipt.native_session_id.0, world.session());
+    let snapshot = fixture
+        .nexus
+        .store
+        .logical_delivery_snapshot(&accepted.logical_delivery_id)
+        .unwrap()
+        .expect("the delivery remains durable");
+    assert!(
+        matches!(
+            snapshot.delivery_state,
+            signal_flow::DeliveryState::Delivered(_) | signal_flow::DeliveryState::Read
+        ),
+        "native evidence settles the one delivery: {snapshot:?}"
+    );
 }
 
 #[test]

@@ -277,7 +277,7 @@ fn the_paired_curriculum_serves_state_on_demand_outside_every_startup() {
     let scratch = temporary.path();
     let field_source = PathBuf::from(std::env::var_os("FLOW_STATE_FIELD_SOURCE").unwrap());
     let field_revision = std::env::var("FLOW_STATE_FIELD_REVISION").unwrap();
-    let roots = ["psyche-belief", "mind-belief", "field-belief"].map(|name| scratch.join(name));
+    let roots = ["psyche-pattern", "mind-pattern", "field-pattern"].map(|name| scratch.join(name));
     let write = |root: &Path, relative: &str, text: &str| {
         let path = root.join(relative);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -388,7 +388,7 @@ fn the_paired_curriculum_serves_state_on_demand_outside_every_startup() {
     };
     let state_source = resolve(state.clone());
     assert_eq!(state_source.module_identity, state);
-    assert_eq!(state_source.repository_name.0, "field-belief");
+    assert_eq!(state_source.repository_name.0, "field-pattern");
     assert_eq!(state_source.source_revision.0, field_revision);
     assert_eq!(state_source.source_relative_path.0, "state/hosts/0.md");
     let raw = fs::read(field_source.join("state/hosts/0.md")).unwrap();

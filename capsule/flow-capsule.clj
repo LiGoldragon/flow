@@ -1266,9 +1266,9 @@
 (def context-roots
   "Each context repository as Curriculum's environment names its directory
   and origin."
-  [["CURRICULUM_PSYCHES_REPOSITORY_DIR" "CURRICULUM_PSYCHES_REPOSITORY_URL" "psyche-belief"]
-   ["CURRICULUM_MIND_CONTEXT_DIR" "CURRICULUM_MIND_CONTEXT_URL" "mind-belief"]
-   ["CURRICULUM_FIELD_CONTEXT_DIR" "CURRICULUM_FIELD_CONTEXT_URL" "field-belief"]])
+  [["CURRICULUM_PSYCHES_REPOSITORY_DIR" "CURRICULUM_PSYCHES_REPOSITORY_URL" "psyche-pattern"]
+   ["CURRICULUM_MIND_CONTEXT_DIR" "CURRICULUM_MIND_CONTEXT_URL" "mind-pattern"]
+   ["CURRICULUM_FIELD_CONTEXT_DIR" "CURRICULUM_FIELD_CONTEXT_URL" "field-pattern"]])
 
 (defn stable-curriculum-environment
   "The running Curriculum's configuration: its unit's environment, read

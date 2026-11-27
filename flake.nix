@@ -14,7 +14,7 @@
       flake = false;
     };
     curriculum-state-field = {
-      url = "github:LiGoldragon/field-belief";
+      url = "github:LiGoldragon/field-pattern/71ec31e78170b46a213ca8e968ef2ce9dba3a5e2";
       flake = false;
     };
     # The shared Place every Nexus starts in and nexus-configure, the tool

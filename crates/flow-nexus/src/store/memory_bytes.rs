@@ -1219,3 +1219,9 @@ mod tests {
         });
     }
 }
+
+// The release that introduced bounded observation changes the wire digest, not
+// the archive of a recorded v11 launch outcome. Exercise the store reader too.
+mod launch_outcome_069 {
+    include!("../../tests/unit/launch_outcome_069.rs");
+}

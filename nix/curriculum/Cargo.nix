@@ -311,6 +311,11 @@ rec {
             requiredFeatures = [ "datom" ];
           }
           {
+            name = "curriculum-context-export";
+            path = "src/context_export_main.rs";
+            requiredFeatures = [ "datom" ];
+          }
+          {
             name = "curriculum-nexus";
             path = "src/nexus_main.rs";
             requiredFeatures = [ ];

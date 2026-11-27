@@ -35,6 +35,7 @@ use std::{
 
 const THREAD_A: &str = "01a0b22c-0000-7000-8000-00000000000a";
 const THREAD_B: &str = "01a0b22c-0000-7000-8000-00000000000b";
+const CHILD_THREAD: &str = "01a0b22c-0000-7000-8000-00000000000c";
 const TURN: &str = "01a0b22c-0000-7000-8000-0000000000f0";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,6 +152,21 @@ fn native_family_reply(thread: &str, status: &str) -> String {
         frame(&serde_json::json!({"id":1,"result":{}})),
         frame(&serde_json::json!({"id":2,"result":{"data":[thread],"nextCursor":null}})),
         frame(&serde_json::json!({"id":3,"result":{"thread":{"id":thread,"parentThreadId":null,"status":{"type":status}}}})),
+    ].concat()
+}
+
+/// An idle root whose child, listed on the second loaded-thread page, has
+/// `child_status`. This is the native shape of a main flow waiting on a
+/// subagent after its own turn has ended.
+fn native_family_with_child_reply(root: &str, child: &str, child_status: &str) -> String {
+    [
+        frame(&serde_json::json!({"id":1,"result":{}})),
+        frame(&serde_json::json!({"id":2,"result":{"data":[root],"nextCursor":"children"}})),
+        frame(&serde_json::json!({"id":2,"result":{"data":[child],"nextCursor":null}})),
+        // The adapter reads loaded ids in lexical order. CHILD_THREAD sorts before
+        // SEAT_THREAD in this fixture, hence child is request 3 and root 4.
+        frame(&serde_json::json!({"id":3,"result":{"thread":{"id":child,"parentThreadId":root,"status":{"type":child_status}}}})),
+        frame(&serde_json::json!({"id":4,"result":{"thread":{"id":root,"parentThreadId":null,"status":{"type":"idle"}}}})),
     ].concat()
 }
 
@@ -2243,8 +2259,12 @@ fn turn_notice(method: &str, thread: &str, turn: &str) -> serde_json::Value {
     })
 }
 
+fn thread_status_notification(thread: &str, status: &str) -> serde_json::Value {
+    serde_json::json!({"method":"thread/status/changed","params":{"threadId":thread,"status":{"type":status}}})
+}
+
 fn seat_rest_notification(thread: &str) -> serde_json::Value {
-    serde_json::json!({"method":"thread/status/changed","params":{"threadId":thread,"status":{"type":"idle"}}})
+    thread_status_notification(thread, "idle")
 }
 
 /// A call the seat's thread makes to the Awake gamma target: once it is
@@ -2346,6 +2366,17 @@ fn seat_responding(
     notices: Vec<serde_json::Value>,
     fence_id: u64,
 ) -> FakeAppServer {
+    seat_responding_with_initial_family(fixture, notices, fence_id, None)
+}
+
+/// As `seat_responding`, with an exact authoritative family reply replacing
+/// the fake's default initial family read.
+fn seat_responding_with_initial_family(
+    fixture: &mut NexusFixture,
+    notices: Vec<serde_json::Value>,
+    fence_id: u64,
+    initial_family: Option<String>,
+) -> FakeAppServer {
     // The seat was in the turn its first notice starts when the responder
     // subscribed: the cut shows that turn running.
     let running = notices
@@ -2361,12 +2392,11 @@ fn seat_responding(
     let family = notices
         .iter()
         .filter(|notice| notice["method"] == "thread/status/changed")
-        .map(|notice| {
-            if notice["params"]["threadId"] == SEAT_THREAD {
-                "idle"
-            } else {
-                "active"
-            }
+        .filter_map(|notice| {
+            Some((
+                notice.pointer("/params/threadId")?.as_str()?,
+                notice.pointer("/params/status/type")?.as_str()?,
+            ))
         })
         .collect::<Vec<_>>();
     assert!(
@@ -2383,10 +2413,22 @@ fn seat_responding(
             running,
         }],
     );
-    for (index, status) in family.iter().enumerate() {
+    if let Some(initial_family) = initial_family {
+        std::fs::write(fake.directory.path().join("frames-3"), initial_family).unwrap();
+    }
+    for (index, (changed_thread, status)) in family.iter().enumerate() {
+        let reply = if *changed_thread == SEAT_THREAD {
+            native_family_reply(SEAT_THREAD, status)
+        } else if *changed_thread == CHILD_THREAD {
+            native_family_with_child_reply(SEAT_THREAD, changed_thread, status)
+        } else {
+            // An unrelated thread's status is only a cue to reread this seat;
+            // it is not silently adopted into the seat's family.
+            native_family_reply(SEAT_THREAD, "active")
+        };
         std::fs::write(
             fake.directory.path().join(format!("frames-{}", 4 + index)),
-            native_family_reply(SEAT_THREAD, status),
+            reply,
         )
         .unwrap();
     }
@@ -2406,6 +2448,60 @@ fn seat_responding(
         );
     }
     fake
+}
+
+/// An idle root thread remains Working while its live app-server family has
+/// an active child. Observe.Agent projects that committed family standing,
+/// replacing a stale idle event, and becomes Idle only after the child rests.
+#[test]
+fn observe_agent_reads_working_while_an_idle_codex_parent_waits_on_its_child() {
+    use crate::generated::memory::{SeatActivity, SeatStanding};
+    use crate::store::current_seat::RecordsCurrentSeats;
+    use signal_flow::{AgentObservation, AgentState, Input, ObserveSelection, Output};
+
+    let mut fixture = NexusFixture::new();
+    fixture.awake_codex_seat(vec![]);
+    fixture
+        .nexus
+        .store
+        .record_observation("908786", Some(SeatStanding::Alive(SeatActivity::Resting)))
+        .unwrap();
+
+    let active_family = native_family_with_child_reply(SEAT_THREAD, CHILD_THREAD, "active");
+    let _active = seat_responding_with_initial_family(
+        &mut fixture,
+        vec![thread_status_notification(CHILD_THREAD, "active")],
+        48,
+        Some(active_family),
+    );
+    assert_eq!(
+        fixture.nexus.dispatch(Input::Observe(ObserveSelection::Agent(
+            flow_ethos::FlowId("908786".into()),
+        ))),
+        Output::AgentObserved(AgentObservation {
+            flow_id: flow_ethos::FlowId("908786".into()),
+            agent_state: AgentState::Working,
+        })
+    );
+
+    // A new subscription first sees the child still active; its following
+    // child-idle notification forces another authoritative family read.
+    let still_active = native_family_with_child_reply(SEAT_THREAD, CHILD_THREAD, "active");
+    let _idle = seat_responding_with_initial_family(
+        &mut fixture,
+        vec![thread_status_notification(CHILD_THREAD, "idle")],
+        49,
+        Some(still_active),
+    );
+    assert_eq!(
+        fixture.nexus.dispatch(Input::Observe(ObserveSelection::Agent(
+            flow_ethos::FlowId("908786".into()),
+        ))),
+        Output::AgentObserved(AgentObservation {
+            flow_id: flow_ethos::FlowId("908786".into()),
+            agent_state: AgentState::Idle,
+        })
+    );
 }
 
 /// A Codex native event advances the oldest queued cohort through its pane,

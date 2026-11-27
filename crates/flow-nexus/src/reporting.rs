@@ -133,6 +133,13 @@ impl RecordsReports for RunningNexus {
     }
 
     fn after_attributed_report(&self, flow_id: &FlowId, event: &Event) {
+        // A foreign Stop remains raw audit. It is not a cue to reconcile,
+        // submit, announce a turn end, or spend work owed by the bound seat.
+        if let Event::Stopped(stop) = event
+            && !self.correlated_stop(&flow_id.0, stop)
+        {
+            return;
+        }
         if let Ok(Some(node)) = self.store.flow_node(&flow_id.0) {
             crate::seat_observation::ObservesCurrentSeats::observe_returning_source(self, &node);
         }

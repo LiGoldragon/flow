@@ -227,6 +227,7 @@ fn renew_interrupts_a_working_claude_flow_and_then_closes_its_pane() {
     );
     let mut working = claude_agent(&fixture);
     working["agent_status"] = serde_json::Value::String("working".into());
+    super::waking::claude_prompt_taken(&fixture);
     let calls = fixture.herdr_for_replacement_taking_keys(vec![working]);
 
     assert_eq!(
@@ -1546,6 +1547,7 @@ fn rebind_cannot_move_a_pane_while_its_confirmed_owner_command_writes() {
 
     let fixture = NexusFixture::new();
     resting_seat(&fixture);
+    super::waking::claude_prompt_taken(&fixture);
     let mut old = claude_agent(&fixture);
     old["agent_status"] = "working".into();
     let mut alternate = old.clone();

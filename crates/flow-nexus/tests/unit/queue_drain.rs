@@ -853,6 +853,30 @@ fn a_foreign_stop_before_confirmation_is_not_a_turn_end() {
     assert_eq!(queue(&fixture), vec![first]);
 }
 
+#[test]
+fn a_foreign_stop_is_audit_only_even_when_the_bound_session_was_resting() {
+    use crate::generated::memory::SeatActivity;
+    for activity in [SeatActivity::Working, SeatActivity::Resting] {
+        let fixture = NexusFixture::new();
+        fixture.accept_pane_operations(
+            vec![claude_agent(&fixture)],
+            PromptFixture::Prompted("w1:p3"),
+        );
+        let first = from_core("held through foreign Stop");
+        seat(&fixture, vec![first.clone()]);
+        fixture.native_activity(CLAUDE_SEAT, activity);
+        let before = fixture.nexus.store.seat_record(CLAUDE_SEAT).unwrap();
+        report(&fixture, foreign_stop());
+        fixture.nexus.settle_stops_at_confirmation();
+        assert_eq!(
+            fixture.nexus.store.seat_record(CLAUDE_SEAT).unwrap(),
+            before
+        );
+        assert_eq!(typed_count(&fixture, "held through foreign Stop"), 0);
+        assert_eq!(queue(&fixture), vec![first]);
+    }
+}
+
 pub(super) fn resolver() -> ResolverIdentity {
     ResolverIdentity {
         process_identity: ProcessIdentity {

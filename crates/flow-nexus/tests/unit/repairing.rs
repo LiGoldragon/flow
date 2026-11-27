@@ -186,9 +186,17 @@ fn inspect_answers_the_metaflow_whole() {
     let State::Awake(launched) = &launching.visible_metaflow.metaflow_state else {
         panic!("the launch holds the Address")
     };
+    assert!(
+        fixture
+            .nexus
+            .store
+            .flow_node(&launched.0)
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(
-        launching.binding.flow_node_option,
-        fixture.nexus.store.flow_node(&launched.0).unwrap()
+        launching.binding.flow_node_option, None,
+        "an unconfirmed launch has an attempt but no current binding"
     );
     assert!(
         matches!(

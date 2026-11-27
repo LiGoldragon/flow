@@ -1543,10 +1543,10 @@ fn one_close_rule_for_every_reap_worker() {
                         });
                     }
                     Judged::NotClosed => {
-                        let subscriptions = if address_held { 2 } else { 1 };
+                        // One standing wire serves both ownership generations.
                         world.until("the opening snapshot", &mut || {
                             world.snapshots_of_predecessor() > snapshots
-                                && world.events.subscriptions() >= subscriptions
+                                && world.events.subscriptions() == 1
                         });
                         world.two_passes();
                     }

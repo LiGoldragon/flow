@@ -1420,6 +1420,10 @@ impl WatchesReapedPane for RunningNexus {
                 }
             }
         }
+        #[cfg(test)]
+        {
+            self.pane_watch_hooks.opened_snapshots.announce();
+        }
         // 5. Events: the pane's own going, or the stream's end.
         loop {
             match events.next_change(&[], None, Some(cancellation)) {
@@ -1659,6 +1663,8 @@ impl HoldsAtPoint for HeldPoint {
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct PaneWatchHooks {
+    /// The worker has consumed the opening snapshot and will now read session changes.
+    pub(crate) opened_snapshots: crate::store::LaunchChanges,
     /// Runs between the supervisor's pass and its wait, once.
     pub(crate) between: Mutex<Option<SupervisorHook>>,
     /// Every worker end the supervisor joined, as it joined it.

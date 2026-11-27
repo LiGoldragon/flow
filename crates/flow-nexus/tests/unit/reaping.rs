@@ -1628,9 +1628,15 @@ fn a_lapsed_worker_is_joined_by_its_own_completion() {
     let hooks = &world.fixture.nexus.pane_watch_hooks;
     let ends = with_supervisor(&world.fixture, || {
         assert!(is_reap_pending(&world.replace(), ReapStanding::Owed));
-        world
-            .events
-            .wait_for("the subscription", |subscribed, _| subscribed >= 1);
+        assert!(
+            world
+                .fixture
+                .nexus
+                .pane_watch_hooks
+                .opened_snapshots
+                .until(0, Instant::now() + Duration::from_secs(20)),
+            "opening snapshot consumed before the stream event"
+        );
         let attempts = world.fixture.nexus.store.faults.attempts().len();
         world.events.close_streams();
         assert!(
@@ -1773,9 +1779,15 @@ fn a_lapsed_watch_is_armed_again_only_by_a_bearing_event() {
     world.show(PaneShown::Occupied);
     let ends = with_supervisor(&world.fixture, || {
         assert!(is_reap_pending(&world.replace(), ReapStanding::Owed));
-        world
-            .events
-            .wait_for("the subscription", |subscribed, _| subscribed >= 1);
+        assert!(
+            world
+                .fixture
+                .nexus
+                .pane_watch_hooks
+                .opened_snapshots
+                .until(0, Instant::now() + Duration::from_secs(20)),
+            "opening snapshot consumed before the stream event"
+        );
         world.events.close_streams();
         use crate::reaping::RunsPaneWatchHooks;
         assert!(
@@ -1977,9 +1989,15 @@ fn a_panicked_watch_lapses_and_is_not_rearmed_by_the_pass() {
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let ends = with_supervisor(&world.fixture, || {
         assert!(is_reap_pending(&world.replace(), ReapStanding::Owed));
-        world
-            .events
-            .wait_for("the subscription", |subscribed, _| subscribed >= 1);
+        assert!(
+            world
+                .fixture
+                .nexus
+                .pane_watch_hooks
+                .opened_snapshots
+                .until(0, Instant::now() + Duration::from_secs(20)),
+            "opening snapshot consumed before the stream event"
+        );
         world.predecessor_pane_gone();
         // The worker panics at the event; the next pass joins it Lapsed.
         assert!(

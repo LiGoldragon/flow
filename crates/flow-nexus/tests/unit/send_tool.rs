@@ -76,7 +76,7 @@ fn target() -> Address {
 }
 
 /// One server-to-client WebSocket text frame, as `printf %b` octal escapes.
-fn frame(json: &serde_json::Value) -> String {
+pub(super) fn frame(json: &serde_json::Value) -> String {
     let json = json.to_string();
     let mut bytes = vec![0x81];
     match u8::try_from(json.len()) {
@@ -183,8 +183,8 @@ pub(super) struct FakeConnection {
 }
 
 pub(super) struct FakeAppServer {
-    directory: tempfile::TempDir,
-    executable: PathBuf,
+    pub(super) directory: tempfile::TempDir,
+    pub(super) executable: PathBuf,
 }
 
 pub(super) trait RunsFakeAppServer {

@@ -37,7 +37,7 @@ use crate::store::context::JudgesCompaction;
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries, SelectsHarnessProfile};
 use crate::store::metaflow::{ReadsSuccession, SleepsMetaflows, Succession};
 use crate::submission::{SeatSubmission, WitnessesSubmissions};
-use crate::codex::{ReadsCodexUserItems, CodexUserItem, SelectsCodexEndpoint};
+use crate::codex::{CodexAdapter, ReadsCodexUserItems, SelectsCodexEndpoint};
 use crate::live::HoldsLiveValue;
 use crate::waking::{HoldsWakingMetaflows, IdentifiesWakingLease, WakingLease};
 use body::{RecognizesLetter, RendersPaneText, VetsBody};
@@ -536,12 +536,10 @@ trait RunsLeasedDelivery<'run> {
     /// interrupt cancelled, which its writer had already submitted. It is
     /// never deleted; the letter follows it.
     fn resubmitted_cancelled_prompt(&self) -> bool;
-    fn codex_user_items(&self) -> Option<Vec<CodexUserItem>>;
-    fn codex_user_item_after(
-        &self,
-        prior_item_ids: &std::collections::BTreeSet<String>,
-        text: &str,
-    ) -> Option<bool>;
+    /// Binds the native reader once, before pane placement. Configuration
+    /// may change while a delivery is in flight; its receipt must still be
+    /// read from the same endpoint and exact native thread it began with.
+    fn codex_receipt_reader(&self) -> Option<(CodexAdapter, String)>;
     fn run(&self) -> Result<Delivery, DeliveryRejection>;
 }
 
@@ -570,9 +568,7 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             .map_err(|_| DeliveryRejection::PersistenceRefused)
     }
 
-    /// Read the bound Codex thread's user items without submitting anything.
-    /// The item list is the native receipt for a steer into a working thread.
-    fn codex_user_items(&self) -> Option<Vec<CodexUserItem>> {
+    fn codex_receipt_reader(&self) -> Option<(CodexAdapter, String)> {
         if self.target.node.harness_kind != HarnessKind::Codex
             || self.target.node.session_id.0.is_empty()
         {
@@ -585,39 +581,12 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             .ok()??
             .address;
         let model = self.nexus.store.configured_model(&address).ok()??;
-        self.nexus
+        let adapter = self.nexus
             .codex_endpoints
             .current()
             .adapter_for(&model)
-            .ok()?
-            .user_items(&self.target.node.session_id.0)
-            .ok()
-    }
-
-    fn codex_user_item_after(
-        &self,
-        prior_item_ids: &std::collections::BTreeSet<String>,
-        text: &str,
-    ) -> Option<bool> {
-        if self.target.node.harness_kind != HarnessKind::Codex
-            || self.target.node.session_id.0.is_empty()
-        {
-            return None;
-        }
-        let address = self
-            .nexus
-            .store
-            .metaflow_awake_as(&self.target.node.flow_id.0)
-            .ok()??
-            .address;
-        let model = self.nexus.store.configured_model(&address).ok()??;
-        self.nexus
-            .codex_endpoints
-            .current()
-            .adapter_for(&model)
-            .ok()?
-            .user_item_after(&self.target.node.session_id.0, prior_item_ids, text, 4)
-            .ok()
+            .ok()?;
+        Some((adapter, self.target.node.session_id.0.clone()))
     }
 
 
@@ -827,10 +796,15 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         let text = self.request.message.pane_text();
         // For a working Codex seat, capture the native item baseline before
         // the one Herdr placement.  No submit/retry is performed here.
-        let codex_before = (self.target.node.harness_kind == HarnessKind::Codex
+        let codex_receipt = (self.target.node.harness_kind == HarnessKind::Codex
             && agent_state == AgentState::Working
             && !hard)
-            .then(|| self.codex_user_items());
+            .then(|| self.codex_receipt_reader())
+            .flatten()
+            .map(|(reader, thread)| {
+                let before = reader.user_items(&thread).ok();
+                (reader, thread, before)
+            });
         // A resting seat reports taking the text; a working one announces
         // nothing until it takes its input, so only its composer shows the
         // submission. The mark is taken before any key.
@@ -858,15 +832,23 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         if self.target.node.harness_kind == HarnessKind::Codex
             && agent_state == AgentState::Working
             && !hard
-            && codex_before.as_ref().is_some_and(Option::is_some)
-        {
-            let before = codex_before
+            && codex_receipt
                 .as_ref()
-                .and_then(|items| items.as_ref())
+                .is_some_and(|(_, _, before)| before.is_some())
+        {
+            let (reader, thread, before) = codex_receipt
+                .as_ref()
+                .expect("working Codex receipt reader");
+            let before = before
+                .as_ref()
                 .map(|items| items.iter().map(|item| item.item_id.clone()).collect());
             let receipt = before
                 .as_ref()
-                .and_then(|ids| self.codex_user_item_after(ids, text.as_str()))
+                .and_then(|ids| {
+                    reader
+                        .user_item_after(thread, ids, text.as_str(), 4)
+                        .ok()
+                })
                 .unwrap_or(false);
             return self.settle(
                 interrupt_witness,

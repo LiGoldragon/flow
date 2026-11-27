@@ -8,6 +8,7 @@ use super::{
 };
 use crate::Dispatches;
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
+use crate::live::HoldsLiveValue;
 use meta_signal_flow::{
     BodyRefusal, CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Content, Delivery,
     DeliveryGrade, DeliveryRejection, DeliveryRequest, HarnessCommandKind, Input as MetaQuery,
@@ -123,6 +124,272 @@ impl NexusFixture {
             harness_command_kind: harness_command,
         }))
     }
+}
+
+/// A real working Codex delivery target whose read-only app-server is the
+/// fixture executable. This is deliberately the same store, routing and
+/// delivery path an ordinary Send uses; only the native endpoint is fake.
+fn working_codex_recipient(
+    fixture: &mut NexusFixture,
+    client: &std::path::Path,
+) -> signal_flow::Address {
+    use crate::store::RegistersFlowIdentity as _;
+    use crate::store::current_seat::RecordsCurrentSeats as _;
+    use crate::store::metaflow::SeedsMetaflow as _;
+    use crate::generated::memory::{SeatActivity, SeatStanding};
+    use signal_flow::{Address, Aspect, CallerIdentity, Metaflow, Model};
+
+    let address = Address {
+        aspect: Aspect::Mind,
+        topic: flow_ethos::Topic("workingReceipt".into()),
+        model: Model::Sol,
+    };
+    super::model::configure(fixture, &[(Model::Sol, "gpt-sol")]);
+    fixture.nexus.codex_endpoints.edit().stable.client_path = client.to_owned();
+    fixture.nexus.codex_endpoints.edit().timeout = std::time::Duration::from_secs(2);
+    let node = fixture.node();
+    fixture
+        .nexus
+        .store
+        .register_flow_in_role(
+            node.clone(),
+            CallerIdentity {
+                flow_id: node.flow_id.clone(),
+                aspect: Aspect::Mind,
+                model_name: flow_ethos::ModelName("gpt-sol".into()),
+            },
+        )
+        .expect("working Codex target registered");
+    fixture
+        .nexus
+        .store
+        .record_observation(
+            &node.flow_id.0,
+            Some(SeatStanding::Alive(SeatActivity::Working)),
+        )
+        .expect("working Codex standing recorded");
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: address.clone(),
+        state: flow_ethos::State::Awake(node.flow_id),
+        past: flow_ethos::Past(vec![]),
+        queue: flow_ethos::Queue(vec![]),
+    });
+    fixture.accept_pane_operations(
+        vec![fixture.current_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    address
+}
+
+fn codex_history_frames(
+    thread: &str,
+    items: Vec<serde_json::Value>,
+) -> String {
+    use super::send_tool::frame;
+    [
+        frame(&serde_json::json!({"id": 1, "result": {}})),
+        frame(&serde_json::json!({"id": 2, "result": {"thread": {"id": thread}}})),
+        frame(&serde_json::json!({"id": 3, "result": {"data": [{
+            "id": "turn-working",
+            "status": "inProgress",
+            "items": items
+        }], "nextCursor": null}})),
+    ]
+    .concat()
+}
+
+fn user_item(id: &str, text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "userMessage",
+        "id": id,
+        "content": [{"type": "text", "text": text}]
+    })
+}
+
+#[derive(Clone, Copy)]
+enum NativeReceiptFixture {
+    Fresh,
+    Stale,
+}
+
+/// Sends one ordinary MiddleAbrupt request through admission, the queue and
+/// the pane writer. The fake app-server sees the bound thread before and
+/// after the single Herdr placement.
+fn ordinary_send_to_working_codex(
+    after: NativeReceiptFixture,
+) -> (
+    signal_flow::VisibleDeliveryState,
+    String,
+    Vec<serde_json::Value>,
+) {
+    use super::send_tool::{
+        FakeAppServer, ReadsClientFrames as _, RunsFakeAppServer as _,
+    };
+    use crate::delivery::body::RendersPaneText as _;
+    use crate::message_projection::ProjectsQueueEntry as _;
+    use crate::sending::SendsRequests as _;
+    use crate::store::metaflow::MutatesMetaflows as _;
+    use crate::waking::SleepsAndWakesSeats as _;
+    use signal_flow::{Input, Message as SignalMessage, Output, Request, SendRequest};
+
+    let fake = FakeAppServer::install(vec![]);
+    let mut fixture = NexusFixture::new();
+    let address = working_codex_recipient(&mut fixture, &fake.executable);
+    let thread = fixture.node().session_id.0;
+    let old = user_item("item-old", "an older identical-looking input");
+    fs::write(
+        fake.directory.path().join("frames-1"),
+        codex_history_frames(&thread, vec![old.clone()]),
+    )
+    .unwrap();
+
+    let answer = fixture.nexus.send_request(
+        SendRequest {
+            address: address.clone(),
+            sendable_message: super::sendable_message(SignalMessage::MiddleAbrupt(
+                Request::Order("receipt-backed working delivery".into()),
+            )),
+        },
+        None,
+    );
+    let Output::SendAccepted(accepted) = answer.response else {
+        panic!("ordinary Send admitted: {:?}", answer.response)
+    };
+    let pending = answer.pending.expect("admitted request schedules its delivery");
+    let metaflow = fixture
+        .nexus
+        .store
+        .metaflow(&address)
+        .unwrap()
+        .expect("recipient metaflow");
+    let cohort = metaflow.queue.0;
+    assert_eq!(cohort.len(), 1);
+    let visible_sender = cohort[0].visible_input(&address).visible_sender;
+    let text = meta_signal_flow::Message::MiddleAbrupt(meta_signal_flow::Letter {
+        visible_sender,
+        content: Content::Waking(
+            cohort
+                .iter()
+                .map(|entry| entry.visible_input(&address))
+                .collect(),
+        ),
+    })
+    .pane_text()
+    .as_str()
+    .to_owned();
+    let after_items = match after {
+        NativeReceiptFixture::Fresh => vec![old.clone(), user_item("item-fresh", &text)],
+        NativeReceiptFixture::Stale => vec![old.clone()],
+    };
+    // Fresh evidence is found on the first bounded read. A stale history is
+    // served for every bounded retry and must never become a receipt.
+    for run in 2..=5 {
+        fs::write(
+            fake.directory.path().join(format!("frames-{run}")),
+            codex_history_frames(&thread, after_items.clone()),
+        )
+        .unwrap();
+    }
+    fixture.nexus.wake_due(pending.address);
+
+    let Output::SendsObserved(observed) = fixture.nexus.dispatch(Input::ObserveSends(None)) else {
+        panic!("ordinary send outcome is observable")
+    };
+    let state = observed
+        .visible_delivery_snapshot_vector
+        .iter()
+        .find(|snapshot| snapshot.request_id == accepted.request_id)
+        .expect("admitted request has a durable outcome")
+        .visible_delivery_state
+        .clone();
+    let operations = fixture.operations();
+    let native = (1..=fake.runs())
+        .flat_map(|run| {
+            fake.directory
+                .path()
+                .join(format!("record-{run}"))
+                .client_messages()
+        })
+        .collect();
+    (state, operations, native)
+}
+
+#[test]
+fn a_working_codex_send_is_delivered_from_its_fresh_native_item_without_retransmission() {
+    let (state, operations, native) =
+        ordinary_send_to_working_codex(NativeReceiptFixture::Fresh);
+    assert_eq!(state, signal_flow::VisibleDeliveryState::Delivered);
+    assert_eq!(
+        operations
+            .lines()
+            .filter(|line| line.contains(" agent prompt "))
+            .count(),
+        1,
+        "one pane placement: {operations}"
+    );
+    assert!(
+        native
+            .iter()
+            .all(|request| request["method"] != "turn/start"),
+        "receipt reads never submit or retry: {native:?}"
+    );
+    assert_eq!(
+        native
+            .iter()
+            .filter(|request| request["method"] == "thread/read")
+            .count(),
+        2,
+        "one baseline and one receipt read"
+    );
+}
+
+#[test]
+fn a_stale_working_codex_item_remains_uncertain_without_retransmission() {
+    let (state, operations, native) =
+        ordinary_send_to_working_codex(NativeReceiptFixture::Stale);
+    assert_eq!(state, signal_flow::VisibleDeliveryState::Uncertain);
+    assert_eq!(
+        operations
+            .lines()
+            .filter(|line| line.contains(" agent prompt "))
+            .count(),
+        1,
+        "one pane placement: {operations}"
+    );
+    assert!(
+        native
+            .iter()
+            .all(|request| request["method"] != "turn/start"),
+        "an absent receipt never causes retransmission: {native:?}"
+    );
+}
+
+#[test]
+fn an_unavailable_working_codex_history_keeps_the_conservative_transport_fallback() {
+    use super::send_tool::{FakeAppServer, RunsFakeAppServer as _};
+    let fake = FakeAppServer::install(vec![]);
+    let mut fixture = NexusFixture::new();
+    working_codex_recipient(&mut fixture, &fake.executable);
+
+    assert_eq!(
+        fixture.deliver(
+            "unavailable-native-history",
+            middle_abrupt("history unavailable")
+        ),
+        MetaResponse::MessageTyped(meta_signal_flow::VisibleDelivery {
+            interrupt_witness: InterruptWitness::NotRequested,
+            delivery_grade: DeliveryGrade::Transported,
+        })
+    );
+    let operations = fixture.operations();
+    assert_eq!(
+        operations
+            .lines()
+            .filter(|line| line.contains(" agent prompt "))
+            .count(),
+        1,
+        "the legacy writer still places exactly once: {operations}"
+    );
 }
 
 /// A Soft Send waits for an idle recipient. To a seat in its turn nothing

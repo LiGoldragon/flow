@@ -89,8 +89,7 @@ Library
                    record_named.{ [ Subject ] [ Result<Boolean MetaOutput> ] }
                    record_every_seat.[ Result<Boolean MetaOutput> ] ]
   SerializesPermaflowEffects.[ effect.{ [ Addressed ] [ WakingLease ] } ]
-  SerializesPermaflowHolds.[ establish_permaflow_hold.{ [ Addressed ] [ Result<Boolean StoreError> ] }
-                            remove_permaflow_hold.{ [ Addressed ] [ Result<Boolean StoreError> ] } ]
+  SerializesPermaflowHolds.[ establish_permaflow_hold.{ [ Addressed ] [ Result<Boolean StoreError> ] } ]
   AdmitsPermaflowControl.[ machine_control.{ [ Subject ] [ Result<Option<WakingLease> MetaOutput> ] }
                           ordinary_control.{ [ Subject ] [ Result<Option<WakingLease> OrdinaryOutput> ] } ]
   ParksHeldLaunches.[ park_held_launch.{ [ ParkedLaunch ] [ Result<LaunchAttemptReservation StoreError> ] }

@@ -143,10 +143,6 @@ pub trait SerializesPermaflowHolds {
         &self,
         input: N,
     ) -> std::result::Result<bool, flow_nexus::store::StoreError>;
-    fn remove_permaflow_hold<N: Addressed>(
-        &self,
-        input: N,
-    ) -> std::result::Result<bool, flow_nexus::store::StoreError>;
 }
 #[rustfmt::skip]
 pub trait AdmitsPermaflowControl {

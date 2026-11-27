@@ -391,34 +391,56 @@ impl crate::generated::overriding::SerializesPermaflowHolds for RunningNexus {
         }
         Ok(moved)
     }
-
-    fn remove_permaflow_hold<N: crate::generated::overriding::Addressed>(
+}
+pub(crate) trait ReleasesParkedLaunches {
+    fn release_parked_launches(
         &self,
-        input: N,
-    ) -> Result<bool, crate::store::StoreError> {
-        use crate::generated::overriding::RemembersOverrides;
-        let address = input.address();
-        let _control = self
-            .waking
-            .manual_control
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _turn = self
-            .dispatch_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _effects = self
-            .waking
-            .effects
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let moved = self.store.permaflow_held(address.clone())?;
-        if self.perform(Operation::Record(Record_Data::PermaflowReleased(address)))
-            != Outcome::Recorded
+        address: &Address,
+        choice: Option<&meta_signal_flow::ParkedLaunchRelease>,
+    ) -> Result<(), meta_signal_flow::Output>;
+}
+
+impl ReleasesParkedLaunches for RunningNexus {
+    fn release_parked_launches(
+        &self,
+        address: &Address,
+        choice: Option<&meta_signal_flow::ParkedLaunchRelease>,
+    ) -> Result<(), meta_signal_flow::Output> {
+        use crate::generated::overriding::ResumesPermaflowWork;
+        use crate::store::overriding::DecidesParkedLaunches;
         {
-            return Err(crate::store::StoreError::StateInvariant);
+            let _control = self
+                .waking
+                .manual_control
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _effects = self
+                .waking
+                .effects
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.store
+                .decide_launch_release(address, choice)
+                .map_err(|error| {
+                    meta_signal_flow::Output::Refused(meta_signal_flow::Refused_Data::StoreRefused(
+                        meta_signal_flow::StoreFailure(error.to_string()),
+                    ))
+                })?
+                .map_err(|ids| {
+                    meta_signal_flow::Output::ParkedLaunchReleaseRejected(
+                        meta_signal_flow::ParkedLaunchReleaseRejected_Data {
+                            address: address.clone(),
+                            launch_request_id_vector: ids,
+                        },
+                    )
+                })?;
         }
-        Ok(moved)
+        self.resume_permaflow(address.clone());
+        Ok(())
     }
 }
 
@@ -600,6 +622,8 @@ pub enum KeptAtStop {
     NotAwake,
     /// The flow's launch is not confirmed: it only holds its Address.
     Unconfirmed,
+    /// A previously parked launch has no explicit Start decision.
+    AwaitingLaunchDisposition,
     /// A wake holds the metaflow.
     Waking,
     /// Flow holds no row for the flow.
@@ -1825,6 +1849,20 @@ impl RefreshesMetaflows for RunningNexus {
             {
                 return Output::ReplaceRejected(ReplaceRejection::Locked);
             }
+            // Retrying a pre-upgrade order without the new authorization
+            // record cannot turn its pending status into a replacement.
+            use crate::store::overriding::DecidesParkedLaunches;
+            if let Ok(Some(order)) = self.store.ordered_replacement(&address)
+                && let Some(launch) = order.ordered_launch()
+                && launch.launch_profile.launch_request_id == profile.launch_request_id
+                && !self.launch_known(&profile.launch_request_id.0)
+                && !matches!(
+                    self.store.start_permitted(&profile.launch_request_id),
+                    Ok(true)
+                )
+            {
+                return self.queue_replacement(profile, origin, FlowId(order.predecessor.0));
+            }
             // A working predecessor is never closed: the replacement waits
             // for its idle event. One already under way or settled resumes.
             if let Some(predecessor) = profile.flow_id_option.clone()
@@ -2123,6 +2161,16 @@ impl WaitsForRestToReplace for RunningNexus {
         metaflow: Metaflow,
         turn: std::sync::MutexGuard<'_, ()>,
     ) -> AtStop {
+        use crate::store::overriding::DecidesParkedLaunches;
+        if let Some(launch) = order.ordered_launch()
+            && !matches!(
+                self.store
+                    .ordered_launch_admitted(&launch.launch_profile.launch_request_id),
+                Ok(true)
+            )
+        {
+            return AtStop::Kept(KeptAtStop::AwaitingLaunchDisposition);
+        }
         let address = metaflow.address.clone();
         let Some(lock) = self.waking.hold(&address) else {
             return AtStop::Kept(KeptAtStop::Waking);
@@ -2222,6 +2270,14 @@ impl WaitsForRestToReplace for RunningNexus {
             return;
         }
 
+        use crate::store::overriding::DecidesParkedLaunches;
+        if !matches!(
+            self.store
+                .ordered_launch_admitted(&launch.launch_profile.launch_request_id),
+            Ok(true)
+        ) {
+            return;
+        }
         let mut profile = launch.launch_profile;
         profile.flow_id_option = None;
         let launch_request_id = profile.launch_request_id.clone();
@@ -2256,7 +2312,18 @@ impl WaitsForRestToReplace for RunningNexus {
             let mut resting = Vec::new();
             let mut orphans = Vec::new();
             for order in self.store.ordered_replacements().unwrap_or_default() {
-                if self.permaflow_held(order.address.clone()) {
+                use crate::store::overriding::DecidesParkedLaunches;
+                if self.permaflow_held(order.address.clone())
+                    || order.ordered_launch().is_some_and(|launch| {
+                        !self.launch_known(&launch.launch_profile.launch_request_id.0)
+                            && !matches!(
+                                self.store.ordered_launch_admitted(
+                                    &launch.launch_profile.launch_request_id
+                                ),
+                                Ok(true)
+                            )
+                    })
+                {
                     continue;
                 }
                 match self.store.metaflow(&order.address) {
@@ -3456,6 +3523,12 @@ impl crate::generated::overriding::ResumesPermaflowWork for RunningNexus {
                 if metaflow.state == flow_ethos::State::Awake(FlowId(intent.predecessor.0.clone())))
         {
             self.take_up_owed(intent);
+        }
+        // Drop settles a parked fresh launch without taking its queue. Release
+        // the failed claim so normal waking work can be admitted again.
+        use crate::store::fresh_launch::TracksFreshLaunches;
+        if let Ok(Some(claim)) = self.store.fresh_cohort(&address) {
+            let _ = self.store.reconcile_fresh(&claim);
         }
         for row in self.store.pending_reaps().unwrap_or_default() {
             if row.address == address {

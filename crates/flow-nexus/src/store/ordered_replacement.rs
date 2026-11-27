@@ -150,15 +150,17 @@ impl OrdersReplacements for FlowStore {
     }
 
     fn order_replacement(&self, order: OrderedReplacement) -> Result<(), StoreError> {
+        use super::overriding::DecidesParkedLaunches;
+        use crate::generated::overriding::RemembersOverrides;
+        let mut commit = self.engine.begin_atomic_commit();
+        if let Some(launch) = order.ordered_launch()
+            && !self.permaflow_held(order.address.clone())?
+        {
+            commit = self.permit_start(commit, &launch.launch_profile.launch_request_id)?;
+        }
         let commit: AtomicCommit = match self.ordered_replacement(&order.address)? {
-            Some(_) => self
-                .engine
-                .begin_atomic_commit()
-                .mutate(self.ordered_replacements, order),
-            None => self
-                .engine
-                .begin_atomic_commit()
-                .assert(self.ordered_replacements, order),
+            Some(_) => commit.mutate(self.ordered_replacements, order),
+            None => commit.assert(self.ordered_replacements, order),
         };
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();

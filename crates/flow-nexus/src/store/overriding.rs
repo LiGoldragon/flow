@@ -143,18 +143,11 @@ impl RemembersOverrides for FlowStore {
         input: N,
     ) -> Result<bool, StoreError> {
         let address = input.address();
-        if !self.permaflow_held(address.clone())? {
-            return Ok(false);
+        let held = self.permaflow_held(address.clone())?;
+        match self.decide_launch_release(&address, None)? {
+            Ok(()) => Ok(held),
+            Err(_) => Err(StoreError::StateInvariant),
         }
-        let key = StoredPermaflowHold { address }.record_key();
-        let commit = self
-            .engine
-            .begin_atomic_commit()
-            .retract(self.permaflow_holds, key);
-        self.engine.commit_atomic(commit)?;
-        self.launch_changes.announce();
-        self.reminder_changes.announce();
-        Ok(true)
     }
 
     /// Appends the transition to its flow's record, the record naming the
@@ -527,5 +520,219 @@ impl crate::generated::overriding::ParksHeldLaunches for FlowStore {
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
         Ok(signal_flow::LaunchAttemptReservation::Reserved(attempt))
+    }
+}
+
+pub(super) const LAUNCH_START_PERMIT_TABLE: &str = "flow_nexus_launch_start_permits";
+pub(super) const LAUNCH_START_PERMIT_FAMILY: &str = "flow-nexus-launch-start-permit";
+pub(super) const LAUNCH_START_PERMIT_SCHEMA: &str = "flow-nexus-launch-start-permit-v1";
+
+use crate::generated::memory::StoredLaunchStartPermit;
+impl EngineRecord for StoredLaunchStartPermit {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.launch_request_id.0.clone())
+    }
+}
+impl MemoryDefinition for StoredLaunchStartPermit {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(LAUNCH_START_PERMIT_SCHEMA)
+    }
+}
+impl DescribesOverrideTable for StoredLaunchStartPermit {
+    fn descriptor() -> TableDescriptor<Self> {
+        TableDescriptor::new(
+            TableName::new(LAUNCH_START_PERMIT_TABLE),
+            FamilyName::new(LAUNCH_START_PERMIT_FAMILY),
+            Self::schema_hash(),
+        )
+    }
+}
+
+/// A marker says a launch was parked, not that the operator permitted it.
+/// The sidecar is absent for old stores. An operator can inspect and resolve
+/// old parked requests even when an old release already cleared their hold.
+pub(crate) trait DecidesParkedLaunches {
+    /// The recorded decision or an already-crossed native boundary suffices
+    /// for recovery. The latter can never be changed into an owner Drop.
+    fn ordered_launch_admitted(
+        &self,
+        id: &signal_flow::LaunchRequestId,
+    ) -> Result<bool, StoreError>;
+    fn start_permitted(&self, id: &signal_flow::LaunchRequestId) -> Result<bool, StoreError>;
+    fn permit_start(
+        &self,
+        commit: sema_engine::AtomicCommit,
+        id: &signal_flow::LaunchRequestId,
+    ) -> Result<sema_engine::AtomicCommit, StoreError>;
+    fn decide_launch_release(
+        &self,
+        address: &signal_flow::Address,
+        choice: Option<&meta_signal_flow::ParkedLaunchRelease>,
+    ) -> Result<Result<(), Vec<signal_flow::LaunchRequestId>>, StoreError>;
+}
+impl DecidesParkedLaunches for FlowStore {
+    fn ordered_launch_admitted(
+        &self,
+        id: &signal_flow::LaunchRequestId,
+    ) -> Result<bool, StoreError> {
+        use crate::store::{ReadsLaunchAttempt, RecordsLaunchOutcome};
+        Ok(self.start_permitted(id)?
+            || self.launch_outcome(&id.0)?.is_some()
+            || self
+                .launch_attempt(&id.0)?
+                .is_some_and(|a| a.native_launch_intent_option.is_some()))
+    }
+    fn start_permitted(&self, id: &signal_flow::LaunchRequestId) -> Result<bool, StoreError> {
+        Ok(!self
+            .engine
+            .match_records(QueryPlan::key(
+                self.launch_start_permits,
+                RecordKey::new(id.0.clone()),
+            ))?
+            .records()
+            .is_empty())
+    }
+    fn permit_start(
+        &self,
+        commit: sema_engine::AtomicCommit,
+        id: &signal_flow::LaunchRequestId,
+    ) -> Result<sema_engine::AtomicCommit, StoreError> {
+        Ok(if self.start_permitted(id)? {
+            commit
+        } else {
+            commit.assert(
+                self.launch_start_permits,
+                StoredLaunchStartPermit {
+                    launch_request_id: id.clone(),
+                },
+            )
+        })
+    }
+    fn decide_launch_release(
+        &self,
+        address: &signal_flow::Address,
+        choice: Option<&meta_signal_flow::ParkedLaunchRelease>,
+    ) -> Result<Result<(), Vec<signal_flow::LaunchRequestId>>, StoreError> {
+        use crate::generated::overriding::ParksHeldLaunches;
+        use crate::store::ordered_replacement::{
+            NamesOrderedLaunch, OrdersReplacements, ShowsWaitingAttempt,
+        };
+        use crate::store::{
+            LaunchOutcome, ReadsLaunchAttempt, RecordsLaunchOutcome, StoredLaunchAttempt,
+            StoredLaunchOutcome,
+        };
+        use meta_signal_flow::ParkedLaunchDisposition;
+        // Our caller holds the same dispatch gate that admits a launch and the
+        // hold/effects gates. Never decide from a previously emitted snapshot.
+        let held = self.permaflow_held(address.clone())?;
+        let mut parked = Vec::new();
+        let mut markers = Vec::new();
+        for row in self.held_launches()? {
+            let id = row.launch_request_id;
+            let attempt = self
+                .launch_attempt(&id.0)?
+                .ok_or(StoreError::StateInvariant)?;
+            if &attempt.launch_profile.address != address {
+                continue;
+            }
+            if self.launch_outcome(&id.0)?.is_none() && (held || !self.start_permitted(&id)?) {
+                if attempt.launch_attempt_phase != signal_flow::LaunchAttemptPhase::Reserved {
+                    return Err(StoreError::StateInvariant);
+                }
+                parked.push(id.clone());
+                markers.push(id);
+            }
+        }
+        let order = self.ordered_replacement(address)?;
+        let ordered = order.as_ref().and_then(NamesOrderedLaunch::ordered_launch);
+        if let Some(launch) = ordered {
+            let id = &launch.launch_profile.launch_request_id;
+            if self.launch_outcome(&id.0)?.is_none()
+                && self.launch_attempt(&id.0)?.is_none_or(|a| {
+                    a.native_launch_intent_option.is_none()
+                        && a.launch_attempt_phase == signal_flow::LaunchAttemptPhase::Reserved
+                })
+                && (held || !self.start_permitted(id)?)
+                && !parked.contains(id)
+            {
+                parked.push(id.clone());
+            }
+        }
+        if let Some(choice) = choice {
+            if parked.is_empty()
+                || choice.address != *address
+                || choice.launch_request_id_vector.len() != parked.len()
+                || !parked
+                    .iter()
+                    .all(|id| choice.launch_request_id_vector.contains(id))
+            {
+                return Ok(Err(parked));
+            }
+        } else if !parked.is_empty() {
+            return Ok(Err(parked));
+        }
+        if !held && choice.is_none() {
+            return Ok(Ok(()));
+        }
+        let mut commit = self.engine.begin_atomic_commit();
+        if held {
+            commit = commit.retract(
+                self.permaflow_holds,
+                StoredPermaflowHold {
+                    address: address.clone(),
+                }
+                .record_key(),
+            );
+        }
+        if let Some(choice) = choice {
+            for id in parked {
+                match choice.parked_launch_disposition {
+                    ParkedLaunchDisposition::Start => {
+                        commit = self.permit_start(commit, &id)?;
+                    }
+                    ParkedLaunchDisposition::Drop => {
+                        let key = RecordKey::new(id.0.clone());
+                        if markers.contains(&id) {
+                            commit = commit.retract(self.held_launches, key.clone());
+                        }
+                        if self.start_permitted(&id)? {
+                            commit = commit.retract(self.launch_start_permits, key.clone());
+                        }
+                        if let Some(launch) =
+                            ordered.filter(|launch| launch.launch_profile.launch_request_id == id)
+                        {
+                            if self.launch_attempt(&id.0)?.is_none() {
+                                commit = commit.assert(
+                                    self.launch_attempts,
+                                    StoredLaunchAttempt {
+                                        launch_attempt: launch.waiting_attempt(),
+                                    },
+                                );
+                            }
+                            commit = commit.retract(
+                                self.ordered_replacements,
+                                RecordKey::new(FlowStore::address_record_key(address)),
+                            );
+                        }
+                        commit = commit.assert(
+                            self.launch_outcomes,
+                            StoredLaunchOutcome {
+                                launch_request_id: id,
+                                launch_outcome: LaunchOutcome::StartRejected(
+                                    signal_flow::StartRejection::ParkedLaunchDropped,
+                                ),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        self.engine.commit_atomic(commit)?;
+        self.launch_changes.announce();
+        self.reminder_changes.announce();
+        Ok(Ok(()))
     }
 }

@@ -288,8 +288,36 @@ impl LaunchesFlows for RunningNexus {
         if let Some(outcome) = outcome {
             return outcome.response(&self.store);
         }
+        use crate::store::ordered_replacement::{
+            NamesOrderedLaunch, OrdersReplacements, ShowsWaitingAttempt,
+        };
+        use crate::store::overriding::DecidesParkedLaunches;
+        let permitted = match self.store.start_permitted(&launch_request_id) {
+            Ok(value) => value,
+            Err(_) => return Output::StartRejected(StartRejection::LaunchPersistenceRefused),
+        };
+        if !permitted
+            && existing
+                .as_ref()
+                .is_none_or(|attempt| attempt.launch_attempt_phase == LaunchAttemptPhase::Reserved)
+        {
+            match self.store.ordered_launch_request(&launch_request_id.0) {
+                Ok(Some(order)) => {
+                    if let Some(launch) = order.ordered_launch() {
+                        return if launch.launch_profile == profile && launch.origin == origin {
+                            Output::LaunchPending(launch.waiting_attempt())
+                        } else {
+                            Output::StartRejected(StartRejection::LaunchRequestConflict)
+                        };
+                    }
+                }
+                Ok(None) => (),
+                Err(_) => return Output::StartRejected(StartRejection::LaunchPersistenceRefused),
+            }
+        }
         let resumable = existing.as_ref().is_some_and(|attempt| {
-            attempt.launch_attempt_phase == LaunchAttemptPhase::Reserved
+            permitted
+                && attempt.launch_attempt_phase == LaunchAttemptPhase::Reserved
                 && !self.permaflow_held(profile.address.clone())
                 && self
                     .store
@@ -1307,6 +1335,13 @@ impl crate::generated::overriding::ResumesHeldLaunches for RunningNexus {
                 }
                 Ok(None) => {}
                 Err(_) => continue,
+            }
+            use crate::store::overriding::DecidesParkedLaunches;
+            if !matches!(
+                self.store.start_permitted(&marker.launch_request_id),
+                Ok(true)
+            ) {
+                continue;
             }
             let response = self.start(attempt.launch_profile, attempt.origin);
             if response == Output::StartRejected(StartRejection::LaunchRequestConflict) {

@@ -143,11 +143,12 @@ impl TracksFreshLaunches for FlowStore {
                 // Reserve precedes the durable native intent, itself written
                 // before Open. Resume the exact reservation through the same
                 // ordered startup path as a previously parked one.
-                self.engine.commit_atomic(
-                    self.engine
-                        .begin_atomic_commit()
-                        .assert(self.held_launches, self.next_held_launch(id)?),
-                )?;
+                use super::overriding::DecidesParkedLaunches;
+                let commit = self
+                    .engine
+                    .begin_atomic_commit()
+                    .assert(self.held_launches, self.next_held_launch(id)?);
+                self.engine.commit_atomic(self.permit_start(commit, id)?)?;
             }
             self.reconcile_fresh(claim)?;
         }

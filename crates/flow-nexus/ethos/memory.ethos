@@ -406,6 +406,7 @@ Memory
   ; Admission order belongs only to the parked marker, not the attempt.
   HeldLaunchPosition.Integer
   StoredHeldLaunch.{ LaunchRequestId HeldLaunchPosition }
+  StoredLaunchStartPermit.{ LaunchRequestId }
   ; A request closed by CloseRequest, with no answer, keyed by the logical
   ; delivery it was bound to, since its id is drawn again once it is
   ; archived: the id it had, and the process that closed it as the Nexus

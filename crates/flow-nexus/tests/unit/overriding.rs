@@ -28,6 +28,22 @@ fn overridden(fixture: &NexusFixture, input: meta::Input) -> meta::Output {
     fixture.nexus.dispatch_meta(input)
 }
 
+fn decide(
+    fixture: &NexusFixture,
+    at: &signal_flow::Address,
+    disposition: meta::ParkedLaunchDisposition,
+    ids: Vec<signal_flow::LaunchRequestId>,
+) -> meta::Output {
+    overridden(
+        fixture,
+        meta::Input::ReleaseParkedLaunches(meta::ParkedLaunchRelease {
+            address: at.clone(),
+            parked_launch_disposition: disposition,
+            launch_request_id_vector: ids,
+        }),
+    )
+}
+
 fn seat_id() -> flow_ethos::FlowId {
     flow_ethos::FlowId(CLAUDE_SEAT.into())
 }
@@ -978,7 +994,44 @@ fn explicit_launch_is_parked_atomically_and_resumed_once_by_release() {
     fixture.restarted();
     fixture.nexus.recover_wakes();
     assert_eq!(world.claude_starts(), 0);
-    overridden(&fixture, meta::Input::ReleasePermaflow(at.clone()));
+    let refused =
+        meta::Output::ParkedLaunchReleaseRejected(meta::ParkedLaunchReleaseRejected_Data {
+            address: at.clone(),
+            launch_request_id_vector: vec![profile.launch_request_id.clone()],
+        });
+    assert_eq!(
+        overridden(&fixture, meta::Input::ReleasePermaflow(at.clone())),
+        refused
+    );
+    assert_eq!(
+        decide(
+            &fixture,
+            &at,
+            meta::ParkedLaunchDisposition::Start,
+            vec![signal_flow::LaunchRequestId("another-id".into())]
+        ),
+        refused
+    );
+    assert_eq!(world.claude_starts(), 0);
+    // Simulate the crash immediately after the transaction commits but
+    // before resume_permaflow can start the authorized request.
+    use crate::store::overriding::DecidesParkedLaunches;
+    let release = meta::ParkedLaunchRelease {
+        address: at.clone(),
+        parked_launch_disposition: meta::ParkedLaunchDisposition::Start,
+        launch_request_id_vector: vec![profile.launch_request_id.clone()],
+    };
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .decide_launch_release(&at, Some(&release))
+            .unwrap(),
+        Ok(())
+    );
+    assert_eq!(world.claude_starts(), 0);
+    fixture.restarted();
+    fixture.nexus.recover_wakes();
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());
     assert!(
         !fixture
@@ -1280,7 +1333,15 @@ fn refused_parked_launch_is_terminal_and_never_reexecuted_after_release_or_resta
                 .configure_change(meta::ConfigurationChange::Metaflows(vec![declaration]))
                 .unwrap();
         }
-        overridden(&fixture, meta::Input::ReleasePermaflow(at.clone()));
+        assert!(matches!(
+            decide(
+                &fixture,
+                &at,
+                meta::ParkedLaunchDisposition::Start,
+                vec![profile.launch_request_id.clone()]
+            ),
+            meta::Output::ParkedLaunchesReleased(_)
+        ));
         let outcome = fixture
             .nexus
             .store
@@ -1381,7 +1442,15 @@ fn release_takes_up_an_orphaned_launch_order_once_without_a_nexus_restart() {
         fixture.nexus.store.ordered_replacement(&at).unwrap(),
         Some(order)
     );
-    overridden(&fixture, meta::Input::ReleasePermaflow(at.clone()));
+    assert!(matches!(
+        decide(
+            &fixture,
+            &at,
+            meta::ParkedLaunchDisposition::Start,
+            vec![signal_flow::LaunchRequestId("held-orphaned-launch".into())]
+        ),
+        meta::Output::ParkedLaunchesReleased(_)
+    ));
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());
     assert!(matches!(
         stored(&fixture, Model::Sol).state,
@@ -1518,7 +1587,15 @@ fn a_parked_prompt_fingerprint_conflict_is_terminal_without_a_profile_conflict()
             .launch_profile,
         profile
     );
-    overridden(&fixture, meta::Input::ReleasePermaflow(at.clone()));
+    assert!(matches!(
+        decide(
+            &fixture,
+            &at,
+            meta::ParkedLaunchDisposition::Start,
+            vec![profile.launch_request_id.clone()]
+        ),
+        meta::Output::ParkedLaunchesReleased(_)
+    ));
     assert_eq!(
         fixture
             .nexus
@@ -1974,4 +2051,176 @@ fn socket_admission_stays_accepted_when_herdr_refuses_before_input() {
     // admitted.
     assert_eq!(state.delivery_state, DeliveryState::Queued);
     assert!(fixture.typed().is_none());
+}
+
+#[test]
+fn parked_launch_drop_checks_the_whole_cohort_then_settles_every_id_across_restart() {
+    use crate::launching::LaunchesFlows;
+    use crate::store::{LaunchOutcome, RecordsLaunchOutcome};
+    let mut fixture = NexusFixture::new();
+    let seat = ended_claude(&fixture);
+    let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let world = fixture.fresh_claude_world();
+    overridden(&fixture, meta::Input::HoldPermaflow(at.clone()));
+    use crate::generated::memory::{OrderedLaunch, OrderedReplacement, Predecessor, PromptSha256};
+    use crate::store::ordered_replacement::{OrdersReplacements, ReplacementOrder};
+    let mut first = seat.profile;
+    first.launch_request_id = signal_flow::LaunchRequestId("parked-a".into());
+    let response = fixture
+        .nexus
+        .start(first.clone(), signal_flow::Origin::Unbound);
+    let signal_flow::Output::LaunchPending(attempt) = response else {
+        panic!("first launch was not parked: {response:?}");
+    };
+    let previous = vec![first.launch_request_id.clone()];
+    assert_eq!(
+        overridden(&fixture, meta::Input::ReleasePermaflow(at.clone())),
+        meta::Output::ParkedLaunchReleaseRejected(meta::ParkedLaunchReleaseRejected_Data {
+            address: at.clone(),
+            launch_request_id_vector: previous,
+        })
+    );
+    // A second fresh attempt cannot take the same Address. A held explicit
+    // replacement order, however, is independent of the parked fresh row.
+    let mut second = attempt.launch_profile;
+    second.launch_request_id = signal_flow::LaunchRequestId("parked-b".into());
+    fixture
+        .nexus
+        .store
+        .order_replacement(OrderedReplacement {
+            address: at.clone(),
+            predecessor: Predecessor("abc123".into()),
+            replacement_order: ReplacementOrder::Launch(Box::new(OrderedLaunch {
+                launch_profile: second.clone(),
+                origin: signal_flow::Origin::Unbound,
+                prompt_sha256: PromptSha256(String::new()),
+            })),
+        })
+        .unwrap();
+    let ids = vec![
+        first.launch_request_id.clone(),
+        second.launch_request_id.clone(),
+    ];
+    let profiles = [first, second];
+    let refused =
+        meta::Output::ParkedLaunchReleaseRejected(meta::ParkedLaunchReleaseRejected_Data {
+            address: at.clone(),
+            launch_request_id_vector: ids.clone(),
+        });
+    for stale in [vec![ids[0].clone()], vec![ids[0].clone(), ids[0].clone()]] {
+        assert_eq!(
+            decide(&fixture, &at, meta::ParkedLaunchDisposition::Drop, stale),
+            refused
+        );
+    }
+    fixture.restarted();
+    fixture.nexus.recover_wakes();
+    assert_eq!(
+        overridden(&fixture, meta::Input::ReleasePermaflow(at.clone())),
+        refused
+    );
+    assert_eq!(
+        decide(
+            &fixture,
+            &at,
+            meta::ParkedLaunchDisposition::Drop,
+            ids.clone()
+        ),
+        meta::Output::ParkedLaunchesReleased(meta::ParkedLaunchRelease {
+            address: at.clone(),
+            parked_launch_disposition: meta::ParkedLaunchDisposition::Drop,
+            launch_request_id_vector: ids.clone()
+        })
+    );
+    fixture.restarted();
+    fixture.nexus.recover_wakes();
+    assert_eq!(world.claude_starts(), 0);
+    for profile in profiles {
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .launch_outcome(&profile.launch_request_id.0)
+                .unwrap(),
+            Some(LaunchOutcome::StartRejected(
+                signal_flow::StartRejection::ParkedLaunchDropped
+            ))
+        );
+        assert_eq!(
+            fixture.nexus.start(profile, signal_flow::Origin::Unbound),
+            signal_flow::Output::StartRejected(signal_flow::StartRejection::ParkedLaunchDropped)
+        );
+    }
+    assert_eq!(
+        decide(&fixture, &at, meta::ParkedLaunchDisposition::Start, ids),
+        meta::Output::ParkedLaunchReleaseRejected(meta::ParkedLaunchReleaseRejected_Data {
+            address: at,
+            launch_request_id_vector: vec![]
+        })
+    );
+    assert_eq!(world.claude_starts(), 0);
+}
+
+#[test]
+fn inherited_unheld_parked_row_needs_explicit_authority_after_reopen() {
+    use crate::generated::operation::{LaunchReservation, Operation, Outcome};
+    use crate::generated::overriding::ParksHeldLaunches;
+    use crate::launching::{LaunchesFlows, NamesLaunchSession};
+    use crate::performing::Performs;
+    use crate::store::NamesConfiguredModel;
+    let mut fixture = NexusFixture::new();
+    let seat = ended_claude(&fixture);
+    let at = address(Model::Sol);
+    let world = fixture.fresh_claude_world();
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Model::Sol, State::Asleep, vec!["abc123"], vec![]));
+    let mut profile = seat.profile;
+    profile.launch_request_id = signal_flow::LaunchRequestId("legacy-parked".into());
+    profile.herdr_session_name = fixture.nexus.launch_session().unwrap();
+    profile.model_name =
+        signal_flow::ModelName(fixture.nexus.store.configured_model(&at).unwrap().unwrap());
+    let Outcome::Composed(launch) = fixture.nexus.perform(Operation::Compose(profile.clone()))
+    else {
+        panic!("the old attempt composes");
+    };
+    // The exact old row shape, no hold row, no positive authorization.
+    fixture
+        .nexus
+        .store
+        .park_held_launch(LaunchReservation {
+            composed_launch: launch,
+            origin: signal_flow::Origin::Unbound,
+        })
+        .unwrap();
+    fixture.restarted();
+    fixture.nexus.recover_wakes();
+    assert!(matches!(
+        fixture
+            .nexus
+            .start(profile.clone(), signal_flow::Origin::Unbound),
+        signal_flow::Output::LaunchPending(_)
+    ));
+    let ids = vec![profile.launch_request_id.clone()];
+    assert_eq!(
+        overridden(&fixture, meta::Input::ReleasePermaflow(at.clone())),
+        meta::Output::ParkedLaunchReleaseRejected(meta::ParkedLaunchReleaseRejected_Data {
+            address: at.clone(),
+            launch_request_id_vector: ids.clone()
+        })
+    );
+    assert_eq!(world.claude_starts(), 0);
+    assert!(matches!(
+        decide(&fixture, &at, meta::ParkedLaunchDisposition::Start, ids),
+        meta::Output::ParkedLaunchesReleased(_)
+    ));
+    assert_eq!(world.claude_starts(), 1);
+    fixture.restarted();
+    fixture.nexus.recover_wakes();
+    assert_eq!(world.claude_starts(), 1);
 }

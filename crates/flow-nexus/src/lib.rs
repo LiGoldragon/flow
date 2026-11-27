@@ -2196,17 +2196,18 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         &self,
         address: &signal_flow::Address,
     ) -> Result<signal_flow::Address, meta_signal_flow::Output> {
-        use crate::generated::overriding::SerializesPermaflowHolds;
-        self.nexus
-            .remove_permaflow_hold(address.clone())
-            .map_err(|error| {
-                meta_signal_flow::Output::Refused(meta_signal_flow::Refused_Data::StoreRefused(
-                    meta_signal_flow::StoreFailure(error.to_string()),
-                ))
-            })?;
-        use crate::generated::overriding::ResumesPermaflowWork;
-        self.nexus.resume_permaflow(address.clone());
+        use crate::waking::ReleasesParkedLaunches;
+        self.nexus.release_parked_launches(address, None)?;
         Ok(address.clone())
+    }
+    fn release_parked_launches(
+        &self,
+        release: &meta_signal_flow::ParkedLaunchRelease,
+    ) -> Result<meta_signal_flow::ParkedLaunchRelease, meta_signal_flow::Output> {
+        use crate::waking::ReleasesParkedLaunches;
+        self.nexus
+            .release_parked_launches(&release.address, Some(release))?;
+        Ok(release.clone())
     }
 }
 
@@ -3286,7 +3287,8 @@ impl DispatchesSerially for RunningNexus {
         | meta_signal_flow::Input::Hold
         | meta_signal_flow::Input::Resume
         | meta_signal_flow::Input::HoldPermaflow(_)
-        | meta_signal_flow::Input::ReleasePermaflow(_) = &query
+        | meta_signal_flow::Input::ReleasePermaflow(_)
+        | meta_signal_flow::Input::ReleaseParkedLaunches(_) = &query
         {
             let response = self.dispatch_meta_from(query, resolver);
             {

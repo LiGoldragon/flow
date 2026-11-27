@@ -227,6 +227,7 @@ const OPTIONAL_TURN_RETENTION_TABLE: &str = "flow_nexus_meta_turn_retention_conf
 const OPTIONAL_FLOW_TRANSITIONS_TABLE: &str = overriding::TRANSITIONS_TABLE;
 const OPTIONAL_HOLD_TABLE: &str = overriding::HOLD_TABLE;
 const OPTIONAL_PERMAFLOW_HOLD_TABLE: &str = overriding::PERMAFLOW_HOLD_TABLE;
+const OPTIONAL_LAUNCH_START_PERMIT_TABLE: &str = overriding::LAUNCH_START_PERMIT_TABLE;
 const OPTIONAL_HELD_LAUNCH_TABLE: &str = overriding::HELD_LAUNCH_TABLE;
 /// Added in 0.60.0 with CloseRequest: a store written before holds no
 /// closed request, and is opened with the family registered empty.
@@ -353,6 +354,7 @@ const RUNNING_TABLES: &[&str] = &[
     OPTIONAL_HOLD_TABLE,
     OPTIONAL_PERMAFLOW_HOLD_TABLE,
     OPTIONAL_HELD_LAUNCH_TABLE,
+    OPTIONAL_LAUNCH_START_PERMIT_TABLE,
     OPTIONAL_CLOSED_REQUEST_TABLE,
     OPTIONAL_ATTEMPT_MEMBERSHIP_TABLE,
     OPTIONAL_ATTEMPT_MEMBERSHIP_BUILT_TABLE,
@@ -1815,6 +1817,7 @@ pub struct FlowStore {
     transitions_gate: Mutex<()>,
     hold: TableReference<crate::generated::memory::StoredHold>,
     permaflow_holds: TableReference<crate::generated::memory::StoredPermaflowHold>,
+    launch_start_permits: TableReference<crate::generated::memory::StoredLaunchStartPermit>,
     held_launches: TableReference<crate::generated::memory::StoredHeldLaunch>,
     closed_requests: TableReference<closed_request::ClosedRequest>,
     queue_delivery: QueueDeliveryTables,
@@ -2936,6 +2939,9 @@ impl OpensFlowStore for FlowStore {
         let permaflow_holds = engine.register_table(
             <crate::generated::memory::StoredPermaflowHold as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
         )?;
+        let launch_start_permits = engine.register_table(
+            <crate::generated::memory::StoredLaunchStartPermit as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
+        )?;
         let held_launches = engine.register_table(
             <crate::generated::memory::StoredHeldLaunch as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
         )?;
@@ -2987,6 +2993,7 @@ impl OpensFlowStore for FlowStore {
             hold,
             permaflow_holds,
             held_launches,
+            launch_start_permits,
             closed_requests,
             attempt_memberships,
             queue_delivery,
@@ -3193,6 +3200,9 @@ impl OpensFlowStore for FlowStore {
         let permaflow_holds = engine.register_table(
             <crate::generated::memory::StoredPermaflowHold as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
         )?;
+        let launch_start_permits = engine.register_table(
+            <crate::generated::memory::StoredLaunchStartPermit as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
+        )?;
         let held_launches = engine.register_table(
             <crate::generated::memory::StoredHeldLaunch as crate::generated::overriding::DescribesOverrideTable>::descriptor(),
         )?;
@@ -3244,6 +3254,7 @@ impl OpensFlowStore for FlowStore {
             hold,
             permaflow_holds,
             held_launches,
+            launch_start_permits,
             closed_requests,
             attempt_memberships,
             queue_delivery,
@@ -4390,6 +4401,17 @@ impl RecordsNativeLaunchIntent for FlowStore {
             .mutate(self.launch_attempts, stored);
         if !self
             .engine
+            .match_records(QueryPlan::key(
+                self.launch_start_permits,
+                request_key.clone(),
+            ))?
+            .records()
+            .is_empty()
+        {
+            commit = commit.retract(self.launch_start_permits, request_key.clone());
+        }
+        if !self
+            .engine
             .match_records(QueryPlan::key(self.held_launches, request_key.clone()))?
             .records()
             .is_empty()
@@ -4747,6 +4769,17 @@ impl RecordsLaunchOutcome for FlowStore {
             commit.assert(self.launch_outcomes, stored)
         };
         let marker_key = RecordKey::new(launch_request_id);
+        if !self
+            .engine
+            .match_records(QueryPlan::key(
+                self.launch_start_permits,
+                marker_key.clone(),
+            ))?
+            .records()
+            .is_empty()
+        {
+            commit = commit.retract(self.launch_start_permits, marker_key.clone());
+        }
         if !self
             .engine
             .match_records(QueryPlan::key(self.held_launches, marker_key.clone()))?
@@ -5808,6 +5841,10 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                 overriding::PERMAFLOW_HOLD_FAMILY,
                 overriding::PERMAFLOW_HOLD_SCHEMA,
             ),
+            overriding::LAUNCH_START_PERMIT_TABLE => (
+                overriding::LAUNCH_START_PERMIT_FAMILY,
+                overriding::LAUNCH_START_PERMIT_SCHEMA,
+            ),
             "flow_nexus_held_launches" => (
                 overriding::HELD_LAUNCH_FAMILY,
                 overriding::HELD_LAUNCH_SCHEMA,
@@ -6199,6 +6236,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                     || *name == OPTIONAL_HOLD_TABLE
                     || *name == OPTIONAL_PERMAFLOW_HOLD_TABLE
                     || *name == OPTIONAL_HELD_LAUNCH_TABLE
+                    || *name == OPTIONAL_LAUNCH_START_PERMIT_TABLE
                     || *name == OPTIONAL_CLOSED_REQUEST_TABLE
                     || *name == OPTIONAL_ATTEMPT_MEMBERSHIP_TABLE
                     || *name == OPTIONAL_ATTEMPT_MEMBERSHIP_BUILT_TABLE

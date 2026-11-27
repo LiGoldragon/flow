@@ -671,7 +671,12 @@ impl PerformsInParts for RunningNexus {
         let claim = match &reservation {
             LaunchAttemptReservation::Reserved(_) => true,
             LaunchAttemptReservation::Existing(attempt) => {
+                use crate::store::overriding::DecidesParkedLaunches;
                 attempt.launch_attempt_phase == signal_flow::LaunchAttemptPhase::Reserved
+                    && matches!(
+                        self.store.start_permitted(&attempt.launch_request_id),
+                        Ok(true)
+                    )
                     && self
                         .store
                         .marked_held_launch(attempt.launch_request_id.clone())

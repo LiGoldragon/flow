@@ -82,24 +82,64 @@ impl ServesBoundRoutes for RunningNexus {
             return;
         }
         self.herdr.session_streams.announce_to(changes.clone());
-        let mut directories = self
+        use crate::event_wait::{NameWatch, WatchesName};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let projects = self
             .herdr
             .native_transcript_root(&signal_flow::HarnessKind::Claude, "")
-            .ok()
-            .and_then(|projects| {
-                ClaudeDirectories::watch(projects, self.herdr.claude_sessions.directory.clone())
-                    .map_err(|err| eprintln!("flow-nexus: Claude observation unavailable: {err}"))
-                    .ok()
-            });
+            .ok();
+        let registry = self.herdr.claude_sessions.directory.clone();
+        let roots_changed = Arc::new(AtomicBool::new(true));
+        // These parent/name witnesses are independent of the directory reader:
+        // failure of that reader can never leave a bad fd in the wait set.
+        let _root_watches: Vec<_> = projects
+            .iter()
+            .chain(std::iter::once(&registry))
+            .filter_map(|path| {
+                let ready = roots_changed.clone();
+                let events = changes.clone();
+                NameWatch::arm(
+                    path,
+                    Box::new(move || {
+                        ready.store(true, Ordering::Release);
+                        events.announce();
+                        true
+                    }),
+                )
+                .map_err(|e| eprintln!("flow-nexus: cannot watch native source name: {e}"))
+                .ok()
+            })
+            .collect();
+        let mut directories = None;
         let mut native_seats = BTreeMap::new();
         let mut views = BTreeMap::<String, BoundTransport>::new();
         while !self.stopping.requested() {
             let Ok(changed) = changes.next_descriptor() else {
                 return;
             };
-            let native = directories
-                .as_mut()
-                .and_then(|source| source.changes().ok());
+            let reopened = roots_changed.swap(false, Ordering::AcqRel);
+            if reopened {
+                directories = projects.as_ref().and_then(|path| {
+                    ClaudeDirectories::watch(path.clone(), registry.clone())
+                        .map_err(|e| eprintln!("flow-nexus: cannot arm Claude directories: {e}"))
+                        .ok()
+                });
+            }
+            let native = match directories.as_mut().map(ReadsClaudeChanges::changes) {
+                Some(Ok(mut records)) => {
+                    records.topology |= reopened;
+                    Some(records)
+                }
+                Some(Err(error)) => {
+                    eprintln!("flow-nexus: lost native change reader: {error}");
+                    directories = None;
+                    None
+                }
+                None => None,
+            };
             let mut present_native = BTreeSet::new();
             let sessions = self.herdr.herdr_sessions().map(|items| {
                 items
@@ -173,10 +213,26 @@ impl ServesBoundRoutes for RunningNexus {
                                 .filter(|_| before == native_birth());
                             // Ending a known process goes through the witnessed
                             // exit path below; file changes convey activity.
-                            if !matches!(
-                                observed,
-                                Some(crate::generated::memory::SeatStanding::Ended)
-                            ) {
+                            if before.is_none()
+                                && self
+                                    .herdr
+                                    .claude_sessions
+                                    .session_process(&node.session_id.0)
+                                    == Some(None)
+                            {
+                                // A newly observable missing seat gets its terminal
+                                // record. An existing Alive seat keeps its row until
+                                // the fenced native exit below can settle its duties.
+                                if matches!(
+                                    self.store.current_seat(&id.0),
+                                    Ok(CurrentSeatRead::NoRecord)
+                                ) {
+                                    let _ = self.store.establish_observation(
+                                        &id.0,
+                                        crate::generated::memory::SeatStanding::Ended,
+                                    );
+                                }
+                            } else {
                                 let _ = self.store.record_observation(&id.0, observed);
                             }
                         }

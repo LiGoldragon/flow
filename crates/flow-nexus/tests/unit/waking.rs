@@ -358,53 +358,77 @@ pub(super) fn report_claude_stop(
 /// `flow_id`'s own Stop with nothing in flight, recorded as its last turn
 /// event: the flow rests.
 pub(super) fn rested_at_stop(fixture: &NexusFixture, flow_id: &str) {
-    use crate::store::events::RecordsHarnessEvents;
+    use crate::generated::memory::{SeatActivity, SeatStanding};
+    use crate::seat_observation::ReadsNativeStanding;
     use crate::waking::ReadsClaudeDelivery;
-    let node = fixture
-        .nexus
-        .store
-        .flow_node(flow_id)
-        .unwrap()
-        .expect("the flow is held");
+    let node = fixture.nexus.store.flow_node(flow_id).unwrap().unwrap();
     let transcript = fixture
         .nexus
         .claude_transcript(&node)
         .expect("the flow's transcript");
+    // This test process stands in for the foreground native process, using
+    // its actual birth and the registered session's already-ended transcript.
+    let pid = std::process::id();
+    let stat = fs::read_to_string("/proc/self/stat").unwrap();
+    let birth = stat
+        .rsplit_once(") ")
+        .unwrap()
+        .1
+        .split_whitespace()
+        .nth(19)
+        .unwrap();
+    let registry = &fixture.nexus.herdr.claude_sessions.directory;
+    assert!(registry.starts_with(fixture.directory.path()));
+    fs::create_dir_all(registry).unwrap();
+    fs::write(
+        registry.join(format!("{pid}.json")),
+        serde_json::json!({"sessionId":node.session_id.0,"pid":pid,"procStart":birth}).to_string(),
+    )
+    .unwrap();
+    let standing = fixture.nexus.read_native_standing(&node);
+    assert_eq!(standing, Some(SeatStanding::Alive(SeatActivity::Resting)));
     fixture
         .nexus
         .store
-        .record_event(
-            flow_id,
-            signal_flow::Event::Stopped(signal_flow::NativeStop {
-                native_session_id_option: Some(signal_flow::NativeSessionId(
-                    node.session_id.0.clone(),
-                )),
+        .record_observation(flow_id, standing)
+        .unwrap();
+    assert_eq!(
+        fixture.nexus.report(signal_flow::Report_Data {
+            flow_id: node.flow_id,
+            process_option: None,
+            event: signal_flow::Event::Stopped(signal_flow::NativeStop {
+                native_session_id_option: Some(signal_flow::NativeSessionId(node.session_id.0)),
                 transcript_path_option: Some(signal_flow::TranscriptPath(
-                    transcript.to_string_lossy().into_owned(),
+                    transcript.to_string_lossy().into_owned()
                 )),
                 last_assistant_message_option: signal_flow::LastAssistantMessageOption(None),
-                background_work: signal_flow::BackgroundWork(vec![]),
-            }),
-        )
-        .expect("the flow's rest recorded");
+                background_work: signal_flow::BackgroundWork(vec![])
+            })
+        }),
+        signal_flow::Output::Reported
+    );
 }
 
-/// The seat's own session took a prompt after its last Stop: it is in its
-/// turn.
+/// The seat's own session took a prompt after its last Stop.
 pub(super) fn claude_prompt_taken(fixture: &NexusFixture) {
-    use crate::store::events::RecordsHarnessEvents;
-    fixture
-        .nexus
-        .store
-        .record_event(
-            CLAUDE_SEAT,
-            signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
+    use crate::generated::memory::{SeatActivity, SeatStanding};
+    use crate::store::current_seat::SeatDecision;
+    assert_eq!(
+        fixture.nexus.report(signal_flow::Report_Data {
+            flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+            process_option: None,
+            event: signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
                 native_session_id_option: Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into())),
                 prompt_id_option: None,
-                prompt_sha256: signal_flow::PromptSha256("0".repeat(64)),
-            }),
-        )
-        .expect("the seat's prompt recorded");
+                prompt_sha256: signal_flow::PromptSha256("0".repeat(64))
+            })
+        }),
+        signal_flow::Output::Reported
+    );
+    assert!(matches!(
+        fixture.nexus.store.seat_decision(CLAUDE_SEAT).unwrap(),
+        SeatDecision::Observed(SeatStanding::Alive(SeatActivity::Working))
+    ));
 }
 
 /// One task in flight, as Claude Code names it in a Stop.

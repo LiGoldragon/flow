@@ -3,6 +3,7 @@
 //! a materialized view used for sender-filtered reconnect snapshots.
 
 use super::ManagesMetaflowState;
+use super::delivery::RecordsDeliveries;
 use super::handover::HoldsHandovers;
 use super::handover_reminders::SchedulesHandoverReminders;
 use super::metaflow::SleepsMetaflows;
@@ -94,7 +95,32 @@ impl RecordsQueueWrites for FlowStore {
         {
             return Ok(false);
         }
+        // The same gate fences authenticated activity changing this seat.
+        // A stale dry read must not overwrite an invalidation with a claim.
+        let _transitions = self
+            .transitions_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut commit = self.engine.begin_atomic_commit();
+        if self.dry_available(flow_id)?
+            && let Some(mut dry) = self.dry_seat(flow_id)?
+        {
+            use crate::request_waking::WakesSleepingPermaflow;
+            let Some(first_ask) = entries
+                .iter()
+                .find(|entry| entry.wakes_sleeping_permaflow())
+            else {
+                return Ok(false);
+            };
+            dry.standing = DrySeatStanding::Claimed {
+                delivery_id: first_ask.logical_delivery_id.clone(),
+                logical_delivery_ids: entries
+                    .iter()
+                    .map(|entry| entry.logical_delivery_id.clone())
+                    .collect(),
+            };
+            commit = commit.mutate(self.logical_deliveries.dry_seats, dry);
+        }
         for entry in entries {
             if !self.queue_entry_is_writable(entry)? {
                 return Ok(false);
@@ -127,10 +153,54 @@ impl RecordsQueueWrites for FlowStore {
             }
         }
         for metaflow in self.list_metaflows()? {
+            let current_flow_id = match &metaflow.state {
+                flow_ethos::State::Awake(flow_id) => Some(flow_id.0.clone()),
+                flow_ethos::State::Asleep => None,
+            };
             let address = metaflow.address;
+            let mut queue = metaflow.queue.0;
+            // A failed read is not proof that the pane was never touched.
+            // Refuse recovery rather than rearming a possible native write.
+            if let Some(mut dry) = current_flow_id
+                .as_deref()
+                .map(|id| self.dry_seat(id))
+                .transpose()?
+                .flatten()
+                && let DrySeatStanding::Claimed {
+                    delivery_id,
+                    logical_delivery_ids: ids,
+                } = dry.standing.clone()
+                && self.delivery(&delivery_id.0)?.is_none()
+                && self.pane_lease(&delivery_id.0)?.is_none()
+                && !ids.is_empty()
+                && queue
+                    .iter()
+                    .take(ids.len())
+                    .map(|entry| &entry.logical_delivery_id)
+                    .eq(ids.iter())
+                && ids.iter().try_fold(true, |valid, id| {
+                    self.queue_request_state(&id.0)
+                        .map(|state| valid && state == Some(RequestState::InFlight))
+                })?
+            {
+                dry.standing = DrySeatStanding::Available;
+                let mut commit = self
+                    .engine
+                    .begin_atomic_commit()
+                    .mutate(self.logical_deliveries.dry_seats, dry);
+                for entry in queue.iter().take(ids.len()) {
+                    commit = self.stage_queue_request_state(
+                        &address,
+                        entry,
+                        RequestState::Queued,
+                        commit,
+                    )?;
+                }
+                self.engine.commit_atomic(commit)?;
+            }
             let mut interrupted = Vec::new();
             let mut attempts = Vec::new();
-            for entry in metaflow.queue.0 {
+            for entry in queue.drain(..) {
                 let stock =
                     by_request.remove(&(address.clone(), entry.logical_delivery_id.clone()));
                 if stock.is_some()
@@ -226,6 +296,34 @@ impl CommitsQueueOutcomes for FlowStore {
         }
         let (mut commit, arrived) =
             self.stage_queue_states(commit, address, handed, &state, request_state.as_ref())?;
+        let _transitions = self
+            .transitions_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let current_flow_id = match &stored.metaflow.state {
+            flow_ethos::State::Awake(flow_id) => Some(flow_id.0.as_str()),
+            flow_ethos::State::Asleep => None,
+        };
+        if let Some(mut dry) = current_flow_id
+            .map(|id| self.dry_seat(id))
+            .transpose()?
+            .flatten()
+            && let DrySeatStanding::Claimed {
+                delivery_id,
+                logical_delivery_ids,
+            } = &dry.standing
+            && handed
+                .iter()
+                .map(|entry| &entry.logical_delivery_id)
+                .eq(logical_delivery_ids.iter())
+        {
+            dry.standing = if state == DeliveryState::Queued {
+                DrySeatStanding::Available
+            } else {
+                DrySeatStanding::Consumed(delivery_id.clone())
+            };
+            commit = commit.mutate(self.logical_deliveries.dry_seats, dry);
+        }
         let receiver_is_current = flow_id.is_some_and(|id| {
             matches!(&stored.metaflow.state, flow_ethos::State::Awake(current) if current.0 == id)
         });
@@ -237,10 +335,6 @@ impl CommitsQueueOutcomes for FlowStore {
             queue.retain(|entry| !ids.contains(&entry.logical_delivery_id));
             commit = commit.mutate(self.metaflows, stored);
         }
-        let _transitions = self
-            .transitions_gate
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         commit =
             self.stage_queue_arrivals(commit, address, flow_id, receiver_is_current, arrived)?;
         self.engine.commit_atomic(commit)?;
@@ -424,6 +518,9 @@ pub(super) const CURRENT_SCHEMA: &str = "flow-nexus-logical-delivery-current-v8"
 pub(super) const EVENT_SCHEMA: &str = "flow-nexus-logical-delivery-event-v7";
 const SIMPLIFIED_REPLY_TABLE_NAME: TableName =
     TableName::new("flow_nexus_simplified_reply_bindings");
+pub(super) const DRY_SEAT_TABLE: &str = "flow_nexus_dry_seats";
+pub(super) const DRY_SEAT_FAMILY: &str = "flow-nexus-dry-seat";
+pub(super) const DRY_SEAT_SCHEMA: &str = "flow-nexus-dry-seat-v1";
 const PURPOSE_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_purposes");
 const REQUEST_ID_TABLE_NAME: TableName = TableName::new("flow_nexus_request_ids");
 const DELIVER_CALL_TABLE_NAME: TableName = TableName::new("flow_nexus_deliver_calls");
@@ -618,6 +715,37 @@ pub(crate) enum SimplifiedReplyStanding {
     /// The bound input is Delivered under this receipt; its answer is owed.
     Received(SimplifiedReplyBinding, NativeReceipt),
 }
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DrySeatStanding {
+    Available,
+    Claimed {
+        delivery_id: LogicalDeliveryId,
+        logical_delivery_ids: Vec<LogicalDeliveryId>,
+    },
+    Consumed(LogicalDeliveryId),
+    Invalidated,
+}
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DrySeat {
+    pub(crate) flow_id: flow_ethos::FlowId,
+    pub(crate) launch_request_id: signal_flow::LaunchRequestId,
+    pub(crate) native_session_id: signal_flow::NativeSessionId,
+    pub(crate) standing: DrySeatStanding,
+}
+impl EngineRecord for DrySeat {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.flow_id.0.clone())
+    }
+}
+impl MemoryDefinition for DrySeat {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(DRY_SEAT_SCHEMA)
+    }
+}
+
 impl EngineRecord for SimplifiedReplyBinding {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.flow_id.0.clone())
@@ -638,6 +766,7 @@ pub(crate) struct LogicalDeliveryTables {
     pub(crate) current: TableReference<CurrentLogicalDelivery>,
     pub(crate) events: TableReference<LogicalDeliveryEvent>,
     pub(crate) simplified_replies: TableReference<SimplifiedReplyBinding>,
+    pub(crate) dry_seats: TableReference<DrySeat>,
     pub(crate) purposes: TableReference<LogicalDeliveryPurpose>,
     pub(crate) request_ids: TableReference<RequestIdBinding>,
     pub(crate) deliver_calls: TableReference<DeliverCall>,
@@ -682,6 +811,7 @@ pub(crate) struct LogicalDeliveryDescriptors {
     pub(crate) current: TableDescriptor<CurrentLogicalDelivery>,
     pub(crate) events: TableDescriptor<LogicalDeliveryEvent>,
     pub(crate) simplified_replies: TableDescriptor<SimplifiedReplyBinding>,
+    pub(crate) dry_seats: TableDescriptor<DrySeat>,
     pub(crate) purposes: TableDescriptor<LogicalDeliveryPurpose>,
     pub(crate) request_ids: TableDescriptor<RequestIdBinding>,
     pub(crate) deliver_calls: TableDescriptor<DeliverCall>,
@@ -719,6 +849,11 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
                 FamilyName::new("flow-nexus-simplified-reply-binding"),
                 SimplifiedReplyBinding::schema_hash(),
             ),
+            dry_seats: TableDescriptor::new(
+                TableName::new(DRY_SEAT_TABLE),
+                FamilyName::new(DRY_SEAT_FAMILY),
+                DrySeat::schema_hash(),
+            ),
             purposes: TableDescriptor::new(
                 PURPOSE_TABLE_NAME,
                 FamilyName::new("flow-nexus-logical-delivery-purpose"),
@@ -750,6 +885,7 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
             current: engine.register_table(descriptors.current)?,
             events: engine.register_table(descriptors.events)?,
             simplified_replies: engine.register_table(descriptors.simplified_replies)?,
+            dry_seats: engine.register_table(descriptors.dry_seats)?,
             purposes: engine.register_table(descriptors.purposes)?,
             request_ids: engine.register_table(descriptors.request_ids)?,
             deliver_calls: engine.register_table(descriptors.deliver_calls)?,
@@ -1223,6 +1359,15 @@ pub(crate) trait RecordsLogicalDeliveries {
         address: &Address,
     ) -> Result<meta_signal_flow::DebugSnapshot, StoreError>;
     fn delivery_purposes(&self) -> Result<Vec<LogicalDeliveryPurpose>, StoreError>;
+    fn dry_seat(&self, flow_id: &str) -> Result<Option<DrySeat>, StoreError>;
+    fn dry_available(&self, flow_id: &str) -> Result<bool, StoreError>;
+    fn dry_claims(&self, flow_id: &str, delivery_id: &str) -> Result<bool, StoreError>;
+    /// Atomically revalidates a Dry batch and acquires its durable pre-effect lease.
+    fn acquire_dry_lease(
+        &self,
+        lease: super::delivery::PaneLease,
+        expected_route: &signal_flow::HerdrRoute,
+    ) -> Result<bool, StoreError>;
     fn bind_simplified_reply(&self, binding: SimplifiedReplyBinding) -> Result<(), StoreError>;
     /// What the flow's reply binding owes: nothing, or an answer to an
     /// input not yet received, or one to an input received under its
@@ -1700,6 +1845,117 @@ impl RecordsLogicalDeliveries for FlowStore {
             QueueOutcome::FixtureHandOver(flow_id, state),
         )
     }
+    fn dry_seat(&self, flow_id: &str) -> Result<Option<DrySeat>, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.logical_deliveries.dry_seats,
+            RecordKey::new(flow_id.to_owned()),
+        ))?;
+        match rows.records() {
+            [] => Ok(None),
+            [row] => Ok(Some(row.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+    fn dry_available(&self, flow_id: &str) -> Result<bool, StoreError> {
+        use super::current_seat::SeatDecision;
+        let Some(dry) = self.dry_seat(flow_id)? else {
+            return Ok(false);
+        };
+        let Some(node) = self.flow_node(flow_id)? else {
+            return Ok(false);
+        };
+        let bound = self.launch_requests_bound_to(flow_id)?;
+        let identity =
+            node.flow_lifecycle == signal_flow::FlowLifecycle::Active
+                && node.session_id.0 == dry.native_session_id.0
+                && matches!(self.seat_decision(flow_id), Ok(SeatDecision::NoRecord))
+                && matches!(
+                    super::metaflow::SleepsMetaflows::metaflow_awake_as(self, flow_id),
+                    Ok(Some(_))
+                )
+                && bound == vec![dry.launch_request_id.0.clone()]
+                && self
+                    .launch_attempt(&dry.launch_request_id.0)?
+                    .is_some_and(|attempt| {
+                        attempt.launch_request_id == dry.launch_request_id
+                            && attempt.native_launch_binding_option.as_ref().is_some_and(
+                                |binding| {
+                                    binding.flow_id.0 == flow_id
+                                        && binding.native_session_id == dry.native_session_id
+                                },
+                            )
+                            && attempt
+                                .native_launch_intent_option
+                                .as_ref()
+                                .is_some_and(|intent| intent.prompt_sha256_vector.is_empty())
+                            && attempt.prompt_delivery_intent_option.as_ref().is_some_and(
+                                |intent| {
+                                    intent.prompt_sha256_vector.is_empty()
+                                        && intent.parts_submitted == signal_flow::PartsSubmitted(0)
+                                },
+                            )
+                    });
+        Ok(identity && dry.standing == DrySeatStanding::Available)
+    }
+    fn dry_claims(&self, flow_id: &str, delivery_id: &str) -> Result<bool, StoreError> {
+        let Some(dry) = self.dry_seat(flow_id)? else {
+            return Ok(false);
+        };
+        let claimed = matches!(&dry.standing,
+        DrySeatStanding::Claimed { delivery_id: id, logical_delivery_ids }
+            if id.0 == delivery_id
+                && !logical_delivery_ids.is_empty()
+                && logical_delivery_ids.iter().all(|logical_id| {
+                    self.queue_request_state(&logical_id.0).ok()
+                        == Some(Some(RequestState::InFlight))
+                }));
+        if !claimed {
+            return Ok(false);
+        }
+        use super::current_seat::SeatDecision;
+        let Some(node) = self.flow_node(flow_id)? else {
+            return Ok(false);
+        };
+        Ok(node.flow_lifecycle == signal_flow::FlowLifecycle::Active
+            && node.session_id.0 == dry.native_session_id.0
+            && matches!(self.seat_decision(flow_id), Ok(SeatDecision::NoRecord))
+            && self.launch_requests_bound_to(flow_id)? == vec![dry.launch_request_id.0.clone()]
+            && matches!(
+                super::metaflow::SleepsMetaflows::metaflow_awake_as(self, flow_id),
+                Ok(Some(_))
+            ))
+    }
+
+    fn acquire_dry_lease(
+        &self,
+        lease: super::delivery::PaneLease,
+        expected_route: &signal_flow::HerdrRoute,
+    ) -> Result<bool, StoreError> {
+        let _state = self
+            .transitions_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lease.lease_step != super::delivery::LeaseStep::Acquired
+            || !self.dry_claims(&lease.flow_id.0, &lease.delivery_id.0)?
+            || self.pane_lease(&lease.delivery_id.0)?.is_some()
+            || self.delivery(&lease.delivery_id.0)?.is_some()
+        {
+            return Ok(false);
+        }
+        let Some(node) = self.flow_node(&lease.flow_id.0)? else {
+            return Ok(false);
+        };
+        let signal_flow::HerdrRouteSelection::Available(route) = node.herdr_route_selection else {
+            return Ok(false);
+        };
+        if route != *expected_route || route.herdr_pane_id != lease.herdr_pane_id {
+            return Ok(false);
+        }
+        self.engine
+            .assert(Assertion::new(self.delivery_tables.pane_leases, lease))?;
+        Ok(true)
+    }
+
     fn bind_simplified_reply(&self, binding: SimplifiedReplyBinding) -> Result<(), StoreError> {
         let _guard = self
             .logical_deliveries

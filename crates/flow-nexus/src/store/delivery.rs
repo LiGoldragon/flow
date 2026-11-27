@@ -176,6 +176,7 @@ impl RegistersDeliveryTables for DeliveryTables {
 /// Reads and writes what Flow keeps of its pane writes.
 pub trait RecordsDeliveries {
     fn delivery(&self, delivery_id: &str) -> Result<Option<Delivery>, StoreError>;
+    fn pane_lease(&self, delivery_id: &str) -> Result<Option<PaneLease>, StoreError>;
     /// Writes or advances the lease row of a delivery that is typing.
     fn record_lease_step(&self, lease: PaneLease) -> Result<(), StoreError>;
     /// Settles a delivery: its outcome is kept and its lease row removed,
@@ -195,6 +196,17 @@ pub trait RecordsDeliveries {
 }
 
 impl RecordsDeliveries for FlowStore {
+    fn pane_lease(&self, delivery_id: &str) -> Result<Option<PaneLease>, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.delivery_tables.pane_leases,
+            RecordKey::new(delivery_id),
+        ))?;
+        match rows.records() {
+            [] => Ok(None),
+            [lease] => Ok(Some(lease.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
     fn delivery(&self, delivery_id: &str) -> Result<Option<Delivery>, StoreError> {
         let records = self
             .engine

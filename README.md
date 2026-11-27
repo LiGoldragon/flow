@@ -327,10 +327,19 @@ the fields are declared tools, configured unavoidable fixed tools, and the
 observed catalog (`None` means it could not be read). Provider, plugin and MCP
 tools are never silently treated as fixed. Codex and Default launches retain
 their existing catalog behavior. A Simplified Default launch or refresh with
-no instruction and no queued request starts an idle native session without
-submitting a turn. Its first real request is the first input, even after a
-Nexus restart. A request already queued is submitted after the idle native
-seat is bound, also without a synthetic startup turn. The Stop hook's `last_assistant_message` becomes a `Result` to the sender of the
+no instruction and no queued request starts a **Dry** native session without
+submitting a turn. Dry is available but is neither Working nor Resting: Start
+answers `Started`, its persisted launch intent records zero submitted parts,
+and `Observe.Agent` remains `Unknown` until authenticated native activity.
+A Soft Notice alone queues without starting a turn. The first request that
+asks, at any priority, becomes the first input and carries older Notices in
+one oldest-first native prompt, even after a Nexus restart. Flow durably names
+that exact batch before pane delivery: a crash before any pane lease restores
+it, while a crash after a pane lease is conservatively `Uncertain` and never
+retypes it. Positive native activity irrevocably ends Dry authority; a later
+unavailable snapshot cannot revive it. A request already queued is submitted
+after the Dry native seat is bound, also without a synthetic startup turn.
+The Stop hook's `last_assistant_message` becomes a `Result` to the sender of the
 consumed request. The response binding follows that request's native
 receipt, rather than whichever sender wrote most recently.
 

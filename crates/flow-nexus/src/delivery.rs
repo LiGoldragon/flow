@@ -39,6 +39,7 @@ use crate::live::HoldsLiveValue;
 use crate::performing::Performs;
 use crate::store::context::JudgesCompaction;
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries, SelectsHarnessProfile};
+use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::{ReadsSuccession, SleepsMetaflows, Succession};
 use crate::store::{NamesConfiguredModel, ReadsFlowRows};
 use crate::submission::{SeatSubmission, WitnessesSubmissions};
@@ -107,15 +108,25 @@ pub struct DeliveryTarget {
     pub node: FlowNode,
     pub route: HerdrRoute,
     pub profile: HarnessProfile,
+    /// The only DeliveryId allowed to write a Dry seat with no current-seat row.
+    pub dry_delivery_id_option: Option<meta_signal_flow::DeliveryId>,
 }
 
 /// Finds the live, routable flow a write is for.
 pub trait FindsDeliveryTarget {
-    fn delivery_target(&self, flow_id: &str) -> Result<DeliveryTarget, TargetRefusal>;
+    fn delivery_target(
+        &self,
+        flow_id: &str,
+        delivery_id: Option<&str>,
+    ) -> Result<DeliveryTarget, TargetRefusal>;
 }
 
 impl FindsDeliveryTarget for RunningNexus {
-    fn delivery_target(&self, flow_id: &str) -> Result<DeliveryTarget, TargetRefusal> {
+    fn delivery_target(
+        &self,
+        flow_id: &str,
+        delivery_id: Option<&str>,
+    ) -> Result<DeliveryTarget, TargetRefusal> {
         let node = match self.store.flow_node(flow_id) {
             Ok(Some(node)) => node,
             Ok(None) => return Err(TargetRefusal::UnknownFlow),
@@ -133,6 +144,9 @@ impl FindsDeliveryTarget for RunningNexus {
                     _ => TargetRefusal::FlowExited,
                 });
             }
+            Ok(SeatDecision::NoRecord)
+                if delivery_id
+                    .is_some_and(|id| matches!(self.store.dry_claims(flow_id, id), Ok(true))) => {}
             Ok(SeatDecision::NoRecord) => return Err(TargetRefusal::Unconfirmed),
             Err(_) => return Err(TargetRefusal::PersistenceRefused),
         }
@@ -153,10 +167,14 @@ impl FindsDeliveryTarget for RunningNexus {
         let HerdrRouteSelection::Available(route) = node.herdr_route_selection.clone() else {
             return Err(TargetRefusal::RouteUnavailable);
         };
+        let dry_delivery_id_option = delivery_id
+            .filter(|id| matches!(self.store.dry_claims(flow_id, id), Ok(true)))
+            .map(|id| meta_signal_flow::DeliveryId(id.to_owned()));
         Ok(DeliveryTarget {
             node,
             route,
             profile,
+            dry_delivery_id_option,
         })
     }
 }
@@ -220,6 +238,9 @@ impl ReadsLeasedPane for RunningNexus {
             Ok(SeatDecision::Observed(SeatStanding::Alive(SeatActivity::Resting))) => {
                 Ok(AgentState::Idle)
             }
+            Ok(SeatDecision::NoRecord) if target.dry_delivery_id_option.is_some() => {
+                Ok(AgentState::Unknown)
+            }
             _ => Err(PaneRefusal::RouteUnavailable),
         }
     }
@@ -279,7 +300,7 @@ impl DeliversMessages for RunningNexus {
     }
 
     fn vet(&self, request: &DeliveryRequest) -> Output {
-        let target = match self.delivery_target(&request.flow_id.0) {
+        let target = match self.delivery_target(&request.flow_id.0, Some(&request.delivery_id.0)) {
             Ok(target) => target,
             Err(refusal) => return Output::DeliveryRejected(refusal.into()),
         };
@@ -290,7 +311,7 @@ impl DeliversMessages for RunningNexus {
     }
 
     fn command(&self, request: CommandRequest) -> Output {
-        let target = match self.delivery_target(&request.flow_id.0) {
+        let target = match self.delivery_target(&request.flow_id.0, None) {
             Ok(target) => target,
             Err(refusal) => return Output::CommandRejected(refusal.into()),
         };
@@ -314,12 +335,12 @@ pub(crate) trait DeliversOwnerCommands {
 
 impl DeliversOwnerCommands for RunningNexus {
     fn owner_command(&self, request: CommandRequest) -> Output {
-        let original = match self.delivery_target(&request.flow_id.0) {
+        let original = match self.delivery_target(&request.flow_id.0, None) {
             Ok(target) => target,
             Err(refusal) => return Output::CommandRejected(refusal.into()),
         };
         let lease = self.pane_leases.hold(&original.route);
-        let target = match self.delivery_target(&request.flow_id.0) {
+        let target = match self.delivery_target(&request.flow_id.0, None) {
             Ok(target)
                 if target.route == original.route
                     && target.node.session_id == original.node.session_id =>
@@ -423,7 +444,7 @@ impl DeliversUnderLease for RunningNexus {
                 return Output::DeliveryRejected(DeliveryRejection::PersistenceRefused);
             }
         }
-        let target = match self.delivery_target(&request.flow_id.0) {
+        let target = match self.delivery_target(&request.flow_id.0, Some(&request.delivery_id.0)) {
             Ok(target) => target,
             Err(refusal) => return Output::DeliveryRejected(refusal.into()),
         };
@@ -728,6 +749,11 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
     }
 
     fn run(&self) -> Result<Delivery, DeliveryRejection> {
+        if let Some(dry_id) = &self.target.dry_delivery_id_option
+            && dry_id != &self.request.delivery_id
+        {
+            return Err(DeliveryRejection::NotDelivered);
+        }
         let hard = matches!(self.request.message, Message::HardAbrupt(_));
         // A hard delivery reads the composer before it presses any key. A
         // text there that is not Flow's own letter refuses it untouched: an
@@ -752,7 +778,28 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         } else {
             self.nexus.writable_state(self.target)?
         };
-        self.step(LeaseStep::Acquired)?;
+        let acquired = PaneLease {
+            delivery_id: self.request.delivery_id.clone(),
+            flow_id: self.target.node.flow_id.clone(),
+            herdr_pane_id: self.target.route.herdr_pane_id.clone(),
+            lease_step: LeaseStep::Acquired,
+        };
+        if self.target.dry_delivery_id_option.is_some() {
+            match self
+                .nexus
+                .store
+                .acquire_dry_lease(acquired, &self.target.route)
+            {
+                Ok(true) => {}
+                Ok(false) => return Err(DeliveryRejection::RouteUnavailable),
+                Err(_) => return Err(DeliveryRejection::PersistenceRefused),
+            }
+        } else {
+            self.nexus
+                .store
+                .record_lease_step(acquired)
+                .map_err(|_| DeliveryRejection::PersistenceRefused)?;
+        }
         let mut interrupt_witness = InterruptWitness::NotRequested;
         if hard && agent_state == AgentState::Working {
             let interruption = self.nexus.herdr.interrupt(

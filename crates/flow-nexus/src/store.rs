@@ -227,6 +227,7 @@ const OPTIONAL_TURN_RETENTION_TABLE: &str = "flow_nexus_meta_turn_retention_conf
 const OPTIONAL_FLOW_TRANSITIONS_TABLE: &str = overriding::TRANSITIONS_TABLE;
 const OPTIONAL_HOLD_TABLE: &str = overriding::HOLD_TABLE;
 const OPTIONAL_PERMAFLOW_HOLD_TABLE: &str = overriding::PERMAFLOW_HOLD_TABLE;
+const OPTIONAL_DRY_SEAT_TABLE: &str = logical_delivery::DRY_SEAT_TABLE;
 const OPTIONAL_LAUNCH_START_PERMIT_TABLE: &str = overriding::LAUNCH_START_PERMIT_TABLE;
 const OPTIONAL_HELD_LAUNCH_TABLE: &str = overriding::HELD_LAUNCH_TABLE;
 /// Added in 0.60.0 with CloseRequest: a store written before holds no
@@ -355,6 +356,7 @@ const RUNNING_TABLES: &[&str] = &[
     OPTIONAL_PERMAFLOW_HOLD_TABLE,
     OPTIONAL_HELD_LAUNCH_TABLE,
     OPTIONAL_LAUNCH_START_PERMIT_TABLE,
+    OPTIONAL_DRY_SEAT_TABLE,
     OPTIONAL_CLOSED_REQUEST_TABLE,
     OPTIONAL_ATTEMPT_MEMBERSHIP_TABLE,
     OPTIONAL_ATTEMPT_MEMBERSHIP_BUILT_TABLE,
@@ -2765,6 +2767,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&logical_delivery_descriptors.current)
                 .with_family(&logical_delivery_descriptors.events)
                 .with_family(&logical_delivery_descriptors.simplified_replies)
+                .with_family(&logical_delivery_descriptors.dry_seats)
                 .with_family(&logical_delivery_descriptors.purposes)
                 .with_family(&heartbeat_standing_descriptor)
                 .with_family(&restart_descriptor)
@@ -5584,7 +5587,58 @@ impl WritesFlowStore for FlowStore {
         let mut commit = self.engine.begin_atomic_commit();
         let mut written = false;
         if flow.flow_lifecycle == FlowLifecycle::Pending {
-            commit = self.stage_current_event(commit, flow_id, current_seat::SeatEvent::Started)?;
+            let matching_native_input_seen = events::RecordsHarnessEvents::events(self, flow_id)?
+                .unwrap_or_default()
+                .iter()
+                .any(|event| {
+                    matches!(
+                        event,
+                        events::RecordedHarnessEvent::PromptSubmitted(prompt)
+                            if prompt.native_session_id_option.as_ref()
+                                == Some(&signal_flow::NativeSessionId(session_id.0.clone()))
+                    )
+                });
+            let dry_attempt = confirming_attempt.as_ref().filter(|attempt| {
+                !matching_native_input_seen
+                    && attempt.launch_profile.flow_kind == signal_flow::FlowKind::Simplified
+                    && attempt
+                        .native_launch_binding_option
+                        .as_ref()
+                        .is_some_and(|binding| {
+                            binding.flow_id.0 == flow_id
+                                && binding.native_session_id.0 == session_id.0
+                        })
+                    && attempt
+                        .native_launch_intent_option
+                        .as_ref()
+                        .is_some_and(|intent| intent.prompt_sha256_vector.is_empty())
+                    && attempt
+                        .prompt_delivery_intent_option
+                        .as_ref()
+                        .is_some_and(|intent| {
+                            intent.prompt_sha256_vector.is_empty()
+                                && intent.parts_submitted == signal_flow::PartsSubmitted(0)
+                        })
+            });
+            if let Some(attempt) = dry_attempt {
+                // A native turn, termination or background job may have
+                // arrived before confirmation. Never mint new Dry authority
+                // over a known seat and let a later unavailable read revive it.
+                if self.seat_record(flow_id)?.is_none() {
+                    commit = commit.assert(
+                        self.logical_deliveries.dry_seats,
+                        logical_delivery::DrySeat {
+                            flow_id: flow_ethos::FlowId(flow_id.to_owned()),
+                            launch_request_id: attempt.launch_request_id.clone(),
+                            native_session_id: signal_flow::NativeSessionId(session_id.0.clone()),
+                            standing: logical_delivery::DrySeatStanding::Available,
+                        },
+                    );
+                }
+            } else {
+                commit =
+                    self.stage_current_event(commit, flow_id, current_seat::SeatEvent::Started)?;
+            }
             flow.flow_lifecycle = FlowLifecycle::Active;
             flow.generation = Generation(1);
             commit = commit.mutate(self.flows, flow);
@@ -5840,6 +5894,10 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
             "flow_nexus_permaflow_holds" => (
                 overriding::PERMAFLOW_HOLD_FAMILY,
                 overriding::PERMAFLOW_HOLD_SCHEMA,
+            ),
+            logical_delivery::DRY_SEAT_TABLE => (
+                logical_delivery::DRY_SEAT_FAMILY,
+                logical_delivery::DRY_SEAT_SCHEMA,
             ),
             overriding::LAUNCH_START_PERMIT_TABLE => (
                 overriding::LAUNCH_START_PERMIT_FAMILY,
@@ -6237,6 +6295,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                     || *name == OPTIONAL_PERMAFLOW_HOLD_TABLE
                     || *name == OPTIONAL_HELD_LAUNCH_TABLE
                     || *name == OPTIONAL_LAUNCH_START_PERMIT_TABLE
+                    || *name == OPTIONAL_DRY_SEAT_TABLE
                     || *name == OPTIONAL_CLOSED_REQUEST_TABLE
                     || *name == OPTIONAL_ATTEMPT_MEMBERSHIP_TABLE
                     || *name == OPTIONAL_ATTEMPT_MEMBERSHIP_BUILT_TABLE
@@ -8868,12 +8927,12 @@ mod tests {
         SchemaVersion, TableDescriptor, TableName,
     };
     use signal_flow::{
-        Address, Aspect, CallerIdentity, ComposedLaunch, FirstPromptPayload, FlowOrigin,
-        HarnessKind, HerdrPaneBinding, Input, LaunchAttemptPhase, LaunchAttemptReservation,
-        LaunchProfile, Model, NativeLaunchBinding, NativeLaunchIntent, NativeTargetReceipt,
-        NativeTranscriptAbsence, NativeTranscriptBoundary, NativeTranscriptCursor, Origin, Output,
-        PromptDeliveryIntent, PromptDeliveryResult, RegistrationAcknowledgement,
-        TargetReceiptRequest,
+        Address, Aspect, CallerIdentity, ComposedLaunch, EndpointSelection, FirstPromptPayload,
+        FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrPaneBinding, Input,
+        LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile, Model, NativeLaunchBinding,
+        NativeLaunchIntent, NativeTargetReceipt, NativeTranscriptAbsence, NativeTranscriptBoundary,
+        NativeTranscriptCursor, Origin, Output, PromptDeliveryIntent, PromptDeliveryResult,
+        RegistrationAcknowledgement, TargetReceiptRequest,
     };
 
     #[test]
@@ -9194,6 +9253,160 @@ mod tests {
                 } else {
                     LaunchAttemptPhase::Reserved
                 }
+            );
+        }
+    }
+
+    #[test]
+    fn pending_native_input_for_the_bound_session_prevents_new_dry_authority() {
+        use crate::store::events::{EventRecording, RecordsHarnessEvents};
+        use sha2::{Digest, Sha256};
+
+        for matching_session in [true, false] {
+            let fixture = StoreFixture::new();
+            let store = fixture.store();
+            let suffix = if matching_session {
+                "matching"
+            } else {
+                "prior"
+            };
+            let request_id = format!("dry-pending-{suffix}");
+            let flow_id = format!("dry-flow-{suffix}");
+            let native_session_id = format!("dry-session-{suffix}");
+            let empty_hash = format!("{:x}", Sha256::digest([]));
+            let mut launch = fixture.composed_launch(&request_id, &empty_hash);
+            launch.harness_kind = HarnessKind::Claude;
+            launch.launch_profile.flow_kind = signal_flow::FlowKind::Simplified;
+            launch.launch_profile.tool_set = signal_flow::ToolSet::Default;
+            launch.launch_profile.instruction_prompt.0.clear();
+            launch.first_prompt_payload.first_prompt_body.0.clear();
+            launch.first_prompt_payload.prompt_part_vector.clear();
+            assert!(matches!(
+                store
+                    .reserve_launch_attempt(&launch, fixture.origin())
+                    .unwrap(),
+                LaunchAttemptReservation::Reserved(_)
+            ));
+            assert!(
+                store
+                    .record_native_launch_intent(NativeLaunchIntent {
+                        launch_request_id: launch.launch_profile.launch_request_id.clone(),
+                        prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+                        harness_kind: HarnessKind::Claude,
+                        model_name: launch.launch_profile.model_name.clone(),
+                        effort: launch.launch_profile.effort.clone(),
+                        system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
+                        prompt_sha256_vector: Vec::new(),
+                    })
+                    .unwrap()
+            );
+            let pane = fixture.pane(&request_id);
+            assert!(
+                store
+                    .record_native_launch_binding(NativeLaunchBinding {
+                        launch_request_id: launch.launch_profile.launch_request_id.clone(),
+                        flow_id: flow_ethos::FlowId(flow_id.clone()),
+                        native_session_id: signal_flow::NativeSessionId(native_session_id.clone()),
+                        harness_kind: HarnessKind::Claude,
+                        herdr_pane_binding: pane.clone(),
+                    })
+                    .unwrap()
+            );
+            store
+                .register_flow_in_role(
+                    FlowNode {
+                        flow_id: flow_ethos::FlowId(flow_id.clone()),
+                        session_id: signal_flow::SessionId(native_session_id.clone()),
+                        harness_kind: HarnessKind::Claude,
+                        endpoint_selection: EndpointSelection::Unavailable,
+                        herdr_route_selection: signal_flow::HerdrRouteSelection::Available(
+                            signal_flow::HerdrRoute {
+                                herdr_session_name: pane.herdr_session_name.clone(),
+                                herdr_agent_name: pane.herdr_agent_name.clone(),
+                                herdr_pane_id: pane.herdr_pane_id.clone(),
+                                herdr_terminal_id: pane.herdr_terminal_id.clone(),
+                            },
+                        ),
+                        origin: fixture.origin(),
+                        flow_lifecycle: FlowLifecycle::Pending,
+                    },
+                    signal_flow::CallerIdentity {
+                        flow_id: flow_ethos::FlowId(flow_id.clone()),
+                        aspect: launch.launch_profile.address.aspect.clone(),
+                        model_name: launch.launch_profile.model_name.clone(),
+                    },
+                )
+                .unwrap();
+            assert!(
+                store
+                    .record_registration_acknowledgement(RegistrationAcknowledgement {
+                        launch_request_id: launch.launch_profile.launch_request_id.clone(),
+                        flow_id: flow_ethos::FlowId(flow_id.clone()),
+                        native_session_id: signal_flow::NativeSessionId(native_session_id.clone()),
+                        herdr_pane_binding: pane.clone(),
+                    })
+                    .unwrap()
+            );
+            assert!(
+                store
+                    .record_prompt_delivery_intent(PromptDeliveryIntent {
+                        launch_request_id: launch.launch_profile.launch_request_id.clone(),
+                        prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+                        flow_id: flow_ethos::FlowId(flow_id.clone()),
+                        native_session_id: signal_flow::NativeSessionId(native_session_id.clone()),
+                        harness_kind: HarnessKind::Claude,
+                        model_name: launch.launch_profile.model_name.clone(),
+                        effort: launch.launch_profile.effort.clone(),
+                        prompt_sha256_vector: Vec::new(),
+                        parts_submitted: signal_flow::PartsSubmitted(0),
+                        stops_reported: signal_flow::StopsReported(0),
+                        leave_outs: signal_flow::LeaveOuts(Vec::new()),
+                        herdr_pane_binding: pane,
+                        native_transcript_boundary: NativeTranscriptBoundary::Absent(
+                            NativeTranscriptAbsence {
+                                native_session_id: signal_flow::NativeSessionId(
+                                    native_session_id.clone(),
+                                ),
+                                harness_kind: HarnessKind::Claude,
+                                transcript_root_device: signal_flow::TranscriptRootDevice(
+                                    "2049".into(),
+                                ),
+                                transcript_root_inode: signal_flow::TranscriptRootInode(
+                                    "99155".into(),
+                                ),
+                            },
+                        ),
+                    })
+                    .unwrap()
+            );
+            let observed_session = if matching_session {
+                native_session_id.clone()
+            } else {
+                "dry-prior-generation-session".into()
+            };
+            assert!(matches!(
+                store
+                    .record_event(
+                        &flow_id,
+                        signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
+                            native_session_id_option: Some(signal_flow::NativeSessionId(
+                                observed_session,
+                            )),
+                            prompt_id_option: None,
+                            prompt_sha256: signal_flow::PromptSha256("a".repeat(64)),
+                        }),
+                    )
+                    .unwrap(),
+                EventRecording::Recorded
+            ));
+            assert!(matches!(
+                store.confirm_started(&flow_id).unwrap(),
+                Output::Started(_)
+            ));
+            assert_eq!(
+                store.dry_available(&flow_id).unwrap(),
+                !matching_session,
+                "only positive input for this exact native session burns Dry before confirmation"
             );
         }
     }

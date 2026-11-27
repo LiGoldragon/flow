@@ -219,6 +219,24 @@ impl RecordsCurrentSeats for FlowStore {
             .as_ref()
             .map(|row| row.background_work.clone())
             .unwrap_or_else(|| BackgroundWork(vec![]));
+        use super::logical_delivery::{DrySeatStanding, RecordsLogicalDeliveries};
+        let mut dry = self.dry_seat(id)?;
+        let dry_authority = dry.is_some();
+        let invalidates_dry = matches!(
+            &event,
+            SeatEvent::Activity(_)
+                | SeatEvent::Stopped(_)
+                | SeatEvent::Ended
+                | SeatEvent::NewIncarnation(_)
+                | SeatEvent::Observed(
+                    SeatStanding::Ended | SeatStanding::Alive(SeatActivity::Working)
+                )
+        );
+        let mut commit = commit;
+        if invalidates_dry && let Some(mut row) = dry.take() {
+            row.standing = DrySeatStanding::Invalidated;
+            commit = commit.mutate(self.logical_deliveries.dry_seats, row);
+        }
         let (next, jobs) = match (standing, event) {
             (_, SeatEvent::NewIncarnation(next)) => (Some(next), BackgroundWork(vec![])),
             (Some(Ended), _) => return Ok(commit),
@@ -228,6 +246,7 @@ impl RecordsCurrentSeats for FlowStore {
             (_, SeatEvent::Observed(next)) => (Some(next), jobs),
             (None, SeatEvent::Started) => (Some(Alive(SeatActivity::Working)), jobs),
             (Some(_), SeatEvent::Activity(activity)) => (Some(Alive(activity)), jobs),
+            (None, SeatEvent::Activity(activity)) if dry_authority => (Some(Alive(activity)), jobs),
             (Some(_), SeatEvent::Stopped(reported)) => {
                 (Some(Alive(SeatActivity::Resting)), reported)
             }

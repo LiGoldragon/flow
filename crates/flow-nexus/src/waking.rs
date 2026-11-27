@@ -190,6 +190,7 @@ pub trait HoldsSoftForIdle {
             .iter()
             .any(|request| request.abrupt() || request.wakes_sleeping_permaflow())
     }
+    fn waits_for_first_input(&self, flow_id: &str) -> bool;
     /// Whether `requests` are handed now to the seat Awake as `flow_id`:
     /// one of them is abrupt, or they are due at rest and the seat rests.
     fn due_now<Queued: ReadsPriority + WakesSleepingPermaflow>(
@@ -200,12 +201,23 @@ pub trait HoldsSoftForIdle {
 }
 
 impl HoldsSoftForIdle for RunningNexus {
+    fn waits_for_first_input(&self, flow_id: &str) -> bool {
+        use crate::store::current_seat::SeatDecision;
+        matches!(self.store.dry_available(flow_id), Ok(true))
+            && matches!(
+                self.store.seat_decision(flow_id),
+                Ok(SeatDecision::NoRecord)
+            )
+    }
     fn due_now<Queued: ReadsPriority + WakesSleepingPermaflow>(
         &self,
         requests: &[Queued],
         flow_id: &str,
     ) -> bool {
         use crate::generated::transitions::{AskedFlow, RecordsTransitions};
+        if self.waits_for_first_input(flow_id) {
+            return self.due_at_rest(requests);
+        }
         match self.store.state_of(AskedFlow(FlowId(flow_id.to_owned()))) {
             Ok(Some(meta_signal_flow::State::Acting)) => requests.iter().any(ReadsPriority::abrupt),
             Ok(Some(meta_signal_flow::State::Resting)) => {
@@ -2483,6 +2495,7 @@ impl DrainsHeldSeats for RunningNexus {
                 Ok(SeatDecision::Observed(SeatStanding::Ended)) => {
                     return Outcome::Failed(Failed_Data::NotAwake);
                 }
+                Ok(SeatDecision::NoRecord) if self.waits_for_first_input(&flow_id.0) => {}
                 Ok(SeatDecision::NoRecord) => return Outcome::Failed(Failed_Data::NoRecord),
                 Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
             }
@@ -2510,51 +2523,18 @@ impl DrainsHeldSeats for RunningNexus {
             {
                 return Outcome::WaitingForTurn(oldest.logical_delivery_id);
             }
-            let response_request = matches!(
-                &oldest.message,
-                signal_flow::Message::HardAbrupt(
-                    signal_flow::Request::Order(_)
-                        | signal_flow::Request::Question(_)
-                        | signal_flow::Request::Living(_)
-                        | signal_flow::Request::Task(_)
-                ) | signal_flow::Message::MiddleAbrupt(
-                    signal_flow::Request::Order(_)
-                        | signal_flow::Request::Question(_)
-                        | signal_flow::Request::Living(_)
-                        | signal_flow::Request::Task(_)
-                ) | signal_flow::Message::Soft(
-                    signal_flow::Request::Order(_)
-                        | signal_flow::Request::Question(_)
-                        | signal_flow::Request::Living(_)
-                        | signal_flow::Request::Task(_)
-                )
-            );
-            if response_request
-                && self
-                    .last_launch_profile(&flow_id.0)
-                    .is_some_and(|profile| profile.flow_kind == signal_flow::FlowKind::Simplified)
-                && let signal_flow::SentBy::Sender(recipient) = &oldest.sent_by
-            {
-                let binding = SimplifiedReplyBinding {
-                    flow_id: flow_id.clone(),
-                    input_delivery_id: crate::generated::memory::InputDeliveryId(
-                        oldest.logical_delivery_id.clone().0,
-                    ),
-                    source: crate::generated::memory::Source(address.clone()),
-                    recipient: crate::generated::memory::Recipient(recipient.clone()),
-                    completed: crate::generated::memory::Completed(false),
-                };
-                if self.store.bind_simplified_reply(binding).is_err() {
-                    return Outcome::WaitingForTurn(oldest.logical_delivery_id);
-                }
-            }
-            // One injection carries every queued message, oldest first: the
-            // triggering one and all held behind it. A Simplified seat binds its
-            // reply to one input, so it takes its oldest alone.
             let simplified = self
                 .last_launch_profile(&flow_id.0)
                 .is_some_and(|profile| profile.flow_kind == signal_flow::FlowKind::Simplified);
-            let cohort: Vec<QueueEntry> = if simplified {
+            let dry = simplified && self.waits_for_first_input(&flow_id.0);
+            let cohort: Vec<QueueEntry> = if dry {
+                let through = queue
+                    .0
+                    .iter()
+                    .position(WakesSleepingPermaflow::wakes_sleeping_permaflow)
+                    .map_or(1, |index| index + 1);
+                queue.0.iter().take(through).cloned().collect()
+            } else if simplified {
                 vec![oldest.clone()]
             } else {
                 queue
@@ -2563,6 +2543,44 @@ impl DrainsHeldSeats for RunningNexus {
                     .take_while(|entry| !self.store.pane_input_waits_for_reply(&entry.request_id))
                     .collect()
             };
+            let response_input = cohort.iter().find(|entry| {
+                matches!(
+                    &entry.message,
+                    signal_flow::Message::HardAbrupt(
+                        signal_flow::Request::Order(_)
+                            | signal_flow::Request::Question(_)
+                            | signal_flow::Request::Living(_)
+                            | signal_flow::Request::Task(_)
+                    ) | signal_flow::Message::MiddleAbrupt(
+                        signal_flow::Request::Order(_)
+                            | signal_flow::Request::Question(_)
+                            | signal_flow::Request::Living(_)
+                            | signal_flow::Request::Task(_)
+                    ) | signal_flow::Message::Soft(
+                        signal_flow::Request::Order(_)
+                            | signal_flow::Request::Question(_)
+                            | signal_flow::Request::Living(_)
+                            | signal_flow::Request::Task(_)
+                    )
+                )
+            });
+            if simplified
+                && let Some(response_input) = response_input
+                && let signal_flow::SentBy::Sender(recipient) = &response_input.sent_by
+            {
+                let binding = SimplifiedReplyBinding {
+                    flow_id: flow_id.clone(),
+                    input_delivery_id: crate::generated::memory::InputDeliveryId(
+                        response_input.logical_delivery_id.clone().0,
+                    ),
+                    source: crate::generated::memory::Source(address.clone()),
+                    recipient: crate::generated::memory::Recipient(recipient.clone()),
+                    completed: crate::generated::memory::Completed(false),
+                };
+                if self.store.bind_simplified_reply(binding).is_err() {
+                    return Outcome::WaitingForTurn(response_input.logical_delivery_id.clone());
+                }
+            }
             // One Waking carries the whole cohort, every input under its own id,
             // sender and priority. Every priority uses the same pane delivery;
             // only a cohort containing HardAbrupt interrupts a working seat.
@@ -2600,8 +2618,18 @@ impl DrainsHeldSeats for RunningNexus {
             } else {
                 meta_signal_flow::Message::Soft(letter)
             };
-            // The pane write is named by the oldest request it carries.
-            let delivery_id = oldest.logical_delivery_id.0.clone();
+            // A Dry batch is one native first-input write named by the
+            // request that asks; older Notices keep their own logical ids
+            // inside the ordered cohort. Other writes retain the oldest id.
+            let delivery_id = if dry {
+                cohort
+                    .iter()
+                    .find(|entry| entry.wakes_sleeping_permaflow())
+                    .map(|entry| entry.logical_delivery_id.0.clone())
+                    .unwrap_or_else(|| oldest.logical_delivery_id.0.clone())
+            } else {
+                oldest.logical_delivery_id.0.clone()
+            };
             let digest = {
                 use crate::delivery::body::{RendersPaneText, ShowsPaneText};
                 use flow_native::DigestsPrompt;

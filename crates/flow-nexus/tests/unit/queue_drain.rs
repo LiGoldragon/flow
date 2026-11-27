@@ -347,7 +347,7 @@ fn a_missing_observation_preserves_even_an_abrupt_order_without_pane_input() {
     use crate::generated::memory::SeatStanding;
     use crate::observe_agent::ObservesAgent;
     assert!(matches!(
-        fixture.nexus.delivery_target(CLAUDE_SEAT),
+        fixture.nexus.delivery_target(CLAUDE_SEAT, None),
         Err(TargetRefusal::Unconfirmed)
     ));
     assert!(
@@ -363,7 +363,7 @@ fn a_missing_observation_preserves_even_an_abrupt_order_without_pane_input() {
         .record_observation(CLAUDE_SEAT, Some(SeatStanding::Ended))
         .unwrap();
     assert!(matches!(
-        fixture.nexus.delivery_target(CLAUDE_SEAT),
+        fixture.nexus.delivery_target(CLAUDE_SEAT, None),
         Err(TargetRefusal::FlowExited)
     ));
     assert!(

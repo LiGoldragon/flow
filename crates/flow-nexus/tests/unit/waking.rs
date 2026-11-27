@@ -18,7 +18,7 @@ use crate::reporting::RecordsReports;
 use crate::store::ManagesMetaflowState;
 use crate::store::context::RecordsContextSize;
 use crate::store::current_seat::RecordsCurrentSeats;
-use crate::store::logical_delivery::RecordsLogicalDeliveries;
+use crate::store::logical_delivery::{RecordsLogicalDeliveries, RecordsQueueWrites};
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::{
     OpensFlowStore, ReadsFlowRows, RecordsFlowLifecycle, RecordsNativeLaunchBinding,
@@ -2479,6 +2479,34 @@ fn an_empty_simplified_default_start_is_dry_until_its_first_delivery_after_reope
         FlowLifecycle::Active,
         "a dry session is Started, not resting"
     );
+    use crate::generated::transitions::{AskedFlow, RecordsTransitions};
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .state_of(AskedFlow(started.flow_id.clone()))
+            .unwrap(),
+        None,
+        "Dry is never recorded as Working or Resting"
+    );
+    use crate::observe_agent::ObservesAgent;
+    assert!(
+        matches!(
+            fixture.nexus.agent_observation(&started.flow_id.0),
+            signal_flow::Output::AgentObserved(signal_flow::AgentObservation {
+                agent_state: signal_flow::AgentState::Unknown,
+                ..
+            })
+        ),
+        "Started plus its persisted zero-part intent is the truthful v0 view"
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .dry_available(&started.flow_id.0)
+            .unwrap()
+    );
 
     fixture.restarted();
     assert!(
@@ -2490,20 +2518,87 @@ fn an_empty_simplified_default_start_is_dry_until_its_first_delivery_after_reope
         topic: flow_ethos::Topic("core".into()),
         model: Model::Opus,
     };
-    let signal_flow::PrivateSendResponse::SendAccepted(accepted) = fixture
-        .nexus
-        .store
-        .accept_logical_delivery(
-            &at,
-            SentBy::Sender(sender),
-            Delivery::Queue,
-            Message::MiddleAbrupt(Request::Order("the first real input".into())),
-            None,
-        )
-        .unwrap()
-    else {
-        panic!("the first real delivery is accepted")
-    };
+    fn accept(
+        fixture: &NexusFixture,
+        at: &Address,
+        sender: &Address,
+        message: Message,
+    ) -> signal_flow::SendAcceptance {
+        let signal_flow::PrivateSendResponse::SendAccepted(accepted) = fixture
+            .nexus
+            .store
+            .accept_logical_delivery(
+                at,
+                SentBy::Sender(sender.clone()),
+                Delivery::Queue,
+                message,
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("the real delivery is accepted")
+        };
+        accepted
+    }
+    let notice = accept(
+        &fixture,
+        &at,
+        &sender,
+        Message::Soft(Request::Notice("the notice arrived first".into())),
+    );
+    fixture.nexus.wake_due(at.clone());
+    assert!(
+        world.user_turns(&fixture).is_empty(),
+        "a Notice alone leaves the session Dry"
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .dry_available(&started.flow_id.0)
+            .unwrap(),
+        "a Notice alone does not claim the first input"
+    );
+    fixture.restarted();
+    let accepted = accept(
+        &fixture,
+        &at,
+        &sender,
+        Message::Soft(Request::Order("the first real input".into())),
+    );
+
+    // Crash after the queue and exact DrySeat claim commit, but before a
+    // PaneLease exists: no external effect was possible, so reopen restores
+    // the original batch and its Dry availability instead of guessing.
+    let batch = fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue.0;
+    assert!(
+        fixture
+            .nexus
+            .store
+            .begin_queue_write(&at, &started.flow_id.0, &batch)
+            .unwrap()
+    );
+    assert!(
+        !fixture
+            .nexus
+            .store
+            .dry_available(&started.flow_id.0)
+            .unwrap()
+    );
+    fixture.restarted();
+    assert!(
+        fixture
+            .nexus
+            .store
+            .dry_available(&started.flow_id.0)
+            .unwrap(),
+        "a pre-pane crash restores the positive Dry authority"
+    );
+    assert_eq!(
+        fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue.0,
+        batch,
+        "the exact Notice+ask batch is recoverable"
+    );
 
     fixture.nexus.wake_due(at.clone());
     fixture.nexus.wake_due(at.clone());
@@ -2511,8 +2606,14 @@ fn an_empty_simplified_default_start_is_dry_until_its_first_delivery_after_reope
     fixture.nexus.wake_due(at);
 
     let turns = world.user_turns(&fixture);
-    assert_eq!(turns.len(), 1, "the delivery is typed once: {turns:?}");
-    assert!(turns[0].contains("the first real input"), "{turns:?}");
+    assert_eq!(turns.len(), 1, "the ordered batch is typed once: {turns:?}");
+    let notice_at = turns[0]
+        .find("the notice arrived first")
+        .expect("the queued Notice rides in the first turn");
+    let order_at = turns[0]
+        .find("the first real input")
+        .expect("the waking Soft Order is the first input");
+    assert!(notice_at < order_at, "oldest first: {turns:?}");
     let crate::store::logical_delivery::SimplifiedReplyStanding::Received(binding, receipt) =
         fixture
             .nexus
@@ -2527,6 +2628,24 @@ fn an_empty_simplified_default_start_is_dry_until_its_first_delivery_after_reope
         crate::generated::memory::InputDeliveryId(accepted.logical_delivery_id.0.clone())
     );
     assert_eq!(receipt.native_session_id.0, world.session());
+    assert!(
+        !fixture
+            .nexus
+            .store
+            .dry_available(&started.flow_id.0)
+            .unwrap(),
+        "the atomic claim survives reopen"
+    );
+    let notice_snapshot = fixture
+        .nexus
+        .store
+        .logical_delivery_snapshot(&notice.logical_delivery_id)
+        .unwrap()
+        .expect("the Notice remains durable");
+    assert!(matches!(
+        notice_snapshot.delivery_state,
+        signal_flow::DeliveryState::Delivered(_) | signal_flow::DeliveryState::Read
+    ));
     let snapshot = fixture
         .nexus
         .store
@@ -2539,6 +2658,197 @@ fn an_empty_simplified_default_start_is_dry_until_its_first_delivery_after_reope
             signal_flow::DeliveryState::Delivered(_) | signal_flow::DeliveryState::Read
         ),
         "native evidence settles the one delivery: {snapshot:?}"
+    );
+}
+
+#[test]
+fn positive_native_activity_irrevocably_ends_dry_authority() {
+    use crate::Dispatches;
+    use crate::generated::memory::{LeaseStep, PaneLease, SeatActivity, SeatStanding};
+    use crate::store::current_seat::{RecordsCurrentSeats, SeatDecision};
+    use signal_flow::{Input, Output, ToolSet};
+
+    let mut fixture = NexusFixture::new();
+    let world = fixture.fresh_claude_world();
+    let mut profile =
+        super::model::seat(Aspect::Mind, Model::Sol, "claude-fixture", "dry-activity");
+    profile.flow_kind = signal_flow::FlowKind::Simplified;
+    profile.tool_set = ToolSet::Default;
+    profile.instruction_prompt.0.clear();
+    let at = profile.address.clone();
+    let Output::Started(started) = fixture.nexus.dispatch(Input::Start(profile)) else {
+        panic!("dry start")
+    };
+    assert!(
+        fixture
+            .nexus
+            .store
+            .dry_available(&started.flow_id.0)
+            .unwrap()
+    );
+    let signal_flow::PrivateSendResponse::SendAccepted(accepted) = fixture
+        .nexus
+        .store
+        .accept_logical_delivery(
+            &at,
+            SentBy::Sender(address(Model::Opus)),
+            Delivery::Queue,
+            Message::Soft(Request::Order("must not cross a stale Dry cut".into())),
+            None,
+        )
+        .unwrap()
+    else {
+        panic!("delivery accepted")
+    };
+    let batch = fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue.0;
+    assert!(
+        fixture
+            .nexus
+            .store
+            .begin_queue_write(&at, &started.flow_id.0, &batch)
+            .unwrap()
+    );
+    use crate::delivery::FindsDeliveryTarget;
+    let selected = fixture
+        .nexus
+        .delivery_target(&started.flow_id.0, Some(&accepted.logical_delivery_id.0))
+        .expect("selection observes the exact claimed Dry batch");
+    fixture
+        .nexus
+        .store
+        .record_observation(
+            &started.flow_id.0,
+            Some(SeatStanding::Alive(SeatActivity::Working)),
+        )
+        .unwrap();
+    assert!(
+        !fixture
+            .nexus
+            .store
+            .acquire_dry_lease(
+                PaneLease {
+                    delivery_id: meta_signal_flow::DeliveryId(
+                        accepted.logical_delivery_id.0.clone()
+                    ),
+                    flow_id: started.flow_id.clone(),
+                    herdr_pane_id: selected.route.herdr_pane_id.clone(),
+                    lease_step: LeaseStep::Acquired,
+                },
+                &selected.route
+            )
+            .unwrap(),
+        "the durable pre-effect cut rejects a target cached before native activity"
+    );
+    assert!(
+        !fixture
+            .nexus
+            .store
+            .dry_available(&started.flow_id.0)
+            .unwrap()
+    );
+    fixture
+        .nexus
+        .store
+        .record_observation(&started.flow_id.0, None)
+        .unwrap();
+    assert!(matches!(
+        fixture
+            .nexus
+            .store
+            .seat_decision(&started.flow_id.0)
+            .unwrap(),
+        SeatDecision::NoRecord
+    ));
+    assert!(
+        !fixture
+            .nexus
+            .store
+            .dry_available(&started.flow_id.0)
+            .unwrap(),
+        "loss of the later snapshot never revives Dry"
+    );
+    assert!(world.user_turns(&fixture).is_empty());
+}
+
+#[test]
+fn a_crash_after_the_exact_pane_lease_is_uncertain_and_never_retypes_the_dry_batch() {
+    use crate::Dispatches;
+    use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries};
+    use signal_flow::{Input, Output, ToolSet};
+
+    let mut fixture = NexusFixture::new();
+    let world = fixture.fresh_claude_world();
+    let mut profile =
+        super::model::seat(Aspect::Mind, Model::Sol, "claude-fixture", "dry-ambiguous");
+    profile.flow_kind = signal_flow::FlowKind::Simplified;
+    profile.tool_set = ToolSet::Default;
+    profile.instruction_prompt.0.clear();
+    let at = profile.address.clone();
+    let Output::Started(started) = fixture.nexus.dispatch(Input::Start(profile)) else {
+        panic!("dry start")
+    };
+    let signal_flow::PrivateSendResponse::SendAccepted(accepted) = fixture
+        .nexus
+        .store
+        .accept_logical_delivery(
+            &at,
+            SentBy::Sender(address(Model::Opus)),
+            Delivery::Queue,
+            Message::Soft(Request::Order("possibly placed once".into())),
+            None,
+        )
+        .unwrap()
+    else {
+        panic!("accepted")
+    };
+    let batch = fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue.0;
+    assert!(
+        fixture
+            .nexus
+            .store
+            .begin_queue_write(&at, &started.flow_id.0, &batch)
+            .unwrap()
+    );
+    let node = fixture
+        .nexus
+        .store
+        .flow_node(&started.flow_id.0)
+        .unwrap()
+        .unwrap();
+    let HerdrRouteSelection::Available(route) = node.herdr_route_selection else {
+        panic!("route")
+    };
+    fixture
+        .nexus
+        .store
+        .record_lease_step(PaneLease {
+            delivery_id: meta_signal_flow::DeliveryId(accepted.logical_delivery_id.0.clone()),
+            flow_id: started.flow_id.clone(),
+            herdr_pane_id: route.herdr_pane_id,
+            lease_step: LeaseStep::Acquired,
+        })
+        .unwrap();
+
+    fixture.restarted();
+    fixture.nexus.wake_due(at.clone());
+    fixture.nexus.wake_due(at);
+    assert!(world.user_turns(&fixture).is_empty(), "never retransmitted");
+    let snapshot = fixture
+        .nexus
+        .store
+        .logical_delivery_snapshot(&accepted.logical_delivery_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        snapshot.delivery_state,
+        signal_flow::DeliveryState::Uncertain
+    );
+    assert!(
+        !fixture
+            .nexus
+            .store
+            .dry_available(&started.flow_id.0)
+            .unwrap()
     );
 }
 

@@ -160,7 +160,7 @@ fn entry(accepted: &SendAcceptance, sender: &Address, request: Request) -> Queue
 /// The Maintained Mind flow Secondary, Awake as the Claude flow abc123,
 /// resting, with its handover left, ready to be refreshed in the fresh
 /// world.
-fn resting_seat() -> (NexusFixture, FreshWorld) {
+pub(super) fn resting_seat() -> (NexusFixture, FreshWorld) {
     let mut fixture = NexusFixture::new();
     let seat = launched_claude_ended_by(&fixture, |_| true);
     rested_at_stop(&fixture, "abc123");

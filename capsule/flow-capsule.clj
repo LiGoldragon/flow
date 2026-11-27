@@ -768,6 +768,18 @@
 
 (defn awake-flow [addr] (let [m (current addr)] (when (= :awake (:state m)) (:flow m))))
 
+(defn refresh-successor
+  "A queued order or a pending reap is not proof of succession: observe
+  the distinct current flow and its predecessor in Past."
+  [addr predecessor reply]
+  (when (and (seq predecessor)
+             (some #(str/starts-with? reply %) ["RefreshQueued." "ReapPending." "Refreshed."])
+             (str/includes? reply predecessor))
+    (watch 90 #(let [{:keys [state flow past]} (current addr)]
+                 (when (and (= :awake state) (not= (str flow) predecessor)
+                            (some #{predecessor} (map str past)))
+                   flow)))))
+
 (defn sender-pane
   "The pane the Opus seat lives in: a Send stands in it, so Flow names
   the Opus as its sender."
@@ -896,14 +908,13 @@
             pane (bound-pane (inspect quaternary))
             before (pane-text pane)
             reply (flow (str "Refresh." quaternary))
-            after (pane-text pane)
-            m (current quaternary)]
+            successor (refresh-successor quaternary flow-id reply)
+            after (pane-text pane)]
         {:reply reply
-         :pass (boolean (and (str/starts-with? reply "Refreshed.") (str/includes? reply flow-id)
-                             (= :asleep (:state m))
+         :pass (boolean (and successor
                              (or (nil? after) (<= (occurrences after "Tag s") (occurrences before "Tag s")))))
          :watched (str "old pane " pane (if after " still readable" " gone after the refresh")
-                       "; Metaflows Haiku " (name (:state m)))}))]
+                       "; OnDemand successor " successor)}))]
 
    ["5 Send during Refresh"
     (fn []
@@ -939,11 +950,10 @@
     (fn []
       (let [old (str (awake-flow secondary))
             reply (flow (str "Refresh." secondary))
-            m (current secondary)]
+            successor (refresh-successor secondary old reply)]
         {:reply reply
-         :pass (boolean (and (str/starts-with? reply "Refreshed.") (= :awake (:state m))
-                             (not= (str (:flow m)) old) (some #{old} (map str (:past m)))))
-         :watched (str "Metaflows straight after: Opus " (name (:state m)) " as " (:flow m) ", Past " (:past m))}))]
+         :pass (boolean successor)
+         :watched (str "Maintained successor " successor " replaced " old)}))]
 
    ["7 Launch at an Awake metaflow"
     (fn []

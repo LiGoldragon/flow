@@ -1,31 +1,23 @@
-//! A refresh ordered from outside: `Refresh.Address` ends the flow the
-//! metaflow is Awake as without giving it a turn. A Maintained metaflow, or
-//! one holding a waking request, has its successor started and confirmed
-//! before the ending flow is reaped; any other is left Asleep with that flow
-//! in Past and its queue kept, and its successor runs on the next waking
-//! request. A Launch addressed to an Awake metaflow is such a refresh. While
-//! the metaflow is held, nothing reaches the ending flow and a Send queues.
+//! An explicit Refresh confirms a successor before retiring the predecessor,
+//! including an OnDemand flow with no waking request. While the address is
+//! held, a Send queues and nothing reaches the ending flow.
 
 use super::refresh_and_compaction::{
     SUCCESSOR_REQUEST, declare_seat, owe_staged_successor, staged_refresh_successor,
 };
 use super::send_tool::accepting_codex_endpoint;
-use super::waking::{
-    CLAUDE_SEAT, ReadsFreshWorld, WakesFreshClaude, address, claude_agent, claude_seat,
-    launched_claude_ended_by,
-};
+use super::waking::{CLAUDE_SEAT, ReadsFreshWorld, address, claude_agent, claude_seat};
 use super::{
     ControlsHerdrSnapshot, MarkedProcess, NexusFixture, PromptFixture, bind_existing_caller,
     codex_agent_in,
 };
-use crate::event_wait::AwaitsPath;
-use crate::fixture_executable::{FixtureExecutable, HoldsLatch, InstallsScript, Latch};
+use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::generated::operation::{Operation, Outcome};
 use crate::performing::Performs;
-use crate::sending::{IdentifiesSender, SendsRequests};
-use crate::store::context::{JudgesThreshold, RecordsContextSize};
+use crate::sending::SendsRequests;
+use crate::store::context::JudgesThreshold;
 use crate::store::logical_delivery::RecordsLogicalDeliveries as _;
-use crate::store::metaflow::{MutatesMetaflows, SeedsMetaflow, SleepsMetaflows};
+use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::successor::{OwesSuccessors, SuccessionCause, SuccessorIntent};
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, ReadsFlowRows};
 use crate::waking::{HoldsWakingMetaflows, SleepsAndWakesSeats};
@@ -35,23 +27,9 @@ use flow_ethos::State;
 use meta_signal_flow::{ConfigurationChange, ConfigureMetaflow, Continuity};
 use signal_flow::{
     Address, FlowLifecycle, HerdrRouteSelection, Input, Message, Metaflow, Model, Origin, Output,
-    RefreshRejection, Refreshed, Refusal, ReplaceRejection, Request, SendRequest, SentBy,
-    Unknown_Data,
+    RefreshRejection, Refusal, ReplaceRejection, Request, SendRequest, SentBy, Unknown_Data,
 };
 use std::fs;
-use std::time::Duration;
-
-/// Releases a fixture operation even when an assertion unwinds before the
-/// scoped worker threads are joined. Cleanup is idempotent and cannot replace
-/// the assertion that exposed it.
-/// Releases a fixture's latch whatever the test came to, so a scope joins.
-struct ReleasesFixtureOnDrop<'latch>(&'latch Latch);
-
-impl Drop for ReleasesFixtureOnDrop<'_> {
-    fn drop(&mut self) {
-        self.0.release();
-    }
-}
 
 fn seat_address() -> Address {
     address(Model::Sol)
@@ -121,9 +99,13 @@ fn stored(fixture: &NexusFixture) -> Metaflow {
 }
 
 fn closed(fixture: &NexusFixture) -> bool {
-    fs::read_to_string(fixture.directory.path().join("herdr-operations.log"))
-        .unwrap_or_default()
-        .contains("pane close w1:p3")
+    ["herdr-operations.log", "herdr-calls.log"]
+        .into_iter()
+        .any(|name| {
+            fs::read_to_string(fixture.directory.path().join(name))
+                .unwrap_or_default()
+                .contains("pane close w1:p3")
+        })
 }
 
 fn lifecycle(fixture: &NexusFixture) -> FlowLifecycle {
@@ -149,22 +131,25 @@ fn requests(metaflow: &Metaflow) -> Vec<Request> {
         .collect()
 }
 
-/// An Awake metaflow is refreshed: its flow's pane is closed with nothing
-/// typed into it, the flow is recorded Stopped and joins Past, the metaflow
-/// is Asleep with its queue kept, and no successor is started: a Notice
-/// wakes nothing.
+/// An explicit Refresh always starts the successor itself, even when an
+/// OnDemand metaflow holds only Notices. The Notice keeps its original
+/// queue identity for the successor, and nothing is typed into the ending
+/// flow.
 #[test]
-fn an_explicit_refresh_ends_the_manual_awake_flow_without_a_turn() {
-    let fixture = NexusFixture::new();
-    fixture.accept_pane_operations(
-        vec![claude_agent(&fixture)],
-        PromptFixture::Prompted("w1:p3"),
+fn an_explicit_refresh_starts_an_on_demand_successor_for_notices() {
+    let notice_id = flow_ethos::LogicalDeliveryId("refresh-notice-kept".into());
+    let notice_request = flow_ethos::RequestId("n0t1".into());
+    let (fixture, _) = refreshable_with_queue(
+        Continuity::OnDemand,
+        vec![signal_flow::QueueEntry {
+            logical_delivery_id: notice_id.clone(),
+            request_id: notice_request.clone(),
+            sent_by: SentBy::Unknown,
+            delivery: Delivery::Queue,
+            message: Message::Soft(Request::Notice("Kept for the successor.".into())),
+        }],
+        true,
     );
-    awake_seat(
-        &fixture,
-        vec![Request::Notice("Kept for the next flow.".into())],
-    );
-    declare(&fixture, seat_address());
     fixture
         .nexus
         .store
@@ -174,31 +159,38 @@ fn an_explicit_refresh_ends_the_manual_awake_flow_without_a_turn() {
         }))
         .unwrap();
 
-    assert_eq!(
-        fixture
-            .nexus
-            .dispatch_serially(Input::Refresh(seat_address()), Origin::Unbound),
-        Output::Refreshed(Refreshed {
-            address: seat_address(),
-            flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
-        })
+    let refreshed = fixture
+        .nexus
+        .dispatch_serially(Input::Refresh(seat_address()), Origin::Unbound);
+    assert!(
+        matches!(&refreshed, Output::ReapPending(pending)
+            if pending.address == seat_address()
+                && pending.predecessor.0.0 == CLAUDE_SEAT),
+        "{refreshed:?}"
     );
-    assert!(closed(&fixture), "the flow's pane is closed");
+    super::reaping::finish_owned_reaps(&fixture);
+    assert!(closed(&fixture), "the predecessor's pane is closed");
     assert!(
         fixture.typed().is_none(),
         "the ending flow is given no turn"
     );
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped);
     let metaflow = stored(&fixture);
-    assert_eq!(metaflow.state, State::Asleep, "no successor is started");
+    assert_eq!(
+        metaflow.state,
+        State::Awake(flow_ethos::FlowId("908786".into())),
+        "the explicit Refresh starts its successor"
+    );
     assert_eq!(
         metaflow.past,
         flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.to_owned())])
     );
+    assert_eq!(metaflow.queue.0.len(), 1);
+    assert_eq!(metaflow.queue.0[0].logical_delivery_id, notice_id);
+    assert_eq!(metaflow.queue.0[0].request_id, notice_request);
     assert_eq!(
         requests(&metaflow),
-        vec![Request::Notice("Kept for the next flow.".into())],
-        "the queue stays on the metaflow"
+        vec![Request::Notice("Kept for the successor.".into())]
     );
     assert!(
         !fixture.nexus.waking.is_waking(&seat_address()),
@@ -249,12 +241,7 @@ fn a_refresh_of_a_metaflow_not_awake_is_refused_not_awake() {
 /// Locked and changes nothing; once the hold is released it runs.
 #[test]
 fn a_refresh_is_refused_locked_while_another_holds_the_metaflow() {
-    let fixture = NexusFixture::new();
-    fixture.accept_pane_operations(
-        vec![claude_agent(&fixture)],
-        PromptFixture::Prompted("w1:p3"),
-    );
-    awake_seat(&fixture, vec![]);
+    let (fixture, _) = refreshable_with_queue(Continuity::OnDemand, vec![], true);
 
     let held = fixture
         .nexus
@@ -275,224 +262,85 @@ fn a_refresh_is_refused_locked_while_another_holds_the_metaflow() {
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
 
     drop(held);
-    assert!(matches!(
-        fixture
-            .nexus
-            .dispatch_serially(Input::Refresh(seat_address()), Origin::Unbound),
-        Output::Refreshed(_)
-    ));
-    assert_eq!(stored(&fixture).state, State::Asleep);
+    let refreshed = fixture
+        .nexus
+        .dispatch_serially(Input::Refresh(seat_address()), Origin::Unbound);
+    assert!(matches!(refreshed, Output::ReapPending(_)), "{refreshed:?}");
+    super::reaping::finish_owned_reaps(&fixture);
+    assert_eq!(
+        stored(&fixture).state,
+        State::Awake(flow_ethos::FlowId("908786".into()))
+    );
 }
 
-/// A Send that arrives while the refresh is closing the ending flow's pane
-/// is never typed into that pane: it waits until the metaflow is Asleep and
-/// is queued there. The next waking request starts a fresh successor, which
-/// holds the whole queue; the ending flow stays Stopped in Past.
+/// An explicit Refresh of an OnDemand metaflow with no queue and no owed
+/// successor creates and confirms exactly one successor itself. The predecessor
+/// is never given another turn and is reaped only after the successor is Awake.
 #[test]
-fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending_flow() {
+fn an_explicit_refresh_with_no_queue_creates_its_successor() {
     const ENDING: &str = "abc123";
-    let mut fixture = NexusFixture::new();
-    // The ending flow was launched, so a wake composes its successor from
-    // that launch.
-    launched_claude_ended_by(&fixture, |_| true);
-    super::waking::rested_at_stop(&fixture, ENDING);
-    fixture.nexus.store.seed_metaflow(Metaflow {
-        address: seat_address(),
-        state: State::Awake(flow_ethos::FlowId(ENDING.into())),
-        past: flow_ethos::Past(vec![]),
-        queue: flow_ethos::Queue(vec![]),
-    });
-    let ending = fixture.nexus.store.flow_node(ENDING).unwrap().unwrap();
-    let HerdrRouteSelection::Available(route) = &ending.herdr_route_selection else {
-        panic!("the ending flow has its pane");
-    };
-    let world = fixture.fresh_claude_world();
-    let caller_agent = codex_agent_in("pane-1", "terminal-pane-1");
-    let fresh_script = fs::read_to_string(&fixture.snapshot_program)
-        .expect("fresh Herdr")
-        .replacen(
-            "  *\"api snapshot\"*) a=; [ -f \"$S/harness\" ] && a=$(agent);",
-            &format!(
-                "  *\"api snapshot\"*) a='{caller_agent}'; [ -f \"$S/harness\" ] && a=\"$a,$(agent)\";"
-            ),
-            1,
-        );
-    // Bind the exact kernel caller directly to a separate metaflow. This
-    // leaves the recipient's Claude model declaration untouched.
-    let sender_address = Address {
-        aspect: signal_flow::Aspect::Mind,
-        topic: flow_ethos::Topic("sender".into()),
-        model: Model::Sol,
-    };
-    let peer = FlowStore::process_identity_for_pid(std::process::id()).unwrap();
+    let (fixture, world) = super::open_requests::resting_seat();
+    fixture
+        .nexus
+        .store
+        .configure_change(ConfigurationChange::Amend(meta_signal_flow::Amend_Data {
+            address: seat_address(),
+            change: meta_signal_flow::Change::Continuity(Continuity::OnDemand),
+        }))
+        .unwrap();
+    assert!(stored(&fixture).queue.0.is_empty());
     assert_eq!(
         fixture
             .nexus
             .store
-            .bind_metaflow(
-                signal_flow::Bind_Data {
-                    address: sender_address.clone(),
-                    process: peer.clone(),
-                },
-                Some(flow_ethos::FlowId("a001".into())),
-            )
+            .successor_intent(&seat_address())
             .unwrap(),
-        Output::Bound(flow_ethos::FlowId("a001".into()))
+        None,
+        "no earlier event owes a successor"
     );
-    let log = fixture.accept_pane_operations(
-        vec![
-            caller_agent,
-            serde_json::json!({
-                "agent":"claude", "agent_status":"idle", "name":route.herdr_agent_name.0,
-                "workspace_id":"w1", "pane_id":route.herdr_pane_id.0,
-                "terminal_id":route.herdr_terminal_id.0,
-                "agent_session":{"source":"herdr:claude","agent":"claude","kind":"id",
-                    "value":ending.session_id.0},
-            }),
-        ],
-        PromptFixture::Prompted("w1:p3"),
+
+    let refreshed = fixture
+        .nexus
+        .dispatch_serially(Input::Refresh(seat_address()), Origin::Unbound);
+    assert!(
+        matches!(&refreshed, Output::ReapPending(pending)
+            if pending.predecessor.0.0 == ENDING
+                && pending.launched.flow_id.0 != ENDING
+                && pending.reap_standing == signal_flow::ReapStanding::Owed),
+        "{refreshed:?}"
     );
-    // The fixture Herdr's close of the ending pane announces itself, then
-    // waits for the test to release it: the refresh holds the metaflow, its
-    // flow not yet recorded ended, for as long as the test needs.
-    let closing = fixture.directory.path().join("close-reached");
-    let release = Latch::closed(fixture.directory.path().join("close-released"));
-    let script = fs::read_to_string(&fixture.snapshot_program).expect("fixture Herdr");
-    let pattern = "  \"pane close\"|\"pane send-keys\"|\"agent wait\")";
-    assert!(script.contains(pattern), "{script}");
-    FixtureExecutable {
-        path: fixture.snapshot_program.clone(),
-    }
-    .install(&script.replacen(
-        pattern,
-        &format!(
-            "  \"pane close\") : > '{closing}'; : < '{release}'; printf '%s\\n' \"$*\" >> '{log}' ;;\n{pattern}",
-            closing = closing.display(),
-            release = release.path.display(),
-            log = log.display(),
-        ),
-        1,
-    ));
+    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+    let successor = stored(&fixture);
+    assert!(
+        matches!(&successor.state, State::Awake(flow_id) if flow_id.0 != ENDING),
+        "the confirmed successor is current: {successor:?}"
+    );
+    assert!(successor.queue.0.is_empty());
     assert_eq!(
-        fixture.nexus.sender_of(&peer).unwrap(),
-        signal_flow::SentBy::Sender(sender_address.clone()),
-        "the caller is authenticated before the recipient transition starts"
+        fixture
+            .nexus
+            .store
+            .successor_intent(&seat_address())
+            .unwrap(),
+        None,
+        "confirmation gives the successor intent"
     );
-    let request = Request::Order("For the successor.".into());
-    let ended = |fixture: &NexusFixture| {
+    assert!(fixture.typed().is_none(), "the predecessor gets no turn");
+
+    assert!(
+        !world.calls().contains("pane close w1:p3"),
+        "the owned reap, not Refresh, closes the predecessor"
+    );
+    assert_eq!(
         fixture
             .nexus
             .store
             .flow_node(ENDING)
             .unwrap()
-            .expect("the flow's row is kept")
-            .flow_lifecycle
-    };
-
-    let (refreshed, sent) = std::thread::scope(|scope| {
-        let _release_on_drop = ReleasesFixtureOnDrop(&release);
-        let refreshing = scope.spawn(|| {
-            fixture
-                .nexus
-                .dispatch_serially(Input::Refresh(seat_address()), Origin::Unbound)
-        });
-        assert!(
-            closing.appeared_by(std::time::Instant::now() + Duration::from_secs(20)),
-            "the close never ran"
-        );
-        // The refresh holds the metaflow and its flow is still Awake.
-        assert!(fixture.nexus.waking.is_waking(&seat_address()));
-        assert_eq!(
-            stored(&fixture).state,
-            State::Awake(flow_ethos::FlowId(ENDING.into()))
-        );
-        let (answered, answer) = std::sync::mpsc::channel();
-        let (nexus, peer, request) = (&fixture.nexus, &peer, &request);
-        let sending = scope.spawn(move || {
-            let answer = nexus.send_request(
-                SendRequest {
-                    address: seat_address(),
-                    sendable_message: super::sendable_message(Message::MiddleAbrupt(
-                        request.clone(),
-                    )),
-                },
-                Some(peer),
-            );
-            answered.send(()).expect("the test waits for the answer");
-            answer
-        });
-        assert!(
-            answer.recv_timeout(Duration::from_millis(500)).is_err(),
-            "the Send is not admitted while the refresh holds the metaflow"
-        );
-        // The request has arrived and is waiting behind the refresh. The
-        // world now changes to the one in which the successor is launched;
-        // its authenticated sender belongs to the request already in hand.
-        FixtureExecutable {
-            path: fixture.snapshot_program.clone(),
-        }
-        .install(&fresh_script);
-        assert!(fixture.typed().is_none(), "nothing reaches the ending flow");
-        release.release();
-        (
-            refreshing.join().expect("refresh answered"),
-            sending.join().expect("send answered"),
-        )
-    });
-
-    assert_eq!(
-        refreshed,
-        Output::Refreshed(Refreshed {
-            address: seat_address(),
-            flow_id: flow_ethos::FlowId(ENDING.into()),
-        })
+            .expect("the predecessor row remains")
+            .flow_lifecycle,
+        FlowLifecycle::Stopped
     );
-    assert!(
-        matches!(sent.response, Output::Sent(_)),
-        "{:?}",
-        sent.response
-    );
-    assert!(sent.pending.is_none());
-    assert!(
-        fs::read_to_string(&log)
-            .unwrap_or_default()
-            .contains("pane close w1:p3"),
-        "the ending flow's pane is closed"
-    );
-    assert!(
-        fixture.typed().is_none(),
-        "nothing was typed into the ending flow"
-    );
-    assert_eq!(ended(&fixture), FlowLifecycle::Stopped);
-    // The waking request starts the successor before it answers Sent.
-    let woken = stored(&fixture);
-    let State::Awake(successor) = woken.state.clone() else {
-        panic!("the successor is woken; Herdr calls: {}", world.calls());
-    };
-    assert_ne!(
-        successor.0, ENDING,
-        "a fresh flow, never the one that ended"
-    );
-    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
-    assert_eq!(
-        woken.past,
-        flow_ethos::Past(vec![flow_ethos::FlowId(ENDING.to_owned())])
-    );
-    assert!(
-        requests(&woken).is_empty(),
-        "the successor's accepted first prompt settles its fixed queue batch"
-    );
-    let turns = world.user_turns(&fixture);
-    assert_eq!(turns.len(), 1, "the wake submits one first turn: {turns:?}");
-    assert!(
-        turns[0].contains("For the successor."),
-        "the queued request is in the successor's first prompt: {turns:?}"
-    );
-    assert!(
-        fixture.typed().is_none(),
-        "the ending flow was handed nothing"
-    );
-    assert_eq!(ended(&fixture), FlowLifecycle::Stopped);
 }
 
 /// The fixture Herdr's answer to `pane close` becomes `answer`, a shell
@@ -509,61 +357,6 @@ pub(super) fn close_answers(fixture: &NexusFixture, answer: &str) {
         &format!("  \"pane close\") {answer} ;;\n{pattern}"),
         1,
     ));
-}
-
-/// A refresh whose close Herdr refuses answers CloseRefused, and one whose
-/// Herdr cannot be read answers HerdrUnavailable: Refresh's own rejections.
-/// Either leaves the flow Awake and live, and releases the lock.
-#[test]
-fn a_refused_close_or_an_unreadable_herdr_answers_refresh_s_own_rejection() {
-    let fixture = NexusFixture::new();
-    fixture.accept_pane_operations(
-        vec![claude_agent(&fixture)],
-        PromptFixture::Prompted("w1:p3"),
-    );
-    awake_seat(&fixture, vec![]);
-    declare(&fixture, seat_address());
-    super::refresh_and_compaction::seat_refreshing_at(&fixture, 1);
-    fixture
-        .nexus
-        .store
-        .record_context_size(CLAUDE_SEAT, 40_000)
-        .unwrap();
-    assert!(fixture.nexus.store.past_threshold(CLAUDE_SEAT).unwrap());
-    close_answers(&fixture, "exit 1");
-    assert_eq!(
-        fixture.nexus.dispatch(Input::Refresh(seat_address())),
-        Output::RefreshRejected(RefreshRejection::CloseRefused)
-    );
-    assert_eq!(
-        stored(&fixture).state,
-        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
-    );
-    assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
-    assert!(!fixture.nexus.waking.is_waking(&seat_address()));
-
-    // Herdr lists its sessions, but the snapshot of the flow's own fails.
-    let script = fs::read_to_string(&fixture.snapshot_program).expect("fixture Herdr");
-    let cases = "case \"$3 $4\" in\n";
-    assert!(script.contains(cases), "{script}");
-    FixtureExecutable {
-        path: fixture.snapshot_program.clone(),
-    }
-    .install(&script.replacen(
-        cases,
-        &format!("{cases}  \"api snapshot\") echo 'herdr: server unreachable' >&2; exit 1 ;;\n"),
-        1,
-    ));
-    assert_eq!(
-        fixture.nexus.dispatch(Input::Refresh(seat_address())),
-        Output::RefreshRejected(RefreshRejection::HerdrUnavailable)
-    );
-    assert_eq!(
-        stored(&fixture).state,
-        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
-    );
-    assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
-    assert!(!fixture.nexus.waking.is_waking(&seat_address()));
 }
 
 /// The Herdr calls the replacement fixture logged that would type into a
@@ -599,6 +392,34 @@ fn refreshable_with_staged_successor(
     delivery: Delivery,
     confirmed: bool,
 ) -> (NexusFixture, signal_flow::LaunchProfile) {
+    refreshable_with_queue(
+        continuity,
+        vec![signal_flow::QueueEntry {
+            logical_delivery_id: flow_ethos::LogicalDeliveryId("refreshing-successor-0".into()),
+            request_id: flow_ethos::RequestId("test".into()),
+            sent_by: SentBy::Unknown,
+            delivery: delivery.clone(),
+            message: match &delivery {
+                Delivery::Wake => signal_flow::Message::MiddleAbrupt(signal_flow::Request::Order(
+                    "For the successor.".into(),
+                )),
+                Delivery::Queue => signal_flow::Message::Soft(signal_flow::Request::Order(
+                    "For the successor.".into(),
+                )),
+            },
+        }],
+        confirmed,
+    )
+}
+
+/// An Awake predecessor and a staged successor, with exactly `queue` kept
+/// on their metaflow. This lets Refresh tests distinguish a successor owed
+/// by the explicit operation from one owed by queued waking work.
+fn refreshable_with_queue(
+    continuity: Continuity,
+    queue: Vec<signal_flow::QueueEntry>,
+    confirmed: bool,
+) -> (NexusFixture, signal_flow::LaunchProfile) {
     let fixture = NexusFixture::new();
     claude_seat(&fixture, 40_000);
     let mut successor = staged_refresh_successor(&fixture);
@@ -615,20 +436,7 @@ fn refreshable_with_staged_successor(
         address: seat_address(),
         state: State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
         past: flow_ethos::Past(vec![]),
-        queue: flow_ethos::Queue(vec![signal_flow::QueueEntry {
-            logical_delivery_id: flow_ethos::LogicalDeliveryId("refreshing-successor-0".into()),
-            request_id: flow_ethos::RequestId("test".into()),
-            sent_by: SentBy::Unknown,
-            delivery: delivery.clone(),
-            message: match &delivery {
-                Delivery::Wake => signal_flow::Message::MiddleAbrupt(signal_flow::Request::Order(
-                    "For the successor.".into(),
-                )),
-                Delivery::Queue => signal_flow::Message::Soft(signal_flow::Request::Order(
-                    "For the successor.".into(),
-                )),
-            },
-        }]),
+        queue: flow_ethos::Queue(queue),
     });
     owe_staged_successor(&fixture);
     fixture.herdr_for_replacement_showing(0, vec![claude_agent(&fixture)]);
@@ -715,11 +523,7 @@ fn a_refresh_owed_a_successor_starts_it_before_the_ending_flow_is_reaped() {
 /// and the lock is released.
 #[test]
 fn a_refresh_whose_successor_stays_unconfirmed_answers_successor_unconfirmed() {
-    let (fixture, _) = refreshable_with_staged_successor(
-        Continuity::Maintained,
-        flow_ethos::Delivery::Queue,
-        false,
-    );
+    let (fixture, _) = refreshable_with_queue(Continuity::OnDemand, vec![], false);
     assert_eq!(
         fixture.nexus.dispatch(Input::Refresh(seat_address())),
         Output::RefreshRejected(RefreshRejection::SuccessorUnconfirmed)
@@ -1171,17 +975,6 @@ fn a_successor_that_cannot_start_answers_refresh_s_own_rejection() {
         PromptFixture::Prompted("w1:p3"),
     );
     awake_seat(&fixture, vec![]);
-    let mut waking = stored(&fixture);
-    waking.queue = flow_ethos::Queue(vec![signal_flow::QueueEntry {
-        logical_delivery_id: flow_ethos::LogicalDeliveryId("refreshing-wake-0".into()),
-        request_id: flow_ethos::RequestId("test".into()),
-        sent_by: SentBy::Unknown,
-        delivery: flow_ethos::Delivery::Wake,
-        message: signal_flow::Message::MiddleAbrupt(signal_flow::Request::Order(
-            "Wake the successor.".into(),
-        )),
-    }]);
-    fixture.nexus.store.seed_metaflow(waking);
     // Declared, with no model configured for its model and aspect.
     declare(&fixture, seat_address());
     assert_eq!(
@@ -1338,20 +1131,13 @@ fn own_seat() -> Origin {
 }
 
 /// A flow that refreshes itself is working: its Refresh answers
-/// RefreshQueued at once and closes nothing. The seat stays Awake in its
-/// pane; the Stop that ends its turn with nothing in flight is its idle
-/// event, at which it is refreshed: its pane closed, its flow Stopped, its
-/// metaflow Asleep, the order spent.
+/// RefreshQueued at once and closes nothing. At its real idle event the
+/// ordered Refresh starts and confirms the successor before reaping it,
+/// even though the OnDemand metaflow has no queued work.
 #[test]
 fn a_self_refresh_of_a_working_seat_waits_for_its_idle_event_and_answers_refresh_queued() {
     use crate::store::ordered_replacement::OrdersReplacements;
-    let fixture = NexusFixture::new();
-    fixture.accept_pane_operations(
-        vec![claude_agent(&fixture)],
-        PromptFixture::Prompted("w1:p3"),
-    );
-    awake_seat(&fixture, vec![]);
-    declare(&fixture, seat_address());
+    let (fixture, _) = refreshable_with_queue(Continuity::OnDemand, vec![], true);
     super::waking::claude_prompt_taken(&fixture);
 
     assert_eq!(
@@ -1382,14 +1168,22 @@ fn a_self_refresh_of_a_working_seat_waits_for_its_idle_event_and_answers_refresh
 
     super::waking::report_claude_stop(&fixture, vec![]);
 
-    assert!(closed(&fixture), "the resting flow's pane is closed");
+    super::reaping::finish_owned_reaps(&fixture);
+    assert!(
+        closed(&fixture),
+        "the predecessor's pane is closed by its reap"
+    );
     assert!(
         fixture.typed().is_none(),
         "the ending flow is given no turn"
     );
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped);
     let metaflow = stored(&fixture);
-    assert_eq!(metaflow.state, State::Asleep);
+    assert_eq!(
+        metaflow.state,
+        State::Awake(flow_ethos::FlowId("908786".into())),
+        "the queued explicit Refresh starts its own successor"
+    );
     assert_eq!(
         metaflow.past,
         flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.to_owned())])
@@ -1412,13 +1206,7 @@ fn a_self_refresh_of_a_working_seat_waits_for_its_idle_event_and_answers_refresh
 fn an_ordered_refresh_waits_for_the_stop_that_confirms_no_background_work() {
     use super::waking::background_task;
     use crate::store::ordered_replacement::OrdersReplacements;
-    let fixture = NexusFixture::new();
-    fixture.accept_pane_operations(
-        vec![claude_agent(&fixture)],
-        PromptFixture::Prompted("w1:p3"),
-    );
-    awake_seat(&fixture, vec![]);
-    declare(&fixture, seat_address());
+    let (fixture, _) = refreshable_with_queue(Continuity::OnDemand, vec![], true);
     super::waking::claude_prompt_taken(&fixture);
     assert!(matches!(
         fixture
@@ -1446,13 +1234,17 @@ fn an_ordered_refresh_waits_for_the_stop_that_confirms_no_background_work() {
             .is_some()
     );
     super::waking::report_claude_stop(&fixture, vec![]);
-    assert!(closed(&fixture), "the flow is refreshed at safe rest");
+    super::reaping::finish_owned_reaps(&fixture);
+    assert!(closed(&fixture), "the predecessor is reaped at safe rest");
     assert!(
         fixture.typed().is_none(),
         "the ending flow is given no turn"
     );
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped);
-    assert_eq!(stored(&fixture).state, State::Asleep);
+    assert_eq!(
+        stored(&fixture).state,
+        State::Awake(flow_ethos::FlowId("908786".into()))
+    );
     assert_eq!(
         fixture
             .nexus
@@ -1583,13 +1375,7 @@ fn reopen_store(fixture: &mut NexusFixture) {
 fn the_ordered_replacement_survives_a_nexus_restart() {
     use crate::store::ordered_replacement::{OrdersReplacements, ReplacementOrder};
     use crate::waking::{RefreshesMetaflows, SleepsAndWakesSeats};
-    let mut fixture = NexusFixture::new();
-    fixture.accept_pane_operations(
-        vec![claude_agent(&fixture)],
-        PromptFixture::Prompted("w1:p3"),
-    );
-    awake_seat(&fixture, vec![]);
-    declare(&fixture, seat_address());
+    let (mut fixture, _) = refreshable_with_queue(Continuity::OnDemand, vec![], true);
     super::waking::claude_prompt_taken(&fixture);
     let caller = another_flows_caller();
     assert!(matches!(
@@ -1645,9 +1431,13 @@ fn the_ordered_replacement_survives_a_nexus_restart() {
     );
 
     super::waking::report_claude_stop(&fixture, vec![]);
-    assert!(closed(&fixture), "the resting flow's pane is closed");
+    super::reaping::finish_owned_reaps(&fixture);
+    assert!(closed(&fixture), "the predecessor's pane is reaped");
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped);
-    assert_eq!(stored(&fixture).state, State::Asleep);
+    assert_eq!(
+        stored(&fixture).state,
+        State::Awake(flow_ethos::FlowId("908786".into()))
+    );
 }
 
 /// The succession a queued Refresh causes carries the caller the Refresh was
@@ -1830,22 +1620,19 @@ fn the_current_flow_and_any_other_caller_refresh_the_current_flow() {
         RefreshCaller::Elsewhere(Origin::Unbound),
         RefreshCaller::Elsewhere(Origin::Flow(elsewhere.clone())),
     ] {
-        let fixture = NexusFixture::new();
-        fixture.accept_pane_operations(
-            vec![claude_agent(&fixture)],
-            PromptFixture::Prompted("w1:p3"),
+        let (fixture, _) = refreshable_with_queue(Continuity::OnDemand, vec![], true);
+        let refreshed = fixture.nexus.refresh(&seat_address(), &caller);
+        assert!(
+            matches!(&refreshed, Output::ReapPending(pending)
+                if pending.predecessor.0.0 == CLAUDE_SEAT),
+            "{caller:?}: {refreshed:?}"
         );
-        awake_seat(&fixture, vec![]);
-        declare(&fixture, seat_address());
-        assert_eq!(
-            fixture.nexus.refresh(&seat_address(), &caller),
-            Output::Refreshed(Refreshed {
-                address: seat_address(),
-                flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
-            }),
-            "{caller:?}"
-        );
+        super::reaping::finish_owned_reaps(&fixture);
         assert!(closed(&fixture));
+        assert_eq!(
+            stored(&fixture).state,
+            State::Awake(flow_ethos::FlowId("908786".into()))
+        );
     }
     // A flow of another Address is no flow of this one.
     let fixture = NexusFixture::new();

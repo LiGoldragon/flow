@@ -7535,43 +7535,19 @@ pub(super) fn codex_seat_in_fresh_world(fixture: &mut NexusFixture) -> FreshWorl
     world
 }
 
-/// Test 1 (Part A): a Refresh ordered while a Codex turn runs is carried
-/// out at the thread's rest with nothing queued.
+/// Refresh itself supplies the reason to launch, even for an OnDemand
+/// Codex flow with no queued work.
 #[test]
 fn a_codex_ordered_refresh_with_nothing_queued_is_carried_out_at_its_rest() {
-    use crate::Dispatches;
-    use signal_flow::{Input, Output};
-    let fixture = NexusFixture::new();
-    let thread = codex_rest_seat(
-        &fixture,
-        Some(meta_signal_flow::Continuity::OnDemand),
-        vec![],
-    );
-    assert_eq!(
-        family(&fixture, &thread, Working),
-        None,
-        "a turn that starts is no rest"
-    );
-    assert!(matches!(
-        fixture.nexus.dispatch(Input::Refresh(address(Model::Sol))),
-        Output::RefreshQueued(_)
-    ));
-    let at_rest = family(&fixture, &thread, Resting);
-    assert!(
-        matches!(&at_rest, Some(AtStop::Refreshed(at)) if *at == address(Model::Sol)),
-        "{at_rest:?}"
-    );
-    assert!(closes(&fixture), "the ordered refresh closes the seat");
+    assert_codex_ordered_refresh_at_rest(meta_signal_flow::Continuity::OnDemand);
 }
 
-/// Test 1 (Part A), Maintained: a Refresh ordered while a Maintained
-/// Codex seat's turn runs is answered RefreshQueued and starts nothing; at
-/// the thread's rest, with nothing queued, the successor is started and
-/// confirmed first, the Address receives as it, the predecessor is
-/// recorded Stopped and its reap owed to its worker, and the order is
-/// spent. The rest answers the reap pending, never a refusal.
 #[test]
 fn a_codex_ordered_refresh_of_a_maintained_seat_starts_its_successor_at_its_rest() {
+    assert_codex_ordered_refresh_at_rest(meta_signal_flow::Continuity::Maintained);
+}
+
+fn assert_codex_ordered_refresh_at_rest(continuity: meta_signal_flow::Continuity) {
     use crate::store::ordered_replacement::OrdersReplacements;
     use crate::store::pending_reap::RecordsPendingReaps;
     use crate::{Dispatches, store::ReadsFlowRows};
@@ -7579,6 +7555,16 @@ fn a_codex_ordered_refresh_of_a_maintained_seat_starts_its_successor_at_its_rest
     let mut fixture = NexusFixture::new();
     let world = codex_seat_in_fresh_world(&mut fixture);
     let at = address(Model::Sol);
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Amend(
+            meta_signal_flow::Amend_Data {
+                address: at.clone(),
+                change: meta_signal_flow::Change::Continuity(continuity),
+            },
+        ))
+        .unwrap();
     assert_eq!(
         family(&fixture, WORKING_CODEX_THREAD, Working),
         None,
@@ -7588,6 +7574,10 @@ fn a_codex_ordered_refresh_of_a_maintained_seat_starts_its_successor_at_its_rest
     assert!(matches!(ordered, Output::RefreshQueued(_)), "{ordered:?}");
     assert_eq!(world.claude_starts(), 0, "nothing starts while it works");
 
+    // A second working cut is not the event that spends the order.
+    assert_eq!(family(&fixture, WORKING_CODEX_THREAD, Working), None);
+    assert_eq!(world.claude_starts(), 0);
+    assert!(!world.calls().contains("pane close w1:p3"));
     let at_rest = family(&fixture, WORKING_CODEX_THREAD, Resting);
     let Some(AtStop::ReapPending(pending)) = &at_rest else {
         panic!("{at_rest:?}; Herdr calls: {}", world.calls());
@@ -7598,6 +7588,17 @@ fn a_codex_ordered_refresh_of_a_maintained_seat_starts_its_successor_at_its_rest
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());
     let successor = pending.launched.flow_id.clone();
     assert_ne!(successor.0, "abc123");
+    let node = fixture
+        .nexus
+        .store
+        .flow_node(&successor.0)
+        .unwrap()
+        .unwrap();
+    assert_ne!(node.session_id.0, WORKING_CODEX_THREAD);
+    assert!(
+        matches!(&node.herdr_route_selection, HerdrRouteSelection::Available(route)
+        if route.herdr_pane_id.0 != "w1:p3")
+    );
     let metaflow = stored(&fixture, Model::Sol);
     assert_eq!(metaflow.state, State::Awake(successor));
     assert!(metaflow.queue.0.is_empty());
@@ -7974,34 +7975,6 @@ fn a_retained_investigator_receives_one_order_through_its_existing_drain() {
         endpoint.queued_turn_texts().is_empty(),
         "no separate turn/start"
     );
-}
-
-/// primary-k7jy: an OnDemand Codex seat with its turn open is kept, a
-/// refresh ordered for it included: the order waits for the turn's end,
-/// and a cut that lists the turn running settles nothing.
-#[test]
-fn an_on_demand_codex_seat_with_its_turn_open_is_kept() {
-    use crate::Dispatches;
-    use signal_flow::{Input, Output};
-    let fixture = NexusFixture::new();
-    let thread = codex_rest_seat(
-        &fixture,
-        Some(meta_signal_flow::Continuity::OnDemand),
-        vec![],
-    );
-    assert_eq!(family(&fixture, &thread, Working), None);
-    assert!(matches!(
-        fixture.nexus.dispatch(Input::Refresh(address(Model::Sol))),
-        Output::RefreshQueued(_)
-    ));
-    assert_eq!(family(&fixture, &thread, Working), None);
-    assert!(!closes(&fixture), "a refresh never closes a working seat");
-    let at_rest = family(&fixture, &thread, Resting);
-    assert!(
-        matches!(&at_rest, Some(AtStop::Refreshed(at)) if *at == address(Model::Sol)),
-        "{at_rest:?}"
-    );
-    assert!(closes(&fixture));
 }
 
 /// Sends `message` to the Sol Address from no flow, as the living at a

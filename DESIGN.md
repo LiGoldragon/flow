@@ -937,8 +937,11 @@ whatever background work runs.
 
 A replacement ordered from outside waits for the same rest, whoever asks:
 `Refresh.Address`, the flow refreshing itself included, and a Launch or
-Replace naming a live flow. A flow that rests now is replaced at once. A
-working one has the order recorded in `flow_nexus_ordered_replacements`
+Replace naming a live flow. An explicit Refresh owes a successor even for
+OnDemand with an empty or Notices-only queue. The successor must confirm
+before its predecessor is reaped; failure to confirm is not a successful
+refresh. This does not change ordinary OnDemand sleep at rest.
+A flow that rests now is replaced at once. A working one has the order recorded in `flow_nexus_ordered_replacements`
 (a Launch's whole profile, origin and first-prompt digest with it), and is
 answered at once: `RefreshQueued.{ Address FlowId }`, or `LaunchPending`
 with the attempt it waits as, which LaunchStatus and Observe.Launch answer

@@ -56,13 +56,10 @@
 //! once, and carried out at the idle event that finds it resting; a Nexus
 //! that starts again carries out what is recorded. Until it rests the flow
 //! is handed what it is sent. At its rest the refresh takes the metaflow's
-//! hold and ends its flow without a turn. A Maintained metaflow, or one holding work that wakes it,
-//! has its successor started and confirmed through Replace before the
-//! ending flow is reaped, and the queue is handed to it. Any other has its
-//! flow's harness closed and the flow recorded Stopped, the metaflow left
-//! Asleep with its queue kept; its successor starts on the next waking
-//! request. A Launch addressed to an Awake metaflow is such a refresh, its
-//! successor the Launch's, run under the same hold. A Send that arrives
+//! hold and starts and confirms the successor through Replace before the
+//! ending flow is reaped, even when an OnDemand flow has no waking work.
+//! A Launch addressed to an Awake metaflow is such a refresh, its successor
+//! the Launch's, run under the same hold. A Send that arrives
 //! while any of these holds the metaflow is queued on it.
 //!
 //! A metaflow is Asleep once its flow has ended: its seat slept, its pane
@@ -1684,22 +1681,11 @@ impl SleepsAndWakesSeats for RunningNexus {
     }
 }
 
-/// A refresh ordered from outside: the metaflow's current flow ends
-/// without a turn. A Maintained metaflow, or one holding a request that asks
-/// for a wake, has its successor started and confirmed in the same event,
-/// before the ending flow is reaped; any other is left Asleep, and its
-/// successor runs on the next waking request.
+/// An ordered refresh owes a successor independently of continuity or queue.
 pub trait RefreshesMetaflows {
-    /// Runs off the dispatch gate, taking it for each step as a wake does.
-    /// Takes the metaflow's lock, the hold a wake takes, so nothing is
-    /// delivered to it and what arrives queues. A metaflow owed its
-    /// successor has it started and confirmed through Replace, which then
-    /// reaps the ending flow; once the lock is released the queue is handed
-    /// to the successor, oldest first. Any other has its flow's harness
-    /// closed under its pane's lease, typing nothing, and its flow recorded
-    /// Stopped, which puts the metaflow Asleep with the flow in Past and its
-    /// queue kept. The successor's context is what any wake composes: the
-    /// metaflow's declaration, remembering the ending flow.
+    /// Takes the same hold as a wake, so incoming work queues. The current
+    /// flow is only reaped after Replace confirms its successor. The queue
+    /// belongs to that successor once the hold is released.
     ///
     /// A caller that is a flow of the Address refreshes only itself: while
     /// the Address is no longer Awake as that flow, the refresh is refused
@@ -1797,8 +1783,8 @@ impl RefreshesMetaflows for RunningNexus {
             }
             Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
         }
-        let node = match self.store.flow_node(&flow_id.0) {
-            Ok(Some(node)) => node,
+        match self.store.flow_node(&flow_id.0) {
+            Ok(Some(_)) => {}
             Ok(None) => {
                 return Output::Refused(Refusal::Unknown(Unknown_Data::FlowId(flow_id)));
             }
@@ -1819,7 +1805,7 @@ impl RefreshesMetaflows for RunningNexus {
         if self.permaflow_held(address.clone()) || !self.rests_for_closing(&flow_id.0) {
             return self.queue_refresh(address, &flow_id.0, caller);
         }
-        self.refresh_held(address, metaflow, flow_id, node, caller, turn, lock)
+        self.refresh_held(address, metaflow, flow_id, caller, turn, lock)
     }
 
     fn replace_held(&self, profile: LaunchProfile, origin: Origin) -> Output {
@@ -1874,13 +1860,11 @@ impl RefreshesMetaflows for RunningNexus {
 pub(crate) trait WaitsForRestToReplace {
     /// The refresh of a resting flow under the metaflow's `lock` and the
     /// gate `turn`, both released by it: see [`RefreshesMetaflows::refresh`].
-    #[allow(clippy::too_many_arguments)]
     fn refresh_held(
         &self,
         address: &Address,
         metaflow: Metaflow,
         flow_id: FlowId,
-        node: FlowNode,
         caller: &RefreshCaller,
         turn: std::sync::MutexGuard<'_, ()>,
         lock: WakingLease,
@@ -1912,7 +1896,6 @@ pub(crate) trait WaitsForRestToReplace {
         &self,
         order: OrderedReplacement,
         metaflow: Metaflow,
-        node: FlowNode,
         turn: std::sync::MutexGuard<'_, ()>,
     ) -> AtStop;
     /// A Launch ordered for a flow that ended before it rested starts as its
@@ -1933,111 +1916,76 @@ impl WaitsForRestToReplace for RunningNexus {
         address: &Address,
         metaflow: Metaflow,
         flow_id: FlowId,
-        node: FlowNode,
         caller: &RefreshCaller,
         turn: std::sync::MutexGuard<'_, ()>,
         lock: WakingLease,
     ) -> Output {
-        use signal_flow::{RefreshRejection, Refreshed, Refusal};
-        let continuity = match self.store.continuity(address) {
-            Ok(continuity) => continuity,
-            Err(error) => return Output::Refused(Refusal::Store(error.to_string())),
-        };
-        let wakes = metaflow.queue.0.holds_waking_request();
-        let refreshed = Output::Refreshed(Refreshed {
-            address: address.clone(),
-            flow_id: flow_id.clone(),
-        });
-        // A Maintained metaflow is never left without a flow, and one holding
-        // a waking request is owed the flow that takes it up: the successor
-        // is started and confirmed before the ending flow is reaped.
-        if continuity == Continuity::Maintained || wakes {
-            // Replace takes the gate for its own steps; the lock keeps any
-            // wake, drain or delivery of the metaflow out meanwhile.
-            drop(turn);
-            let replaced = self.refresh_successor_first(
-                &flow_id.0,
-                &metaflow,
-                SuccessionCause::Ordered(caller.clone()),
-            );
-            drop(lock);
-            self.wake_deferred();
-            return match replaced {
-                // The successor runs; its predecessor's reap is pending.
-                AtStop::ReapPending(pending) => {
-                    if pending.reap_standing != signal_flow::ReapStanding::Owed {
-                        eprintln!(
-                            "flow-nexus: flow {} refreshed; its successor {} runs; its reap is pending: {:?}",
-                            flow_id.0, pending.launched.flow_id.0, pending.reap_standing
-                        );
-                    }
-                    self.wake_due(address.clone());
-                    Output::ReapPending(*pending)
-                }
-                AtStop::Refreshed(_) => {
-                    eprintln!(
-                        "flow-nexus: flow {flow_id} refreshed; {:?} {} {:?} runs its successor",
-                        address.aspect,
-                        address.topic.0,
-                        address.model,
-                        flow_id = flow_id.0
-                    );
-                    // What queued while the lock stood is handed to the
-                    // successor, oldest first.
-                    self.wake_due(address.clone());
-                    refreshed
-                }
-                // A refused successor answers the Replace's own rejection;
-                // one whose launch is still pending or ambiguous when the
-                // confirmation wait ends is unconfirmed, and stays owed.
-                AtStop::Kept(KeptAtStop::RefreshLaunchRefused(response)) => {
-                    Output::RefreshRejected(match *response {
-                        Output::ReplaceRejected(rejection) => {
-                            RefreshRejection::SuccessorRefused(rejection)
-                        }
-                        Output::StartRejected(rejection) => RefreshRejection::SuccessorRefused(
-                            signal_flow::ReplaceRejection::LaunchRefused(rejection),
-                        ),
-                        Output::LaunchPending(_) | Output::StartAmbiguous(_) => {
-                            RefreshRejection::SuccessorUnconfirmed
-                        }
-                        _ => RefreshRejection::PersistenceRefused,
-                    })
-                }
-                AtStop::Kept(KeptAtStop::RefreshUnplaceable) => {
-                    Output::RefreshRejected(RefreshRejection::Undeclared)
-                }
-                _ => Output::RefreshRejected(RefreshRejection::PersistenceRefused),
-            };
-        }
-        // Writability of the route is distinct from the native rest that
-        // authorized this refresh. An unreadable snapshot is not refusal
-        // by a known pane, and neither changes the seat's standing.
-        if matches!(
-            self.herdr.pane_presence(&node),
-            crate::herdr::PanePresence::Unknown
-        ) {
-            return Output::RefreshRejected(RefreshRejection::HerdrUnavailable);
-        }
-        if let Err(outcome) = self.close_at_rest(&flow_id.0, &node) {
-            return Output::RefreshRejected(match *outcome {
-                Outcome::Failed(Failed_Data::HerdrRefused) => RefreshRejection::CloseRefused,
-                _ => RefreshRejection::PersistenceRefused,
-            });
-        }
-        // The lock is released under the gate, so a Send admitted after it
-        // finds the metaflow Asleep and free, and its waking request wakes
-        // it.
-        drop(lock);
+        use signal_flow::{RefreshRejection, Refreshed};
+        // Replace takes the gate for its own steps; the lock keeps any
+        // wake, drain or delivery of the metaflow out meanwhile.
         drop(turn);
-        eprintln!(
-            "flow-nexus: flow {flow_id} refreshed; {:?} {} {:?} sleeps until a waking request",
-            address.aspect,
-            address.topic.0,
-            address.model,
-            flow_id = flow_id.0
+        let replaced = self.refresh_successor_first(
+            &flow_id.0,
+            &metaflow,
+            SuccessionCause::Ordered(caller.clone()),
         );
-        refreshed
+        drop(lock);
+        self.wake_deferred();
+        let outcome = match replaced {
+            // The successor runs; its predecessor's reap is pending.
+            AtStop::ReapPending(pending) => {
+                eprintln!(
+                    "flow-nexus: flow {} refreshed; its successor {} runs; its reap is pending: {:?}",
+                    flow_id.0, pending.launched.flow_id.0, pending.reap_standing
+                );
+                self.wake_due(address.clone());
+                Output::ReapPending(*pending)
+            }
+            AtStop::Refreshed(_) => {
+                eprintln!(
+                    "flow-nexus: flow {flow_id} refreshed; {:?} {} {:?} runs its successor",
+                    address.aspect,
+                    address.topic.0,
+                    address.model,
+                    flow_id = flow_id.0
+                );
+                // What queued while the lock stood is handed to the
+                // successor, oldest first.
+                self.wake_due(address.clone());
+                Output::Refreshed(Refreshed {
+                    address: address.clone(),
+                    flow_id: flow_id.clone(),
+                })
+            }
+            // A refused successor answers the Replace's own rejection;
+            // one whose launch is still pending or ambiguous when the
+            // confirmation wait ends is unconfirmed, and stays owed.
+            AtStop::Kept(KeptAtStop::RefreshLaunchRefused(response)) => {
+                Output::RefreshRejected(match *response {
+                    Output::ReplaceRejected(rejection) => {
+                        RefreshRejection::SuccessorRefused(rejection)
+                    }
+                    Output::StartRejected(rejection) => RefreshRejection::SuccessorRefused(
+                        signal_flow::ReplaceRejection::LaunchRefused(rejection),
+                    ),
+                    Output::LaunchPending(_) | Output::StartAmbiguous(_) => {
+                        RefreshRejection::SuccessorUnconfirmed
+                    }
+                    _ => RefreshRejection::PersistenceRefused,
+                })
+            }
+            AtStop::Kept(KeptAtStop::RefreshUnplaceable) => {
+                Output::RefreshRejected(RefreshRejection::Undeclared)
+            }
+            _ => Output::RefreshRejected(RefreshRejection::PersistenceRefused),
+        };
+        if let Output::RefreshRejected(reason) = &outcome {
+            eprintln!(
+                "flow-nexus: refresh of {address:?} flow {} rejected: {reason:?}",
+                flow_id.0
+            );
+        }
+        outcome
     }
 
     fn queue_refresh(&self, address: &Address, flow_id: &str, caller: &RefreshCaller) -> Output {
@@ -2173,7 +2121,6 @@ impl WaitsForRestToReplace for RunningNexus {
         &self,
         order: OrderedReplacement,
         metaflow: Metaflow,
-        node: FlowNode,
         turn: std::sync::MutexGuard<'_, ()>,
     ) -> AtStop {
         let address = metaflow.address.clone();
@@ -2181,7 +2128,7 @@ impl WaitsForRestToReplace for RunningNexus {
             return AtStop::Kept(KeptAtStop::Waking);
         };
         eprintln!(
-            "flow-nexus: flow {} rests; the replacement ordered for it runs",
+            "flow-nexus: flow {} rests; processing its ordered replacement",
             order.predecessor.0
         );
         let response = match order.replacement_order {
@@ -2204,7 +2151,6 @@ impl WaitsForRestToReplace for RunningNexus {
                 &address,
                 metaflow,
                 signal_flow::FlowId(order.predecessor.0),
-                node,
                 &caller,
                 turn,
                 lock,
@@ -3380,7 +3326,7 @@ impl WakesInParts for RunningNexus {
         }
         let closable = self.rests_for_closing(flow_id);
         if closable && let Some(order) = ordered {
-            return self.replace_as_ordered(order, metaflow, node, turn);
+            return self.replace_as_ordered(order, metaflow, turn);
         }
         // The warning's own delivery is not proof that the harness has
         // started a turn. Do not sleep or auto-refresh it on this very

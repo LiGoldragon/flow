@@ -10,7 +10,7 @@
     # speaks to it through signal-curriculum-nexus, the wire contract both
     # compile.
     curriculum = {
-      url = "github:LiGoldragon/Curriculum/fd4a2b9396959faf8cea2dce66fe25b2ad23413e";
+      url = "github:LiGoldragon/Curriculum/1c0e14cea57b1788a3dce530bf0386aca13c02d4";
       flake = false;
     };
     curriculum-state-field = {

@@ -984,7 +984,7 @@ fn a_maintained_seat_refreshed_with_nothing_queued_starts_its_successor_first() 
         ),
         "{at_stop:?}"
     );
-    super::reaping::finish_reaps(&fixture);
+    super::reaping::finish_owned_reaps(&fixture);
     let metaflow = seat_metaflow_now(&fixture);
     assert_eq!(
         metaflow.state,
@@ -1134,7 +1134,7 @@ fn an_on_demand_seat_refreshed_with_a_waking_request_starts_its_successor_first(
         ),
         "{at_stop:?}"
     );
-    super::reaping::finish_reaps(&fixture);
+    super::reaping::finish_owned_reaps(&fixture);
     assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
     assert!(closed(&fixture), "the predecessor's pane is closed");
     let metaflow = seat_metaflow_now(&fixture);

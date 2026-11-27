@@ -660,7 +660,7 @@ fn a_refresh_owed_a_successor_starts_it_before_the_ending_flow_is_reaped() {
             ),
             "{continuity:?} {delivery:?}: {refreshed:?}"
         );
-        super::reaping::finish_reaps(&fixture);
+        super::reaping::finish_owned_reaps(&fixture);
         let metaflow = stored(&fixture);
         assert_eq!(
             metaflow.state,
@@ -1290,7 +1290,7 @@ fn a_nexus_start_starts_a_successor_owed_after_a_refresh_or_a_replace() {
 
         fixture.nexus.recover_wakes();
         // The reap the start owed is its worker's.
-        super::reaping::finish_reaps(&fixture);
+        super::reaping::finish_owned_reaps(&fixture);
 
         let metaflow = stored(&fixture);
         assert_eq!(

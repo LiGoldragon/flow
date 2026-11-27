@@ -774,6 +774,20 @@ pub(super) fn with_supervisor(
 /// to its end for each owed row, on a Herdr socket that shows the pane's
 /// going right after the subscription.
 pub(super) fn finish_reaps(fixture: &NexusFixture) {
+    finish_reaps_from(fixture, ReapFixturePane::Gone);
+}
+
+pub(super) fn finish_owned_reaps(fixture: &NexusFixture) {
+    finish_reaps_from(fixture, ReapFixturePane::Owned);
+}
+
+#[derive(Clone, Copy)]
+enum ReapFixturePane {
+    Owned,
+    Gone,
+}
+
+fn finish_reaps_from(fixture: &NexusFixture, opening: ReapFixturePane) {
     use crate::observation_lifetime::{CancelsObservation, ObservationCancellation};
     let listener = fixture
         ._herdr_server
@@ -791,22 +805,71 @@ pub(super) fn finish_reaps(fixture: &NexusFixture) {
             HerdrRouteSelection::Available(route) => Some(route),
             HerdrRouteSelection::Unavailable => None,
         };
-        if let Some(route) = &route {
-            use super::ControlsHerdrSnapshot;
-            fixture.set_agents(vec![fixture.successor_agent()]);
-            events.emit_gone(&route.herdr_pane_id.0);
-        }
+        use super::ControlsHerdrSnapshot;
+        let disappear = || {
+            if let Some(route) = &route {
+                fixture.set_agents(vec![fixture.successor_agent()]);
+                events.emit_gone(&route.herdr_pane_id.0);
+            }
+        };
         let cancellation =
             ObservationCancellation::open(fixture.nexus.store.launch_changes.clone()).unwrap();
-        let end = fixture.nexus.watch_reaped_pane(
-            &row.predecessor.0,
-            &ArmedReap {
-                launch_request_id: row.launch_request_id.clone(),
-                reap_responsibility: row.reap_responsibility.clone(),
-                route,
-            },
-            &cancellation,
-        );
+        let armed = ArmedReap {
+            launch_request_id: row.launch_request_id.clone(),
+            reap_responsibility: row.reap_responsibility.clone(),
+            route: route.clone(),
+        };
+        let watch = || {
+            fixture
+                .nexus
+                .watch_reaped_pane(&row.predecessor.0, &armed, &cancellation)
+        };
+        let end = match opening {
+            ReapFixturePane::Gone => {
+                disappear();
+                watch()
+            }
+            ReapFixturePane::Owned => {
+                let pane = &route
+                    .as_ref()
+                    .expect("owned transport route")
+                    .herdr_pane_id
+                    .0;
+                let closes = || {
+                    fs::read_to_string(fixture.file("herdr-calls.log"))
+                        .unwrap_or_default()
+                        .lines()
+                        .filter(|line| {
+                            line.split_once(" pane close ")
+                                .is_some_and(|(_, id)| id == pane)
+                        })
+                        .count()
+                };
+                let before = closes();
+                let snapshots = &fixture.nexus.pane_watch_hooks.opened_snapshots;
+                let seen = snapshots.current();
+                std::thread::scope(|scope| {
+                    let worker = scope.spawn(watch);
+                    let opened = snapshots.until(seen, Instant::now() + Duration::from_secs(10));
+                    let closed = closes() == before + 1;
+                    if opened && closed {
+                        disappear();
+                    } else {
+                        cancellation.cancel(
+                            crate::observation_lifetime::ObservationCancellationCause::NexusStopped,
+                        );
+                    }
+                    let end = worker.join().unwrap();
+                    assert!(
+                        opened && closed,
+                        "owned pane {pane}: opening snapshot {opened}, closes {} -> {}",
+                        before,
+                        closes()
+                    );
+                    end
+                })
+            }
+        };
         assert_eq!(
             end,
             PaneWatchEnd::Acted,

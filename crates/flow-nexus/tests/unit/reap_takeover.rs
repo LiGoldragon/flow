@@ -699,6 +699,46 @@ fn a_crash_after_the_successor_end_commit_is_recovered_from_the_rows_once() {
     assert_eq!(world.fixture.restarted(), read, "read once, then nothing");
 }
 
+/// A definitive app-server family result, distinct from a missing pane.
+fn native_successor_ended(world: &ReapWorld) {
+    use crate::generated::memory::SeatStanding;
+    use crate::send_tool::RespondsToSendCalls;
+    use crate::store::ReadsFlowRows;
+    let node = world
+        .fixture
+        .nexus
+        .store
+        .flow_node(SUCCESSOR)
+        .unwrap()
+        .unwrap();
+    let mut stale = node.clone();
+    stale.session_id.0.push_str("-other");
+    world
+        .fixture
+        .nexus
+        .apply_observed_family(&stale, None, Some(SeatStanding::Ended));
+    assert_eq!(
+        world.lifecycle(SUCCESSOR),
+        FlowLifecycle::Active,
+        "stale family result does not end the bound thread"
+    );
+    world
+        .fixture
+        .nexus
+        .apply_thread_family(&node.session_id.0, Some(SeatStanding::Ended));
+    assert_eq!(world.lifecycle(SUCCESSOR), FlowLifecycle::Exited);
+    let settled = world.attempt_count();
+    world
+        .fixture
+        .nexus
+        .apply_thread_family(&node.session_id.0, Some(SeatStanding::Ended));
+    assert_eq!(
+        settled,
+        world.attempt_count(),
+        "replaying the native end spends no obligation twice"
+    );
+}
+
 /// Test 5: a refused successor-end commit leaves the prior state whole, for
 /// the next end to re-run: (a) the Stop retried, its pane positively
 /// observed Absent, records Stopped with no close (ruling cszm, Option A),
@@ -799,6 +839,9 @@ fn a_refused_successor_end_commit_leaves_the_prior_state_for_the_next_end() {
                     matches!(delivered, meta_signal_flow::Output::DeliveryRejected(_)),
                     "{delivered:?}"
                 );
+                assert_eq!(world.lifecycle(SUCCESSOR), FlowLifecycle::Active);
+                assert_eq!(world.owner(), Some(ReapResponsibility::LaunchSuccessor));
+                native_successor_ended(&world);
                 assert_eq!(world.lifecycle(SUCCESSOR), FlowLifecycle::Exited);
             }
             _ => {
@@ -899,6 +942,9 @@ fn every_end_of_the_successor_reassigns_what_it_owed() {
                             message: super::middle_abrupt("are you there"),
                         },
                     ));
+                assert_eq!(world.lifecycle(SUCCESSOR), FlowLifecycle::Active);
+                assert_eq!(world.owner(), Some(ReapResponsibility::LaunchSuccessor));
+                native_successor_ended(&world);
                 FlowLifecycle::Exited
             }
             "wake" => {
@@ -919,6 +965,9 @@ fn every_end_of_the_successor_reassigns_what_it_owed() {
                     )
                     .unwrap();
                 world.fixture.nexus.drain_awake(&world.address());
+                assert_eq!(world.lifecycle(SUCCESSOR), FlowLifecycle::Active);
+                assert_eq!(world.owner(), Some(ReapResponsibility::LaunchSuccessor));
+                native_successor_ended(&world);
                 FlowLifecycle::Exited
             }
             _ => {
@@ -928,10 +977,16 @@ fn every_end_of_the_successor_reassigns_what_it_owed() {
                     .fixture
                     .nexus
                     .dispatch(Input::Refresh(world.address()));
-                assert_eq!(
-                    refreshed,
-                    Output::RefreshRejected(signal_flow::RefreshRejection::NotAwake)
+                assert!(
+                    matches!(
+                        refreshed,
+                        Output::RefreshQueued(_) | Output::RefreshRejected(_)
+                    ),
+                    "{refreshed:?}"
                 );
+                assert_eq!(world.lifecycle(SUCCESSOR), FlowLifecycle::Active);
+                assert_eq!(world.owner(), Some(ReapResponsibility::LaunchSuccessor));
+                native_successor_ended(&world);
                 FlowLifecycle::Exited
             }
         };

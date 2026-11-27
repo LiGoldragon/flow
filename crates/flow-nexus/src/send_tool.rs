@@ -55,6 +55,7 @@ use crate::live::HoldsLiveValue;
 use crate::sending::{AdmitsSendPayload, MintsId};
 use crate::store::current_seat::RecordsCurrentSeats;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
+use crate::store::restart::RecordsRestarts;
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::{NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows};
 use crate::submission::NotesAppServerMessage;
@@ -742,6 +743,13 @@ pub(crate) trait RespondsToSendCalls {
     /// not, asks Flow to wake the target whose persisted delivery policy is
     /// Wake. Err when the answer could not be written.
     fn observe_thread_family(&self, thread: &str);
+    fn apply_observed_family(
+        &self,
+        node: &signal_flow::FlowNode,
+        birth: Option<crate::generated::memory::SeatBirth>,
+        standing: Option<crate::generated::memory::SeatStanding>,
+    ) -> Option<crate::waking::AtStop>;
+    #[cfg(test)]
     fn apply_thread_family(
         &self,
         thread: &str,
@@ -759,39 +767,80 @@ impl AwaitsAppServerSocket for RunningNexus {}
 impl RespondsToSendCalls for RunningNexus {
     fn observe_thread_family(&self, thread: &str) {
         use crate::seat_observation::ReadsNativeStanding;
-        if let Some(node) = self.codex_flow_on(thread) {
-            self.apply_thread_family(thread, self.read_native_standing(&node));
+        if let Some(node) = self.codex_flow_on(thread)
+            && let Ok(birth) = self.store.seat_birth(&node.flow_id.0)
+        {
+            let standing = self.read_native_standing(&node);
+            self.apply_observed_family(&node, birth, standing);
         }
     }
 
+    #[cfg(test)]
     fn apply_thread_family(
         &self,
         thread: &str,
         standing: Option<crate::generated::memory::SeatStanding>,
     ) -> Option<crate::waking::AtStop> {
+        let node = self.codex_flow_on(thread)?;
+        let birth = self.store.seat_birth(&node.flow_id.0).ok()?;
+        self.apply_observed_family(&node, birth, standing)
+    }
+    fn apply_observed_family(
+        &self,
+        node: &signal_flow::FlowNode,
+        birth: Option<crate::generated::memory::SeatBirth>,
+        standing: Option<crate::generated::memory::SeatStanding>,
+    ) -> Option<crate::waking::AtStop> {
         use crate::generated::memory::{SeatActivity, SeatStanding};
         use crate::store::current_seat::CurrentSeatRead;
         use crate::store::metaflow::SleepsMetaflows;
-        let node = self.codex_flow_on(thread)?;
-        if node.flow_lifecycle != signal_flow::FlowLifecycle::Active {
-            return None;
-        }
+        let thread = &node.session_id.0;
+        let ended = standing == Some(SeatStanding::Ended);
+        let mut end_address = None;
         let rest = standing == Some(SeatStanding::Alive(SeatActivity::Resting));
         {
             let _gate = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
-            match self.store.current_seat(&node.flow_id.0).ok()? {
-                CurrentSeatRead::Known(row)
-                    if row.seat_standing == SeatStanding::Ended
-                        || standing.as_ref() == Some(&row.seat_standing) =>
+            if node.flow_lifecycle != signal_flow::FlowLifecycle::Active
+                || self.codex_flow_on(thread).as_ref() != Some(node)
+                || self.store.restart_record(&node.flow_id.0).ok()?.is_some()
+                || self.store.seat_birth(&node.flow_id.0).ok()? != birth
+            {
+                return None;
+            }
+            if ended {
+                use crate::generated::operation::{Operation, Outcome, Record_Data};
+                use crate::performing::Performs;
+                end_address = self
+                    .store
+                    .metaflow_awake_as(&node.flow_id.0)
+                    .ok()?
+                    .map(|seat| seat.address);
+                if self.perform(Operation::Record(Record_Data::Exited(node.flow_id.clone())))
+                    != Outcome::Recorded
                 {
                     return None;
                 }
-                CurrentSeatRead::NoRecord if standing.is_none() => return None,
-                _ => {}
+            } else {
+                match self.store.current_seat(&node.flow_id.0).ok()? {
+                    CurrentSeatRead::Known(row)
+                        if row.seat_standing == SeatStanding::Ended
+                            || standing.as_ref() == Some(&row.seat_standing) =>
+                    {
+                        return None;
+                    }
+                    CurrentSeatRead::NoRecord if standing.is_none() => return None,
+                    _ => {}
+                }
+                self.store
+                    .record_observation(&node.flow_id.0, standing)
+                    .ok()?;
             }
-            self.store
-                .record_observation(&node.flow_id.0, standing)
-                .ok()?;
+        }
+        if ended {
+            if let Some(address) = end_address {
+                self.wake_due(address);
+            }
+            return None;
         }
         if rest {
             return Some(self.settle_native_rest(&node.flow_id.0, thread));

@@ -135,9 +135,9 @@ fn each_claude_report_is_one_event_leading_to_its_state() {
     assert!(transitions(&fixture, seat).is_empty());
 
     report(&fixture, signal_flow::Event::Started(session()));
-    assert_eq!(
-        held(&fixture, seat),
-        vec![reported(meta::State::Acting, Event::Started)]
+    assert!(
+        held(&fixture, seat).is_empty(),
+        "session attachment is not a launch or a change of activity"
     );
 
     report(

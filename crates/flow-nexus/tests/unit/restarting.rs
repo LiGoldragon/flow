@@ -554,6 +554,17 @@ fn restart_of_a_working_seat_is_carried_out_at_its_next_stop() {
         shown.replace("\"agent_status\":\"idle\"", "\"agent_status\":\"working\""),
     )
     .unwrap();
+    assert!(report_from(
+        &fixture,
+        Event::PromptSubmitted(signal_flow::NativePrompt {
+            native_session_id_option: Some(signal_flow::NativeSessionId(
+                world.seat.session.clone()
+            )),
+            prompt_id_option: None,
+            prompt_sha256: signal_flow::PromptSha256("0".repeat(64))
+        }),
+        Some(world.old_hook())
+    ));
     assert_eq!(
         restarted(&fixture),
         Output::RestartQueued(flow_ethos::FlowId(FLOW.into()))
@@ -3534,13 +3545,17 @@ fn adopted_on_new(
         }),
         Output::Adopted(flow_ethos::FlowId(FLOW.into()))
     );
-    // An adopted seat holds no report in the new Nexus's Memory until its
-    // harness reports; its next report is its rest.
-    use crate::generated::transitions::{ReportedEvent, ReportsEvents};
-    new.report_event(ReportedEvent {
-        flow_id: flow_ethos::FlowId(FLOW.into()),
-        event: crate::generated::memory::Event::Idle(signal_flow::Tokens(0)),
-    });
+    // Adoption supplies identity, never activity. The fixture's live
+    // registered process and native transcript establish current standing.
+    use crate::seat_observation::ObservesCurrentSeats;
+    use crate::store::current_seat::{RecordsCurrentSeats, SeatDecision};
+    new.observe_returning_source(&new_node(&new));
+    assert!(matches!(
+        new.store.seat_decision(FLOW).unwrap(),
+        SeatDecision::Observed(crate::generated::memory::SeatStanding::Alive(
+            crate::generated::memory::SeatActivity::Resting
+        ))
+    ));
     (world, new, curriculum)
 }
 

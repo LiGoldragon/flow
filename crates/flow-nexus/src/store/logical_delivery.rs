@@ -32,7 +32,8 @@ use signal_flow::{
 /// The existing launch settlement and the two exits of a marked pane write
 /// share one atomic queue/lifecycle commit.
 enum QueueOutcome<'a> {
-    Started(&'a str, DeliveryState),
+    #[cfg(test)]
+    FixtureHandOver(&'a str, DeliveryState),
     Written(&'a str, Option<DeliveryState>),
     Interrupted(Vec<QueueDeliveryAttempt>),
 }
@@ -180,7 +181,8 @@ impl CommitsQueueOutcomes for FlowStore {
         };
         let queue = &mut stored.metaflow.queue.0;
         let (state, flow_id, request_state, attempts) = match outcome {
-            QueueOutcome::Started(flow_id, state) => {
+            #[cfg(test)]
+            QueueOutcome::FixtureHandOver(flow_id, state) => {
                 if stored.metaflow.state
                     != flow_ethos::State::Awake(flow_ethos::FlowId(flow_id.to_owned()))
                     || !queue.starts_with(handed)
@@ -1183,6 +1185,7 @@ pub(crate) trait RecordsLogicalDeliveries {
     /// in a turn that runs. A request whose record is already final keeps
     /// it. False, and nothing written, when the metaflow is not Awake as
     /// the flow or its queue does not start with `handed`.
+    #[cfg(test)]
     fn record_hand_over(
         &self,
         address: &Address,
@@ -1683,6 +1686,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             logical_delivery_id_vector,
         })
     }
+    #[cfg(test)]
     fn record_hand_over(
         &self,
         address: &Address,
@@ -1690,7 +1694,11 @@ impl RecordsLogicalDeliveries for FlowStore {
         handed: &[QueueEntry],
         state: DeliveryState,
     ) -> Result<bool, StoreError> {
-        self.commit_queue_outcome(address, handed, QueueOutcome::Started(flow_id, state))
+        self.commit_queue_outcome(
+            address,
+            handed,
+            QueueOutcome::FixtureHandOver(flow_id, state),
+        )
     }
     fn bind_simplified_reply(&self, binding: SimplifiedReplyBinding) -> Result<(), StoreError> {
         let _guard = self

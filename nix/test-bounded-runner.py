@@ -24,8 +24,8 @@ if name == "assertion":
     print("original assertion: actual != expected", flush=True)
     sys.exit(101)
 if name == "hang":
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=True)
-    pathlib.Path("descendant").write_text(str(child.pid))
+    nested = "import os,pathlib,subprocess,sys,time; leaf=subprocess.Popen([sys.executable,'-c','import time;time.sleep(600)'],start_new_session=True); pathlib.Path('descendant').write_text(str(os.getpid())+' '+str(leaf.pid)); time.sleep(600)"
+    subprocess.Popen([sys.executable, "-c", nested], start_new_session=True)
     print("entered blocking fixture", flush=True)
     time.sleep(600)
 print("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out")
@@ -44,7 +44,9 @@ print("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered ou
                          "TIMEOUT after 2s: hang", "2 passed; 2 failed; 1 ignored; 5 total",
                          "failed: assertion", "failed: hang"]:
             assert expected in result.stdout, expected
-        assert not Path("/proc", (root / "descendant").read_text()).exists()
+        nested = (root / "descendant").read_text().split()
+        assert len(nested) == 2
+        assert all(not Path("/proc", pid).exists() for pid in nested)
 
 
 if __name__ == "__main__":

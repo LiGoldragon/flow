@@ -32,7 +32,14 @@ def run_case(binary, name, seconds):
             # Once a child exits, any grandchildren are adopted by this
             # reaper, including those in unrelated process groups.
             children = Path(f"/proc/self/task/{os.getpid()}/children")
-            while owned := children.read_text().split():
+            while True:
+                try:
+                    retired, _ = os.waitpid(-1, os.WNOHANG)
+                except ChildProcessError:
+                    break  # ECHILD: this subreaper has no remaining children.
+                if retired:
+                    continue
+                owned = children.read_text().split()
                 for pid in map(int, owned):
                     try:
                         os.kill(pid, signal.SIGKILL)

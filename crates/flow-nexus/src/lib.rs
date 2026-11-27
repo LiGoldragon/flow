@@ -912,9 +912,7 @@ impl signal_flow::Answering for OrdinaryCall<'_> {
         use crate::store::logical_delivery::RecordsLogicalDeliveries;
         self.nexus
             .store
-            .read_every_delivery_snapshot(
-                delivery_cursor_option.as_ref().map(|cursor| cursor.0),
-            )
+            .read_every_delivery_snapshot(delivery_cursor_option.as_ref().map(|cursor| cursor.0))
             .map(|observation| {
                 crate::message_projection::ProjectsSendObservation::visible_send_observation(
                     &observation,

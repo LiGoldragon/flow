@@ -18,7 +18,6 @@ use crate::performing::ClassifiesNativeLaunchFailure;
 use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
 use crate::store::ManagesMetaflowState;
-use crate::tool_catalog::AuthorizesToolCatalog;
 use crate::store::NamesLiveFlow;
 use crate::store::ReadsLaunchInspectionRecords;
 use crate::store::address_hold::HoldsLaunchAddress;
@@ -33,6 +32,7 @@ use crate::store::{
 };
 use crate::store::{AnswersLaunchOutcome, LaunchedRecord};
 use crate::store::{ConfiguresFlowStore, NamesConfiguredModel};
+use crate::tool_catalog::AuthorizesToolCatalog;
 use crate::waking::{RestsEndedAwake, SettlesStopsAtConfirmation};
 use crate::{
     RunningNexus,
@@ -547,10 +547,9 @@ impl LaunchesFlows for RunningNexus {
         root: meta_signal_flow::Root,
         harness_arguments: Vec<String>,
     ) -> Output {
-        if let Err(refusal) = Self::authorize_tool_catalog(
-            &launch.harness_kind,
-            &launch.launch_profile.tool_set,
-        ) {
+        if let Err(refusal) =
+            Self::authorize_tool_catalog(&launch.harness_kind, &launch.launch_profile.tool_set)
+        {
             return Output::StartRejected(StartRejection::ToolCatalogRefused(refusal));
         }
         let persistence = || Output::StartRejected(StartRejection::LaunchPersistenceRefused);

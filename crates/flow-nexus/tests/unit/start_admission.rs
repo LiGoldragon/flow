@@ -261,7 +261,11 @@ fn an_explicit_claude_catalog_is_refused_publicly_before_any_native_effect() {
     );
     assert!(fixture.typed().is_none(), "no prompt reached a native pane");
     assert!(
-        !fixture.directory.path().join("herdr-operations.log").exists(),
+        !fixture
+            .directory
+            .path()
+            .join("herdr-operations.log")
+            .exists(),
         "no pane or provider command was attempted"
     );
 

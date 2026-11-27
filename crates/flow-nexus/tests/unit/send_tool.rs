@@ -5,6 +5,7 @@
 //! subscription and independent read-only family observation, in that order.
 
 use super::{ControlsHerdrSnapshot, NexusFixture};
+use crate::Dispatches;
 use crate::HoldsStopRequest;
 use crate::codex::{CodexAdapter, ResponderSignal, SelectsCodexEndpoint};
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
@@ -17,7 +18,6 @@ use crate::live::HoldsLiveValue;
 use crate::send_tool::{
     DescribesSendInvocation, HandlesSendCallAnswers, RespondsToSendCalls, SendTool, ServesSendTool,
 };
-use crate::Dispatches;
 use crate::sending::{MAX_SEND_PAYLOAD_BYTES, MeasuresSendPayload};
 use crate::store::logical_delivery::{MintsRequestIds, RecordsLogicalDeliveries};
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
@@ -2476,9 +2476,11 @@ fn observe_agent_reads_working_while_an_idle_codex_parent_waits_on_its_child() {
         Some(active_family),
     );
     assert_eq!(
-        fixture.nexus.dispatch(Input::Observe(ObserveSelection::Agent(
-            flow_ethos::FlowId("908786".into()),
-        ))),
+        fixture
+            .nexus
+            .dispatch(Input::Observe(ObserveSelection::Agent(flow_ethos::FlowId(
+                "908786".into()
+            ),))),
         Output::AgentObserved(AgentObservation {
             flow_id: flow_ethos::FlowId("908786".into()),
             agent_state: AgentState::Working,
@@ -2495,9 +2497,11 @@ fn observe_agent_reads_working_while_an_idle_codex_parent_waits_on_its_child() {
         Some(still_active),
     );
     assert_eq!(
-        fixture.nexus.dispatch(Input::Observe(ObserveSelection::Agent(
-            flow_ethos::FlowId("908786".into()),
-        ))),
+        fixture
+            .nexus
+            .dispatch(Input::Observe(ObserveSelection::Agent(flow_ethos::FlowId(
+                "908786".into()
+            ),))),
         Output::AgentObserved(AgentObservation {
             flow_id: flow_ethos::FlowId("908786".into()),
             agent_state: AgentState::Idle,

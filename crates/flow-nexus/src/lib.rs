@@ -65,6 +65,7 @@ pub mod reminding;
 pub mod repairing;
 pub mod restarting;
 use metaflow::DispatchesMetaflowPeer;
+mod claude_changes;
 #[cfg(test)]
 mod exec_witness;
 #[cfg(test)]

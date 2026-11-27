@@ -1073,3 +1073,11 @@ launch identity until confirmation: another wake cannot create a duplicate.
 An observed receipt can complete the same stored attempt without resubmission.
 Takeover also rejects undeclared parked reservations and discards undeclared
 successor and replacement obligations, preserving the Address's durable queue.
+
+A hookless Claude's main transcript is also an event source. Flow watches the
+native registry, projects root and project directories before reading the
+current seat. Creation, append and atomic replacement identify the session
+to re-observe against its live process and birth. Only the main session's
+native activity changes its standing; transport readiness never does. A
+committed Resting revision feeds the same recipient dispatcher as a bound
+hook. Re-reading the same standing does not announce a second transition.

@@ -1132,3 +1132,102 @@ fn a_new_release_during_a_blocked_retry_stays_pending_without_a_second_writer() 
         assert_eq!(typed_count(&fixture, "coalesce the retry"), 1);
     });
 }
+
+#[test]
+fn a_hookless_claude_transcript_rest_delivers_queued_soft_exactly_once() {
+    use crate::HoldsStopRequest;
+    use crate::event_wait::AwaitsDirectory;
+    use crate::generated::memory::{SeatActivity, SeatStanding};
+    use crate::seat_routes::ServesBoundRoutes;
+    use crate::store::current_seat::SeatDecision;
+    use crate::store::recipient_retries::{ObservesRetryCompletion, RetriesRecipients};
+    use std::fs;
+    use std::time::{Duration, Instant};
+    let fixture = NexusFixture::new();
+    let payload = "queued for a hookless Claude";
+    seat(&fixture, vec![from_core(payload)]);
+    let command_log = fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    let transcript = super::waking::claude_transcript(&fixture);
+    fs::remove_file(&transcript).unwrap();
+    let store = &fixture.nexus.store;
+    store.record_observation(CLAUDE_SEAT, None).unwrap();
+    let registry = &fixture.nexus.herdr.claude_sessions.directory;
+    assert!(registry.starts_with(fixture.directory.path()));
+    fs::create_dir_all(registry).unwrap();
+    let pid = std::process::id();
+    let stat = fs::read_to_string("/proc/self/stat").unwrap();
+    let birth = stat
+        .rsplit_once(") ")
+        .unwrap()
+        .1
+        .split_whitespace()
+        .nth(19)
+        .unwrap();
+    fs::write(
+        registry.join(format!("{pid}.json")),
+        serde_json::json!({"pid":pid,"sessionId":CLAUDE_SESSION,"procStart":birth}).to_string(),
+    )
+    .unwrap();
+    fixture.nexus.watch_recipient_retries().unwrap();
+    std::thread::scope(|scope| {
+        struct Stop<'a>(&'a crate::RunningNexus);
+        impl Drop for Stop<'_> {
+            fn drop(&mut self) {
+                self.0.stopping.request();
+            }
+        }
+        scope.spawn(|| fixture.nexus.serve_recipient_retries());
+        scope.spawn(|| fixture.nexus.serve_bound_routes());
+        let _stop = Stop(&fixture.nexus);
+        let deadline = || Instant::now() + Duration::from_secs(8);
+        let user = serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"message":{"content":"native turn"}});
+        fs::write(&transcript, format!("{user}\n")).unwrap();
+        assert!(store.completed_by(&[address(Model::Sol)], deadline()));
+        assert!(matches!(
+            store.seat_decision(CLAUDE_SEAT).unwrap(),
+            SeatDecision::Observed(SeatStanding::Alive(SeatActivity::Working))
+        ));
+        assert_eq!(typed_count(&fixture, payload), 0);
+        let replacement = transcript.with_extension("replacement");
+        fs::write(
+            &replacement,
+            format!("{user}\n{}\n", end_turn("foreground-ended")),
+        )
+        .unwrap();
+        fs::rename(replacement, &transcript).unwrap();
+        assert!(
+            fixture
+                .directory
+                .path()
+                .until_holds(deadline(), &mut || typed_count(&fixture, payload) == 1)
+        );
+        use crate::store::AnnouncesLaunchChanges;
+        assert!(
+            store
+                .launch_changes
+                .until_holds(deadline(), &mut || queue(&fixture).is_empty())
+        );
+        // The recipient may append its accepted user row. Two more genuine
+        // file events traverse Working then Resting; neither retypes the input.
+        append_main_rows(&fixture, &[user]);
+        let until = |activity: SeatActivity| {
+            let signal = crate::store::LaunchChanges::default();
+            use crate::store::metaflow_watch::WatchesMetaflows;
+            store.watch_native_rests(signal.clone()).unwrap();
+            signal.until_holds(deadline(), &mut ||matches!(store.seat_decision(CLAUDE_SEAT).unwrap(),SeatDecision::Observed(SeatStanding::Alive(current)) if current==activity))
+        };
+        assert!(until(SeatActivity::Working));
+        append_main_rows(&fixture, &[end_turn("duplicate-ready")]);
+        assert!(until(SeatActivity::Resting));
+        assert_eq!(
+            fs::read_to_string(command_log)
+                .unwrap()
+                .matches("agent prompt")
+                .count(),
+            1
+        );
+    });
+}

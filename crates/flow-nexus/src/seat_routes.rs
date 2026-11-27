@@ -3,13 +3,17 @@
 //! a seat. All validated Claude process descriptors share the same wait.
 use crate::caller::KnowsHerdrServers;
 use crate::claude::ReadsClaudeSessions;
+use crate::claude_changes::{ClaudeDirectories, ReadsClaudeChanges};
 use crate::event_wait::{AnnouncesOnce, AwaitsDescriptors, OpensExitDescriptor};
+use crate::herdr::LocatesNativeTranscripts;
 use crate::herdr::session_stream::{ReadsSessionChanges, SessionCursor, SharesSessionStreams};
 use crate::herdr::{PaneOwnership, ReadsHerdrPanes};
 use crate::observe_agent::RecordsWitnessedExit;
 use crate::restarting::{FencesSeatEvents, SeatWitness};
+use crate::seat_observation::ReadsNativeStanding;
 use crate::store::current_seat::{CurrentSeatRead, RecordsCurrentSeats};
 use crate::store::metaflow_watch::WatchesMetaflows;
+use crate::store::restart::RecordsRestarts;
 use crate::store::{AnnouncesLaunchChanges, LaunchChanges, ManagesMetaflowState, ReadsFlowRows};
 use crate::{HoldsStopRequest, RunningNexus};
 use std::collections::{BTreeMap, BTreeSet};
@@ -76,11 +80,25 @@ impl ServesBoundRoutes for RunningNexus {
             return;
         }
         self.herdr.session_streams.announce_to(changes.clone());
+        let mut directories = self
+            .herdr
+            .native_transcript_root(&signal_flow::HarnessKind::Claude, "")
+            .ok()
+            .and_then(|projects| {
+                ClaudeDirectories::watch(projects, self.herdr.claude_sessions.directory.clone())
+                    .map_err(|err| eprintln!("flow-nexus: Claude observation unavailable: {err}"))
+                    .ok()
+            });
+        let mut native_seats = BTreeMap::new();
         let mut views = BTreeMap::<String, BoundTransport>::new();
         while !self.stopping.requested() {
             let Ok(changed) = changes.next_descriptor() else {
                 return;
             };
+            let native = directories
+                .as_mut()
+                .and_then(|source| source.changes().ok());
+            let mut present_native = BTreeSet::new();
             let sessions = self.herdr.herdr_sessions().map(|items| {
                 items
                     .into_iter()
@@ -106,6 +124,47 @@ impl ServesBoundRoutes for RunningNexus {
                 };
                 if node.flow_lifecycle != signal_flow::FlowLifecycle::Active {
                     continue;
+                }
+                if node.harness_kind == signal_flow::HarnessKind::Claude
+                    && let Some(changes) = &native
+                {
+                    present_native.insert(id.0.clone());
+                    let identity = (
+                        node.session_id.clone(),
+                        self.store.seat_birth(&id.0).ok().flatten(),
+                    );
+                    let first = native_seats.get(&id.0) != Some(&identity);
+                    if first
+                        || changes.topology
+                        || changes.registry
+                        || changes.sessions.contains(&node.session_id.0)
+                    {
+                        let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+                        if matches!(self.store.restart_record(&id.0), Ok(None))
+                            && self.store.flow_node(&id.0).ok().flatten() == Some(node.clone())
+                            && self.store.seat_birth(&id.0).ok().flatten() == identity.1
+                        {
+                            let valid_birth = identity.1.as_ref().is_none_or(|birth| {
+                                u32::try_from(birth.process.pid.0)
+                                    .ok()
+                                    .and_then(|pid| self.herdr.claude_sessions.session_of(pid))
+                                    .as_deref()
+                                    == Some(node.session_id.0.as_str())
+                            });
+                            let observed = valid_birth
+                                .then(|| self.read_native_standing(&node))
+                                .flatten();
+                            // Ending a known process goes through the witnessed
+                            // exit path below; file changes convey activity.
+                            if !matches!(
+                                observed,
+                                Some(crate::generated::memory::SeatStanding::Ended)
+                            ) {
+                                let _ = self.store.record_observation(&id.0, observed);
+                            }
+                        }
+                    }
+                    native_seats.insert(id.0.clone(), identity);
                 }
                 let Some(witness) = self.seat_witness(&id.0) else {
                     continue;
@@ -156,8 +215,12 @@ impl ServesBoundRoutes for RunningNexus {
                     };
                 }
             }
+            native_seats.retain(|id, _| present_native.contains(id));
             views.retain(|id, _| present.contains(id));
             let mut descriptors = vec![self.stopping.descriptor(), changed.descriptor()];
+            if let Some(source) = &directories {
+                descriptors.push(source.descriptor.as_fd());
+            }
             descriptors.extend(processes.iter().map(AsFd::as_fd));
             if descriptors.ready(None).is_err() {
                 return;

@@ -3549,7 +3549,9 @@ fn adopted_on_new(
     // registered process and native transcript establish current standing.
     use crate::seat_observation::ObservesCurrentSeats;
     use crate::store::current_seat::{RecordsCurrentSeats, SeatDecision};
-    new.observe_returning_source(&new_node(&new));
+    let adopted = new.store.flow_node(FLOW).unwrap().expect("adopted seat");
+    assert_eq!(adopted.session_id.0, world.seat.session);
+    new.observe_returning_source(&adopted);
     assert!(matches!(
         new.store.seat_decision(FLOW).unwrap(),
         SeatDecision::Observed(crate::generated::memory::SeatStanding::Alive(

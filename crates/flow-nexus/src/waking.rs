@@ -2014,6 +2014,15 @@ impl WaitsForRestToReplace for RunningNexus {
                 _ => Output::RefreshRejected(RefreshRejection::PersistenceRefused),
             };
         }
+        // Writability of the route is distinct from the native rest that
+        // authorized this refresh. An unreadable snapshot is not refusal
+        // by a known pane, and neither changes the seat's standing.
+        if matches!(
+            self.herdr.pane_presence(&node),
+            crate::herdr::PanePresence::Unknown
+        ) {
+            return Output::RefreshRejected(RefreshRejection::HerdrUnavailable);
+        }
         if let Err(outcome) = self.close_at_rest(&flow_id.0, &node) {
             return Output::RefreshRejected(match *outcome {
                 Outcome::Failed(Failed_Data::HerdrRefused) => RefreshRejection::CloseRefused,
@@ -2669,6 +2678,22 @@ impl WakesInParts for RunningNexus {
             self.rest_ended_awake(address);
             match self.store.metaflow(address) {
                 Ok(Some(metaflow)) if metaflow.state == flow_ethos::State::Asleep => {
+                    use crate::handover::NamesPredecessor;
+                    if let Some(predecessor) = metaflow.past.0.last()
+                        && !predecessor.0.names_predecessor()
+                    {
+                        return Err(WakeRefusal::FreshNotStarted(
+                            Failed_Data::CompositionRefused(
+                                signal_flow::CompositionRefusal::HandoverUnreadable(
+                                    signal_flow::HandoverUnreadable_Data {
+                                        flow_id: predecessor.clone(),
+                                        handover_fault:
+                                            signal_flow::HandoverFault::InvalidPredecessor,
+                                    },
+                                ),
+                            ),
+                        ));
+                    }
                     if !self.wake_is_due(&metaflow) {
                         return Err(WakeRefusal::NothingQueued);
                     }

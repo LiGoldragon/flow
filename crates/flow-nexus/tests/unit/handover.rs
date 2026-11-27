@@ -122,6 +122,19 @@ fn woken(left: Left<'_>, past: Vec<&str>, declared: bool) -> (NexusFixture, Fres
         vec![Request::Order("A".into())],
     ));
     let world = fixture.fresh_claude_world();
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .metaflow(&at)
+            .unwrap()
+            .unwrap()
+            .queue
+            .0
+            .len(),
+        1,
+        "the first wake has not claimed or removed its queued request"
+    );
     let lease = fixture.nexus.waking.hold(&at).expect("the wake holds it");
     let outcome = fixture.nexus.perform(Operation::Wake(at));
     drop(lease);

@@ -36,6 +36,21 @@ pub trait YieldsHandover: std::fmt::Debug + Send + Sync {
     }
 }
 
+/// A predecessor must be a single flow name, including when no current
+/// seat record can exist for a malformed value.
+pub(crate) trait NamesPredecessor {
+    fn names_predecessor(&self) -> bool;
+}
+
+impl NamesPredecessor for str {
+    fn names_predecessor(&self) -> bool {
+        !self.is_empty()
+            && self
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    }
+}
+
 /// The file-backed source: `flows/<predecessor FlowId>/handover.md` under
 /// the launch root. A missing file, or an empty one, is [`Handover::Absent`];
 /// a predecessor that names no flow, a file that cannot be read, or one that
@@ -46,11 +61,7 @@ pub struct HandoverFile;
 impl YieldsHandover for HandoverFile {
     fn handover(&self, _address: &Address, predecessor: &str, launch_root: &Path) -> Handover {
         // A FlowId names a directory: letters, digits, hyphen and underscore.
-        let names_a_flow = !predecessor.is_empty()
-            && predecessor
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
-        if !names_a_flow {
+        if !predecessor.names_predecessor() {
             return Handover::Unreadable(HandoverFault::InvalidPredecessor);
         }
         let path = launch_root

@@ -146,16 +146,31 @@ impl ServesBoundRoutes for RunningNexus {
                             && self.store.flow_node(&id.0).ok().flatten() == Some(node.clone())
                             && self.store.seat_birth(&id.0).ok().flatten() == identity.1
                         {
-                            let valid_birth = identity.1.as_ref().is_none_or(|birth| {
-                                u32::try_from(birth.process.pid.0)
-                                    .ok()
-                                    .and_then(|pid| self.herdr.claude_sessions.session_of(pid))
-                                    .as_deref()
-                                    == Some(node.session_id.0.as_str())
-                            });
-                            let observed = valid_birth
-                                .then(|| self.read_native_standing(&node))
-                                .flatten();
+                            let native_birth = || {
+                                use crate::restarting::{ExitProof, ProcFs, ProvesExit};
+                                use crate::store::{FlowStore, ReadsFlowMemory};
+                                let pid = self
+                                    .herdr
+                                    .claude_sessions
+                                    .session_process(&node.session_id.0)??;
+                                let process = FlowStore::process_identity_for_pid(pid)?;
+                                if process.exit_proof(&ProcFs) != ExitProof::Running
+                                    || self.herdr.claude_sessions.session_of(pid).as_deref()
+                                        != Some(node.session_id.0.as_str())
+                                    || identity
+                                        .1
+                                        .as_ref()
+                                        .is_some_and(|birth| birth.process != process)
+                                {
+                                    return None;
+                                }
+                                Some(process)
+                            };
+                            let before = native_birth();
+                            let observed = before
+                                .as_ref()
+                                .and_then(|_| self.read_native_standing(&node))
+                                .filter(|_| before == native_birth());
                             // Ending a known process goes through the witnessed
                             // exit path below; file changes convey activity.
                             if !matches!(

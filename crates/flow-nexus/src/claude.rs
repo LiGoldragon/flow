@@ -306,6 +306,9 @@ impl ReadsClaudeTurns for Path {
     ) -> Option<crate::generated::memory::SeatActivity> {
         use crate::generated::memory::SeatActivity::{Resting, Working};
         let transcript = fs::read_to_string(self).ok()?;
+        if !transcript.ends_with('\n') {
+            return None; // An incomplete JSONL record is not a turn boundary.
+        }
         let mut activity = None;
         for line in transcript.lines() {
             let row = serde_json::from_str::<Value>(line).ok()?;

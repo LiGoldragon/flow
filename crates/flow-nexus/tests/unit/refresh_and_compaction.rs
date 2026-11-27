@@ -675,6 +675,58 @@ fn an_idle_on_demand_seat_is_refreshed_only_past_its_threshold() {
 }
 
 #[test]
+fn a_resting_refresh_deferred_for_transport_runs_when_its_own_route_is_ready() {
+    use crate::HoldsStopRequest;
+    use crate::store::recipient_retries::{ObservesRetryCompletion, RetriesRecipients};
+    use std::time::{Duration, Instant};
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(vec![], PromptFixture::Prompted("w1:p3"));
+    claude_seat(&fixture, 210_000);
+    append_main_rows(&fixture, &[end_turn("ready-on-transport")]);
+    seat_warned_at(&fixture, 200_000, "threshold");
+    declare_seat(
+        &fixture,
+        Continuity::OnDemand,
+        vec!["spirit:core:0".into(), "intent:flow:0".into()],
+    );
+    seat_metaflow(&fixture, vec![]);
+    fixture
+        .nexus
+        .store
+        .record_context_size(CLAUDE_SEAT, 210_000)
+        .unwrap();
+    assert_eq!(
+        fixture.nexus.settle_stopped(CLAUDE_SEAT),
+        AtStop::Kept(crate::waking::KeptAtStop::RefreshUnrouted)
+    );
+    assert!(!closed(&fixture));
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.nexus.watch_recipient_retries().unwrap();
+    std::thread::scope(|scope| {
+        struct Stop<'a>(&'a crate::RunningNexus);
+        impl Drop for Stop<'_> {
+            fn drop(&mut self) {
+                self.0.stopping.request();
+            }
+        }
+        scope.spawn(|| fixture.nexus.serve_recipient_retries());
+        let _stop = Stop(&fixture.nexus);
+        fixture.nexus.route_ready(&seat_address(), CLAUDE_SEAT);
+        assert!(
+            fixture
+                .nexus
+                .store
+                .completed_by(&[seat_address()], Instant::now() + Duration::from_secs(8))
+        );
+        assert_eq!(seat_metaflow_now(&fixture).state, State::Asleep);
+        assert!(closed(&fixture));
+    });
+}
+
+#[test]
 fn manual_on_demand_keeps_cold_context_and_drains_work_to_the_same_seat() {
     use crate::store::handover_reminders::SchedulesHandoverReminders;
     use crate::store::logical_delivery::RecordsLogicalDeliveries;

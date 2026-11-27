@@ -2291,7 +2291,7 @@ fn startup_prompts(world: &FreshWorld) -> usize {
 /// A wake a queued request makes due, whose first prompt's receipt lands
 /// after the wake looked for it, leaves the request it carried out of the
 /// queue: the turn end after it types only what arrived since, and the
-/// carried request is Delivered on the receipt.
+/// carried request cannot be relabelled after an ambiguous settlement.
 #[test]
 fn a_due_wake_whose_receipt_lands_late_never_types_its_carried_request_again() {
     let mut fixture = NexusFixture::new();
@@ -2322,11 +2322,23 @@ fn a_due_wake_whose_receipt_lands_late_never_types_its_carried_request_again() {
     );
     assert!(later_prompts(&world).is_empty(), "{}", world.calls());
 
+    // No native user receipt was available in the transcript at the
+    // claim settlement. Uncertain is already final before late evidence.
+    let before = fixture
+        .nexus
+        .store
+        .logical_delivery_snapshot(&carried.logical_delivery_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.delivery_state, signal_flow::DeliveryState::Uncertain);
+    assert!(world.user_turns(&fixture).is_empty());
     // The receipt lands, D arrives, and the woken flow's turn ends.
     startup_rows_land(&fixture, &world);
     let mut arrived = stored(&fixture, Model::Sol);
-    arrived.queue.0.push(Request::Order("D".into()).unsent());
+    let suffix = Request::Order("D".into()).unsent();
+    arrived.queue.0.push(suffix.clone());
     fixture.nexus.store.seed_metaflow(arrived);
+    assert_eq!(stored(&fixture, Model::Sol).queue.0, vec![suffix.clone()]);
     use std::io::Write;
     let session = world.session();
     let transcript = fixture
@@ -2386,12 +2398,23 @@ fn a_due_wake_whose_receipt_lands_late_never_types_its_carried_request_again() {
         .logical_delivery_snapshot(&carried.logical_delivery_id)
         .unwrap()
         .expect("A is held");
+    assert_eq!(
+        snapshot, before,
+        "late evidence cannot rewrite a final outcome"
+    );
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
     assert!(
         matches!(
-            snapshot.delivery_state,
+            fixture
+                .nexus
+                .store
+                .logical_delivery_snapshot(&suffix.logical_delivery_id)
+                .unwrap()
+                .unwrap()
+                .delivery_state,
             signal_flow::DeliveryState::Delivered(_)
         ),
-        "A settles on its first prompt's receipt: {snapshot:?}"
+        "D has its own native receipt and settles independently"
     );
 }
 

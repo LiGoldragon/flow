@@ -91,6 +91,75 @@ impl ProvesWakeOrigin for FlowStore {
     }
 }
 
+/// Removes only this exact ordinary Bind incarnation after a verified OS
+/// exit. Process bindings that alias native-launched flows do not own the
+/// native lifecycle and are never retired by this observer.
+pub(crate) trait EndsOrdinaryBinding {
+    fn end_bound_peer(
+        &self,
+        address: &Address,
+        id: &FlowId,
+        process: &Process,
+    ) -> Result<bool, StoreError>;
+}
+impl EndsOrdinaryBinding for FlowStore {
+    fn end_bound_peer(
+        &self,
+        address: &Address,
+        id: &FlowId,
+        process: &Process,
+    ) -> Result<bool, StoreError> {
+        use super::current_seat::RecordsCurrentSeats;
+        use crate::generated::memory::SeatStanding;
+        let Some(mut row) = self.stored_metaflow(address)? else {
+            return Ok(false);
+        };
+        if row.metaflow.state != MetaflowState::Awake(id.clone())
+            || self.bound_process(address)?.as_ref() != Some(process)
+            || self.flow(&id.0)?.is_some()
+            || self.address_hold(&id.0)?.is_some()
+            || self
+                .engine
+                .match_records(QueryPlan::all(self.launch_attempts))?
+                .records()
+                .iter()
+                .any(|a| {
+                    a.launch_attempt
+                        .native_launch_binding_option
+                        .as_ref()
+                        .is_some_and(|b| b.flow_id == *id)
+                })
+        {
+            return Ok(false);
+        }
+        let _state = self
+            .transitions_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let key = RecordKey::new(Self::address_record_key(address));
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .retract(self.metaflow_processes, key.clone());
+        // Preserve the dead incarnation and its Address ownership in the
+        // same commit even if the ordinary Current response becomes Unknown.
+        let commit = self.stage_observation(commit, &id.0, SeatStanding::Ended)?;
+        let commit = if row.metaflow.queue.0.is_empty() && row.metaflow.past.0.is_empty() {
+            commit.retract(self.metaflows, key)
+        } else {
+            row.metaflow.state = MetaflowState::Asleep;
+            row.metaflow.past.0.retain(|past| past != id);
+            row.metaflow.past.0.push(id.clone());
+            commit.mutate(self.metaflows, row)
+        };
+        let commit = self.reaps_reassigned(address, None, commit)?.commit;
+        let commit = self.sender_locks_released(address, commit)?;
+        self.engine.commit_atomic(commit)?;
+        self.launch_changes.announce();
+        Ok(true)
+    }
+}
+
 /// Materializes working state for a configured Address, never policy.
 pub(crate) trait PreparesDeclaredMetaflow {
     fn prepare_declared_metaflow(&self, address: &Address) -> Result<bool, StoreError>;
@@ -202,7 +271,8 @@ impl MutatesMetaflows for FlowStore {
             {
                 return Ok(Output::Bound(id.clone()));
             }
-            if FlowStore::process_is_live(&previous) {
+            use crate::restarting::{ExitProof, ProcFs, ProvesExit};
+            if !matches!(previous.exit_proof(&ProcFs), ExitProof::Exited(_)) {
                 return Ok(Output::Refused(Refusal::Taken(address)));
             }
         }

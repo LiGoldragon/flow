@@ -89,6 +89,8 @@ impl WatchesMetaflows for FlowStore {
         self.engine
             .subscribe(QueryPlan::all(self.current_seats), sink.clone())?;
         self.engine
+            .subscribe(QueryPlan::all(self.metaflow_processes), sink.clone())?;
+        self.engine
             .subscribe(QueryPlan::all(self.seat_births), sink)?;
         Ok(())
     }

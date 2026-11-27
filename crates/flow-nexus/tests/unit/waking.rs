@@ -1765,6 +1765,75 @@ fn current(fixture: &NexusFixture, address: Address) -> signal_flow::Output {
     fixture.nexus.dispatch(signal_flow::Input::Current(address))
 }
 
+/// Wait on the exact ordinary peer's pidfd as the route supervisor does,
+/// then let the same observer reconcile its exit; Current itself does no
+/// process I/O. At recovery the first observation also sees an earlier exit.
+fn finish_bound_peer(fixture: &NexusFixture, peer: BoundPeer, at: &Address, after_reopen: bool) {
+    use crate::event_wait::AwaitsDescriptors;
+    use crate::restarting::ProcFs;
+    use crate::seat_routes::WatchesBoundPeers;
+    use std::os::fd::AsFd;
+    let process = peer.process();
+    let State::Awake(id) = fixture.nexus.store.metaflow(at).unwrap().unwrap().state else {
+        panic!("bound peer owns seat")
+    };
+    if after_reopen {
+        peer.end();
+    } else {
+        let end = fixture
+            .nexus
+            .watch_bound_peer(at, &id, &process, &ProcFs)
+            .expect("live peer's pidfd");
+        peer.end();
+        assert_eq!(
+            [end.as_fd()]
+                .ready(Some(
+                    std::time::Instant::now() + std::time::Duration::from_secs(5)
+                ))
+                .unwrap(),
+            vec![true]
+        );
+    }
+    fixture.nexus.watch_bound_peer(at, &id, &process, &ProcFs);
+}
+
+#[test]
+fn an_unobservable_or_superseded_bound_peer_cannot_retire_an_address() {
+    use crate::restarting::{ProcFs, ReadsProcessStatus};
+    use crate::seat_routes::WatchesBoundPeers;
+    struct Denied;
+    impl ReadsProcessStatus for Denied {
+        fn process_stat(&self, _: u32) -> std::io::Result<String> {
+            Err(std::io::ErrorKind::PermissionDenied.into())
+        }
+        fn pid_max(&self) -> Option<u32> {
+            Some(u32::MAX)
+        }
+    }
+    let fixture = NexusFixture::new();
+    let at = address(Model::Sol);
+    let old = BoundPeer::spawn();
+    old.bind(&fixture, at.clone());
+    let process = old.process();
+    let State::Awake(id) = fixture.nexus.store.metaflow(&at).unwrap().unwrap().state else {
+        panic!("bound")
+    };
+    old.end();
+    fixture.nexus.watch_bound_peer(&at, &id, &process, &Denied);
+    assert_eq!(
+        fixture.nexus.store.bound_process(&at).unwrap(),
+        Some(process.clone())
+    );
+    let next = BoundPeer::spawn();
+    next.bind(&fixture, at.clone());
+    fixture.nexus.watch_bound_peer(&at, &id, &process, &ProcFs);
+    assert_eq!(
+        fixture.nexus.store.bound_process(&at).unwrap(),
+        Some(next.process())
+    );
+    next.end();
+}
+
 /// An Address Flow holds only through a binding is forgotten once the bound
 /// process has ended: Flow can neither deliver to it nor wake it, and the
 /// seat behind it is no flow Flow holds.
@@ -1777,7 +1846,7 @@ fn an_address_held_only_through_an_ended_binding_is_forgotten() {
         current(&fixture, address(Model::Sol)),
         signal_flow::Output::Current(signal_flow::Current_Data::Awake(_))
     ));
-    peer.end();
+    finish_bound_peer(&fixture, peer, &address(Model::Sol), false);
     assert_eq!(
         current(&fixture, address(Model::Sol)),
         signal_flow::Output::Current(signal_flow::Current_Data::Unknown)
@@ -1803,7 +1872,7 @@ fn an_ended_binding_holding_work_rests_asleep() {
         .expect("bound metaflow");
     bound.queue = flow_ethos::Queue(vec![Request::Order("Kept.".into()).unsent()]);
     fixture.nexus.store.seed_metaflow(bound);
-    peer.end();
+    finish_bound_peer(&fixture, peer, &address(Model::Sol), true);
     assert_eq!(
         current(&fixture, address(Model::Sol)),
         signal_flow::Output::Current(signal_flow::Current_Data::Asleep)

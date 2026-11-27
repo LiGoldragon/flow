@@ -75,6 +75,45 @@ impl WatchesNativeProcess for RunningNexus {
     }
 }
 
+pub(crate) trait WatchesBoundPeers {
+    fn watch_bound_peer(
+        &self,
+        address: &signal_flow::Address,
+        id: &signal_flow::FlowId,
+        process: &signal_flow::Process,
+        kernel: &impl crate::restarting::ReadsProcessStatus,
+    ) -> Option<OwnedFd>;
+}
+impl WatchesBoundPeers for RunningNexus {
+    fn watch_bound_peer(
+        &self,
+        address: &signal_flow::Address,
+        id: &signal_flow::FlowId,
+        process: &signal_flow::Process,
+        kernel: &impl crate::restarting::ReadsProcessStatus,
+    ) -> Option<OwnedFd> {
+        use crate::restarting::{ExitProof, ProvesExit};
+        use crate::store::metaflow::EndsOrdinaryBinding;
+        match process.exit_proof(kernel) {
+            ExitProof::Running => {
+                let fd = u32::try_from(process.pid.0).ok()?.exit_descriptor().ok();
+                match process.exit_proof(kernel) {
+                    ExitProof::Running => return fd,
+                    ExitProof::Unproven(_) => return None,
+                    ExitProof::Exited(_) => {}
+                }
+            }
+            ExitProof::Unproven(_) => return None,
+            ExitProof::Exited(_) => {}
+        }
+        let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(error) = self.store.end_bound_peer(address, id, process) {
+            eprintln!("flow-nexus: could not settle ended ordinary binding: {error}");
+        }
+        None
+    }
+}
+
 impl ServesBoundRoutes for RunningNexus {
     fn serve_bound_routes(&self) {
         let changes = LaunchChanges::default();
@@ -162,8 +201,22 @@ impl ServesBoundRoutes for RunningNexus {
                 let flow_ethos::State::Awake(id) = seat.state else {
                     continue;
                 };
-                let Ok(Some(node)) = self.store.flow_node(&id.0) else {
-                    continue;
+                let node = match self.store.flow_node(&id.0) {
+                    Ok(Some(node)) => node,
+                    Ok(None) => {
+                        if let Ok(Some(peer)) = self.store.bound_process(&seat.address)
+                            && let Some(fd) = self.watch_bound_peer(
+                                &seat.address,
+                                &id,
+                                &peer,
+                                &crate::restarting::ProcFs,
+                            )
+                        {
+                            processes.push(fd);
+                        }
+                        continue;
+                    }
+                    Err(_) => continue,
                 };
                 if node.flow_lifecycle != signal_flow::FlowLifecycle::Active {
                     continue;

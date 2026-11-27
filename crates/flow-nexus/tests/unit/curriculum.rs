@@ -299,10 +299,15 @@ fn the_paired_curriculum_serves_state_on_demand_outside_every_startup() {
             .expect("copy the locked Field repository")
             .success()
     );
+    assert_eq!(
+        fs::read(roots[2].join("modules.datom")).unwrap(),
+        fs::read(field_source.join("modules.datom")).unwrap(),
+        "the witness must use the locked Field declaration corpus unchanged"
+    );
     write(
         &roots[0],
         "modules.datom",
-        "[ { { Spirit core Single.0 } spirit/core/0.md } { { Intent main-flow Single.0 } intent/main-flow/0.md } ]",
+        "[ { { Spirit core Single.0 } spirit/core/0.md } { { Intent main-flow Single.0 } intent/main-flow/0.md } { { Vision energy-management Single.0 } vision/energy-management/0.md } ]",
     );
     write(&roots[0], "spirit/core/0.md", "Flow system control.");
     write(
@@ -311,14 +316,29 @@ fn the_paired_curriculum_serves_state_on_demand_outside_every_startup() {
         "Flow seat intent control.",
     );
     write(
+        &roots[0],
+        "vision/energy-management/0.md",
+        "Fixture dependency for the locked Field State corpus.",
+    );
+    write(
         &roots[1],
         "modules.datom",
-        "[ { { Knowledge control Single.0 } knowledge/control/0.md } ]",
+        "[ { { Knowledge control Single.0 } knowledge/control/0.md } { { Notion leading Single.0 } notion/leading/0.md } { { Notion subagent-roles Single.0 } notion/subagent-roles/0.md } ]",
     );
     write(
         &roots[1],
         "knowledge/control/0.md",
         "---\ndescription: Flow knowledge control.\ndependencies: []\nplacement: user\n---\nFlow user control.",
+    );
+    write(
+        &roots[1],
+        "notion/leading/0.md",
+        "Fixture dependency for the locked Field State corpus.",
+    );
+    write(
+        &roots[1],
+        "notion/subagent-roles/0.md",
+        "Fixture dependency for the locked Field State corpus.",
     );
     write(scratch, "roles.datom", "Roles.{ [] }");
 

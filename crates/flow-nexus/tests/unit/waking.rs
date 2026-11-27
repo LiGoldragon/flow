@@ -1005,7 +1005,7 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
 /// joins Past, and the Order wakes a fresh flow on a new native session.
 /// The queued Order remains durable until native history receipts it.
 #[test]
-fn a_flow_whose_pane_is_gone_is_asleep_and_wakes_fresh() {
+fn a_missing_pane_does_not_wake_a_successor_until_the_native_session_ends() {
     let mut fixture = NexusFixture::new();
     let at = address(Model::Sol);
     fixture.nexus.store.seed_metaflow(metaflow(
@@ -1027,6 +1027,30 @@ fn a_flow_whose_pane_is_gone_is_asleep_and_wakes_fresh() {
     fixture.nexus.store.seed_metaflow(awake);
 
     fixture.nexus.drain_awake(&at);
+    assert_eq!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(flow_ethos::FlowId("abc123".into()))
+    );
+    assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 1);
+    assert!(!fixture.nexus.wake_is_due(&stored(&fixture, Model::Sol)));
+    let world = fixture.fresh_claude_world();
+    let ended = signal_flow::Event::Ended(Some(signal_flow::NativeSessionId(seat.session.clone())));
+    let id = flow_ethos::FlowId("abc123".into());
+    let lease = fixture
+        .nexus
+        .waking
+        .hold(&at)
+        .expect("inspect the end before the committed wake");
+    assert_eq!(
+        fixture.nexus.report(signal_flow::Report_Data {
+            flow_id: id.clone(),
+            event: ended.clone(),
+            process_option: None
+        }),
+        signal_flow::Output::Reported
+    );
+    fixture.nexus.after_report(&id, &ended);
+    drop(lease);
     let asleep = stored(&fixture, Model::Sol);
     assert_eq!(asleep.state, State::Asleep);
     assert_eq!(
@@ -1045,7 +1069,6 @@ fn a_flow_whose_pane_is_gone_is_asleep_and_wakes_fresh() {
     );
     assert!(fixture.nexus.wake_is_due(&asleep));
 
-    let world = fixture.fresh_claude_world();
     fixture.nexus.wake_due(at);
     let woken = stored(&fixture, Model::Sol);
     let State::Awake(flow_id) = &woken.state else {
@@ -2170,7 +2193,39 @@ fn a_due_wake_whose_receipt_lands_late_never_types_its_carried_request_again() {
     let mut arrived = stored(&fixture, Model::Sol);
     arrived.queue.0.push(Request::Order("D".into()).unsent());
     fixture.nexus.store.seed_metaflow(arrived);
-    fixture.nexus.settle_stopped(&flow_id.0);
+    use std::io::Write;
+    let session = world.session();
+    let transcript = fixture
+        .directory
+        .path()
+        .join("native-transcripts/claude/-home-li-primary")
+        .join(format!("{session}.jsonl"));
+    let mut completed = end_turn("fresh-main-completed");
+    completed["sessionId"] = session.clone().into();
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap(),
+        "{completed}"
+    )
+    .unwrap();
+    let stop = signal_flow::Event::Stopped(signal_flow::NativeStop {
+        native_session_id_option: Some(signal_flow::NativeSessionId(session)),
+        transcript_path_option: Some(signal_flow::TranscriptPath(
+            transcript.display().to_string(),
+        )),
+        background_work: signal_flow::BackgroundWork(vec![]),
+    });
+    assert_eq!(
+        fixture.nexus.report(signal_flow::Report_Data {
+            flow_id: flow_id.clone(),
+            event: stop.clone(),
+            process_option: None
+        }),
+        signal_flow::Output::Reported
+    );
+    fixture.nexus.after_report(&flow_id, &stop);
 
     assert_eq!(startup_prompts(&world), 1, "{}", world.calls());
     let later = later_prompts(&world);
@@ -2178,6 +2233,17 @@ fn a_due_wake_whose_receipt_lands_late_never_types_its_carried_request_again() {
     assert!(
         later[0].contains(" D }") && !later[0].contains(" A }"),
         "the turn end types D, never A again: {later:?}"
+    );
+    let turns = world.user_turns(&fixture);
+    assert_eq!(
+        turns.iter().filter(|turn| turn.contains(" A }")).count(),
+        1,
+        "{turns:?}"
+    );
+    assert_eq!(
+        turns.iter().filter(|turn| turn.contains(" D }")).count(),
+        1,
+        "{turns:?}"
     );
     let snapshot = fixture
         .nexus

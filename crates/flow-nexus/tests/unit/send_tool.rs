@@ -17,6 +17,7 @@ use crate::live::HoldsLiveValue;
 use crate::send_tool::{
     DescribesSendInvocation, HandlesSendCallAnswers, RespondsToSendCalls, SendTool, ServesSendTool,
 };
+use crate::Dispatches;
 use crate::sending::{MAX_SEND_PAYLOAD_BYTES, MeasuresSendPayload};
 use crate::store::logical_delivery::{MintsRequestIds, RecordsLogicalDeliveries};
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
@@ -2394,8 +2395,8 @@ fn seat_responding_with_initial_family(
         .filter(|notice| notice["method"] == "thread/status/changed")
         .filter_map(|notice| {
             Some((
-                notice.pointer("/params/threadId")?.as_str()?,
-                notice.pointer("/params/status/type")?.as_str()?,
+                notice.pointer("/params/threadId")?.as_str()?.to_owned(),
+                notice.pointer("/params/status/type")?.as_str()?.to_owned(),
             ))
         })
         .collect::<Vec<_>>();
@@ -2417,9 +2418,9 @@ fn seat_responding_with_initial_family(
         std::fs::write(fake.directory.path().join("frames-3"), initial_family).unwrap();
     }
     for (index, (changed_thread, status)) in family.iter().enumerate() {
-        let reply = if *changed_thread == SEAT_THREAD {
+        let reply = if changed_thread == SEAT_THREAD {
             native_family_reply(SEAT_THREAD, status)
-        } else if *changed_thread == CHILD_THREAD {
+        } else if changed_thread == CHILD_THREAD {
             native_family_with_child_reply(SEAT_THREAD, changed_thread, status)
         } else {
             // An unrelated thread's status is only a cue to reread this seat;

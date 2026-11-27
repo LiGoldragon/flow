@@ -1088,6 +1088,9 @@ fn a_refused_reap_owing_commit_leaves_only_the_successor_receiving() {
         let mut world = ReapWorld::staged("refused-owing");
         world
             .fixture
+            .native_activity(PREDECESSOR, crate::generated::memory::SeatActivity::Resting);
+        world
+            .fixture
             .nexus
             .store
             .faults
@@ -1221,6 +1224,9 @@ fn the_receiving_flow_switches_at_confirmation_and_never_names_two() {
 #[test]
 fn a_crash_between_acknowledgement_and_confirmation_routes_to_the_predecessor() {
     let mut world = ReapWorld::staged("crash-w1");
+    world
+        .fixture
+        .native_activity(PREDECESSOR, crate::generated::memory::SeatActivity::Resting);
     // The staged launch stands after W1, as a crash there leaves it.
     let first = world.fixture.restarted();
     assert_eq!(
@@ -1880,6 +1886,9 @@ fn a_stale_worker_writes_nothing_and_the_address_keeps_one_receiving_flow() {
 #[test]
 fn a_refused_worker_commit_keeps_the_successor_the_only_receiving_flow() {
     let world = ReapWorld::staged("refused-settle");
+    world
+        .fixture
+        .native_activity(PREDECESSOR, crate::generated::memory::SeatActivity::Resting);
     let ends = with_supervisor(&world.fixture, || {
         world
             .fixture
@@ -1900,7 +1909,7 @@ fn a_refused_worker_commit_keeps_the_successor_the_only_receiving_flow() {
         assert!(vetted(&world.vet(SUCCESSOR)));
         assert!(delivery_rejected(
             &world.vet(PREDECESSOR),
-            meta_signal_flow::DeliveryRejection::FlowStopped
+            meta_signal_flow::DeliveryRejection::Superseded(signal_flow::FlowId(SUCCESSOR.into()))
         ));
         world.fixture.nexus.store.launch_changes.announce();
         let calls = world.calls().len();

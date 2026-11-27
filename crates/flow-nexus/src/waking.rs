@@ -3355,6 +3355,17 @@ impl WakesInParts for RunningNexus {
         if closable && let Some(order) = ordered {
             return self.replace_as_ordered(order, metaflow, node, turn);
         }
+        // The warning's own delivery is not proof that the harness has
+        // started a turn. Do not sleep or auto-refresh it on this very
+        // rest; wait for its next authoritative rest edge.
+        use crate::store::handover_reminders::SchedulesHandoverReminders;
+        if !warned {
+            match self.store.warned(&address, flow_id) {
+                Ok(true) => return AtStop::Idle,
+                Ok(false) => {}
+                Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+            }
+        }
         if refresh_due && !closable {
             return AtStop::Idle;
         }

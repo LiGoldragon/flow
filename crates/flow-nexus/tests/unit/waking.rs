@@ -5732,6 +5732,18 @@ fn persisted_global_hold_defers_interrupted_launch_cleanup_until_owner_resume() 
         acknowledged.record_native_intent(&fixture.nexus);
         acknowledged.bind(&fixture.nexus);
         acknowledged.register_and_acknowledge(&fixture.nexus);
+        // This independent thread is observable even though its launch
+        // remains unconfirmed. Resume must snapshot it before switching.
+        fixture.native_activity(&acknowledged.binding.flow_id.0, Working);
+        assert!(
+            fixture
+                .nexus
+                .store
+                .seats()
+                .unwrap()
+                .iter()
+                .any(|seat| seat.flow_id == acknowledged.binding.flow_id)
+        );
         assert!(
             fixture
                 .nexus
@@ -7481,7 +7493,11 @@ fn a_warned_codex_seat_is_refreshed_at_the_rest_after_its_warning() {
     // The rest that opens the warning: the warning is typed and the seat,
     // handed it, is in the turn it opens; it is not refreshed.
     let warned_at = family(&fixture, &thread, Resting);
-    assert_eq!(warned_at, Some(AtStop::Kept(KeptAtStop::InTurn)));
+    assert_eq!(
+        warned_at,
+        Some(AtStop::Idle),
+        "typing a warning cannot assert a native Codex turn began; it prevents sleep on that same edge"
+    );
     let reminder = fixture
         .nexus
         .store

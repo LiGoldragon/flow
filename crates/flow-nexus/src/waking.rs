@@ -1453,7 +1453,7 @@ impl SleepsAndWakesSeats for RunningNexus {
         use crate::store::metaflow::{ProvesWakeOrigin, WakeOrigin};
         if !matches!(
             self.store.wake_origin(metaflow),
-            Ok(WakeOrigin::FirstSeat | WakeOrigin::EndedPredecessor)
+            Ok(WakeOrigin::FirstSeat | WakeOrigin::EndedPredecessor(_))
         ) {
             return false;
         }
@@ -2696,7 +2696,7 @@ impl WakesInParts for RunningNexus {
                         .wake_origin(&metaflow)
                         .map_err(|_| WakeRefusal::StoreUnreadable)?
                     {
-                        WakeOrigin::FirstSeat | WakeOrigin::EndedPredecessor => {}
+                        WakeOrigin::FirstSeat | WakeOrigin::EndedPredecessor(_) => {}
                         WakeOrigin::LivePredecessor => return Err(WakeRefusal::SessionLive),
                         WakeOrigin::Undeclared => return Err(WakeRefusal::Unplaceable),
                         WakeOrigin::Unresolved => {
@@ -2866,10 +2866,28 @@ impl WakesInParts for RunningNexus {
         // its handover is given to the new flow. The metaflow is Asleep, so
         // the predecessor takes no part in taking its Address.
         let mut profile = seat.fresh_profile();
-        profile.flow_id_option = metaflow.past.0.last().cloned();
+
         use crate::store::fresh_launch::TracksFreshLaunches;
         let claim = {
             let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+            use crate::store::metaflow::{ProvesWakeOrigin, WakeOrigin};
+            let bound = self
+                .store
+                .metaflow(address)
+                .map_err(|_| FreshRefusal::Failed(Failed_Data::StoreRefused))?
+                .ok_or(FreshRefusal::Failed(Failed_Data::NoRecord))?;
+            if !matches!(self.store.metaflow_declaration(address), Ok(Some(_))) {
+                return Err(FreshRefusal::Failed(Failed_Data::NoRecord));
+            }
+            profile.flow_id_option = match self
+                .store
+                .wake_origin(&bound)
+                .map_err(|_| FreshRefusal::Failed(Failed_Data::StoreRefused))?
+            {
+                WakeOrigin::FirstSeat => None,
+                WakeOrigin::EndedPredecessor(id) => Some(id),
+                _ => return Err(FreshRefusal::Failed(Failed_Data::NoRecord)),
+            };
             if !self
                 .store
                 .claim_fresh(address, &profile.launch_request_id, startup)

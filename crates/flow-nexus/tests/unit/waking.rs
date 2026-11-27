@@ -535,7 +535,7 @@ fn an_idle_maintained_codex_flow_keeps_its_pane_and_stays_awake() {
     maintain(&fixture, address(Model::Sol));
     assert_eq!(
         fixture.nexus.settle_stopped("908786"),
-        AtStop::Kept(KeptAtStop::ThreadNotResting)
+        AtStop::Kept(KeptAtStop::InTurn)
     );
 
     // Test 5: the thread's coming to rest settles the seat itself, once,
@@ -6922,6 +6922,15 @@ fn a_launch_remembers_its_metaflow_s_last_flows_to_its_depth_or_those_it_names()
 fn a_nexus_start_forgets_a_successor_already_given_and_wakes_one_owed() {
     use crate::store::successor::{OwesSuccessors, SuccessionCause, SuccessorIntent};
     let fixture = NexusFixture::new();
+    fixture
+        .nexus
+        .store
+        .record_observation(
+            "def456",
+            Some(crate::generated::memory::SeatStanding::Ended),
+        )
+        .unwrap();
+
     claude_seat(&fixture, 40_000);
     fixture.nexus.store.seed_metaflow(metaflow(
         Model::Sol,
@@ -7171,11 +7180,17 @@ fn reported_session_end_starts_a_maintained_successor() {
     maintain(&fixture, address(Model::Sol));
     let world = fixture.fresh_claude_world();
 
-    fixture.nexus.after_report(
-        &signal_flow::FlowId("abc123".to_owned()),
-        &signal_flow::Event::Ended(Some(signal_flow::NativeSessionId(seat.session.clone()))),
+    let id = signal_flow::FlowId("abc123".into());
+    let end = signal_flow::Event::Ended(Some(signal_flow::NativeSessionId(seat.session.clone())));
+    assert_eq!(
+        fixture.nexus.report(signal_flow::Report_Data {
+            flow_id: id.clone(),
+            event: end.clone(),
+            process_option: None
+        }),
+        signal_flow::Output::Reported
     );
-
+    fixture.nexus.after_report(&id, &end);
     let woken = stored(&fixture, Model::Sol);
     let State::Awake(flow_id) = &woken.state else {
         panic!("the successor starts: {woken:?}; {}", world.calls());

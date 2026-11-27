@@ -688,7 +688,21 @@ fn an_idle_on_demand_seat_is_refreshed_only_past_its_threshold() {
         );
         claude_seat(&fixture, tokens);
         append_main_rows(&fixture, &[end_turn("last-turn")]);
-        seat_warned_at(&fixture, 200_000, "fixture");
+        // This test isolates the hard threshold; the warning-band case
+        // has a separate oracle for the warning turn and the next safe rest.
+        fixture.nexus.store.seed_role(CallerIdentity {
+            flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
+            aspect: Aspect::Mind,
+            model_name: flow_ethos::ModelName(CLAUDE_MODEL.into()),
+        });
+        fixture
+            .nexus
+            .store
+            .configure_change(ConfigurationChange::Thresholds(vec![ConfigureThreshold {
+                model_name: flow_ethos::ModelName(CLAUDE_MODEL.into()),
+                refresh_threshold: meta_signal_flow::RefreshThreshold(200_000),
+            }]))
+            .unwrap();
         declare_seat(
             &fixture,
             Continuity::OnDemand,

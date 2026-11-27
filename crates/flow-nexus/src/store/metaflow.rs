@@ -15,7 +15,7 @@ use signal_flow::{
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum WakeOrigin {
     FirstSeat,
-    EndedPredecessor,
+    EndedPredecessor(FlowId),
     LivePredecessor,
     Unresolved,
     Undeclared,
@@ -37,15 +37,28 @@ impl ProvesWakeOrigin for FlowStore {
         if seat.state != MetaflowState::Asleep {
             return Ok(WakeOrigin::LivePredecessor);
         }
-        if let Some(last) = seat.past.0.last() {
+        let address = &seat.address;
+        let marker = self.engine.current_database_marker()?;
+        let owed = self.successor_intent(address)?;
+        let last = match (seat.past.0.last(), owed.as_ref()) {
+            (Some(last), Some(intent)) if last.0 != intent.predecessor.0 => {
+                return Ok(WakeOrigin::Unresolved);
+            }
+            (Some(last), _) => Some(last.clone()),
+            (None, Some(intent))
+                if intent.succession_cause == super::successor::SuccessionCause::Exit =>
+            {
+                Some(FlowId(intent.predecessor.0.clone()))
+            }
+            _ => None,
+        };
+        if let Some(last) = last {
             return Ok(match self.seat_decision(&last.0)? {
-                SeatDecision::Observed(SeatStanding::Ended) => WakeOrigin::EndedPredecessor,
+                SeatDecision::Observed(SeatStanding::Ended) => WakeOrigin::EndedPredecessor(last),
                 SeatDecision::Observed(SeatStanding::Alive(_)) => WakeOrigin::LivePredecessor,
                 SeatDecision::NoRecord => WakeOrigin::Unresolved,
             });
         }
-        let address = &seat.address;
-        let marker = self.engine.current_database_marker()?;
         if self.metaflow_declaration(address)?.is_none() {
             return Ok(WakeOrigin::Undeclared);
         }
@@ -55,7 +68,7 @@ impl ProvesWakeOrigin for FlowStore {
         if self.bound_process(address)?.is_some()
             || self.fresh_cohort(address)?.is_some()
             || self.ordered_replacement(address)?.is_some()
-            || self.successor_intent(address)?.is_some()
+            || owed.is_some()
             || self.handover_memory(address)?.is_some()
             || self.pending_handover(address)?.is_some()
             || !self.pending_reaps_at(address)?.is_empty()

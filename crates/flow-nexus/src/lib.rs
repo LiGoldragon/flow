@@ -3085,31 +3085,10 @@ impl WatchesTerminationSignals for TerminationSignals {
     }
 }
 
-/// Reports a listed row as what Herdr shows of it, without writing anything.
-///
-/// A flow's stored row says what Flow last recorded, which is not the same as
-/// what is there now, and List used to report the row alone. Two witnessed
-/// ways it went wrong: a seat whose pane was gone stayed Pending on the route
-/// it was bound to, and a seat that was plainly live stayed Pending because
-/// only a Presented Deliver ever promoted one — so a flow bound through the
-/// privileged contract, or one started before Flow Nexus, was Pending forever.
-/// A listed flow is therefore reconciled against Herdr before it is answered:
-///
-/// - its bound pane present: the flow is witnessed live, so its route is
-///   refreshed and it is reported Active;
-/// - its bound pane gone: the flow is reported `Exited`, with no route and no
-///   endpoint. `Exited` is the seat's own going, never `Retired` — an exit
-///   retains the flow's record and retirement is an act of authority.
-///
-/// **This writes nothing.** List is a query, and a query does not change what
-/// it is asked about: the row keeps whatever Flow recorded, and only a command
-/// that witnesses a pane's fate — `Stop`, a replacement's reap, `Retire`, or a
-/// `Deliver` that finds the pane gone — persists an ended lifecycle. Reading the
-/// truth and recording it are deliberately separate.
-///
-/// This helper is for internal native-flow reconciliation. Metaflows on the
-/// ordinary wire are read from their own durable records and never projected
-/// from these native seat rows.
+/// A read-only listing projects harness standing from the current record and
+/// transport availability from Herdr. Neither fact substitutes for the other.
+/// Without a current record the lifecycle field retains its registered value;
+/// decisions still receive NoRecord. Listing never creates a current record.
 pub trait ReconcilesListedFlows {
     fn reconciled(&self, nodes: Vec<FlowNode>) -> Vec<FlowNode>;
     fn reconciled_node(&self, node: FlowNode) -> FlowNode;
@@ -3127,17 +3106,29 @@ impl ReconcilesListedFlows for RunningNexus {
         if !node.flow_lifecycle.is_live() {
             return node;
         }
-        match self.herdr.pane_presence(&node) {
-            herdr::PanePresence::Present => {
-                let mut node = self.herdr.refresh_route(node);
-                node.flow_lifecycle = FlowLifecycle::Active;
-                node
+        use crate::generated::memory::SeatStanding;
+        use crate::store::current_seat::SeatDecision;
+        let mut node = node;
+        match self.store.seat_decision(&node.flow_id.0) {
+            Ok(SeatDecision::Observed(SeatStanding::Alive(_))) => {
+                node.flow_lifecycle = FlowLifecycle::Active
             }
+            Ok(SeatDecision::Observed(SeatStanding::Ended)) => {
+                return FlowNode {
+                    endpoint_selection: EndpointSelection::Unavailable,
+                    herdr_route_selection: HerdrRouteSelection::Unavailable,
+                    flow_lifecycle: FlowLifecycle::Exited,
+                    ..node
+                };
+            }
+            _ => {}
+        }
+        match self.herdr.pane_presence(&node) {
+            herdr::PanePresence::Present => self.herdr.refresh_route(node),
             herdr::PanePresence::Unknown => node,
             herdr::PanePresence::Absent | herdr::PanePresence::Bare => FlowNode {
                 endpoint_selection: EndpointSelection::Unavailable,
                 herdr_route_selection: HerdrRouteSelection::Unavailable,
-                flow_lifecycle: FlowLifecycle::Exited,
                 ..node
             },
         }
@@ -6072,11 +6063,23 @@ mod tests {
 
     #[test]
     fn an_imported_codex_flow_whose_pane_is_gone_is_refused_before_typing() {
+        use crate::store::current_seat::RecordsCurrentSeats;
         let fixture = NexusFixture::new();
         let operation_log =
             fixture.accept_pane_operations(vec![], PromptFixture::Prompted("w1:p3"));
         bind_existing_caller(&fixture, "908786", "w1:p3");
 
+        fixture
+            .nexus
+            .store
+            .record_observation(
+                "908786",
+                Some(crate::generated::memory::SeatStanding::Alive(
+                    crate::generated::memory::SeatActivity::Working,
+                )),
+            )
+            .unwrap();
+        let before = fixture.stored_lifecycle();
         let node = resolved(&fixture);
         assert_eq!(node.herdr_route_selection, HerdrRouteSelection::Unavailable);
         assert_eq!(
@@ -6085,12 +6088,8 @@ mod tests {
         );
         assert_eq!(fixture.typed(), None);
         assert!(prompts(&operation_log).is_empty());
-        // The pane is gone and Flow never closed it, so the flow Exited. The
-        // Deliver above is the command that witnessed it, so the row itself now
-        // says so; List would report the same either way, and Retired is not
-        // what an observation ever produces.
-        assert_eq!(fixture.stored_lifecycle(), FlowLifecycle::Exited);
-        assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Exited);
+        assert_eq!(fixture.stored_lifecycle(), before);
+        assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Active);
     }
 
     fn rebind(
@@ -6241,71 +6240,44 @@ mod tests {
         assert_eq!(listed(&fixture), before);
     }
 
-    /// A seat Flow never stopped can still be gone: its pane leaves Herdr and
-    /// nothing can reach it. List used to answer such a flow Pending on the
-    /// route it was bound to, which is what made a gone seat look launchable.
-    /// It is reported `Exited` — the seat's own going — with no route, its row
-    /// and history kept. It is never `Retired`: an exit retains the record and
-    /// retirement is an act of authority, not an inference from a pane.
+    /// A missing transport removes the route but cannot end the harness.
     #[test]
-    fn a_flow_whose_pane_left_herdr_is_listed_exited_and_keeps_its_row() {
+    fn a_native_live_flow_keeps_its_lifecycle_when_its_pane_leaves_herdr() {
+        use crate::store::ReadsFlowRows;
         let fixture = NexusFixture::new();
         fixture.set_agents(vec![fixture.current_agent()]);
-        let node = fixture.node();
-        assert!(matches!(
-            fixture
-                .nexus
-                .dispatch_meta(meta_signal_flow::Input::RegisterFlow(node.clone())),
-            meta_signal_flow::Output::FlowRegistered(_)
-        ));
-        assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Active);
-
-        // The pane exits. Nothing else changes.
+        fixture.register_with(FlowLifecycle::Active);
         fixture.set_agents(vec![]);
-
-        use crate::store::ReadsFlowRows as _;
-        let rows = fixture.nexus.store.flow_nodes().expect("Flow rows read");
-        let rows = fixture.nexus.reconciled(rows);
-        assert_eq!(rows.len(), 1, "the row and its history stay");
-        assert_eq!(rows[0].flow_id, flow_ethos::FlowId("908786".into()));
-        assert_eq!(rows[0].flow_lifecycle, FlowLifecycle::Exited);
-        assert_ne!(
-            rows[0].flow_lifecycle,
-            FlowLifecycle::Retired,
-            "a pane going away never retires a flow"
-        );
+        let rows = fixture
+            .nexus
+            .reconciled(fixture.nexus.store.flow_nodes().unwrap());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].flow_lifecycle, FlowLifecycle::Active);
         assert_eq!(
             rows[0].herdr_route_selection,
             HerdrRouteSelection::Unavailable
         );
         assert_eq!(rows[0].endpoint_selection, EndpointSelection::Unavailable);
-        assert_eq!(rows[0].origin, node.origin, "its provenance is kept");
-
-        // List wrote nothing: the stored row still says what Flow recorded.
+        assert_eq!(rows[0].origin, fixture.node().origin);
         assert_eq!(
-            fixture.stored_lifecycle(),
-            FlowLifecycle::Active,
-            "List must not write"
-        );
-
-        // A Deliver is a command, and it does record the exit it witnesses.
-        assert_eq!(
-            fixture.send("to a seat that is gone"),
+            fixture.send("unrouted"),
             Sent::Refused(meta_signal_flow::DeliveryRejection::RouteUnavailable)
         );
-        assert_eq!(fixture.stored_lifecycle(), FlowLifecycle::Exited);
+        assert_eq!(fixture.stored_lifecycle(), FlowLifecycle::Active);
+        assert!(fixture.typed().is_none());
+    }
+
+    #[test]
+    fn a_pending_row_without_native_evidence_cannot_deliver_even_with_a_pane() {
+        let fixture = NexusFixture::new();
+        fixture.set_agents(vec![fixture.current_agent()]);
+        fixture.register_with(FlowLifecycle::Pending);
         assert_eq!(
-            fixture.send("again"),
-            Sent::Refused(meta_signal_flow::DeliveryRejection::FlowExited)
+            fixture.send("unobserved"),
+            Sent::Refused(meta_signal_flow::DeliveryRejection::Unconfirmed)
         );
-        assert_eq!(
-            fixture.nexus.dispatch(Input::ResolveRecipient(
-                signal_flow::RecipientResolutionRequest(flow_ethos::FlowId("908786".into()))
-            )),
-            Output::RecipientResolutionRejected(
-                signal_flow::RecipientResolutionRejection::FlowUnavailable
-            )
-        );
+        assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Pending);
+        assert!(fixture.typed().is_none());
     }
 
     /// A Herdr that cannot be read never retires a flow: the pane's fate is
@@ -6328,26 +6300,25 @@ mod tests {
         assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Active);
     }
 
-    /// A seat bound through the privileged contract, or started before Flow
-    /// Nexus, has no Presented Deliver to promote it, and so stayed Pending for
-    /// as long as it lived. Herdr showing its bound pane present is a witness
-    /// that it is live, and List reports so — without writing: List is a
-    /// query, and a query does not change what it is asked about.
     #[test]
-    fn a_pending_seat_whose_pane_herdr_shows_live_is_listed_active() {
+    fn a_pending_row_with_a_native_live_record_is_listed_active_without_writing() {
+        use crate::store::current_seat::RecordsCurrentSeats;
         let fixture = NexusFixture::new();
         fixture.set_agents(vec![fixture.current_agent()]);
         fixture.register_with(FlowLifecycle::Pending);
+        assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Pending);
+        fixture
+            .nexus
+            .store
+            .record_observation(
+                "908786",
+                Some(crate::generated::memory::SeatStanding::Alive(
+                    crate::generated::memory::SeatActivity::Working,
+                )),
+            )
+            .unwrap();
+        assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Active);
         assert_eq!(fixture.stored_lifecycle(), FlowLifecycle::Pending);
-
-        assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Active);
-        // Listing it again, and again, changes nothing in the store.
-        assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Active);
-        assert_eq!(
-            fixture.stored_lifecycle(),
-            FlowLifecycle::Pending,
-            "List must not write"
-        );
     }
 
     /// Flow had no way to retire a flow at all, so a seat retired elsewhere

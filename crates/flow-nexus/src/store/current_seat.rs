@@ -106,6 +106,12 @@ impl RecordsCurrentSeats for FlowStore {
             .transitions_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        // No transition means no audit entry and no Sema transaction.
+        if let Some(next) = &observation
+            && matches!(self.current_seat(id)?, CurrentSeatRead::Known(row) if row.seat_standing==SeatStanding::Ended || &row.seat_standing==next)
+        {
+            return Ok(());
+        }
         let commit = self.engine.begin_atomic_commit();
         let commit = match observation {
             Some(standing) => self.stage_observation(commit, id, standing)?,

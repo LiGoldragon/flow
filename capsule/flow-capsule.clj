@@ -1314,7 +1314,7 @@
       (throw (ex-info "the Curriculum Nexus opened no socket" {})))
     (when-not (p/alive? @curriculum)
       (throw (ex-info "the Curriculum Nexus exited" {:log (str/trim (slurp log))})))
-    (let [probe (reply-text (run {:env env} (str curriculum-package "/bin/curriculum") "ResolveSkills.[ spirit:core intent:models ]"))]
+    (let [probe (reply-text (run {:env env} (str curriculum-package "/bin/curriculum") "ResolveSkills.[ spirit:knowing:0 ]"))]
       (println (str "curriculum | " curriculum-package " | layout " layout ", refresh " no-refresh
                     ", records " capsule-flows " | socket " curriculum-socket " | ResolveSkills -> " probe)))))
 
@@ -1616,16 +1616,26 @@
   (fill (first (filter #(str/starts-with? % (str "Configure." family "."))
                        (str/split-lines (slurp (fs/file libexec "configure.datom")))))))
 
-(def missing-module "vision:no-such-module-2a9116")
+(defn with-missing-seat-module
+  "Replaces the selected seat's knowing module with an absent module, leaving
+  the rest of the capsule declaration intact."
+  [line addr]
+  (let [seat (re-pattern (str "\\{\\s+" (java.util.regex.Pattern/quote addr)
+                              "\\s+None\\s+\\[[^\\]]*\\]\\s+\\[\\s*(spirit:knowing:0)(?=\\s|\\])"))
+        match (re-matcher seat line)]
+    (when-not (.find match)
+      (throw (ex-info "the capsule's knowing module is not declared for the seat" {:address addr})))
+    (let [start (.start match 1)
+          end (.end match 1)]
+      (when (.find match)
+        (throw (ex-info "the capsule seat is declared more than once" {:address addr})))
+      (str (subs line 0 start) "vision:no-such-module-2a9116:0" (subs line end)))))
 
 (defn broken-metaflows
   "The capsule's Metaflows with the seat at addr declaring a module no
   context repository holds, so its successor cannot compose."
   [addr]
-  (let [line (configure-line "Metaflows")
-        [_ aspect topic model] (re-find #"\{ (\w+) (\w+) (\w+) \}" addr)
-        seat (re-pattern (str "\\{ \\{ " aspect " " topic " " model " \\} \\[ spirit:core intent:models \\]"))]
-    (str/replace-first line seat (str "{ { " aspect " " topic " " model " } [ spirit:core " missing-module " ]"))))
+  (with-missing-seat-module (configure-line "Metaflows") addr))
 
 (defn restore-configuration! []
   [(flow-meta (configure-line "Metaflows")) (flow-meta (configure-line "Thresholds"))])
@@ -1941,8 +1951,8 @@
                   (cond
                     (str/starts-with? line "Configure.Metaflows.")
                     (append-entries (str/replace line " OnDemand Automatic «" " Maintained Automatic «")
-                                    [(str "{ " codex-secondary " None " terra-leave-outs " [ spirit:core intent:models ] [] Simplified Explicit.[] Maintained Automatic «» [] }")
-                                     (str "{ " asleep-primary " None [] [ spirit:core intent:models ] [] Regular Default OnDemand Automatic «» [] }")])
+                                    [(str "{ " codex-secondary " None " terra-leave-outs " [ spirit:knowing:0 ] [] Simplified Explicit.[] Maintained Automatic «» [] }")
+                                     (str "{ " asleep-primary " None [] [ spirit:knowing:0 ] [] Regular Default OnDemand Automatic «» [] }")])
                     (and codex-model (str/starts-with? line "Configure.Models."))
                     (append-entries line [(str "{ Sol " codex-model " }")])
                     :else line))

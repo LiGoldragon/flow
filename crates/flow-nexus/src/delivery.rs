@@ -28,17 +28,20 @@ pub mod body;
 pub mod lease;
 
 use crate::RunningNexus;
+use crate::codex::{
+    CodexUserItemSubscription, SelectsCodexEndpoint, SubscribesCodexUserItems,
+    WaitsForCodexUserItem,
+};
 use crate::compacting::WatchesCompactions;
 use crate::generated::operation::{Operation, Record_Data};
 use crate::herdr::pane::{Interruption, NamesKeys, PaneAgent, Placement, Submission, WritesPane};
+use crate::live::HoldsLiveValue;
 use crate::performing::Performs;
-use crate::store::{ReadsFlowRows, NamesConfiguredModel};
 use crate::store::context::JudgesCompaction;
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries, SelectsHarnessProfile};
 use crate::store::metaflow::{ReadsSuccession, SleepsMetaflows, Succession};
+use crate::store::{NamesConfiguredModel, ReadsFlowRows};
 use crate::submission::{SeatSubmission, WitnessesSubmissions};
-use crate::codex::{CodexAdapter, ReadsCodexUserItems, SelectsCodexEndpoint};
-use crate::live::HoldsLiveValue;
 use crate::waking::{HoldsWakingMetaflows, IdentifiesWakingLease, WakingLease};
 use body::{RecognizesLetter, RendersPaneText, VetsBody};
 use flow_native::DigestsPrompt;
@@ -539,7 +542,7 @@ trait RunsLeasedDelivery<'run> {
     /// Binds the native reader once, before pane placement. Configuration
     /// may change while a delivery is in flight; its receipt must still be
     /// read from the same endpoint and exact native thread it began with.
-    fn codex_receipt_reader(&self) -> Option<(CodexAdapter, String)>;
+    fn codex_receipt_subscription(&self) -> Option<CodexUserItemSubscription>;
     fn run(&self) -> Result<Delivery, DeliveryRejection>;
 }
 
@@ -568,7 +571,7 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             .map_err(|_| DeliveryRejection::PersistenceRefused)
     }
 
-    fn codex_receipt_reader(&self) -> Option<(CodexAdapter, String)> {
+    fn codex_receipt_subscription(&self) -> Option<CodexUserItemSubscription> {
         if self.target.node.harness_kind != HarnessKind::Codex
             || self.target.node.session_id.0.is_empty()
         {
@@ -581,14 +584,16 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             .ok()??
             .address;
         let model = self.nexus.store.configured_model(&address).ok()??;
-        let adapter = self.nexus
+        let adapter = self
+            .nexus
             .codex_endpoints
             .current()
             .adapter_for(&model)
             .ok()?;
-        Some((adapter, self.target.node.session_id.0.clone()))
+        adapter
+            .subscribe_user_items(&self.target.node.session_id.0)
+            .ok()
     }
-
 
     fn refuse(&self, rejection: DeliveryRejection) -> Result<Delivery, DeliveryRejection> {
         let _ = self.nexus.store.release_lease(&self.request.delivery_id.0);
@@ -794,17 +799,14 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         }
         let observe = matches!(agent_state, AgentState::Idle | AgentState::Done);
         let text = self.request.message.pane_text();
-        // For a working Codex seat, capture the native item baseline before
-        // the one Herdr placement.  No submit/retry is performed here.
+        // Subscribe to this exact working Codex thread before the one Herdr
+        // placement.  The resume answer is the native cut: a matching item
+        // notification after it is fresh without any polling or retry.
         let codex_receipt = (self.target.node.harness_kind == HarnessKind::Codex
             && agent_state == AgentState::Working
             && !hard)
-            .then(|| self.codex_receipt_reader())
-            .flatten()
-            .map(|(reader, thread)| {
-                let before = reader.user_items(&thread).ok();
-                (reader, thread, before)
-            });
+            .then(|| self.codex_receipt_subscription())
+            .flatten();
         // A resting seat reports taking the text; a working one announces
         // nothing until it takes its input, so only its composer shows the
         // submission. The mark is taken before any key.
@@ -825,31 +827,15 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         let _ = self.step(LeaseStep::Placed);
 
         // A working Codex steer does not create a new turn and therefore
-        // cannot be witnessed by the ordinary turn-start hook.  Read the
-        // thread items once after placement and accept only a fresh item on
-        // this exact bound thread whose text matches this letter.  An absent
-        // or unreadable native receipt remains Uncertain.
-        if self.target.node.harness_kind == HarnessKind::Codex
-            && agent_state == AgentState::Working
-            && !hard
-            && codex_receipt
-                .as_ref()
-                .is_some_and(|(_, _, before)| before.is_some())
-        {
-            let (reader, thread, before) = codex_receipt
-                .as_ref()
-                .expect("working Codex receipt reader");
-            let before = before
-                .as_ref()
-                .map(|items| items.iter().map(|item| item.item_id.clone()).collect());
-            let receipt = before
-                .as_ref()
-                .and_then(|ids| {
-                    reader
-                        .user_item_after(thread, ids, text.as_str(), 4)
-                        .ok()
-                })
-                .unwrap_or(false);
+        // cannot be witnessed by the ordinary turn-start hook.  Its
+        // subscribed `userMessage` notification is the native receipt.  An
+        // absent or unreadable receipt remains Uncertain. The PaneLease
+        // serializes Flow's placements; Codex does not expose the TUI's
+        // generated client-message id before placement, so another actor
+        // typing byte-identical text after the cut is outside this receipt's
+        // distinguishable scope.
+        if let Some(subscription) = codex_receipt {
+            let receipt = subscription.wait_for(text.as_str()).unwrap_or(false);
             return self.settle(
                 interrupt_witness,
                 if receipt {
@@ -906,4 +892,3 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         self.settle(interrupt_witness, DeliveryGrade::Presented)
     }
 }
-

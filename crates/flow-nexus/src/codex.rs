@@ -273,24 +273,91 @@ pub trait ReadsCodexTurnHistory {
     fn newest_turn(&self, thread_id: &str) -> Result<Option<String>, CodexAdapterUnavailable>;
 }
 
-/// A user-message item currently present in a Codex thread.  This is a
-/// read-only receipt: it never starts, steers, or retries a turn.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CodexUserItem {
-    pub turn_id: String,
-    pub item_id: String,
-    pub text: String,
+/// One app-server connection subscribed to the exact Herdr-bound thread
+/// before a pane placement.  Codex's installed protocol publishes a
+/// `userMessage` as `item/started` and `item/completed`; the subscription's
+/// `thread/resume` answer is the atomic cut before the placement, so a
+/// matching notification read afterwards is a fresh native receipt.
+pub struct CodexUserItemSubscription {
+    session: ProxySession,
+    thread_id: String,
+    timeout: Duration,
 }
 
-pub trait ReadsCodexUserItems {
-    fn user_items(&self, thread_id: &str) -> Result<Vec<CodexUserItem>, CodexAdapterUnavailable>;
-    fn user_item_after(
+pub trait SubscribesCodexUserItems {
+    fn subscribe_user_items(
         &self,
         thread_id: &str,
-        prior_item_ids: &BTreeSet<String>,
-        text: &str,
-        attempts: usize,
-    ) -> Result<bool, CodexAdapterUnavailable>;
+    ) -> Result<CodexUserItemSubscription, CodexAdapterUnavailable>;
+}
+
+pub trait WaitsForCodexUserItem {
+    /// Waits on the subscribed socket, never polling the thread and never
+    /// submitting or retrying input.  Only this thread's exact one-part
+    /// user message is a receipt.
+    fn wait_for(self, text: &str) -> Result<bool, CodexAdapterUnavailable>;
+}
+
+impl WaitsForCodexUserItem for CodexUserItemSubscription {
+    fn wait_for(self, text: &str) -> Result<bool, CodexAdapterUnavailable> {
+        use crate::codex_turns::ReadsThreadItem;
+        use crate::generated::turn_ledger::CodexTurnId;
+
+        let this = self;
+        let deadline = Instant::now() + this.timeout;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or(CodexAdapterUnavailable::TimedOut)?;
+            match this
+                .session
+                .replies
+                .recv_timeout(remaining)
+                .map_err(|_| CodexAdapterUnavailable::TimedOut)?
+            {
+                ProxyEvent::Reply(Ok(message)) => {
+                    // `item/completed` can follow the cut for an item that
+                    // began before it, so only the item's start is fresh.
+                    if message.get("method").and_then(serde_json::Value::as_str)
+                        != Some("item/started")
+                        || message
+                            .pointer("/params/threadId")
+                            .and_then(serde_json::Value::as_str)
+                            != Some(this.thread_id.as_str())
+                    {
+                        continue;
+                    }
+                    let Some(turn) = message
+                        .pointer("/params/turnId")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|turn| !turn.is_empty())
+                    else {
+                        continue;
+                    };
+                    if message
+                        .pointer("/params/item")
+                        .and_then(|item| item.seen_letter(&CodexTurnId(turn.to_owned())))
+                        .is_some_and(|seen| seen.payload_text.0 == text)
+                    {
+                        return Ok(true);
+                    }
+                }
+                ProxyEvent::Reply(Err(error)) => return Err(error),
+                ProxyEvent::Ping(_) => {}
+                ProxyEvent::Upgraded => {
+                    return Err(CodexAdapterUnavailable::Protocol(
+                        "duplicate WebSocket upgrade".into(),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for CodexUserItemSubscription {
+    fn drop(&mut self) {
+        self.session.stop_proxy();
+    }
 }
 
 /// Opens a launch's Codex thread through the app-server before any TUI
@@ -1540,106 +1607,42 @@ impl ReadsCodexTurnHistory for CodexAdapter {
     }
 }
 
-impl ReadsCodexUserItems for CodexAdapter {
-    fn user_items(&self, thread_id: &str) -> Result<Vec<CodexUserItem>, CodexAdapterUnavailable> {
-        use crate::codex_turns::{ReadsThreadItem, ReadsTurnReport};
-        let mut session = self.initialize_bound_session()?;
-        let result = (|| {
-            let read = session.request(
-                2,
-                "thread/read",
-                serde_json::json!({"threadId": thread_id, "includeTurns": false}),
-                self.timeout,
-            )?;
-            if read.pointer("/thread/id").and_then(serde_json::Value::as_str)
-                != Some(thread_id)
-            {
-                return Err(CodexAdapterUnavailable::Protocol(
-                    "thread/read returned another thread".into(),
-                ));
-            }
-            session
-            .request(
-                3,
-                "thread/turns/list",
-                serde_json::json!({
-                    "threadId": thread_id,
-                    "limit": 20,
-                    "sortDirection": "desc",
-                    "itemsView": "full"
-                }),
-                self.timeout,
-            )
-            .and_then(|listed| {
-                let turns = listed
-                    .get("data")
-                    .and_then(serde_json::Value::as_array)
-                    .ok_or_else(|| {
-                        CodexAdapterUnavailable::Protocol("thread/turns/list has no data".into())
-                    })?;
-                let mut items = Vec::new();
-                for turn in turns {
-                    let report = turn.turn_report().ok_or_else(|| {
-                        CodexAdapterUnavailable::Protocol("a listed turn has no id or status".into())
-                    })?;
-                    let values = turn.get("items").and_then(serde_json::Value::as_array).ok_or_else(|| {
-                        CodexAdapterUnavailable::Protocol("a listed turn has no full items".into())
-                    })?;
-                    for item in values {
-                        if item.get("type").and_then(serde_json::Value::as_str)
-                            != Some("userMessage")
-                        {
-                            continue;
-                        }
-                        // Keep every well-formed userMessage id in the baseline,
-                        // including multipart messages.  Only a single text part is
-                        // eligible for exact receipt matching; multipart text is
-                        // deliberately represented as non-matching empty text.
-                        let item_id = item.get("id").and_then(serde_json::Value::as_str)
-                            .ok_or_else(|| CodexAdapterUnavailable::Protocol(
-                                "a userMessage item has no id".into()))?;
-                        let content = item.get("content").and_then(serde_json::Value::as_array)
-                            .ok_or_else(|| CodexAdapterUnavailable::Protocol(
-                                "a userMessage item has malformed content".into()))?;
-                        let text = match item.seen_letter(&report.codex_turn_id) {
-                            Some(seen) => seen.payload_text.0,
-                            None if content.len() > 1 => String::new(),
-                            None => return Err(CodexAdapterUnavailable::Protocol(
-                                "a userMessage item has malformed content".into())),
-                        };
-                        items.push(CodexUserItem {
-                            turn_id: report.codex_turn_id.0.clone(),
-                            item_id: item_id.into(),
-                            text,
-                        });
-                    }
-                }
-                Ok(items)
-            })
-        })();
-        session.stop_proxy();
-        result
-    }
-
-    fn user_item_after(
+impl SubscribesCodexUserItems for CodexAdapter {
+    fn subscribe_user_items(
         &self,
         thread_id: &str,
-        prior_item_ids: &BTreeSet<String>,
-        text: &str,
-        attempts: usize,
-    ) -> Result<bool, CodexAdapterUnavailable> {
-        let attempts = attempts.clamp(1, 4);
-        for attempt in 0..attempts {
-            if self.user_items(thread_id)?.iter().any(|item| {
-                item.text == text && !prior_item_ids.contains(&item.item_id)
-            }) {
-                return Ok(true);
+    ) -> Result<CodexUserItemSubscription, CodexAdapterUnavailable> {
+        let mut session = self.initialize_bound_session()?;
+        let resumed = match session.request(
+            2,
+            "thread/resume",
+            serde_json::json!({
+                "threadId": thread_id,
+                    "excludeTurns": true
+            }),
+            self.timeout,
+        ) {
+            Ok(resumed) => resumed,
+            Err(error) => {
+                session.stop_proxy();
+                return Err(error);
             }
-            if attempt + 1 < attempts {
-                std::thread::sleep(Duration::from_millis(100 * (attempt as u64 + 1)));
-            }
+        };
+        if resumed
+            .pointer("/thread/id")
+            .and_then(serde_json::Value::as_str)
+            != Some(thread_id)
+        {
+            session.stop_proxy();
+            return Err(CodexAdapterUnavailable::Protocol(
+                "thread/resume returned another thread".into(),
+            ));
         }
-        Ok(false)
+        Ok(CodexUserItemSubscription {
+            session,
+            thread_id: thread_id.to_owned(),
+            timeout: self.timeout,
+        })
     }
 }
 
@@ -2337,23 +2340,18 @@ mod tests {
     }
 
     #[test]
-    fn user_items_reads_full_native_items_without_starting_a_turn() {
+    fn a_subscribed_user_item_is_an_exact_native_receipt_without_starting_a_turn() {
         let _guard = FAKE_PROXY_LOCK.lock().unwrap();
         let fake = FakeProxy;
         let frames = [
             fake.websocket_frame(r#"{"id":1,"result":{}}"#),
-            fake.websocket_frame(r#"{"id":2,"result":{"thread":{"id":"thread-bound"}}}"#),
-            fake.websocket_frame(r#"{"id":3,"result":{"data":[{"id":"turn-2","status":"inProgress","items":[{"type":"userMessage","id":"item-old","content":[{"type":"text","text":"old"}]},{"type":"userMessage","id":"item-new","content":[{"type":"text","text":"new"}]}]}],"nextCursor":null}}"#),
+            fake.websocket_frame(r#"{"id":2,"result":{"thread":{"id":"thread-bound"},"initialTurnsPage":{"data":[]}}}"#),
+            fake.websocket_frame(r#"{"method":"item/started","params":{"threadId":"thread-bound","turnId":"turn-2","item":{"type":"userMessage","id":"item-new","content":[{"type":"text","text":"new"}]}}}"#),
         ];
         let (_directory, executable) = fake.install(&frames);
         let adapter = adapter_at(executable);
-        assert_eq!(
-            adapter.user_items("thread-bound").unwrap(),
-            vec![
-                CodexUserItem { turn_id: "turn-2".into(), item_id: "item-old".into(), text: "old".into() },
-                CodexUserItem { turn_id: "turn-2".into(), item_id: "item-new".into(), text: "new".into() },
-            ]
-        );
+        let subscription = adapter.subscribe_user_items("thread-bound").unwrap();
+        assert!(subscription.wait_for("new").unwrap());
     }
 
     fn endpoints() -> CodexEndpoints {

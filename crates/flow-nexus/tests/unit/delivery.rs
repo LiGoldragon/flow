@@ -133,10 +133,10 @@ fn working_codex_recipient(
     fixture: &mut NexusFixture,
     client: &std::path::Path,
 ) -> signal_flow::Address {
+    use crate::generated::memory::{SeatActivity, SeatStanding};
     use crate::store::RegistersFlowIdentity as _;
     use crate::store::current_seat::RecordsCurrentSeats as _;
     use crate::store::metaflow::SeedsMetaflow as _;
-    use crate::generated::memory::{SeatActivity, SeatStanding};
     use signal_flow::{Address, Aspect, CallerIdentity, Metaflow, Model};
 
     let address = Address {
@@ -146,7 +146,7 @@ fn working_codex_recipient(
     };
     super::model::configure(fixture, &[(Model::Sol, "gpt-sol")]);
     fixture.nexus.codex_endpoints.edit().stable.client_path = client.to_owned();
-    fixture.nexus.codex_endpoints.edit().timeout = std::time::Duration::from_secs(2);
+    fixture.nexus.codex_endpoints.edit().timeout = std::time::Duration::from_millis(100);
     let node = fixture.node();
     fixture
         .nexus
@@ -181,21 +181,34 @@ fn working_codex_recipient(
     address
 }
 
-fn codex_history_frames(
+fn codex_subscription_frames(
     thread: &str,
-    items: Vec<serde_json::Value>,
+    prior_items: Vec<serde_json::Value>,
+    notification: Option<(&str, serde_json::Value)>,
 ) -> String {
     use super::send_tool::frame;
-    [
+    let mut frames = vec![
         frame(&serde_json::json!({"id": 1, "result": {}})),
-        frame(&serde_json::json!({"id": 2, "result": {"thread": {"id": thread}}})),
-        frame(&serde_json::json!({"id": 3, "result": {"data": [{
-            "id": "turn-working",
-            "status": "inProgress",
-            "items": items
-        }], "nextCursor": null}})),
-    ]
-    .concat()
+        frame(&serde_json::json!({"id": 2, "result": {
+            "thread": {"id": thread},
+            "initialTurnsPage": {"data": [{
+                "id": "turn-working",
+                "status": "inProgress",
+                "items": prior_items
+            }]}
+        }})),
+    ];
+    if let Some((method, item)) = notification {
+        frames.push(frame(&serde_json::json!({
+            "method": method,
+            "params": {
+                "threadId": thread,
+                "turnId": "turn-working",
+                "item": item
+            }
+        })));
+    }
+    frames.concat()
 }
 
 fn user_item(id: &str, text: &str) -> serde_json::Value {
@@ -213,8 +226,8 @@ enum NativeReceiptFixture {
 }
 
 /// Sends one ordinary MiddleAbrupt request through admission, the queue and
-/// the pane writer. The fake app-server sees the bound thread before and
-/// after the single Herdr placement.
+/// the pane writer. The fake app-server subscribes to the bound thread
+/// before the single Herdr placement.
 fn ordinary_send_to_working_codex(
     after: NativeReceiptFixture,
 ) -> (
@@ -222,9 +235,7 @@ fn ordinary_send_to_working_codex(
     String,
     Vec<serde_json::Value>,
 ) {
-    use super::send_tool::{
-        FakeAppServer, ReadsClientFrames as _, RunsFakeAppServer as _,
-    };
+    use super::send_tool::{FakeAppServer, ReadsClientFrames as _, RunsFakeAppServer as _};
     use crate::delivery::body::{RendersPaneText as _, ShowsPaneText as _};
     use crate::message_projection::ProjectsQueueEntry as _;
     use crate::sending::SendsRequests as _;
@@ -236,13 +247,6 @@ fn ordinary_send_to_working_codex(
     let mut fixture = NexusFixture::new();
     let address = working_codex_recipient(&mut fixture, &fake.executable);
     let thread = fixture.node().session_id.0;
-    let old = user_item("item-old", "an older identical-looking input");
-    fs::write(
-        fake.directory.path().join("frames-1"),
-        codex_history_frames(&thread, vec![old.clone()]),
-    )
-    .unwrap();
-
     let lease = fixture
         .nexus
         .waking
@@ -251,9 +255,9 @@ fn ordinary_send_to_working_codex(
     let answer = fixture.nexus.send_request(
         SendRequest {
             address: address.clone(),
-            sendable_message: super::sendable_message(SignalMessage::MiddleAbrupt(
-                Request::Order("receipt-backed working delivery".into()),
-            )),
+            sendable_message: super::sendable_message(SignalMessage::MiddleAbrupt(Request::Order(
+                "receipt-backed working delivery".into(),
+            ))),
         },
         None,
     );
@@ -281,19 +285,17 @@ fn ordinary_send_to_working_codex(
     .pane_text()
     .as_str()
     .to_owned();
-    let after_items = match after {
-        NativeReceiptFixture::Fresh => vec![old.clone(), user_item("item-fresh", &text)],
-        NativeReceiptFixture::Stale => vec![old.clone()],
+    let notification = match after {
+        NativeReceiptFixture::Fresh => Some(("item/started", user_item("item-fresh", &text))),
+        // A completion after the subscription cut can belong to the exact
+        // same-text item already present at the cut. It is not fresh.
+        NativeReceiptFixture::Stale => Some(("item/completed", user_item("item-old", &text))),
     };
-    // Fresh evidence is found on the first bounded read. A stale history is
-    // served for every bounded retry and must never become a receipt.
-    for run in 2..=5 {
-        fs::write(
-            fake.directory.path().join(format!("frames-{run}")),
-            codex_history_frames(&thread, after_items.clone()),
-        )
-        .unwrap();
-    }
+    fs::write(
+        fake.directory.path().join("frames-1"),
+        codex_subscription_frames(&thread, vec![user_item("item-old", &text)], notification),
+    )
+    .unwrap();
     drop(lease);
     fixture.nexus.wake_due(address.clone());
 
@@ -321,8 +323,7 @@ fn ordinary_send_to_working_codex(
 
 #[test]
 fn a_working_codex_send_is_delivered_from_its_fresh_native_item_without_retransmission() {
-    let (state, operations, native) =
-        ordinary_send_to_working_codex(NativeReceiptFixture::Fresh);
+    let (state, operations, native) = ordinary_send_to_working_codex(NativeReceiptFixture::Fresh);
     assert_eq!(state, signal_flow::VisibleDeliveryState::Delivered);
     assert_eq!(
         operations
@@ -341,17 +342,22 @@ fn a_working_codex_send_is_delivered_from_its_fresh_native_item_without_retransm
     assert_eq!(
         native
             .iter()
-            .filter(|request| request["method"] == "thread/read")
+            .filter(|request| request["method"] == "thread/resume")
             .count(),
-        2,
-        "one baseline and one receipt read"
+        1,
+        "one subscription before placement"
+    );
+    assert!(
+        native.iter().all(|request| {
+            request["method"] != "thread/read" && request["method"] != "thread/turns/list"
+        }),
+        "receipt waits on the native event without polling: {native:?}"
     );
 }
 
 #[test]
 fn a_stale_working_codex_item_remains_uncertain_without_retransmission() {
-    let (state, operations, native) =
-        ordinary_send_to_working_codex(NativeReceiptFixture::Stale);
+    let (state, operations, native) = ordinary_send_to_working_codex(NativeReceiptFixture::Stale);
     assert_eq!(state, signal_flow::VisibleDeliveryState::Uncertain);
     assert_eq!(
         operations

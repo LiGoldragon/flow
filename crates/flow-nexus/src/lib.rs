@@ -897,12 +897,24 @@ impl signal_flow::Answering for OrdinaryCall<'_> {
     // its opening frame once, as a read.
     fn observe_sends(
         &self,
-        _delivery_cursor_option: &Option<signal_flow::DeliveryCursor>,
+        delivery_cursor_option: &Option<signal_flow::DeliveryCursor>,
+    ) -> Result<signal_flow::VisibleSendObservation, Output> {
+        self.snapshot_sends(delivery_cursor_option)
+    }
+
+    // A bounded read of the same durable, public projection as ObserveSends.
+    // Unlike ObserveSends the connection adapter does not intercept this
+    // input, so the ordinary one-reply connection closes after this frame.
+    fn snapshot_sends(
+        &self,
+        delivery_cursor_option: &Option<signal_flow::DeliveryCursor>,
     ) -> Result<signal_flow::VisibleSendObservation, Output> {
         use crate::store::logical_delivery::RecordsLogicalDeliveries;
         self.nexus
             .store
-            .read_every_delivery_snapshot(None)
+            .read_every_delivery_snapshot(
+                delivery_cursor_option.as_ref().map(|cursor| cursor.0),
+            )
             .map(|observation| {
                 crate::message_projection::ProjectsSendObservation::visible_send_observation(
                     &observation,
@@ -3536,6 +3548,7 @@ mod tests {
     mod seat_binding;
     mod send_admission;
     mod send_tool;
+    mod snapshot_sends;
     mod start_admission;
     mod submission;
     mod transitions;

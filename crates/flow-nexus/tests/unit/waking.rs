@@ -1354,7 +1354,14 @@ fn first_wake_needs_a_declared_virgin_address_and_a_waking_request() {
     declare_on_demand(&fixture, at.clone());
     let mut quiet = first.clone();
     quiet.queue.0[0].delivery = Delivery::Queue;
+    assert!(fixture.nexus.wake_is_due(&quiet), "Order itself wakes");
+    quiet.queue.0[0].message = Message::Soft(Request::Notice("no wake".into()));
     assert!(!fixture.nexus.wake_is_due(&quiet));
+    quiet.queue.0[0].delivery = Delivery::Wake;
+    assert!(
+        fixture.nexus.wake_is_due(&quiet),
+        "explicit Wake applies even to a Notice"
+    );
     assert_eq!(
         fixture.nexus.store.wake_origin(&first).unwrap(),
         WakeOrigin::FirstSeat
@@ -2809,7 +2816,10 @@ fn a_nexus_start_wakes_a_seat_whose_wake_did_not_finish() {
         vec![],
         vec![Request::Order("p".into())],
     );
-    assert!(fixture.nexus.wake_is_due(&primary));
+    assert!(
+        !fixture.nexus.wake_is_due(&primary),
+        "an undeclared virgin address cannot launch"
+    );
     fixture.nexus.store.seed_metaflow(primary);
     let world = fixture.fresh_claude_world();
 

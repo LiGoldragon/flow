@@ -284,6 +284,13 @@ pub struct CodexUserItem {
 
 pub trait ReadsCodexUserItems {
     fn user_items(&self, thread_id: &str) -> Result<Vec<CodexUserItem>, CodexAdapterUnavailable>;
+    fn user_item_after(
+        &self,
+        thread_id: &str,
+        prior_item_ids: &BTreeSet<String>,
+        text: &str,
+        attempts: usize,
+    ) -> Result<bool, CodexAdapterUnavailable>;
 }
 
 /// Opens a launch's Codex thread through the app-server before any TUI
@@ -1537,9 +1544,23 @@ impl ReadsCodexUserItems for CodexAdapter {
     fn user_items(&self, thread_id: &str) -> Result<Vec<CodexUserItem>, CodexAdapterUnavailable> {
         use crate::codex_turns::{ReadsThreadItem, ReadsTurnReport};
         let mut session = self.initialize_bound_session()?;
-        let result = session
-            .request(
+        let result = (|| {
+            let read = session.request(
                 2,
+                "thread/read",
+                serde_json::json!({"threadId": thread_id, "includeTurns": false}),
+                self.timeout,
+            )?;
+            if read.pointer("/thread/id").and_then(serde_json::Value::as_str)
+                != Some(thread_id)
+            {
+                return Err(CodexAdapterUnavailable::Protocol(
+                    "thread/read returned another thread".into(),
+                ));
+            }
+            session
+            .request(
+                3,
                 "thread/turns/list",
                 serde_json::json!({
                     "threadId": thread_id,
@@ -1558,31 +1579,67 @@ impl ReadsCodexUserItems for CodexAdapter {
                     })?;
                 let mut items = Vec::new();
                 for turn in turns {
-                    let Some(report) = turn.turn_report() else { continue };
-                    let Some(values) = turn.get("items").and_then(serde_json::Value::as_array)
-                    else { continue };
+                    let report = turn.turn_report().ok_or_else(|| {
+                        CodexAdapterUnavailable::Protocol("a listed turn has no id or status".into())
+                    })?;
+                    let values = turn.get("items").and_then(serde_json::Value::as_array).ok_or_else(|| {
+                        CodexAdapterUnavailable::Protocol("a listed turn has no full items".into())
+                    })?;
                     for item in values {
                         if item.get("type").and_then(serde_json::Value::as_str)
                             != Some("userMessage")
                         {
                             continue;
                         }
-                        let seen = item.seen_letter(&report.codex_turn_id).ok_or_else(|| {
-                            CodexAdapterUnavailable::Protocol(
-                                "a userMessage item has malformed content".into(),
-                            )
-                        })?;
+                        // Keep every well-formed userMessage id in the baseline,
+                        // including multipart messages.  Only a single text part is
+                        // eligible for exact receipt matching; multipart text is
+                        // deliberately represented as non-matching empty text.
+                        let item_id = item.get("id").and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| CodexAdapterUnavailable::Protocol(
+                                "a userMessage item has no id".into()))?;
+                        let content = item.get("content").and_then(serde_json::Value::as_array)
+                            .ok_or_else(|| CodexAdapterUnavailable::Protocol(
+                                "a userMessage item has malformed content".into()))?;
+                        let text = match item.seen_letter(&report.codex_turn_id) {
+                            Some(seen) => seen.payload_text.0,
+                            None if content.len() > 1 => String::new(),
+                            None => return Err(CodexAdapterUnavailable::Protocol(
+                                "a userMessage item has malformed content".into())),
+                        };
                         items.push(CodexUserItem {
-                            turn_id: seen.codex_turn_id.0,
-                            item_id: seen.codex_item_id.0,
-                            text: seen.payload_text.0,
+                            turn_id: report.codex_turn_id.0.clone(),
+                            item_id: item_id.into(),
+                            text,
                         });
                     }
                 }
                 Ok(items)
-            });
+            })
+        })();
         session.stop_proxy();
         result
+    }
+
+    fn user_item_after(
+        &self,
+        thread_id: &str,
+        prior_item_ids: &BTreeSet<String>,
+        text: &str,
+        attempts: usize,
+    ) -> Result<bool, CodexAdapterUnavailable> {
+        let attempts = attempts.clamp(1, 4);
+        for attempt in 0..attempts {
+            if self.user_items(thread_id)?.iter().any(|item| {
+                item.text == text && !prior_item_ids.contains(&item.item_id)
+            }) {
+                return Ok(true);
+            }
+            if attempt + 1 < attempts {
+                std::thread::sleep(Duration::from_millis(100 * (attempt as u64 + 1)));
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -2285,7 +2342,8 @@ mod tests {
         let fake = FakeProxy;
         let frames = [
             fake.websocket_frame(r#"{"id":1,"result":{}}"#),
-            fake.websocket_frame(r#"{"id":2,"result":{"data":[{"id":"turn-2","status":"inProgress","items":[{"type":"userMessage","id":"item-old","content":[{"type":"text","text":"old"}]},{"type":"userMessage","id":"item-new","content":[{"type":"text","text":"new"}]}]}],"nextCursor":null}}"#),
+            fake.websocket_frame(r#"{"id":2,"result":{"thread":{"id":"thread-bound"}}}"#),
+            fake.websocket_frame(r#"{"id":3,"result":{"data":[{"id":"turn-2","status":"inProgress","items":[{"type":"userMessage","id":"item-old","content":[{"type":"text","text":"old"}]},{"type":"userMessage","id":"item-new","content":[{"type":"text","text":"new"}]}]}],"nextCursor":null}}"#),
         ];
         let (_directory, executable) = fake.install(&frames);
         let adapter = adapter_at(executable);

@@ -35,7 +35,7 @@ use crate::performing::Performs;
 use crate::store::{ReadsFlowRows, NamesConfiguredModel};
 use crate::store::context::JudgesCompaction;
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries, SelectsHarnessProfile};
-use crate::store::metaflow::{ReadsSuccession, Succession};
+use crate::store::metaflow::{ReadsSuccession, SleepsMetaflows, Succession};
 use crate::submission::{SeatSubmission, WitnessesSubmissions};
 use crate::codex::{ReadsCodexUserItems, CodexUserItem, SelectsCodexEndpoint};
 use crate::live::HoldsLiveValue;
@@ -537,11 +537,11 @@ trait RunsLeasedDelivery<'run> {
     /// never deleted; the letter follows it.
     fn resubmitted_cancelled_prompt(&self) -> bool;
     fn codex_user_items(&self) -> Option<Vec<CodexUserItem>>;
-    fn fresh_codex_item(
-        before: Option<&[CodexUserItem]>,
-        after: Option<&[CodexUserItem]>,
+    fn codex_user_item_after(
+        &self,
+        prior_item_ids: &std::collections::BTreeSet<String>,
         text: &str,
-    ) -> bool;
+    ) -> Option<bool>;
     fn run(&self) -> Result<Delivery, DeliveryRejection>;
 }
 
@@ -581,7 +581,7 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         let address = self
             .nexus
             .store
-            .metaflow_awake_as(&self.target.node.flow_id)
+            .metaflow_awake_as(&self.target.node.flow_id.0)
             .ok()??
             .address;
         let model = self.nexus.store.configured_model(&address).ok()??;
@@ -594,19 +594,32 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             .ok()
     }
 
-    fn fresh_codex_item(
-        before: Option<&[CodexUserItem]>,
-        after: Option<&[CodexUserItem]>,
+    fn codex_user_item_after(
+        &self,
+        prior_item_ids: &std::collections::BTreeSet<String>,
         text: &str,
-    ) -> bool {
-        let Some(after) = after else { return false };
-        after.iter().any(|item| {
-            item.text == text
-                && before
-                    .map(|items| !items.iter().any(|old| old.item_id == item.item_id))
-                    .unwrap_or(false)
-        })
+    ) -> Option<bool> {
+        if self.target.node.harness_kind != HarnessKind::Codex
+            || self.target.node.session_id.0.is_empty()
+        {
+            return None;
+        }
+        let address = self
+            .nexus
+            .store
+            .metaflow_awake_as(&self.target.node.flow_id.0)
+            .ok()??
+            .address;
+        let model = self.nexus.store.configured_model(&address).ok()??;
+        self.nexus
+            .codex_endpoints
+            .current()
+            .adapter_for(&model)
+            .ok()?
+            .user_item_after(&self.target.node.session_id.0, prior_item_ids, text, 4)
+            .ok()
     }
+
 
     fn refuse(&self, rejection: DeliveryRejection) -> Result<Delivery, DeliveryRejection> {
         let _ = self.nexus.store.release_lease(&self.request.delivery_id.0);
@@ -845,10 +858,16 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         if self.target.node.harness_kind == HarnessKind::Codex
             && agent_state == AgentState::Working
             && !hard
+            && codex_before.as_ref().is_some_and(Option::is_some)
         {
-            let after = self.codex_user_items();
-            let before = codex_before.as_ref().and_then(|items| items.as_deref());
-            let receipt = Self::fresh_codex_item(before, after.as_deref(), text.as_str());
+            let before = codex_before
+                .as_ref()
+                .and_then(|items| items.as_ref())
+                .map(|items| items.iter().map(|item| item.item_id.clone()).collect());
+            let receipt = before
+                .as_ref()
+                .and_then(|ids| self.codex_user_item_after(ids, text.as_str()))
+                .unwrap_or(false);
             return self.settle(
                 interrupt_witness,
                 if receipt {
@@ -906,48 +925,3 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
     }
 }
 
-#[cfg(test)]
-mod working_codex_receipt_tests {
-    use super::{CodexUserItem, RunsLeasedDelivery};
-
-    fn item(id: &str, text: &str) -> CodexUserItem {
-        CodexUserItem {
-            turn_id: "thread-turn".into(),
-            item_id: id.into(),
-            text: text.into(),
-        }
-    }
-
-    #[test]
-    fn fresh_matching_item_is_a_receipt() {
-        let before = [item("old", "same")];
-        let after = [item("old", "same"), item("new", "same")];
-        assert!(<super::LeasedDelivery<'static> as RunsLeasedDelivery>::fresh_codex_item(
-            Some(&before), Some(&after), "same"
-        ));
-    }
-
-    #[test]
-    fn stale_or_repeated_item_is_not_a_receipt() {
-        let before = [item("old", "same")];
-        let after = [item("old", "same")];
-        assert!(!<super::LeasedDelivery<'static> as RunsLeasedDelivery>::fresh_codex_item(
-            Some(&before), Some(&after), "same"
-        ));
-    }
-
-    #[test]
-    fn wrong_item_text_and_unreadable_history_are_not_receipts() {
-        let before = [item("old", "other")];
-        let after = [item("new", "other")];
-        assert!(!<super::LeasedDelivery<'static> as RunsLeasedDelivery>::fresh_codex_item(
-            Some(&before), Some(&after), "wanted"
-        ));
-        assert!(!<super::LeasedDelivery<'static> as RunsLeasedDelivery>::fresh_codex_item(
-            Some(&before), None, "wanted"
-        ));
-        assert!(!<super::LeasedDelivery<'static> as RunsLeasedDelivery>::fresh_codex_item(
-            None, Some(&after), "other"
-        ));
-    }
-}

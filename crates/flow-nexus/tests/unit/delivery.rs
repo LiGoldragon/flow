@@ -225,10 +225,10 @@ fn ordinary_send_to_working_codex(
     use super::send_tool::{
         FakeAppServer, ReadsClientFrames as _, RunsFakeAppServer as _,
     };
-    use crate::delivery::body::RendersPaneText as _;
+    use crate::delivery::body::{RendersPaneText as _, ShowsPaneText as _};
     use crate::message_projection::ProjectsQueueEntry as _;
     use crate::sending::SendsRequests as _;
-    use crate::store::metaflow::MutatesMetaflows as _;
+    use crate::store::metaflow::SleepsMetaflows as _;
     use crate::waking::SleepsAndWakesSeats as _;
     use signal_flow::{Input, Message as SignalMessage, Output, Request, SendRequest};
 

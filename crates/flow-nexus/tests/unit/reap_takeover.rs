@@ -584,9 +584,19 @@ fn a_crash_after_the_successor_end_commit_is_recovered_from_the_rows_once() {
             .any(|attempt| attempt.starts_with("Reap")),
         "recover_obligations commits nothing for a pane-owed row"
     );
-    world.show(PaneShown::Absent);
+    world.show(PaneShown::SessionUnreported);
     let closes = world.closes();
+    let snapshots = world.snapshots_of_predecessor();
     with_supervisor(&world.fixture, || {
+        world.until(
+            "new owner has subscribed and read the opening snapshot",
+            &mut || {
+                world.armed().last().is_some_and(|armed| {
+                    armed.reap_responsibility == ReapResponsibility::AddressHeld
+                }) && world.snapshots_of_predecessor() > snapshots
+            },
+        );
+        world.predecessor_pane_gone();
         world.until("the reap settled", &mut || world.row().is_none());
     });
     assert_eq!(world.armed().len(), 1, "one worker");
@@ -1063,6 +1073,9 @@ fn taken_over(world: &ReapWorld) {
         faults.refuse_next(RefusedWrite::HandoverOwing);
         let launched = world.confirmed_at_address("takes-over", LATER, None);
         let _ = world.settled("takes-over", launched);
+        world
+            .fixture
+            .native_activity(LATER, crate::generated::memory::SeatActivity::Resting);
         world.rest(LATER);
         assert_eq!(world.owner(), Some(taken_over_by(LATER)));
     });

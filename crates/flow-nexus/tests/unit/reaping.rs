@@ -561,16 +561,52 @@ impl StagesReap for ReapWorld {
     }
 
     fn until(&self, what: &str, holds: &mut dyn FnMut() -> bool) {
-        // The store file and the Herdr call log are both in the fixture's
-        // directory: each commit and each Herdr call is a change there.
-        use crate::event_wait::AwaitsDirectory;
-        assert!(
-            self.fixture
-                .directory
-                .path()
-                .until_holds(Instant::now() + Duration::from_secs(20), holds),
-            "never: {what}"
-        );
+        // A memory-mapped store commit is not a directory write event. Arm
+        // the store's actual commit/completion source AND Herdr's call log.
+        use crate::event_wait::{AnnouncesOnce, AwaitsDescriptors};
+        use notify::Watcher;
+        let files = crate::store::LaunchChanges::default();
+        let changed = files.clone();
+        let mut watch = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            if event.is_ok_and(|e| {
+                matches!(
+                    e.kind,
+                    notify::EventKind::Create(_)
+                        | notify::EventKind::Modify(_)
+                        | notify::EventKind::Remove(_)
+                )
+            }) {
+                changed.announce();
+            }
+        })
+        .unwrap();
+        watch
+            .watch(
+                self.fixture.directory.path(),
+                notify::RecursiveMode::NonRecursive,
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let file = files.next_descriptor().unwrap();
+            let store = self
+                .fixture
+                .nexus
+                .store
+                .launch_changes
+                .next_descriptor()
+                .unwrap();
+            if holds() {
+                return;
+            }
+            let ready = [file.descriptor(), store.descriptor()]
+                .ready(Some(deadline))
+                .unwrap();
+            if !ready.iter().any(|ready| *ready) {
+                assert!(holds(), "never: {what}");
+                return;
+            }
+        }
     }
 }
 
@@ -691,6 +727,12 @@ impl ProbesGate for GateProbe {
     }
 }
 
+impl Drop for GateProbe {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 /// Runs the reap supervisor for the duration of `body`, then stops the
 /// Nexus and joins it; the ends of every worker it joined. Every worker
 /// this supervisor spawned is joined exactly once.
@@ -708,6 +750,9 @@ pub(super) fn with_supervisor(
         struct StopsOnDrop<'nexus>(&'nexus crate::RunningNexus);
         impl Drop for StopsOnDrop<'_> {
             fn drop(&mut self) {
+                use crate::reaping::HoldsAtPoint;
+                self.0.pane_watch_hooks.pass_hold.release();
+                self.0.pane_watch_hooks.revalidation_hold.release();
                 self.0.stopping.request();
                 self.0.store.launch_changes.announce();
             }
@@ -854,6 +899,21 @@ fn a_reap_is_answered_pending_as_soon_as_it_is_owed_and_closed_outside_the_gate(
                 LaunchStatusOutcome::ReapPending(_) | LaunchStatusOutcome::Replaced(_)
             ));
             assert_eq!(world.lifecycle(PREDECESSOR), FlowLifecycle::Stopped);
+            use crate::generated::memory::SeatStanding;
+            use crate::store::current_seat::RecordsCurrentSeats;
+            assert!(
+                delivery_rejected(
+                    &world.vet(PREDECESSOR),
+                    meta_signal_flow::DeliveryRejection::Unconfirmed
+                ),
+                "a pending reap alone is not proof of native death"
+            );
+            world
+                .fixture
+                .nexus
+                .store
+                .record_observation(PREDECESSOR, Some(SeatStanding::Ended))
+                .unwrap();
             assert!(delivery_rejected(
                 &world.vet(PREDECESSOR),
                 meta_signal_flow::DeliveryRejection::FlowStopped
@@ -878,7 +938,6 @@ fn a_reap_is_answered_pending_as_soon_as_it_is_owed_and_closed_outside_the_gate(
                     .is_none()
             });
         });
-        probe.stop();
         let seen = probe.seen();
         assert!(!seen.is_empty(), "the reap's Herdr calls were probed");
         assert!(
@@ -3571,7 +3630,6 @@ fn no_gated_path_of_a_reap_calls_herdr() {
                 world2.standing() == Some(ReapStanding::CloseRefused)
             });
         });
-        probe.stop();
         let seen = probe.seen();
         assert!(!seen.is_empty());
         assert!(seen.iter().all(|(_, free)| *free), "{seen:?}");

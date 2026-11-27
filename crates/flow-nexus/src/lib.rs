@@ -4480,6 +4480,9 @@ mod tests {
             self.nexus.waking = crate::waking::WakingMetaflows::default();
             self.nexus.stopped_at_confirmation = crate::waking::StoppedAtConfirmation::default();
             self.nexus.refresh_refusals = crate::waking::RefreshRefusals::default();
+            // Standing session subscriptions belong to the dead Nexus, not
+            // the replacement or its new store's change source.
+            self.nexus.herdr.session_streams = Default::default();
             self.nexus.pane_watch_rearms = Default::default();
             self.nexus.pane_watch_hooks = Default::default();
             self.nexus.stopping = crate::Stopping::default();

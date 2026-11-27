@@ -240,6 +240,7 @@ impl NexusFixture {
             self.nexus.dispatch_meta(MetaQuery::RegisterFlow(node)),
             MetaResponse::FlowRegistered(_)
         ));
+        self.native_activity("908786", crate::generated::memory::SeatActivity::Working);
     }
 
     fn resting_recipient(&self, composer: Composer) {
@@ -322,6 +323,7 @@ fn a_letter_seen_leaving_the_composer_is_presented_with_no_key_pressed() {
         PromptFixture::Prompted("w1:p3"),
     );
     fixture.register_with(FlowLifecycle::Active);
+    fixture.native_activity("908786", crate::generated::memory::SeatActivity::Resting);
     assert_eq!(
         fixture.deliver_soft("clean-1", "when you rest"),
         delivered("clean-1", DeliveryGrade::Presented)

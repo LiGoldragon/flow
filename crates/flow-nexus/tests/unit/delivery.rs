@@ -199,6 +199,8 @@ fn both_harnesses_deliver_every_priority_and_only_hard_interrupts_working() {
                     signal_flow::HarnessKind::Codex => "codex",
                 };
                 fixture.accept_pane_operations(vec![agent], PromptFixture::Prompted("w1:p3"));
+                use crate::generated::memory::SeatActivity::{Resting, Working};
+                fixture.native_activity(flow_id, if working { Working } else { Resting });
 
                 let response = fixture.deliver_to(
                     flow_id,
@@ -382,6 +384,7 @@ fn a_resting_recipient_is_not_interrupted() {
         PromptFixture::Prompted("w1:p3"),
     );
     fixture.register_with(FlowLifecycle::Active);
+    fixture.native_activity("908786", crate::generated::memory::SeatActivity::Resting);
     let MetaResponse::MessageTyped(delivery) =
         fixture.deliver("hard-2", Message::HardAbrupt(letter("now")))
     else {
@@ -449,6 +452,7 @@ fn a_path_and_a_later_command_line_are_ordinary_text() {
             PromptFixture::Prompted("w1:p3"),
         );
         fixture.register_with(FlowLifecycle::Active);
+        fixture.native_activity("908786", crate::generated::memory::SeatActivity::Resting);
         assert_eq!(
             fixture.nexus.dispatch_meta(MetaQuery::Vet(DeliveryRequest {
                 delivery_id: meta_signal_flow::DeliveryId("vet".into()),
@@ -595,6 +599,7 @@ fn a_pending_flow_seen_reacting_to_a_delivery_is_active() {
         PromptFixture::Prompted("w1:p3"),
     );
     fixture.register_with(FlowLifecycle::Pending);
+    fixture.native_activity("908786", crate::generated::memory::SeatActivity::Resting);
     assert_eq!(
         fixture.send("hello"),
         Sent::Graded(DeliveryGrade::Presented)
@@ -656,6 +661,7 @@ fn commands_interrupt_a_working_agent_and_compact_through_the_writer() {
         PromptFixture::Prompted("w1:p3"),
     );
     resting.register_with(FlowLifecycle::Active);
+    resting.native_activity("908786", crate::generated::memory::SeatActivity::Resting);
     assert_eq!(
         resting
             .nexus
@@ -682,6 +688,7 @@ fn compact_is_refused_below_the_refresh_threshold_and_placed_at_it() {
         PromptFixture::Prompted("w1:p3"),
     );
     fixture.register_with(FlowLifecycle::Active);
+    fixture.native_activity("908786", crate::generated::memory::SeatActivity::Resting);
     let refused =
         |refusal| MetaResponse::CommandRejected(CommandRejection::CompactionRefused(refusal));
 
@@ -734,10 +741,10 @@ fn compact_is_refused_below_the_refresh_threshold_and_placed_at_it() {
 }
 
 #[test]
-fn observe_agent_opens_on_the_state_herdr_shows() {
+fn observe_agent_reads_native_standing_unknown_without_a_record() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
-        vec![fixture.current_agent()],
+        vec![fixture.settled_agent()],
         PromptFixture::Prompted("w1:p3"),
     );
     fixture.register_with(FlowLifecycle::Active);
@@ -760,7 +767,7 @@ fn observe_agent_opens_on_the_state_herdr_shows() {
             )))),
         Output::AgentObserved(AgentObservation {
             flow_id: flow_ethos::FlowId("unheld".into()),
-            agent_state: AgentState::Gone,
+            agent_state: AgentState::Unknown,
         })
     );
 }

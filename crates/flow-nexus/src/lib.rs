@@ -4996,6 +4996,19 @@ mod tests {
             agent
         }
 
+        /// A synthetic native observation for a test whose boundary is the
+        /// downstream pane writer. Registration alone supplies no standing.
+        fn native_activity(&self, id: &str, activity: crate::generated::memory::SeatActivity) {
+            use crate::store::current_seat::RecordsCurrentSeats;
+            self.nexus
+                .store
+                .record_observation(
+                    id,
+                    Some(crate::generated::memory::SeatStanding::Alive(activity)),
+                )
+                .unwrap();
+        }
+
         fn register_with(&self, lifecycle: FlowLifecycle) {
             let mut node = self.node();
             let active = lifecycle == FlowLifecycle::Active;
@@ -5107,6 +5120,7 @@ mod tests {
             PromptFixture::Prompted("w1:p3"),
         );
         fixture.register_with(FlowLifecycle::Pending);
+        fixture.native_activity("908786", crate::generated::memory::SeatActivity::Resting);
 
         assert_eq!(
             fixture.send("bare prompt"),
@@ -5336,6 +5350,7 @@ mod tests {
             PromptFixture::Prompted("w1:p3"),
         );
         fixture.register_with(FlowLifecycle::Pending);
+        fixture.native_activity("908786", crate::generated::memory::SeatActivity::Working);
 
         assert_eq!(
             fixture.send("queued prompt"),
@@ -5374,6 +5389,7 @@ mod tests {
                 PromptFixture::RefusedBeforeInput(code),
             );
             fixture.register_with(FlowLifecycle::Pending);
+            fixture.native_activity("908786", crate::generated::memory::SeatActivity::Resting);
 
             assert_eq!(
                 fixture.send("bare prompt"),
@@ -5400,6 +5416,7 @@ mod tests {
                 PromptFixture::FailedAfterInput(failure),
             );
             fixture.register_with(FlowLifecycle::Pending);
+            fixture.native_activity("908786", crate::generated::memory::SeatActivity::Resting);
 
             assert_eq!(
                 fixture.send("bare prompt"),
@@ -5432,6 +5449,7 @@ mod tests {
             PromptFixture::Prompted("w1:p9"),
         );
         fixture.register_with(FlowLifecycle::Pending);
+        fixture.native_activity("908786", crate::generated::memory::SeatActivity::Resting);
 
         assert_eq!(
             fixture.send("bare prompt"),
@@ -5465,6 +5483,7 @@ mod tests {
             PromptFixture::Prompted("w1:p3"),
         );
         fixture.register_with(FlowLifecycle::Active);
+        fixture.native_activity("908786", crate::generated::memory::SeatActivity::Resting);
 
         assert_eq!(
             fixture.send("bare prompt"),
@@ -5488,6 +5507,7 @@ mod tests {
         let mut stale = fixture.current_agent();
         stale["terminal_id"] = serde_json::Value::String("term-replaced".into());
         fixture.set_agents(vec![stale]);
+        fixture.native_activity("908786", crate::generated::memory::SeatActivity::Resting);
 
         assert_eq!(
             fixture.send_to("908786", "stale route prompt"),
@@ -5998,6 +6018,7 @@ mod tests {
             PromptFixture::Prompted("w1:p3"),
         );
         bind_existing_caller(&fixture, "908786", "w1:p3");
+        fixture.native_activity("908786", crate::generated::memory::SeatActivity::Resting);
 
         assert_eq!(
             fixture.send("bare prompt"),
@@ -6033,6 +6054,7 @@ mod tests {
             PromptFixture::Prompted("w1:p3"),
         );
         bind_existing_caller(&fixture, "908786", "w1:p3");
+        fixture.native_activity("908786", crate::generated::memory::SeatActivity::Resting);
 
         let node = resolved(&fixture);
         assert_eq!(node.endpoint_selection, EndpointSelection::Unavailable);

@@ -650,8 +650,17 @@ fn a_fresh_wake_does_not_select_a_pane_writers_request() {
     let target = address(Model::Sol);
     fixture.nexus.store.seed_metaflow(Metaflow {
         state: State::Asleep,
+        past: flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.into())]),
         ..stored(&fixture, Model::Sol)
     });
+    fixture
+        .nexus
+        .store
+        .record_observation(
+            CLAUDE_SEAT,
+            Some(crate::generated::memory::SeatStanding::Ended),
+        )
+        .unwrap();
     let _lease = fixture.nexus.waking.hold(&target).unwrap();
     assert!(matches!(
         fixture.nexus.perform(Operation::Wake(target)),

@@ -780,15 +780,24 @@ fn releasing_one_permaflow_while_global_hold_stands_keeps_its_work_queued() {
 
 #[test]
 fn permaflow_hold_leaves_other_addresses_due_to_wake() {
+    use crate::generated::memory::SeatStanding;
+    use crate::store::current_seat::RecordsCurrentSeats;
     let fixture = NexusFixture::new();
-    resting_seat(&fixture);
+    for (model, last) in [(Model::Sol, "a1b2c3"), (Model::Astra, "d4e5f6")] {
+        fixture
+            .nexus
+            .store
+            .record_observation(last, Some(SeatStanding::Ended))
+            .unwrap();
+        fixture.nexus.store.seed_metaflow(metaflow(
+            model.clone(),
+            State::Asleep,
+            vec![last],
+            vec![Request::Order("address work".into())],
+        ));
+        assert!(fixture.nexus.wake_is_due(&stored(&fixture, model)));
+    }
     overridden(&fixture, meta::Input::HoldPermaflow(address(Model::Sol)));
-    fixture.nexus.store.seed_metaflow(metaflow(
-        Model::Astra,
-        State::Asleep,
-        vec![],
-        vec![Request::Order("other-address-work".into())],
-    ));
     assert!(fixture.nexus.wake_is_due(&stored(&fixture, Model::Astra)));
     assert!(!fixture.nexus.wake_is_due(&stored(&fixture, Model::Sol)));
 }

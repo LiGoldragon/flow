@@ -7596,9 +7596,17 @@ fn a_successor_refusal_routes_once_to_the_configured_investigator() {
         fixture.nexus.store.seed_metaflow(Metaflow {
             address: investigator_address.clone(),
             state: State::Asleep,
-            past: flow_ethos::Past(vec![]),
+            past: flow_ethos::Past(vec![flow_ethos::FlowId("a57a01".into())]),
             queue: flow_ethos::Queue(vec![]),
         });
+        fixture
+            .nexus
+            .store
+            .record_observation(
+                "a57a01",
+                Some(crate::generated::memory::SeatStanding::Ended),
+            )
+            .unwrap();
         if let Some(model) = &investigator {
             fixture
                 .nexus

@@ -1060,8 +1060,9 @@ pub struct StateRevision(pub i64);
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct CurrentSeat {
     pub flow_id: signal_flow::FlowId,
-    pub seat_standing: SeatStanding,
+    pub seat_standing_option: std::option::Option<SeatStanding>,
     pub state_revision: StateRevision,
+    pub background_work: signal_flow::BackgroundWork,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

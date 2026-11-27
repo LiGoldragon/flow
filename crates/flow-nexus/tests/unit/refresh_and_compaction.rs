@@ -418,11 +418,9 @@ fn a_seat_past_its_threshold_shown_working_is_refreshed_at_its_stop() {
 }
 
 /// A seat past its threshold whose turn ends with a subagent and a monitor
-/// in flight is refreshed at that Stop: a flow that keeps background work
-/// running at every turn's end would otherwise never be refreshed. Its pane
-/// is closed, its queue kept for the next flow.
+/// in flight keeps both its jobs and its refresh obligation until a safe Stop.
 #[test]
-fn a_stop_with_live_background_work_past_the_threshold_refreshes() {
+fn an_overdue_refresh_preserves_live_background_work_until_a_safe_stop() {
     use super::waking::{background_task, report_claude_stop};
     use signal_flow::BackgroundTaskKind;
     let fixture = NexusFixture::new();
@@ -450,6 +448,31 @@ fn a_stop_with_live_background_work_past_the_threshold_refreshes() {
             background_task("m1", BackgroundTaskKind::Monitor),
         ],
     );
+    use crate::generated::memory::{SeatActivity, SeatStanding};
+    use crate::store::current_seat::{CurrentSeatRead, RecordsCurrentSeats};
+    use crate::waking::JudgesClosingRest;
+    assert!(!closed(&fixture));
+    assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Active);
+    // Temporarily losing the source cannot certify that either job ended.
+    fixture
+        .nexus
+        .store
+        .record_observation(CLAUDE_SEAT, None)
+        .unwrap();
+    assert!(matches!(
+        fixture.nexus.store.current_seat(CLAUDE_SEAT).unwrap(),
+        CurrentSeatRead::NoRecord
+    ));
+    fixture
+        .nexus
+        .store
+        .record_observation(
+            CLAUDE_SEAT,
+            Some(SeatStanding::Alive(SeatActivity::Resting)),
+        )
+        .unwrap();
+    assert!(!fixture.nexus.rests_for_closing(CLAUDE_SEAT));
+    report_claude_stop(&fixture, vec![]);
     assert!(closed(&fixture), "the seat's pane is closed");
     assert!(fixture.typed().is_none(), "nothing is typed into it");
     assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
@@ -471,10 +494,9 @@ fn a_stop_with_live_background_work_past_the_threshold_refreshes() {
 /// reaches the warning share of its threshold, at MiddleAbrupt, the
 /// configured words, its handover path and its own Refresh, and nothing
 /// else; it is not
-/// refreshed at the Stop that warned it, and is refreshed at the next,
-/// though it never rested and wrote no handover.
+/// refreshed until the native harness reports that its jobs are gone.
 #[test]
-fn a_busy_flow_is_warned_and_then_refreshed_at_its_next_stop() {
+fn a_busy_flow_is_warned_once_and_refreshed_only_after_its_jobs_finish() {
     use super::waking::{background_task, report_claude_stop};
     use crate::store::handover_reminders::SchedulesHandoverReminders;
     use signal_flow::BackgroundTaskKind;
@@ -556,10 +578,25 @@ fn a_busy_flow_is_warned_and_then_refreshed_at_its_next_stop() {
     assert!(!typed.contains("flow-nexus"), "{typed}");
     assert!(!typed.contains("Keep"), "{typed}");
 
-    // The next turn's end refreshes it, busy and with no handover written.
+    // The warning stays owed without destroying the busy harness.
     append_main_rows(&fixture, &[usage(180_000)]);
     report_claude_stop(&fixture, busy());
-    assert!(closed(&fixture), "the warned seat is refreshed");
+    assert!(!closed(&fixture));
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .handover_reminder(&seat_address(), 0)
+            .unwrap()
+            .unwrap()
+            .sent,
+        crate::generated::memory::Sent(1)
+    );
+    report_claude_stop(&fixture, vec![]);
+    assert!(
+        closed(&fixture),
+        "the warned seat is refreshed at safe rest"
+    );
     assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Stopped);
     let metaflow = seat_metaflow_now(&fixture);
     assert_eq!(metaflow.state, State::Asleep);

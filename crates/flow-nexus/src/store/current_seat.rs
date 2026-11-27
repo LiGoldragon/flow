@@ -7,11 +7,11 @@ use sema_engine::{
     AtomicCommit, EngineRecord, FamilyName, QueryPlan, RecordKey, SchemaHash, TableDescriptor,
     TableName,
 };
-use signal_flow::FlowId;
+use signal_flow::{BackgroundWork, FlowId};
 
 pub(super) const TABLE: &str = "flow_nexus_current_seats";
 pub(super) const FAMILY: &str = "flow-nexus-current-seat";
-pub(super) const SCHEMA: &str = "flow-nexus-current-seat-v1";
+pub(super) const SCHEMA: &str = "flow-nexus-current-seat-v2";
 
 pub(super) trait DescribesCurrentSeats {
     fn descriptor() -> TableDescriptor<CurrentSeat>;
@@ -33,9 +33,15 @@ impl EngineRecord for CurrentSeat {
     }
 }
 
+pub(crate) struct KnownSeat {
+    pub seat_standing: SeatStanding,
+    pub state_revision: StateRevision,
+    pub background_work: BackgroundWork,
+}
+
 pub(crate) enum CurrentSeatRead {
     NoRecord,
-    Known(CurrentSeat),
+    Known(KnownSeat),
 }
 
 /// Decision view of the keyed record. An unavailable source cannot be
@@ -50,11 +56,13 @@ pub(crate) enum SeatEvent {
     NewIncarnation(SeatStanding),
     Started,
     Activity(SeatActivity),
+    Stopped(BackgroundWork),
     Ended,
 }
 
 pub(crate) trait RecordsCurrentSeats {
     fn seat_decision(&self, id: &str) -> Result<SeatDecision, StoreError>;
+    fn seat_record(&self, id: &str) -> Result<Option<CurrentSeat>, StoreError>;
     fn current_seat(&self, id: &str) -> Result<CurrentSeatRead, StoreError>;
     fn record_observation(
         &self,
@@ -85,12 +93,28 @@ impl RecordsCurrentSeats for FlowStore {
     }
 
     fn current_seat(&self, id: &str) -> Result<CurrentSeatRead, StoreError> {
+        Ok(match self.seat_record(id)? {
+            Some(CurrentSeat {
+                seat_standing_option: Some(seat_standing),
+                state_revision,
+                background_work,
+                ..
+            }) => CurrentSeatRead::Known(KnownSeat {
+                seat_standing,
+                state_revision,
+                background_work,
+            }),
+            _ => CurrentSeatRead::NoRecord,
+        })
+    }
+
+    fn seat_record(&self, id: &str) -> Result<Option<CurrentSeat>, StoreError> {
         let rows = self
             .engine
             .match_records(QueryPlan::key(self.current_seats, RecordKey::new(id)))?;
         match rows.records() {
-            [] => Ok(CurrentSeatRead::NoRecord),
-            [row] => Ok(CurrentSeatRead::Known(row.clone())),
+            [] => Ok(None),
+            [row] => Ok(Some(row.clone())),
             _ => Err(StoreError::StateInvariant),
         }
     }
@@ -115,11 +139,23 @@ impl RecordsCurrentSeats for FlowStore {
         let commit = self.engine.begin_atomic_commit();
         let commit = match observation {
             Some(standing) => self.stage_observation(commit, id, standing)?,
-            None => match self.current_seat(id)? {
-                CurrentSeatRead::Known(CurrentSeat {
-                    seat_standing: SeatStanding::Alive(_),
-                    ..
-                }) => commit.retract(self.current_seats, RecordKey::new(id)),
+            None => match self.seat_record(id)? {
+                Some(mut row)
+                    if matches!(row.seat_standing_option, Some(SeatStanding::Alive(_))) =>
+                {
+                    if row.background_work.0.is_empty() {
+                        commit.retract(self.current_seats, RecordKey::new(id))
+                    } else {
+                        // Unavailable is not evidence that authenticated jobs ended.
+                        row.seat_standing_option = None;
+                        row.state_revision.0 = row
+                            .state_revision
+                            .0
+                            .checked_add(1)
+                            .ok_or(StoreError::StateInvariant)?;
+                        commit.mutate(self.current_seats, row)
+                    }
+                }
                 _ => return Ok(()),
             },
         };
@@ -174,37 +210,50 @@ impl RecordsCurrentSeats for FlowStore {
         id: &str,
         event: SeatEvent,
     ) -> Result<AtomicCommit, StoreError> {
-        use CurrentSeatRead::{Known, NoRecord};
         use SeatStanding::{Alive, Ended};
-        let previous = self.current_seat(id)?;
-        let next = match (&previous, event) {
-            (_, SeatEvent::NewIncarnation(standing)) => standing,
-            (
-                Known(CurrentSeat {
-                    seat_standing: Ended,
-                    ..
-                }),
-                _,
-            ) => return Ok(commit),
-            (_, SeatEvent::Observed(standing)) => standing,
-            (_, SeatEvent::Ended) => Ended,
-            (NoRecord, SeatEvent::Started) => Alive(SeatActivity::Working),
-            (Known(_), SeatEvent::Started) | (NoRecord, SeatEvent::Activity(_)) => {
-                return Ok(commit);
+        let previous = self.seat_record(id)?;
+        let standing = previous
+            .as_ref()
+            .and_then(|row| row.seat_standing_option.as_ref());
+        let jobs = previous
+            .as_ref()
+            .map(|row| row.background_work.clone())
+            .unwrap_or_else(|| BackgroundWork(vec![]));
+        let (next, jobs) = match (standing, event) {
+            (_, SeatEvent::NewIncarnation(next)) => (Some(next), BackgroundWork(vec![])),
+            (Some(Ended), _) => return Ok(commit),
+            (_, SeatEvent::Ended | SeatEvent::Observed(Ended)) => {
+                (Some(Ended), BackgroundWork(vec![]))
             }
-            (Known(_), SeatEvent::Activity(activity)) => Alive(activity),
+            (_, SeatEvent::Observed(next)) => (Some(next), jobs),
+            (None, SeatEvent::Started) => (Some(Alive(SeatActivity::Working)), jobs),
+            (Some(_), SeatEvent::Activity(activity)) => (Some(Alive(activity)), jobs),
+            (Some(_), SeatEvent::Stopped(reported)) => {
+                (Some(Alive(SeatActivity::Resting)), reported)
+            }
+            (None, SeatEvent::Stopped(reported))
+                if !reported.0.is_empty() || previous.is_some() =>
+            {
+                (None, reported)
+            }
+            _ => return Ok(commit),
         };
         Ok(match previous {
-            NoRecord => commit.assert(
+            None => commit.assert(
                 self.current_seats,
                 CurrentSeat {
                     flow_id: FlowId(id.into()),
-                    seat_standing: next,
+                    seat_standing_option: next,
                     state_revision: StateRevision(1),
+                    background_work: jobs,
                 },
             ),
-            Known(mut row) if row.seat_standing != next => {
-                row.seat_standing = next;
+            Some(_) if next.is_none() && jobs.0.is_empty() => {
+                commit.retract(self.current_seats, RecordKey::new(id))
+            }
+            Some(mut row) if row.seat_standing_option != next || row.background_work != jobs => {
+                row.seat_standing_option = next;
+                row.background_work = jobs;
                 row.state_revision.0 = row
                     .state_revision
                     .0
@@ -212,7 +261,7 @@ impl RecordsCurrentSeats for FlowStore {
                     .ok_or(StoreError::StateInvariant)?;
                 commit.mutate(self.current_seats, row)
             }
-            Known(_) => commit,
+            Some(_) => commit,
         })
     }
 }

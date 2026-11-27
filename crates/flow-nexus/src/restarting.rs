@@ -802,6 +802,11 @@ impl RestartsInSteps for RunningNexus {
                 )));
             }
         }
+        use crate::store::current_seat::{CurrentSeatRead, RecordsCurrentSeats};
+        if matches!(self.store.current_seat(flow_id), Ok(CurrentSeatRead::Known(row)) if !row.background_work.0.is_empty())
+        {
+            return Err(Box::new(self.queue_restart(&address, flow_id)));
+        }
         let presence = self.herdr.pane_presence(&node);
         match presence {
             PanePresence::Unknown => return refused(RestartRefusal::CloseRefused),
@@ -809,7 +814,7 @@ impl RestartsInSteps for RunningNexus {
             // now, the restart is ordered for it and answered RestartQueued.
             PanePresence::Present if !at_idle_event => {
                 use crate::generated::memory::{SeatActivity, SeatStanding};
-                use crate::store::current_seat::{RecordsCurrentSeats, SeatDecision};
+                use crate::store::current_seat::SeatDecision;
                 let resting = match self.store.seat_decision(flow_id) {
                     Ok(SeatDecision::Observed(SeatStanding::Alive(activity))) => {
                         activity == SeatActivity::Resting

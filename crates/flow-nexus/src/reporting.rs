@@ -90,7 +90,10 @@ impl RecordsReports for RunningNexus {
             .flatten();
         let state_event = match typed {
             Some(StateReport::Working(_)) => Some(SeatEvent::Activity(SeatActivity::Working)),
-            Some(StateReport::Idle(_)) => Some(SeatEvent::Activity(SeatActivity::Resting)),
+            Some(StateReport::Idle(_)) => Some(match &event {
+                Event::Stopped(stop) => SeatEvent::Stopped(stop.background_work.clone()),
+                _ => SeatEvent::Activity(SeatActivity::Resting),
+            }),
             Some(StateReport::Ended) => Some(SeatEvent::Ended),
             _ => None,
         };

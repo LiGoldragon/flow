@@ -389,7 +389,7 @@ Memory
   SeatActivity.[ Working Resting ]
   SeatStanding.[ Alive.SeatActivity Ended ]
   StateRevision.Integer
-  CurrentSeat.{ FlowId SeatStanding StateRevision }
+  CurrentSeat.{ FlowId Option<SeatStanding> StateRevision BackgroundWork }
   ; One unfinished fresh launch per Address. The attempt owns its native
   ; progress; this record owns only the exact durable request membership.
   FreshLaunchCohort.{ Address LaunchRequestId Vector<LogicalDeliveryId> }

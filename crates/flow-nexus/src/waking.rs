@@ -452,7 +452,7 @@ impl RestsEndedAwake for RunningNexus {
         let ended = matches!(
             self.store.current_seat(&flow_id.0),
             Ok(crate::store::current_seat::CurrentSeatRead::Known(
-                crate::generated::memory::CurrentSeat {
+                crate::store::current_seat::KnownSeat {
                     seat_standing: crate::generated::memory::SeatStanding::Ended,
                     ..
                 }
@@ -1121,7 +1121,10 @@ pub(crate) trait JudgesClosingRest {
 
 impl JudgesClosingRest for RunningNexus {
     fn rests_for_closing(&self, flow_id: &str) -> bool {
-        self.rests_now(flow_id)
+        use crate::generated::memory::{SeatActivity, SeatStanding};
+        use crate::store::current_seat::CurrentSeatRead;
+        matches!(self.store.current_seat(flow_id), Ok(CurrentSeatRead::Known(row))
+            if row.seat_standing == SeatStanding::Alive(SeatActivity::Resting) && row.background_work.0.is_empty())
     }
 }
 
@@ -1453,7 +1456,7 @@ impl SleepsAndWakesSeats for RunningNexus {
             if !matches!(
                 self.store.current_seat(&last.0),
                 Ok(crate::store::current_seat::CurrentSeatRead::Known(
-                    crate::generated::memory::CurrentSeat {
+                    crate::store::current_seat::KnownSeat {
                         seat_standing: crate::generated::memory::SeatStanding::Ended,
                         ..
                     }
@@ -3320,10 +3323,10 @@ impl WakesInParts for RunningNexus {
             Ok(order) => order.filter(|order| order.predecessor.0 == flow_id),
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
-        let closable = self.rests_now(flow_id);
-        if !closable {
+        if !self.rests_now(flow_id) {
             return AtStop::Kept(KeptAtStop::InTurn);
         }
+        let closable = self.rests_for_closing(flow_id);
         if closable && let Some(order) = ordered {
             return self.replace_as_ordered(order, metaflow, node, turn);
         }

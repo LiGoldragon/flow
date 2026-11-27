@@ -1407,10 +1407,9 @@ fn a_self_refresh_of_a_working_seat_waits_for_its_idle_event_and_answers_refresh
 
 /// An ordered Refresh is carried out at the flow's next Stop though that
 /// Stop names work in flight, a comment watch's monitor among it: the
-/// background work is ended with the harness, as a refresh past the
-/// threshold ends it. Its pane is closed, its flow Stopped, the order spent.
+/// background work keeps it awake until a later authenticated Stop clears it.
 #[test]
-fn an_ordered_refresh_is_carried_out_at_the_next_stop_ending_background_work() {
+fn an_ordered_refresh_waits_for_the_stop_that_confirms_no_background_work() {
     use super::waking::background_task;
     use crate::store::ordered_replacement::OrdersReplacements;
     let fixture = NexusFixture::new();
@@ -1436,7 +1435,18 @@ fn an_ordered_refresh_is_carried_out_at_the_next_stop_ending_background_work() {
         )],
     );
 
-    assert!(closed(&fixture), "the flow is refreshed at this Stop");
+    assert!(!closed(&fixture));
+    assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
+    assert!(
+        fixture
+            .nexus
+            .store
+            .ordered_replacement(&seat_address())
+            .unwrap()
+            .is_some()
+    );
+    super::waking::report_claude_stop(&fixture, vec![]);
+    assert!(closed(&fixture), "the flow is refreshed at safe rest");
     assert!(
         fixture.typed().is_none(),
         "the ending flow is given no turn"

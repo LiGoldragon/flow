@@ -581,7 +581,7 @@ fn restart_of_a_working_seat_is_carried_out_at_its_next_stop() {
         Output::RestartQueued(flow_ethos::FlowId(FLOW.into()))
     );
 
-    // Its Stop names work in flight; the restart runs at it all the same.
+    // Its first Stop names work in flight; restarting would destroy the monitor.
     let mut stop = stop_of(&world, &fixture);
     if let Event::Stopped(native) = &mut stop {
         native.background_work = signal_flow::BackgroundWork(vec![signal_flow::BackgroundTask {
@@ -592,6 +592,13 @@ fn restart_of_a_working_seat_is_carried_out_at_its_next_stop() {
         }]);
     }
     assert!(report_from(&fixture, stop, Some(world.old_hook())));
+    assert!(world.resumes().is_empty());
+    assert!(world.calls_naming("pane close").is_empty());
+    assert!(report_from(
+        &fixture,
+        stop_of(&world, &fixture),
+        Some(world.old_hook())
+    ));
     let resumes = world.resumes();
     assert_eq!(resumes.len(), 1, "{}", world.fresh.calls());
     assert!(resumes[0].contains(&format!("--resume {}", world.seat.session)));

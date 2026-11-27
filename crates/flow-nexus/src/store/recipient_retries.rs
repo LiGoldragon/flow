@@ -70,7 +70,10 @@ impl SubscriptionSink<CurrentSeat> for RecipientRetries {
     fn deliver(&self, event: SubscriptionEvent<CurrentSeat>) -> Result<(), SinkError> {
         if let SubscriptionEvent::Delta(delta) = event
             && matches!(delta.kind(), DeltaKind::Assert | DeltaKind::Mutate)
-            && matches!(delta.record().seat_standing, SeatStanding::Alive(_))
+            && matches!(
+                delta.record().seat_standing_option,
+                Some(SeatStanding::Alive(_))
+            )
         {
             self.targets
                 .lock()

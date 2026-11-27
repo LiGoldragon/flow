@@ -44,10 +44,11 @@ impl WatchesNativeProcess for RunningNexus {
         node: &signal_flow::FlowNode,
         seat: &SeatWitness,
     ) -> Option<OwnedFd> {
-        use crate::generated::memory::{CurrentSeat, SeatStanding};
+        use crate::generated::memory::SeatStanding;
+        use crate::store::current_seat::KnownSeat;
         if !matches!(
             self.store.current_seat(&node.flow_id.0),
-            Ok(CurrentSeatRead::Known(CurrentSeat {
+            Ok(CurrentSeatRead::Known(KnownSeat {
                 seat_standing: SeatStanding::Alive(_),
                 ..
             }))

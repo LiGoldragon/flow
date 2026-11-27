@@ -13,7 +13,7 @@
 //! seat runs in and the birth of its harness process, by which a late event
 //! of the seat it replaced is told from the seat's own.
 
-use super::current_seat::{CurrentSeatRead, RecordsCurrentSeats, SeatEvent};
+use super::current_seat::{RecordsCurrentSeats, SeatEvent};
 use super::transitions::StagesObservationAudit;
 use super::{AnnouncesLaunchChanges, FlowHerdrRouteRecord, FlowStore, ReadsFlowStore, StoreError};
 pub(crate) use crate::generated::memory::StoredRestart;
@@ -214,7 +214,7 @@ impl RecordsRestarts for FlowStore {
                 )?;
                 self.stage_current_event(commit, id, SeatEvent::NewIncarnation(standing))?
             }
-            None if matches!(self.current_seat(id)?, CurrentSeatRead::Known(_)) => {
+            None if self.seat_record(id)?.is_some() => {
                 commit.retract(self.current_seats, RecordKey::new(id))
             }
             None => commit,

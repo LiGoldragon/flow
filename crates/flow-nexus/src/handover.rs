@@ -31,6 +31,9 @@ pub enum Handover {
 /// kept under a root ignores it.
 pub trait YieldsHandover: std::fmt::Debug + Send + Sync {
     fn handover(&self, address: &Address, predecessor: &str, launch_root: &Path) -> Handover;
+    fn crystallization(&self, _predecessor: &str) -> Handover {
+        Handover::Absent
+    }
     fn requires_launch_root(&self) -> bool {
         true
     }
@@ -45,6 +48,21 @@ pub struct HandoverFile;
 
 impl YieldsHandover for HandoverFile {
     fn handover(&self, _address: &Address, predecessor: &str, launch_root: &Path) -> Handover {
+        PredecessorDocument::Handover.read_under(&launch_root.join("flows"), predecessor)
+    }
+}
+
+pub(crate) enum PredecessorDocument {
+    Handover,
+    Crystallization,
+}
+
+pub(crate) trait ReadsPredecessorDocument {
+    fn read_under(self, flows_root: &Path, predecessor: &str) -> Handover;
+}
+
+impl ReadsPredecessorDocument for PredecessorDocument {
+    fn read_under(self, flows_root: &Path, predecessor: &str) -> Handover {
         // A FlowId names a directory: letters, digits, hyphen and underscore.
         let names_a_flow = !predecessor.is_empty()
             && predecessor
@@ -53,14 +71,18 @@ impl YieldsHandover for HandoverFile {
         if !names_a_flow {
             return Handover::Unreadable(HandoverFault::InvalidPredecessor);
         }
-        let path = launch_root
-            .join("flows")
-            .join(predecessor)
-            .join("handover.md");
+        let filename = match self {
+            Self::Handover => "handover.md",
+            Self::Crystallization => "crystallization.md",
+        };
+        let path = flows_root.join(predecessor).join(filename);
         match std::fs::read(&path) {
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(text) if text.is_empty() => Handover::Absent,
                 Ok(text) => Handover::Text(text),
+                Err(_) if matches!(self, Self::Crystallization) => Handover::Unreadable(
+                    HandoverFault::Unreadable(format!("{}: not UTF-8", path.display())),
+                ),
                 Err(_) => Handover::Unreadable(HandoverFault::NotUtf8),
             },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Handover::Absent,

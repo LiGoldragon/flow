@@ -41,7 +41,7 @@ fn emergency_intent(
 /// The composer a configured Nexus runs: one Memory source for both the
 /// handover and the recovery (`ConfiguredRunner`).
 fn memory_composer(store: &Arc<FlowStore>) -> LaunchComposer {
-    let source = Arc::new(crate::MemoryHandoverSource(store.clone()));
+    let source = Arc::new(crate::MemoryHandoverSource(store.clone(), None));
     LaunchComposer::with_context(
         crate::context::ContextComposer(Arc::new(crate::context::FixtureComposer::from(
             &[

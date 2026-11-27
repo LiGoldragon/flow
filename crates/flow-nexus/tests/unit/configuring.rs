@@ -2522,7 +2522,7 @@ fn one_live_store_value_reaches_both_composers_without_reconstructing_the_source
             launch_request_id: profile.launch_request_id.clone(),
         })
         .unwrap();
-    let source = std::sync::Arc::new(crate::MemoryHandoverSource(nexus.store.clone()));
+    let source = std::sync::Arc::new(crate::MemoryHandoverSource(nexus.store.clone(), None));
     let modules = [
         ("spirit:core:0", "Spirit body."),
         ("intent:flow:0", "Intent body."),

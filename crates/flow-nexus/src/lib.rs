@@ -203,7 +203,7 @@ pub struct RunningNexus {
 /// ([`crate::handover::HandoverFile`]). With no root resolved only Memory is
 /// read.
 #[derive(Clone)]
-struct MemoryHandoverSource(Arc<FlowStore>);
+struct MemoryHandoverSource(Arc<FlowStore>, Option<PathBuf>);
 
 impl std::fmt::Debug for MemoryHandoverSource {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -212,6 +212,14 @@ impl std::fmt::Debug for MemoryHandoverSource {
 }
 
 impl crate::handover::YieldsHandover for MemoryHandoverSource {
+    fn crystallization(&self, predecessor: &str) -> crate::handover::Handover {
+        use crate::handover::{PredecessorDocument, ReadsPredecessorDocument};
+        match &self.1 {
+            Some(root) => PredecessorDocument::Crystallization.read_under(root, predecessor),
+            None => crate::handover::Handover::Absent,
+        }
+    }
+
     fn requires_launch_root(&self) -> bool {
         false
     }
@@ -2320,7 +2328,10 @@ trait ComposesFromConfiguration {
 
 impl ComposesFromConfiguration for ConfiguredRunner {
     fn composer(&self, store: Arc<FlowStore>) -> LaunchComposer {
-        let handover_source = Arc::new(MemoryHandoverSource(store));
+        let handover_source = Arc::new(MemoryHandoverSource(
+            store,
+            Some(self.source_root.join("flows")),
+        ));
         LaunchComposer::with_presentation_prompt(
             context::ContextComposer(std::sync::Arc::new(CurriculumComposer::at(
                 &self.curriculum_nexus_path,

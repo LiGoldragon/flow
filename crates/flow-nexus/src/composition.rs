@@ -369,6 +369,12 @@ impl ReadsEmergencyPredecessor for LaunchComposer {
 }
 
 trait ReadsHandover {
+    fn crystallization_text(
+        &self,
+        profile: &LaunchProfile,
+        launch_root: HandoverRoot<'_>,
+    ) -> Result<Option<String>, CompositionError>;
+
     fn handover_text(
         &self,
         profile: &LaunchProfile,
@@ -378,6 +384,27 @@ trait ReadsHandover {
 }
 
 impl ReadsHandover for LaunchComposer {
+    fn crystallization_text(
+        &self,
+        profile: &LaunchProfile,
+        launch_root: HandoverRoot<'_>,
+    ) -> Result<Option<String>, CompositionError> {
+        let Some(predecessor) = &profile.flow_id_option else {
+            return Ok(None);
+        };
+        if launch_root == HandoverRoot::Unread {
+            return Ok(None);
+        }
+        match self.handover.crystallization(&predecessor.0) {
+            Handover::Absent => Ok(None),
+            Handover::Text(text) => Ok(Some(text)),
+            Handover::Unreadable(fault) => Err(CompositionError::HandoverUnreadable {
+                predecessor: predecessor.0.clone(),
+                fault,
+            }),
+        }
+    }
+
     /// The text of a successor's handover, placed after the brief in its
     /// first prompt: what the source yields for the launch's predecessor.
     /// None for a launch with no predecessor, for one composed with no
@@ -923,10 +950,20 @@ impl ComposesInRoot for LaunchComposer {
             // instruction remains the first user message; an empty one does
             // not create a context-only startup turn.
             let system_prompt = self.launch_system_prompt(&harnessed, &verified, &segments)?;
-            let handover = if brief.is_empty() && recovery.is_none() {
+            let has_startup = !brief.is_empty() || recovery.is_some();
+            let crystallization = if has_startup {
+                self.crystallization_text(&harnessed.launch_profile, launch_root)?
+            } else {
+                None
+            };
+            let handover = if !has_startup {
                 None
             } else {
                 self.handover_text(&harnessed.launch_profile, launch_root, recovery.as_ref())?
+            };
+            let brief = match &crystallization {
+                Some(crystallization) => vec![brief].placed_last(crystallization).concat(),
+                None => brief,
             };
             let brief = match &handover {
                 Some(handover) => vec![brief].placed_last(handover).concat(),
@@ -962,6 +999,11 @@ impl ComposesInRoot for LaunchComposer {
         // The handover follows the brief, and the open requests follow the
         // handover, the last piece of the message.
         let mut pieces = segments.joined_with(&brief);
+        if let Some(crystallization) =
+            self.crystallization_text(&harnessed.launch_profile, launch_root)?
+        {
+            pieces = pieces.placed_last(&crystallization);
+        }
         if let Some(handover) =
             &self.handover_text(&harnessed.launch_profile, launch_root, recovery.as_ref())?
         {

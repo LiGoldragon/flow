@@ -1320,6 +1320,7 @@ fn a_flow_that_stopped_while_working_or_awaited_is_kept() {
 fn an_entry_marked_wake_makes_a_wake_due_at_every_layer() {
     let fixture = NexusFixture::new();
     for model in [Model::Astra, Model::Sol, Model::Luna, Model::Terra] {
+        declare_on_demand(&fixture, address(model.clone()));
         assert!(
             fixture.nexus.wake_is_due(&metaflow(
                 model.clone(),
@@ -1330,6 +1331,70 @@ fn an_entry_marked_wake_makes_a_wake_due_at_every_layer() {
             "queued work can be explicitly woken at {model:?}"
         );
     }
+}
+
+#[test]
+fn first_wake_needs_a_declared_virgin_address_and_a_waking_request() {
+    use crate::store::metaflow::{ProvesWakeOrigin, WakeOrigin};
+    let mut fixture = NexusFixture::new();
+    let at = address(Model::Sol);
+    let world = fixture.fresh_claude_world();
+    let first = metaflow(
+        Model::Sol,
+        State::Asleep,
+        vec![],
+        vec![Request::Order("first request".into())],
+    );
+    fixture.nexus.store.seed_metaflow(first.clone());
+    assert_eq!(
+        fixture.nexus.store.wake_origin(&first).unwrap(),
+        WakeOrigin::Undeclared
+    );
+    assert!(!fixture.nexus.wake_is_due(&first));
+    declare_on_demand(&fixture, at.clone());
+    let mut quiet = first.clone();
+    quiet.queue.0[0].delivery = Delivery::Queue;
+    assert!(!fixture.nexus.wake_is_due(&quiet));
+    assert_eq!(
+        fixture.nexus.store.wake_origin(&first).unwrap(),
+        WakeOrigin::FirstSeat
+    );
+    fixture.nexus.wake_due(at);
+    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+    assert!(matches!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(_)
+    ));
+    assert!(stored(&fixture, Model::Sol).queue.0.is_empty());
+}
+#[test]
+fn an_orphaned_launch_with_empty_past_is_not_a_first_wake() {
+    use crate::store::metaflow::{ProvesWakeOrigin, WakeOrigin};
+    let fixture = NexusFixture::new();
+    let mut old = fixture.staged_launch("already-reserved", None);
+    old.profile.address = address(Model::Sol);
+    old.composed.launch_profile.address = address(Model::Sol);
+    let first = metaflow(
+        Model::Sol,
+        State::Asleep,
+        vec![],
+        vec![Request::Order("wait for owner".into())],
+    );
+    declare_on_demand(&fixture, first.address.clone());
+    fixture.nexus.store.seed_metaflow(first.clone());
+    old.reserve(&fixture.nexus);
+    assert_eq!(
+        fixture.nexus.store.wake_origin(&first).unwrap(),
+        WakeOrigin::Unresolved
+    );
+    let _held = fixture.nexus.waking.hold(&first.address).unwrap();
+    assert!(matches!(
+        fixture
+            .nexus
+            .perform(Operation::Wake(first.address.clone())),
+        Outcome::Failed(Failed_Data::NoRecord)
+    ));
+    assert_eq!(stored(&fixture, Model::Sol).queue, first.queue);
 }
 
 #[test]
@@ -6404,6 +6469,7 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
     let mut fixture = NexusFixture::new();
     let setup = interrupted_launch(&mut fixture);
     let state = setup.world.state.clone();
+    declare_on_demand(&fixture, setup.recipient.clone());
     let recipient = setup.recipient.clone();
     let params = serde_json::json!({
         "threadId": FRESH_THREAD,

@@ -800,6 +800,7 @@ pub trait SleepsAndWakesSeats {
     /// Whether Flow's records show the metaflow due a wake: Asleep and
     /// holding work that wakes it.
     fn wake_is_due(&self, metaflow: &Metaflow) -> bool;
+    fn has_due_work(&self, metaflow: &Metaflow) -> bool;
     /// Hands over newly due work and releases the Address lease under the
     /// gate when no more work is due.
     fn drain_due_held(&self, address: &Address, lease: WakingLease);
@@ -1449,22 +1450,17 @@ impl SleepsAndWakesSeats for RunningNexus {
     }
 
     fn wake_is_due(&self, metaflow: &Metaflow) -> bool {
-        if let flow_ethos::State::Asleep = &metaflow.state {
-            let Some(last) = metaflow.past.0.last() else {
-                return false;
-            };
-            if !matches!(
-                self.store.current_seat(&last.0),
-                Ok(crate::store::current_seat::CurrentSeatRead::Known(
-                    crate::store::current_seat::KnownSeat {
-                        seat_standing: crate::generated::memory::SeatStanding::Ended,
-                        ..
-                    }
-                ))
-            ) {
-                return false;
-            }
+        use crate::store::metaflow::{ProvesWakeOrigin, WakeOrigin};
+        if !matches!(
+            self.store.wake_origin(metaflow),
+            Ok(WakeOrigin::FirstSeat | WakeOrigin::EndedPredecessor)
+        ) {
+            return false;
         }
+        self.has_due_work(metaflow)
+    }
+
+    fn has_due_work(&self, metaflow: &Metaflow) -> bool {
         if self.permaflow_held(metaflow.address.clone()) {
             return false;
         }
@@ -2694,7 +2690,20 @@ impl WakesInParts for RunningNexus {
                             ),
                         ));
                     }
-                    if !self.wake_is_due(&metaflow) {
+                    use crate::store::metaflow::{ProvesWakeOrigin, WakeOrigin};
+                    match self
+                        .store
+                        .wake_origin(&metaflow)
+                        .map_err(|_| WakeRefusal::StoreUnreadable)?
+                    {
+                        WakeOrigin::FirstSeat | WakeOrigin::EndedPredecessor => {}
+                        WakeOrigin::LivePredecessor => return Err(WakeRefusal::SessionLive),
+                        WakeOrigin::Undeclared => return Err(WakeRefusal::Unplaceable),
+                        WakeOrigin::Unresolved => {
+                            return Err(WakeRefusal::FreshNotStarted(Failed_Data::NoRecord));
+                        }
+                    }
+                    if !self.has_due_work(&metaflow) {
                         return Err(WakeRefusal::NothingQueued);
                     }
                     // A store refusal after a pane write leaves its marker

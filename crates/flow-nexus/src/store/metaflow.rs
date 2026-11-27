@@ -10,6 +10,87 @@ use signal_flow::{
     Unknown_Data,
 };
 
+/// The origin of a potential fresh wake. Missing current evidence for a
+/// predecessor is not the same as a declared address with no first seat.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WakeOrigin {
+    FirstSeat,
+    EndedPredecessor,
+    LivePredecessor,
+    Unresolved,
+    Undeclared,
+}
+pub(crate) trait ProvesWakeOrigin {
+    fn wake_origin(&self, seat: &Metaflow) -> Result<WakeOrigin, StoreError>;
+}
+impl ProvesWakeOrigin for FlowStore {
+    fn wake_origin(&self, seat: &Metaflow) -> Result<WakeOrigin, StoreError> {
+        use super::current_seat::{RecordsCurrentSeats, SeatDecision};
+        use super::fresh_launch::TracksFreshLaunches;
+        use super::handover::HoldsHandovers;
+        use super::metaflow_declaration::ReadsMetaflowDeclarations;
+        use super::ordered_replacement::OrdersReplacements;
+        use super::pending_handover::RecordsPendingHandovers;
+        use super::pending_reap::WritesPendingReap;
+        use super::successor::OwesSuccessors;
+        use crate::generated::memory::SeatStanding;
+        if seat.state != MetaflowState::Asleep {
+            return Ok(WakeOrigin::LivePredecessor);
+        }
+        if let Some(last) = seat.past.0.last() {
+            return Ok(match self.seat_decision(&last.0)? {
+                SeatDecision::Observed(SeatStanding::Ended) => WakeOrigin::EndedPredecessor,
+                SeatDecision::Observed(SeatStanding::Alive(_)) => WakeOrigin::LivePredecessor,
+                SeatDecision::NoRecord => WakeOrigin::Unresolved,
+            });
+        }
+        let address = &seat.address;
+        let marker = self.engine.current_database_marker()?;
+        if self.metaflow_declaration(address)?.is_none() {
+            return Ok(WakeOrigin::Undeclared);
+        }
+        // Even a settled launch attempt, or a superseded owner's Address
+        // header, disproves first ownership. No transition is inspected to
+        // determine a seat's activity. Missing/changed input fails closed.
+        if self.bound_process(address)?.is_some()
+            || self.fresh_cohort(address)?.is_some()
+            || self.ordered_replacement(address)?.is_some()
+            || self.successor_intent(address)?.is_some()
+            || self.handover_memory(address)?.is_some()
+            || self.pending_handover(address)?.is_some()
+            || !self.pending_reaps_at(address)?.is_empty()
+            || self
+                .engine
+                .match_records(QueryPlan::all(self.address_holds))?
+                .records()
+                .iter()
+                .any(|r| &r.address == address)
+            || self
+                .engine
+                .match_records(QueryPlan::all(self.restarts))?
+                .records()
+                .iter()
+                .any(|r| &r.restart_record.address == address)
+            || self
+                .engine
+                .match_records(QueryPlan::all(self.launch_attempts))?
+                .records()
+                .iter()
+                .any(|r| &r.launch_attempt.launch_profile.address == address)
+            || self
+                .engine
+                .match_records(QueryPlan::all(self.flow_transitions))?
+                .records()
+                .iter()
+                .any(|r| &r.address == address)
+            || self.engine.current_database_marker()? != marker
+        {
+            return Ok(WakeOrigin::Unresolved);
+        }
+        Ok(WakeOrigin::FirstSeat)
+    }
+}
+
 /// Materializes working state for a configured Address, never policy.
 pub(crate) trait PreparesDeclaredMetaflow {
     fn prepare_declared_metaflow(&self, address: &Address) -> Result<bool, StoreError>;

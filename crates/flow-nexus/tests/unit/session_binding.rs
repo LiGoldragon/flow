@@ -6,6 +6,7 @@ use super::NexusFixture;
 use super::refresh_and_compaction::declare_seat;
 use super::waking::{CLAUDE_SEAT, address, claude_seat};
 use crate::Dispatches;
+use crate::DispatchesSerially;
 use crate::generated::transitions::{AskedFlow, RecordsTransitions};
 use crate::harness_subscription::{HarnessObservation, KeepsHarnessWitnesses};
 use crate::store::ReadsFlowRows;
@@ -13,7 +14,8 @@ use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use flow_ethos::State;
 use meta_signal_flow::{Bind_Data, BindRefused_Data, Bound_Data, Continuity, Input, Output};
 use signal_flow::{FlowId, FlowLifecycle, Metaflow, Model, TranscriptPath};
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const BOUND_SESSION: &str = "b0a7d5e1-0000-4000-8000-000000000007";
 
@@ -198,4 +200,58 @@ fn a_bind_replacing_another_flow_names_and_retires_it() {
         metaflow.past,
         flow_ethos::Past(vec![FlowId(CLAUDE_SEAT.into())])
     );
+}
+
+/// A meta Bind through the gated meta dispatch, as the meta socket sends
+/// it, leaves the gate free: a missing transcript is answered Unreadable,
+/// and a Bind after it of a real transcript is answered Bound, each
+/// within a bounded wait.
+#[test]
+fn a_bind_through_the_meta_socket_dispatch_leaves_the_next_call_answered() {
+    let fixture = Arc::new(declared());
+    witnessed_resting(&fixture, BOUND_SESSION);
+    let missing = TranscriptPath(
+        fixture
+            .directory
+            .path()
+            .join("absent/none.jsonl")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let path = transcript_of(&fixture, BOUND_SESSION);
+    let (sent, received) = std::sync::mpsc::channel();
+    // A detached thread: a regression that holds the gate leaves it
+    // blocked, and the test fails on the bounded wait instead of hanging.
+    let caller = {
+        let fixture = Arc::clone(&fixture);
+        let missing = missing.clone();
+        std::thread::spawn(move || {
+            for transcript_path in [missing, path] {
+                let reply = fixture.nexus.dispatch_meta_serially(
+                    Input::Bind(Bind_Data {
+                        address: address(Model::Sol),
+                        transcript_path,
+                    }),
+                    None,
+                );
+                sent.send(reply).unwrap();
+            }
+        })
+    };
+    let wait = Duration::from_secs(10);
+    assert_eq!(
+        received.recv_timeout(wait).expect("the first Bind answers"),
+        Output::BindRefused(BindRefused_Data::Unreadable(missing))
+    );
+    assert_eq!(
+        received
+            .recv_timeout(wait)
+            .expect("the Bind after it answers"),
+        Output::Bound(Bound_Data {
+            address: address(Model::Sol),
+            flow_id: FlowId("b0a7d5".into()),
+            flow_id_option: None,
+        })
+    );
+    caller.join().unwrap();
 }

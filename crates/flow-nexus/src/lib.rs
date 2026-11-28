@@ -3295,10 +3295,11 @@ impl DispatchesSerially for RunningNexus {
         query: meta_signal_flow::Input,
         resolver: Option<meta_signal_flow::ResolverIdentity>,
     ) -> meta_signal_flow::Output {
-        // A Restart and every override run off the gate, each taking it for
-        // its own steps: a Renew, a Deliver and a Resume launch or deliver
-        // as a wake does.
+        // A Restart, a Bind and every override run off the gate, each taking
+        // it for its own steps: a Renew, a Deliver and a Resume launch or
+        // deliver as a wake does, and a Bind commits its binding.
         if let meta_signal_flow::Input::Restart(_)
+        | meta_signal_flow::Input::Bind(_)
         | meta_signal_flow::Input::SetState(_)
         | meta_signal_flow::Input::CrystallizeNow(_)
         | meta_signal_flow::Input::Renew(_)

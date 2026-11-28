@@ -1137,3 +1137,39 @@ impl Exemplifying for Examples<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Contract, Origin, Printed, Printing};
+
+    /// A name imported along with its neighbours, and a unit variant of
+    /// another file whose name a carried type shares: the printout declares
+    /// the import, keeps the unit a unit, and checks.
+    #[test]
+    fn imports_resolve_and_a_unit_stays_a_unit() {
+        let contract = Contract {
+            name: "fixture",
+            signal: "; The fixture's prose.\nSignal\n[ library:[ Holder ] ]\n[ Put.Holder\n  Ask ]\n[ Taken.Queue\n  Asked ]\n[ Queue.{ String } ]\n",
+            origins: vec![Origin {
+                name: "library",
+                texts: vec![
+                    "Library\n[ crate:Delivery ]\n[ Holder.{ Inner.Vector<String> Delivery } ]\n[]\n[]\n",
+                    "Library\n[]\n[ Delivery.[ Queue Wake ] ]\n[]\n[]\n",
+                ],
+            }],
+        };
+        let printout = contract.printout().expect("the fixture reads");
+        printout.check().expect("the printout checks");
+        let text = printout.text();
+        assert!(
+            text.starts_with("; The fixture's prose.\nSignal\n"),
+            "{text}"
+        );
+        assert!(text.contains("FixtureQueue"), "{text}");
+        assert_eq!(
+            printout.input_examples(),
+            ["Put.{ [ «String» ] Queue }", "Ask"]
+        );
+        assert_eq!(printout.output_examples(), ["Taken.{ «String» }", "Asked"]);
+    }
+}

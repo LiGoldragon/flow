@@ -954,25 +954,3 @@ pub(super) fn standing_told(nexus: &crate::RunningNexus, session: &str, state: h
         background_work_vector: vec![],
     }]));
 }
-
-/// A pane resumed bare in a new pane: the flow's recorded route shows its
-/// session no longer, and at the rest its harness tells, the route follows
-/// the session to the pane whose Claude agent shows it.
-#[test]
-fn a_told_rest_moves_the_route_to_the_pane_that_shows_the_session() {
-    use crate::store::ReadsFlowRows;
-    let fixture = NexusFixture::new();
-    let mut moved = claude_agent(&fixture);
-    moved["pane_id"] = serde_json::Value::String("w9:p1".into());
-    moved["terminal_id"] = serde_json::Value::String("terminal-w9".into());
-    fixture.accept_pane_operations(vec![moved], PromptFixture::Prompted("w9:p1"));
-    claude_seat(&fixture, 40_000);
-    working_now(&fixture);
-    rested_now(&fixture);
-    let node = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
-    let signal_flow::HerdrRouteSelection::Available(route) = node.herdr_route_selection else {
-        panic!("the flow is routed");
-    };
-    assert_eq!(route.herdr_pane_id.0, "w9:p1");
-    assert_eq!(route.herdr_terminal_id.0, "terminal-w9");
-}

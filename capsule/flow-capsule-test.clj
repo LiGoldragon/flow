@@ -260,11 +260,11 @@
                 (str/includes? (:err missing) (str configuration "/nexus/flow-nexus.datom"))))
     (check "the packaged client takes its place's name from its configuration, and with no place file is refused, naming it"
            (and (= 2 (:exit configured)) (not (str/includes? (:err configured) "invalid Flow Input"))
-                (not (str/includes? (:err configured) "usage:"))
+                (not (str/includes? (:err configured) "\nSignal\n"))
                 (str/starts-with? (:err configured) "Missing.")
                 (str/includes? (:err configured) (str configuration "/nexus/no-owner/flow-nexus.signal"))))
-    (check "a typed place is a second argument, refused"
-           (and (= 2 (:exit typed)) (str/includes? (:err typed) "usage:"))))
+    (check "a typed place is a second argument, refused with the printout"
+           (and (= 2 (:exit typed)) (str/includes? (:err typed) "\nSignal\n"))))
   (check "a place-started Nexus is started with its place's name"
          (= "main"
             (flow-capsule/start-text flow-package flow-capsule/ordinary-socket flow-capsule/meta-socket

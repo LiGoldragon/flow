@@ -1107,7 +1107,7 @@ rec {
           }
           {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow 0.93.0";
+            packageId = "meta-signal-flow 0.94.0";
             features = [ "datom" ];
           }
           {
@@ -1168,7 +1168,7 @@ rec {
       };
       "flow-nexus" = rec {
         crateName = "flow-nexus";
-        version = "0.60.7";
+        version = "0.61.0";
         edition = "2024";
         crateBin = [
           {
@@ -1230,12 +1230,18 @@ rec {
             packageId = "getrandom";
           }
           {
+            name = "harness-nexus-library";
+            packageId = "harness-nexus-library";
+            rename = "harness";
+            usesDefaultFeatures = false;
+          }
+          {
             name = "libc";
             packageId = "libc";
           }
           {
             name = "meta-signal-flow";
-            packageId = "meta-signal-flow 0.93.0";
+            packageId = "meta-signal-flow 0.94.0";
             features = [ "datom" ];
           }
           {
@@ -1303,6 +1309,11 @@ rec {
           {
             name = "signal-flow-before-request-ids";
             packageId = "signal-flow-before-request-ids";
+            features = [ "datom" ];
+          }
+          {
+            name = "signal-harness";
+            packageId = "signal-harness";
             features = [ "datom" ];
           }
           {
@@ -1588,6 +1599,46 @@ rec {
           "wasm_js" = [ "dep:wasm-bindgen" "dep:js-sys" ];
         };
         resolvedDefaultFeatures = [ "std" ];
+      };
+      "harness-nexus-library" = rec {
+        crateName = "harness-nexus-library";
+        version = "0.3.0";
+        edition = "2024";
+        workspace_member = null;
+        src = pkgs.fetchgit {
+          url = "https://github.com/LiGoldragon/harness-nexus-library";
+          rev = "ae7e008700972b7f033de6ba94c36e6c49fc93f8";
+          sha256 = "0pzack9igg9qh0yb148pl4yy3a0v5ik3208abgd6gcisjsgxpsqb";
+        };
+        libName = "harness";
+        dependencies = [
+          {
+            name = "datom-codec";
+            packageId = "datom-codec";
+            optional = true;
+          }
+          {
+            name = "flow-ethos";
+            packageId = "flow-ethos";
+            rename = "flow";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "protos";
+            packageId = "protos";
+            optional = true;
+          }
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+        ];
+        features = {
+          "datom" = [ "dep:datom-codec" "dep:protos" "flow/datom" ];
+        };
+        resolvedDefaultFeatures = [ "datom" ];
       };
       "hashbrown" = rec {
         crateName = "hashbrown";
@@ -1895,15 +1946,15 @@ rec {
         };
         resolvedDefaultFeatures = [ "default" ];
       };
-      "meta-signal-flow 0.93.0" = rec {
+      "meta-signal-flow 0.94.0" = rec {
         crateName = "meta-signal-flow";
-        version = "0.93.0";
+        version = "0.94.0";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-flow";
-          rev = "b3794761f8b3f95867fd6db67452580f50d89974";
-          sha256 = "1h2faksm9c0la2b5gn2jnpcbq6sjwmv4w0k9fd20w9gdanw1rz8y";
+          rev = "78046f151448e5a85419b2355a09962ce61fe04b";
+          sha256 = "1861i16z2p47cdalmgqjm8dcvjsiy2b1yngwvzdq6n2gxi3js6ab";
         };
         libName = "meta_signal_flow";
         dependencies = [
@@ -1915,6 +1966,12 @@ rec {
           {
             name = "flow-ethos";
             packageId = "flow-ethos";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "harness-nexus-library";
+            packageId = "harness-nexus-library";
+            rename = "harness";
             usesDefaultFeatures = false;
           }
           {
@@ -1945,7 +2002,7 @@ rec {
           }
         ];
         features = {
-          "datom" = [ "dep:datom-codec" "dep:protos" "flow-ethos/datom" "signal-flow/datom" "signal/datom" ];
+          "datom" = [ "dep:datom-codec" "dep:protos" "flow-ethos/datom" "signal-flow/datom" "signal/datom" "harness/datom" ];
         };
         resolvedDefaultFeatures = [ "datom" "default" ];
       };
@@ -3510,6 +3567,52 @@ rec {
         ];
         features = {
           "datom" = [ "dep:datom-codec" "flow-ethos/datom" "signal/datom" ];
+        };
+        resolvedDefaultFeatures = [ "datom" "default" ];
+      };
+      "signal-harness" = rec {
+        crateName = "signal-harness";
+        version = "0.2.0";
+        edition = "2024";
+        workspace_member = null;
+        src = pkgs.fetchgit {
+          url = "https://github.com/LiGoldragon/signal-harness";
+          rev = "f302b3088c719a3df1991b7701899dea7dce7288";
+          sha256 = "16rayxpsnjrl5w7kj1hl3bm1kcsbld66w17pg03lb8hp2lkwrqc6";
+        };
+        libName = "signal_harness";
+        dependencies = [
+          {
+            name = "datom-codec";
+            packageId = "datom-codec";
+            optional = true;
+          }
+          {
+            name = "flow-ethos";
+            packageId = "flow-ethos";
+            rename = "flow";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "harness-nexus-library";
+            packageId = "harness-nexus-library";
+            rename = "harness";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "protos";
+            packageId = "protos";
+            optional = true;
+          }
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+        ];
+        features = {
+          "datom" = [ "dep:datom-codec" "dep:protos" "harness/datom" "flow/datom" ];
         };
         resolvedDefaultFeatures = [ "datom" "default" ];
       };

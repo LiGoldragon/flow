@@ -306,7 +306,7 @@ dependencies = [
  "ethos-zero 29.0.0",
  "flow-ethos",
  "flow-place",
- "meta-signal-flow 0.93.0",
+ "meta-signal-flow 0.94.0",
  "protos",
  "rkyv",
  "signal",
@@ -324,7 +324,7 @@ dependencies = [
 
 [[package]]
 name = "flow-nexus"
-version = "0.60.7"
+version = "0.61.0"
 dependencies = [
  "base64",
  "datom-codec",
@@ -336,8 +336,9 @@ dependencies = [
  "flow-native",
  "flow-place",
  "getrandom",
+ "harness-nexus-library",
  "libc",
- "meta-signal-flow 0.93.0",
+ "meta-signal-flow 0.94.0",
  "meta-signal-flow 77.0.0",
  "meta-signal-flow-before-request-ids",
  "notify",
@@ -355,6 +356,7 @@ dependencies = [
  "signal-flow 0.70.0",
  "signal-flow 60.0.0",
  "signal-flow-before-request-ids",
+ "signal-harness",
  "tempfile",
  "thiserror",
  "translator",
@@ -425,6 +427,17 @@ dependencies = [
  "libc",
  "r-efi",
  "wasip2",
+]
+
+[[package]]
+name = "harness-nexus-library"
+version = "0.3.0"
+source = "git+https://github.com/LiGoldragon/harness-nexus-library?rev=ae7e008700972b7f033de6ba94c36e6c49fc93f8#ae7e008700972b7f033de6ba94c36e6c49fc93f8"
+dependencies = [
+ "datom-codec",
+ "flow-ethos",
+ "protos",
+ "rkyv",
 ]
 
 [[package]]
@@ -551,12 +564,13 @@ dependencies = [
 
 [[package]]
 name = "meta-signal-flow"
-version = "0.93.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=b3794761f8b3f95867fd6db67452580f50d89974#b3794761f8b3f95867fd6db67452580f50d89974"
+version = "0.94.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=78046f151448e5a85419b2355a09962ce61fe04b#78046f151448e5a85419b2355a09962ce61fe04b"
 dependencies = [
  "datom-codec",
  "ethos-zero 29.0.0",
  "flow-ethos",
+ "harness-nexus-library",
  "protos",
  "rkyv",
  "signal",
@@ -1019,6 +1033,18 @@ dependencies = [
  "flow-ethos-before-request-ids",
  "rkyv",
  "signal",
+]
+
+[[package]]
+name = "signal-harness"
+version = "0.2.0"
+source = "git+https://github.com/LiGoldragon/signal-harness?rev=f302b3088c719a3df1991b7701899dea7dce7288#f302b3088c719a3df1991b7701899dea7dce7288"
+dependencies = [
+ "datom-codec",
+ "flow-ethos",
+ "harness-nexus-library",
+ "protos",
+ "rkyv",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 [package]
 name = "flow-nexus"
-version = "0.60.7"
+version = "0.61.0"
 build = "build.rs"
 edition.workspace = true
 [[bin]]
@@ -49,6 +49,13 @@ tempfile = "3"
 getrandom = "0.3"
 thiserror.workspace = true
 tungstenite = "0.28"
+# The subscription every Harness Nexus serves (Subscribe, Subscribed,
+# Changed), taken from each socket the daemon's configuration names, over
+# the event vocabulary of the harness library. Each is pinned by its full
+# revision, the string every other consumer writes, so Cargo sees one crate
+# of each.
+signal-harness = { git = "https://github.com/LiGoldragon/signal-harness", rev = "f302b3088c719a3df1991b7701899dea7dce7288", features = ["datom"] }
+harness = { package = "harness-nexus-library", git = "https://github.com/LiGoldragon/harness-nexus-library", rev = "ae7e008700972b7f033de6ba94c36e6c49fc93f8", default-features = false }
 [build-dependencies]
 ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "f23eacf" }
 [dev-dependencies]

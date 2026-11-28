@@ -79,6 +79,7 @@ pub mod handover_archive;
 mod handover_observation;
 pub mod handover_reminding;
 pub(crate) mod harness_command;
+pub mod harness_subscription;
 pub mod heartbeat;
 pub mod herdr;
 pub mod launching;
@@ -200,6 +201,10 @@ pub struct RunningNexus {
     /// Announced each time a Configure replaces a family, and at a stop;
     /// see `observe_configuration`.
     pub configuration_changes: store::LaunchChanges,
+    /// What each Harness Nexus the daemon's configuration names has told of
+    /// each flow, and the disagreements with Flow's own state that stood
+    /// their grace: a witness that decides nothing (`harness_subscription`).
+    pub harness_witnesses: harness_subscription::HarnessWitnesses,
 }
 
 /// The handover source for fresh successors: the predecessor's sections in
@@ -2207,6 +2212,15 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
             .release_parked_launches(&release.address, Some(release))?;
         Ok(release.clone())
     }
+
+    // What each Harness Nexus told of each flow Flow holds, beside Flow's
+    // own state of it; it decides nothing.
+    fn observe_harness(
+        &self,
+    ) -> Result<meta_signal_flow::HarnessObserved_Data, meta_signal_flow::Output> {
+        use harness_subscription::ObservesHarness;
+        self.nexus.harness_observed()
+    }
 }
 
 pub trait OpensRunningNexus {
@@ -2276,6 +2290,7 @@ impl OpensRunningNexus for RunningNexus {
             compactions: compacting::CompactionWatch::default(),
             seat_submissions: Arc::default(),
             configuration_changes: store::LaunchChanges::default(),
+            harness_witnesses: harness_subscription::HarnessWitnesses::default(),
         })
     }
 }
@@ -3527,6 +3542,7 @@ mod tests {
     pub(crate) mod handover_configuration;
     mod handover_memory;
     mod handover_reminding;
+    mod harness_subscription;
     mod heartbeat_production;
     mod launching_nexus;
     mod model;
@@ -4433,6 +4449,7 @@ mod tests {
                 compactions: crate::compacting::CompactionWatch::default(),
                 seat_submissions: std::sync::Arc::default(),
                 configuration_changes: Default::default(),
+                harness_witnesses: Default::default(),
             };
             let herdr_config = directory.path().join("herdr-config");
             let session_socket = herdr_config.join("sessions/messaging-build/herdr.sock");

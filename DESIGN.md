@@ -70,6 +70,32 @@ the flow to that new session, in its row and its owner proof, and its
 FlowId stays. A SessionEnd with any other reason reports `Ended` and is the
 flow's exit.
 
+Every Harness Nexus serves one subscription (signal-harness), and Flow holds
+what each tells as a witness of each flow's state beside its own sources,
+deciding nothing by it (`harness_subscription`). The daemon reads
+`<configuration home>/nexus/<place-name>/flow-nexus-daemon.datom` beside its
+place file, one `DaemonConfiguration.{ Vector<HarnessSubscriptionPath>
+GraceSeconds DisagreementCapacity }`; with no file nothing is subscribed to,
+and a file that cannot be read or is invalid refuses the start, naming it.
+One thread per socket, spawned into the daemon's scope, dials it, sends
+Subscribe once per connection, and takes the Subscribed snapshot and each
+Changed into `RunningNexus`'s witnesses, keyed by socket and flow: a
+Subscribed replaces that socket's witnesses whole, a Changed updates one
+(its tokens too on ContextSize), and a flow told Ended stays until the
+socket's next Subscribed. A connection that ends after its Subscribed is
+dialed again at once; a socket absent, refusing, or silent before its
+Subscribed is waited on by a watch of its name. When a Changed moves a
+flow's harness state to a new value, its comparison with `state_of` falls
+due GraceSeconds later, replacing the flow's comparison not yet due, if the
+harness state is still that value and Flow records a state: Flowing.Working,
+Waiting and Blocked agree with Acting, Flowing.Rested with Resting, Ended
+with Asleep, Crystallizing with any Flowing state, and Dry is not judged.
+One judge thread waits on the witnesses' change announcement and the stop,
+bounded by the earliest due moment, and keeps each disagreement in a ring of
+DisagreementCapacity entries. Meta `ObserveHarness` answers every witness of
+a flow Flow holds, each with Flow's own state now, and the ring oldest
+first. No rest, drain, wake or close is taken from a witness.
+
 A Claude flow's FlowId exists before its harness. Reserve chooses the Claude
 session id from the launch request id (UUIDv5-shaped, so one request names
 one session), claims the FlowId for it through `flow-id`, and holds the flow

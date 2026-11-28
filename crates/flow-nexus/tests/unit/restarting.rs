@@ -2871,6 +2871,7 @@ impl OpensSecondNexus for NexusFixture {
             compactions: crate::compacting::CompactionWatch::default(),
             seat_submissions: std::sync::Arc::default(),
             configuration_changes: Default::default(),
+            harness_witnesses: Default::default(),
         }
     }
 }

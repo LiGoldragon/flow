@@ -1,3 +1,20 @@
+# Flow 0.61.0: the Harness Nexuses' witness
+
+The meta wire contract is meta-signal-flow 0.94.0, which appends
+`ObserveHarness`, answered `HarnessObserved`; every output from
+`ConfigureRefused` on moves one discriminant. Upgrade the meta client with
+the daemon. Ordinary Signal and Memory are unchanged.
+
+The daemon reads an optional
+`<configuration home>/nexus/<place-name>/flow-nexus-daemon.datom` beside its
+place file, for example
+`{ [ «/run/user/1001/nexus/main/claude-harness-subscription.sock» ] 30 64 }`:
+the Harness Nexus subscription sockets, the grace in seconds before a moved
+harness state is compared with Flow's own, and the number of disagreements
+kept. Without the file the daemon runs as before; a file that cannot be read
+or is invalid refuses the start, naming it. The witness decides nothing: no
+rest, drain, wake or close comes from it.
+
 # Flow 0.60.6: permaflow refresh mode
 
 Take a store copy before activation. Permaflow declaration Memory v9 adds

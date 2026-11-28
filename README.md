@@ -104,6 +104,22 @@ echo '{ main /run/user/1001/nexus/main /home/li/.local/state/nexus/main }' > pla
 nexus-configure 'Compile.{ place.datom ~/.config/nexus/main/flow-nexus.signal }'
 ```
 
+Beside the place file the daemon reads one optional datom,
+`$XDG_CONFIG_HOME/nexus/main/flow-nexus-daemon.datom`,
+`DaemonConfiguration.{ Vector<HarnessSubscriptionPath> GraceSeconds
+DisagreementCapacity }`: the Harness Nexus subscription sockets it subscribes
+to for their witness of each flow, the grace before a moved harness state is
+compared with Flow's own, and the number of disagreements kept. With no file
+nothing is subscribed to; a file that cannot be read or is invalid refuses the
+start, naming it. The witness decides nothing; it is read by
+`flow-meta 'ObserveHarness'`, answered
+`HarnessObserved.{ [ <witness> ... ] [ <disagreement> ... ] }`.
+
+```sh
+echo '{ [ «/run/user/1001/nexus/main/claude-harness-subscription.sock» ] 30 64 }' \
+  > ~/.config/nexus/main/flow-nexus-daemon.datom
+```
+
 The executable holds no configuration. A new memory is made empty and the
 Nexus starts unconfigured: it binds, announces readiness and answers
 `Unconfigured`, and a release replays the configuration through

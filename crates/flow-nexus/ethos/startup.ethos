@@ -10,6 +10,18 @@ Library
   ; store a running Nexus holds is never touched: a deploy runs it before
   ; it activates this Flow.
   StoreCheckRequest.{ StorePath }
-  StoreCheck.[ Opens.StorePath Absent.StorePath Refused.StoreRefusal ] ]
+  StoreCheck.[ Opens.StorePath Absent.StorePath Refused.StoreRefusal ]
+  ; What the daemon reads beside its place file, one datom at
+  ; <configuration home>/nexus/<place-name>/flow-nexus-daemon.datom. With no
+  ; file nothing is subscribed to, the daemon as it was before the file. Each
+  ; HarnessSubscriptionPath, absolute, is a Harness Nexus's subscription
+  ; socket, subscribed to for its witness of each flow; a harness state
+  ; that moved is compared with Flow's own GraceSeconds later, and the
+  ; disagreements kept are at most DisagreementCapacity, the oldest dropped.
+  HarnessSubscriptionPath.String
+  DaemonConfiguration.{ Vector<HarnessSubscriptionPath> GraceSeconds.Integer DisagreementCapacity.Integer }
+  DaemonConfigurationFault.{ Path Reason }
+  DaemonConfigurationRefusal.[ Unreadable.DaemonConfigurationFault
+                               Invalid.DaemonConfigurationFault ] ]
 [ ChecksStore.[ check.[ StoreCheck ] ] ]
 []

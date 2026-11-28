@@ -1,4 +1,7 @@
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
+use flow_nexus::harness_subscription::{
+    LocatesDaemonConfiguration, ReportsDaemonConfigurationRefusal, SubscribesToHarnesses,
+};
 use flow_nexus::place::{FindsFlowPlace, LaysOutPlace, PlaceName, ReportsPlaceRefusal};
 use flow_nexus::placed_socket::{PlacedSocket, PlacesSocket};
 use flow_nexus::store::recipient_retries::RetriesRecipients;
@@ -107,8 +110,18 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    // The daemon's own configuration, beside its place file: with no file
+    // nothing is subscribed to, and one that cannot be read or is invalid
+    // refuses the start, naming it.
+    let daemon_configuration = match place_name.daemon_configuration() {
+        Ok(configuration) => configuration,
+        Err(refusal) => {
+            eprintln!("flow-nexus: {}", refusal.report());
+            return ExitCode::FAILURE;
+        }
+    };
     let nexus = match RunningNexus::open(&place) {
-        Ok(nexus) => nexus,
+        Ok(nexus) => nexus.configured_by(daemon_configuration),
         Err(StoreError::UnrecognizedMemory { path, reason }) => {
             StartupRefusal::report_unrecognized_store(&path, &reason);
             return ExitCode::FAILURE;
@@ -209,6 +222,10 @@ fn main() -> ExitCode {
             use flow_nexus::heartbeat::RunsHeartbeat;
             nexus.keep_heartbeating()
         });
+        // Each Harness Nexus the configuration names is subscribed to, one
+        // thread per socket and one judge, its witness of each flow held
+        // beside Flow's own; it decides nothing.
+        nexus.witness_harnesses(scope);
         scope.spawn(|| {
             if signals.watch(&nexus.stopping) {
                 nexus.stop(&sockets);

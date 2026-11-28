@@ -345,7 +345,8 @@ impl SpeaksHarness for HarnessCommandLine {
             // read as a file when the path exists; `--session-id` creates
             // the session of that id or resumes it; `--model` takes
             // provider/id, and `--thinking` the level as the configuration
-            // spells it, which Pi itself judges.
+            // spells it, which Pi itself judges. The extension that takes
+            // the hook flags is loaded by the configured arguments.
             HarnessCommandLine::Pi(pi) => {
                 let mut words = vec![
                     "--system-prompt".to_owned(),
@@ -358,6 +359,14 @@ impl SpeaksHarness for HarnessCommandLine {
                 if !pi.effort.0.is_empty() {
                     words.extend(["--thinking".into(), pi.effort.0.clone()]);
                 }
+                // The flags Flow's own Pi extension registers: the hook
+                // command, and the events it is run on, comma-separated.
+                words.extend([
+                    "--flow-hook".into(),
+                    pi.pi_flow_hook.hook_command.0.clone(),
+                    "--flow-hook-events".into(),
+                    pi.pi_flow_hook.hook_event_names.0.join(","),
+                ]);
                 words.extend(pi.configured_harness_arguments.0.iter().cloned());
                 words
             }

@@ -15,12 +15,12 @@ use crate::generated::emission::{
     AgentStatus, AgentTarget, AgentWait, ClaudeCommandLine, ClaudeEnvironment, ClaudeSessionStart,
     ClaudeSettings, CodexCommandLine, CodexExecutable, CodexSocket, ConfiguredHarnessArguments,
     CreateWorkspace_Data, Emittable, FlowIdentityClaim, FlowsRoot, Focus, HarnessCommandLine,
-    HerdrCommand, HerdrSessionCommand, HerdrSocketCall, HerdrSocketReply, Label, LineCount,
-    Milliseconds, OpenCodeAgent, OpenCodeAgentName, OpenCodeCommandLine, OpenCodeServer,
-    OutputMatch, OutputSource, PiCommandLine, ProcessReply, PromptAgentByName, PromptText,
-    ReadinessMarker, RenamePane_Data, RenameWorkspace_Data, ReportPaneMetadata_Data,
-    RunInPane_Data, SessionTitle, StartAgent_Data, SystemPromptFile, WaitForAgent_Data,
-    WaitForPaneOutput_Data, WorkingDirectory,
+    HerdrCommand, HerdrSessionCommand, HerdrSocketCall, HerdrSocketReply, HookCommand,
+    HookEventNames, Label, LineCount, Milliseconds, OpenCodeAgent, OpenCodeAgentName,
+    OpenCodeCommandLine, OpenCodeServer, OutputMatch, OutputSource, PiCommandLine, PiFlowHook,
+    ProcessReply, PromptAgentByName, PromptText, ReadinessMarker, RenamePane_Data,
+    RenameWorkspace_Data, ReportPaneMetadata_Data, RunInPane_Data, SessionTitle, StartAgent_Data,
+    SystemPromptFile, WaitForAgent_Data, WaitForPaneOutput_Data, WorkingDirectory,
 };
 pub use crate::generated::starter::StartupProgress;
 use crate::generated::starter::{
@@ -482,8 +482,34 @@ pub(crate) trait PreparesClaudePane {
     ) -> Result<(), String>;
 }
 
-impl PreparesClaudePane for HerdrCli {
-    fn claude_flag_settings(&self, lean: &LeanStart) -> String {
+/// The flow hook a harness reports its events through: the one shell line
+/// that runs the configured hook client with its configuration, and the
+/// configured native events, by Claude Code's names, which `flow-hook`
+/// reads from every harness alike.
+pub(crate) trait ComposesFlowHook {
+    fn hook_command(&self) -> String;
+}
+
+/// A native event by the name Claude Code gives it, which `flow-hook` reads.
+pub(crate) trait NamesHookEvent {
+    fn hook_event_name(&self) -> &'static str;
+}
+
+impl NamesHookEvent for meta_signal_flow::HarnessHookEvent {
+    fn hook_event_name(&self) -> &'static str {
+        use meta_signal_flow::HarnessHookEvent;
+        match self {
+            HarnessHookEvent::SessionStart => "SessionStart",
+            HarnessHookEvent::PostToolUse => "PostToolUse",
+            HarnessHookEvent::UserPromptSubmit => "UserPromptSubmit",
+            HarnessHookEvent::Stop => "Stop",
+            HarnessHookEvent::SessionEnd => "SessionEnd",
+        }
+    }
+}
+
+impl ComposesFlowHook for HerdrCli {
+    fn hook_command(&self) -> String {
         let configuration = HookConfiguration {
             ordinary_socket_path: flow_ethos::OrdinarySocketPath(
                 self.ordinary_socket.to_string_lossy().into_owned(),
@@ -492,11 +518,17 @@ impl PreparesClaudePane for HerdrCli {
         .datomize(DatomPath::new())
         .protosize()
         .compact();
-        let command = format!(
+        format!(
             "{} {}",
             self.harness_hook.current().to_string_lossy().shell_quoted(),
             configuration.shell_quoted()
-        );
+        )
+    }
+}
+
+impl PreparesClaudePane for HerdrCli {
+    fn claude_flag_settings(&self, lean: &LeanStart) -> String {
+        let command = self.hook_command();
         let hook = serde_json::json!([{
             "hooks": [{
                 "type": "command",
@@ -513,18 +545,11 @@ impl PreparesClaudePane for HerdrCli {
         let mut hooks = serde_json::Map::new();
         for event in self.harness_hook_events.current().iter() {
             use meta_signal_flow::HarnessHookEvent;
-            let name = match event {
-                HarnessHookEvent::SessionStart => "SessionStart",
-                HarnessHookEvent::PostToolUse => "PostToolUse",
-                HarnessHookEvent::UserPromptSubmit => "UserPromptSubmit",
-                HarnessHookEvent::Stop => "Stop",
-                HarnessHookEvent::SessionEnd => "SessionEnd",
-            };
             let setting = match event {
                 HarnessHookEvent::PostToolUse => every_tool.clone(),
                 _ => hook.clone(),
             };
-            hooks.insert(name.into(), setting);
+            hooks.insert(event.hook_event_name().into(), setting);
         }
         let mut settings = serde_json::json!({
             "permissions": { "defaultMode": "bypassPermissions" },
@@ -2019,6 +2044,16 @@ impl ConstructsHarnessCommand for HerdrCli {
                     )?),
                     model_name: launch.launch_profile.model_name.clone(),
                     effort: launch.launch_profile.effort.clone(),
+                    pi_flow_hook: PiFlowHook {
+                        hook_command: HookCommand(required(resources.pi_hook, "its flow hook")?),
+                        hook_event_names: HookEventNames(
+                            self.harness_hook_events
+                                .current()
+                                .iter()
+                                .map(|event| event.hook_event_name().to_owned())
+                                .collect(),
+                        ),
+                    },
                     configured_harness_arguments,
                 })
             }
@@ -2150,6 +2185,7 @@ impl SpawnsNativeHarness for HerdrCli {
             opencode_session: None,
             system_prompt_file: None,
             pi_session: None,
+            pi_hook: (launch.harness_kind == HarnessKind::Pi).then(|| self.hook_command()),
         };
         let command = self
             .harness_command(launch, resources, harness_arguments)

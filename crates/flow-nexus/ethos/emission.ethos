@@ -91,8 +91,12 @@ Emission
   OpenCodeAgent.{ OpenCodeAgentName.String ModelName Effort SystemPromptFile }
   ; Pi: the file its whole system prompt is read from, the session it
   ; creates or resumes, its model as provider/id and its thinking level,
-  ; and the configured arguments.
-  PiCommandLine.{ SystemPromptFile NativeSessionId ModelName Effort ConfiguredHarnessArguments }
+  ; the flow hook its extension reports through, and the configured
+  ; arguments, which load that extension.
+  PiCommandLine.{ SystemPromptFile NativeSessionId ModelName Effort PiFlowHook ConfiguredHarnessArguments }
+  ; The flow hook command, and the configured native events it is run on,
+  ; by the names flow-hook reads.
+  PiFlowHook.{ HookCommand.String HookEventNames.Vector<String> }
   ; The arguments the configuration adds, as a person wrote them.
   ConfiguredHarnessArguments.Vector<String>
   Printout.{ Stdout.String Stderr.String }

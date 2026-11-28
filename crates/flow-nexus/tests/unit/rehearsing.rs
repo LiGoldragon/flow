@@ -98,6 +98,8 @@ impl RehearsalFixture for Fixture {
                 .then(|| "/run/flow/request-fixture/system".into()),
             pi_session: (harness == &HarnessKind::Pi)
                 .then(|| "12345678-1234-5abc-8def-123456789abc".into()),
+            pi_hook: (harness == &HarnessKind::Pi)
+                .then(|| "'/run/flow/flow-hook' '{ /run/flow/ordinary.sock }'".into()),
         }
     }
 
@@ -120,6 +122,7 @@ impl RehearsalFixture for Fixture {
                 "<opencode-server>" => actual.opencode_server.clone().unwrap(),
                 "<opencode-session>" => actual.opencode_session.clone().unwrap(),
                 "<pi-session>" => actual.pi_session.clone().unwrap(),
+                "<flow-hook>" => actual.pi_hook.clone().unwrap(),
                 other => other.to_owned(),
             };
         }
@@ -268,13 +271,23 @@ fn an_opencode_agent_carries_model_variant_and_system_prompt_file() {
 }
 
 /// A Pi flow is rehearsed whole: its system prompt by file, the session
-/// Flow chose, its model and thinking level as configured, the configured
-/// tail last; the rehearsal the same argv as the launch with its resources
-/// in place. An effort left to the harness passes no `--thinking`.
+/// Flow chose, its model and thinking level as configured, the flow hook
+/// and its configured events for Flow's extension, the configured tail,
+/// which loads that extension, last; the rehearsal the same argv as the
+/// launch with its resources in place. An effort left to the harness
+/// passes no `--thinking`.
 #[test]
 fn a_pi_flow_rehearses_its_whole_command_line() {
-    let herdr = HerdrCli::default();
-    let tail = "--approve".harness_arguments().unwrap();
+    use crate::herdr::ConfiguresHerdrCli;
+    use meta_signal_flow::HarnessHookEvent;
+    let herdr = HerdrCli::default().with_harness_hook_events(vec![
+        HarnessHookEvent::SessionStart,
+        HarnessHookEvent::Stop,
+        HarnessHookEvent::SessionEnd,
+    ]);
+    let tail = "-e /run/flow/pi/flow-hook.js --approve"
+        .harness_arguments()
+        .unwrap();
     let launch = Fixture::launch(HarnessKind::Pi);
     let command = |launch: &ComposedLaunch, resources| {
         herdr.command_line(&herdr.harness_command(launch, resources, &tail).unwrap())
@@ -292,7 +305,7 @@ fn a_pi_flow_rehearses_its_whole_command_line() {
     assert_eq!(
         line,
         format!(
-            "'{herdr_word}' '--session' '<session>' 'agent' 'start' '<agent>' '--kind' 'pi' '--pane' '<pane>' '--timeout' '30000' '--' '--system-prompt' '<prompt-fd>' '--session-id' '<pi-session>' '--model' 'refuseless/deepseek-v4.1-flash-fast' '--thinking' 'medium' '--approve'"
+            "'{herdr_word}' '--session' '<session>' 'agent' 'start' '<agent>' '--kind' 'pi' '--pane' '<pane>' '--timeout' '30000' '--' '--system-prompt' '<prompt-fd>' '--session-id' '<pi-session>' '--model' 'refuseless/deepseek-v4.1-flash-fast' '--thinking' 'medium' '--flow-hook' '<flow-hook>' '--flow-hook-events' 'SessionStart,Stop,SessionEnd' '-e' '/run/flow/pi/flow-hook.js' '--approve'"
         )
     );
     println!("Rehearsed.«{line}»");

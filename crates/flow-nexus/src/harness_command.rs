@@ -112,6 +112,8 @@ pub(crate) struct HarnessCommandResources {
     pub system_prompt_file: Option<String>,
     /// The Pi session Flow chose, which `--session-id` creates or resumes.
     pub pi_session: Option<String>,
+    /// The flow hook command a Pi flow's extension reports through.
+    pub pi_hook: Option<String>,
 }
 
 /// Produces the resource projection used by a rehearsal. It creates nothing.
@@ -139,6 +141,7 @@ impl RehearsesHarnessResources for HarnessCommandResources {
                 opencode_session: None,
                 system_prompt_file: None,
                 pi_session: None,
+                pi_hook: None,
             },
             HarnessKind::Codex => Self {
                 herdr_session: "<session>".into(),
@@ -156,6 +159,7 @@ impl RehearsesHarnessResources for HarnessCommandResources {
                 opencode_session: None,
                 system_prompt_file: None,
                 pi_session: None,
+                pi_hook: None,
             },
             HarnessKind::OpenCode => Self {
                 herdr_session: "<session>".into(),
@@ -173,6 +177,7 @@ impl RehearsesHarnessResources for HarnessCommandResources {
                 opencode_session: Some("<opencode-session>".into()),
                 system_prompt_file: Some("<system-prompt-file>".into()),
                 pi_session: None,
+                pi_hook: None,
             },
             HarnessKind::Pi => Self {
                 herdr_session: "<session>".into(),
@@ -190,6 +195,7 @@ impl RehearsesHarnessResources for HarnessCommandResources {
                 opencode_session: None,
                 system_prompt_file: None,
                 pi_session: Some("<pi-session>".into()),
+                pi_hook: Some("<flow-hook>".into()),
             },
         }
     }

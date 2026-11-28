@@ -1360,6 +1360,7 @@ impl RestartsInSteps for RunningNexus {
                     opencode_session: None,
                     system_prompt_file: None,
                     pi_session: None,
+                    pi_hook: None,
                 }
             }
             // A Codex TUI attaches to the thread its app-server keeps.
@@ -1386,6 +1387,7 @@ impl RestartsInSteps for RunningNexus {
                     opencode_session: None,
                     system_prompt_file: None,
                     pi_session: None,
+                    pi_hook: None,
                 }
             }
             HarnessKind::OpenCode => {

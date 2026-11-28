@@ -2588,58 +2588,81 @@ fn one_live_store_value_reaches_both_composers_without_reconstructing_the_source
 
 #[test]
 fn effort_precedence_readback_and_reopen_preserve_each_configuration_layer() {
+    use crate::model::RunsModel;
     use crate::store::effort_configuration::ReadsEffort;
     use meta_signal_flow::{Change, Effort, ModelEffort};
+    let spelled = |spelling: &str| Effort::Native(spelling.to_owned());
     let (fixture, nexus, alpha, beta) = amend_world();
-    let before = snapshot(&nexus);
-    assert_eq!(before.configured_model_efforts.0.len(), 8);
-    for entry in &before.configured_model_efforts.0 {
-        assert_eq!(
-            entry.effort,
-            if entry.model == Model::Terra {
-                Effort::Low
-            } else {
-                Effort::Medium
-            }
-        );
-    }
-    for (model_effort, model_text) in [
-        (Effort::Default, ""),
-        (Effort::High, "high"),
-        (Effort::Medium, "medium"),
-        (Effort::Low, "low"),
+    // The code holds no effort: a fresh store's models are Default, and
+    // their launches omit the argument.
+    assert!(snapshot(&nexus).configured_model_efforts.0.is_empty());
+    assert_eq!(
+        nexus.store.configured_effort(&alpha.address).unwrap(),
+        Effort::Default
+    );
+    assert_eq!(nexus.store.launch_effort(&alpha.address).unwrap(), "");
+    // Spellings a harness takes, and ones no harness takes: each is
+    // configured, stored and read back as written.
+    for model_effort in [
+        spelled("xhigh"),
+        spelled("ultra"),
+        Effort::Default,
+        spelled("medium"),
     ] {
         let mut expected = snapshot(&nexus);
         expected
             .configured_model_efforts
             .0
-            .iter_mut()
-            .find(|entry| entry.model == alpha.address.model)
-            .unwrap()
-            .effort = model_effort.clone();
+            .retain(|entry| entry.model != alpha.address.model);
+        expected.configured_model_efforts.0.push(ModelEffort {
+            model: alpha.address.model.clone(),
+            effort: model_effort.clone(),
+        });
+        expected
+            .configured_model_efforts
+            .0
+            .sort_by_key(|entry| entry.model.name().to_owned());
         configures(
             &nexus,
             ConfigurationChange::ModelEffort(ModelEffort {
                 model: alpha.address.model.clone(),
-                effort: model_effort,
+                effort: model_effort.clone(),
             }),
         );
         assert_eq!(snapshot(&nexus), expected);
-        for (effort, text) in [
-            (Effort::Default, model_text),
-            (Effort::High, "high"),
-            (Effort::Medium, "medium"),
-            (Effort::Low, "low"),
+        for permaflow_effort in [
+            spelled("max"),
+            spelled("minimal"),
+            spelled("none"),
+            Effort::Default,
         ] {
             let mut changed = alpha.clone();
-            changed.effort = effort.clone();
+            changed.effort = permaflow_effort.clone();
             let expected = with_permaflow(&snapshot(&nexus), &changed);
-            configures(&nexus, amend(&alpha.address, Change::Effort(effort)));
+            configures(
+                &nexus,
+                amend(&alpha.address, Change::Effort(permaflow_effort.clone())),
+            );
             assert_eq!(snapshot(&nexus), expected);
-            assert_eq!(nexus.store.configured_effort(&alpha.address).unwrap(), text);
+            // A permaflow's Default is its model's.
+            let effort = match &permaflow_effort {
+                Effort::Default => model_effort.clone(),
+                native => native.clone(),
+            };
+            assert_eq!(
+                nexus.store.configured_effort(&alpha.address).unwrap(),
+                effort
+            );
+            assert_eq!(
+                nexus.store.launch_effort(&alpha.address).unwrap(),
+                match effort {
+                    Effort::Native(spelling) => spelling,
+                    Effort::Default => String::new(),
+                }
+            );
             assert_eq!(
                 nexus.store.configured_effort(&beta.address).unwrap(),
-                "medium"
+                Effort::Default
             );
         }
     }
@@ -2649,6 +2672,6 @@ fn effort_precedence_readback_and_reopen_preserve_each_configuration_layer() {
     assert_eq!(snapshot(&reopened), expected);
     assert_eq!(
         reopened.store.configured_effort(&alpha.address).unwrap(),
-        "low"
+        spelled("medium")
     );
 }

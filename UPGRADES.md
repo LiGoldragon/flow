@@ -1,3 +1,23 @@
+# Flow, next release: effort is Default or the harness's own spelling
+
+Take a store copy before activation. Meta Signal 0.94.0 makes Effort
+`[ Default Native.String ]`: the harness's own spelling of a level, kept
+as written and passed to the harness unchanged as its one effort argument.
+Flow holds no list of levels and checks none against the model. Any
+spelling is configured, stored and read back; the harness alone judges it,
+and Codex's refusal at thread/start fails the launch with what Codex said.
+A model's Default omits the argument; a permaflow's Default is its model's.
+For example: `Configure.ModelEffort.{ Sol Native.xhigh }`,
+`Configure.Amend.{ { Psyche core Fable } Effort.Native.max }`.
+
+The open upgrades the model effort Memory v1 to v2 and the permaflow
+declaration Memory v9 to v10 (and v7, v8 directly): Default stays Default,
+High, Medium and Low become `Native.high`, `Native.medium` and
+`Native.low`. The code holds no effort: a fresh store gives no model one,
+so its launches omit the argument until a model's effort is configured.
+The previous daemon requires the pre-upgrade store. Use a paired meta
+client; ordinary Signal is unchanged.
+
 # Flow 0.60.6: permaflow refresh mode
 
 Take a store copy before activation. Permaflow declaration Memory v9 adds

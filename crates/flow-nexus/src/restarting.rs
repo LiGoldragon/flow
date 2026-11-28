@@ -1289,7 +1289,7 @@ impl RestartsInSteps for RunningNexus {
             model_name: signal_flow::ModelName(model_name),
             effort: signal_flow::Effort(
                 self.store
-                    .configured_effort(&record.address)
+                    .launch_effort(&record.address)
                     .map_err(|_| refused("StoreRefused"))?,
             ),
             flow_id_option: None,

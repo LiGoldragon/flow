@@ -316,6 +316,44 @@ mod tests {
         );
     }
 
+    /// An effort is the harness's own spelling: whatever is written, empty,
+    /// spaced or not ASCII, is read, kept and printed back as written.
+    #[test]
+    fn every_native_effort_spelling_prints_back_as_written() {
+        let client = FlowMetaClient;
+        for spelling in ["xhigh", "max", "ultra", "«extra high»", "«très-haut»", "«»"] {
+            for datom in [
+                format!("Configure.ModelEffort.{{ Sol Native.{spelling} }}"),
+                format!("Configure.Amend.{{ {{ Psyche core Fable }} Effort.Native.{spelling} }}"),
+            ] {
+                let query = client
+                    .parse_query([datom.clone()].into_iter())
+                    .expect("an effort declaration parses");
+                let printed = query.datomize(vec![]).protosize().compact();
+                let reread = client
+                    .parse_query([printed.clone()].into_iter())
+                    .expect("its print parses");
+                assert_eq!(reread, query, "{datom} printed {printed}");
+                let spelled = spelling.trim_start_matches('«').trim_end_matches('»');
+                let Input::Configure(change) = &query else {
+                    panic!("an effort declaration is one Configure query")
+                };
+                let effort = match change {
+                    ConfigurationChange::ModelEffort(model_effort) => &model_effort.effort,
+                    ConfigurationChange::Amend(amend) => match &amend.change {
+                        meta_signal_flow::Change::Effort(effort) => effort,
+                        other => panic!("amended otherwise: {other:?}"),
+                    },
+                    other => panic!("configured otherwise: {other:?}"),
+                };
+                assert_eq!(
+                    effort,
+                    &meta_signal_flow::Effort::Native(spelled.to_owned())
+                );
+            }
+        }
+    }
+
     #[test]
     fn renew_and_restart_are_the_meta_surface_s_own() {
         // The meta surface renews an Address, the override panel's input at

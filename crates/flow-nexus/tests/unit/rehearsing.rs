@@ -338,14 +338,22 @@ fn production_rehearse_success_and_refusal_create_nothing() {
 }
 
 #[test]
-fn all_efforts_are_rendered_once_and_harness_default_is_omitted() {
-    use crate::store::effort_configuration::NativeEffort;
-    use meta_signal_flow::Effort;
+fn every_spelling_is_rendered_once_unchanged_and_none_is_omitted() {
     let herdr = HerdrCli::default();
     for harness in [HarnessKind::Claude, HarnessKind::Codex] {
-        for effort in [Effort::Default, Effort::High, Effort::Medium, Effort::Low] {
+        // The empty spelling is the launch wire's None.
+        for effort in [
+            "",
+            "high",
+            "xhigh",
+            "max",
+            "minimal",
+            "ultra",
+            "extra high",
+            "très-haut",
+        ] {
             let mut launch = Fixture::launch(harness.clone());
-            launch.launch_profile.effort = signal_flow::Effort(effort.native_effort().into());
+            launch.launch_profile.effort = signal_flow::Effort(effort.into());
             let command = herdr
                 .harness_command(
                     &launch,
@@ -365,10 +373,10 @@ fn all_efforts_are_rendered_once_and_harness_default_is_omitted() {
                     }
                 })
                 .collect();
-            let expected: Vec<_> = if effort == Effort::Default {
+            let expected: Vec<_> = if effort.is_empty() {
                 vec![]
             } else {
-                vec![effort.native_effort()]
+                vec![effort]
             };
             assert_eq!(settings, expected);
         }

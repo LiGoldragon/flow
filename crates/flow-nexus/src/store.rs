@@ -6223,7 +6223,12 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                 identity.schema_hash(),
                 schema if schema == SchemaHash::for_label(effort_upgrade::SCHEMA_V7)
                     || schema == SchemaHash::for_label(effort_upgrade::SCHEMA_V8)
+                    || schema == SchemaHash::for_label(effort_upgrade::SCHEMA_V9)
             );
+        let before_model_effort_spelling = table_key == effort_configuration::TABLE
+            && identity.table_name() == table_key
+            && identity.family().as_str() == effort_configuration::FAMILY
+            && identity.schema_hash() == SchemaHash::for_label(effort_configuration::SCHEMA_V1);
         let before_abandonment = table_key == delivery_attempt_upgrade::TABLE
             && identity.table_name() == table_key
             && identity.family().as_str() == delivery_attempt_upgrade::FAMILY
@@ -6231,6 +6236,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
                 == SchemaHash::for_label(delivery_attempt_upgrade::SCHEMA_V10);
         before_abandonment
             || before_effort
+            || before_model_effort_spelling
             || before_refresh_callers
             || before_recovery_cause
             || before_recovery_refusals
@@ -10163,22 +10169,13 @@ mod tests {
         assert_eq!(row.purpose, previous.configure_metaflow.purpose);
         assert_eq!(row.root_option, previous.configure_metaflow.root_option);
         assert_eq!(row.leave_outs, previous.configure_metaflow.leave_outs);
-        assert_eq!(snapshot.model_efforts.len(), 8);
-        for entry in snapshot.model_efforts {
-            assert_eq!(
-                entry.effort,
-                if entry.model == signal_flow::Model::Terra {
-                    meta_signal_flow::Effort::Low
-                } else {
-                    meta_signal_flow::Effort::Medium
-                }
-            );
-        }
+        // The code holds no effort: no model is given one on open.
+        assert!(snapshot.model_efforts.is_empty());
         upgraded
             .configure_change(meta_signal_flow::ConfigurationChange::ModelEffort(
                 meta_signal_flow::ModelEffort {
                     model: signal_flow::Model::Fable,
-                    effort: meta_signal_flow::Effort::High,
+                    effort: meta_signal_flow::Effort::Native("high".into()),
                 },
             ))
             .unwrap();
@@ -10186,7 +10183,7 @@ mod tests {
         for _ in 0..2 {
             use super::effort_configuration::ReadsEffort;
             let running = FlowStore::open_configured(&fixture.path()).unwrap();
-            assert_eq!(running.configured_effort(&address).unwrap(), "high");
+            assert_eq!(running.launch_effort(&address).unwrap(), "high");
         }
     }
 
@@ -10216,7 +10213,7 @@ mod tests {
                 continuity: meta_signal_flow::Continuity::Maintained,
                 purpose: meta_signal_flow::Purpose("kept purpose".into()),
                 records: meta_signal_flow::Records(vec![]),
-                effort: meta_signal_flow::Effort::High,
+                effort: super::effort_upgrade::EffortV1::High,
             },
         };
         let table_name = META_METAFLOW_CONFIGURATION_TABLE_NAME.as_str();
@@ -10249,11 +10246,166 @@ mod tests {
             .iter()
             .find(|row| row.address == address)
             .unwrap();
-        assert_eq!(row.effort, meta_signal_flow::Effort::High);
+        assert_eq!(row.effort, meta_signal_flow::Effort::Native("high".into()));
         assert_eq!(row.refresh_mode, meta_signal_flow::RefreshMode::Automatic);
         assert_eq!(row.purpose, previous.configure_metaflow.purpose);
         assert_eq!(row.root_option, previous.configure_metaflow.root_option);
         assert_eq!(row.leave_outs, previous.configure_metaflow.leave_outs);
+    }
+
+    /// A store 0.60.2 through 0.60.7 wrote, its efforts closed levels, opens
+    /// with each level its spelling and Default none, and opens so again.
+    #[test]
+    fn native_effort_upgrade_admits_exact_v9_and_v1_model_efforts_and_reopens() {
+        use super::effort_configuration::{
+            FAMILY as EFFORT_FAMILY, ModelEffortV1, ReadsEffort, StoredModelEffortV1,
+            TABLE as EFFORT_TABLE,
+        };
+        use super::effort_upgrade::{
+            ConfigureMetaflowV9, EffortV1, StoredMetaMetaflowConfigurationV9,
+        };
+        use super::metaflow_declaration::{
+            META_METAFLOW_CONFIGURATION_FAMILY, META_METAFLOW_CONFIGURATION_TABLE_NAME,
+        };
+        use sema_engine::{
+            FamilyIdentity, FamilyName, MemoryDefinition, TableName, TableRegistration,
+        };
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        let declared = |topic: &str, effort: EffortV1| StoredMetaMetaflowConfigurationV9 {
+            configure_metaflow: ConfigureMetaflowV9 {
+                address: signal_flow::Address {
+                    aspect: signal_flow::Aspect::Psyche,
+                    topic: flow_ethos::Topic(topic.into()),
+                    model: signal_flow::Model::Sol,
+                },
+                root_option: None,
+                leave_outs: signal_flow::LeaveOuts(vec![]),
+                system_modules: signal_flow::SystemModules(vec![]),
+                prompt_modules: signal_flow::PromptModules(vec![]),
+                flow_kind: signal_flow::FlowKind::Regular,
+                tool_set: signal_flow::ToolSet::Default,
+                continuity: meta_signal_flow::Continuity::OnDemand,
+                refresh_mode: meta_signal_flow::RefreshMode::Manual,
+                purpose: meta_signal_flow::Purpose("kept purpose".into()),
+                records: meta_signal_flow::Records(vec![]),
+                effort,
+            },
+        };
+        let declarations = [
+            declared("effortDefault", EffortV1::Default),
+            declared("effortLow", EffortV1::Low),
+        ];
+        let model_efforts = [
+            (signal_flow::Model::Sol, EffortV1::Medium),
+            (signal_flow::Model::Terra, EffortV1::Low),
+            (signal_flow::Model::Opus, EffortV1::Default),
+            (signal_flow::Model::Fable, EffortV1::High),
+        ];
+        let database = redb::Database::open(fixture.path()).unwrap();
+        let write = database.begin_write().unwrap();
+        {
+            let mut catalog = write.open_table(super::SEMA_CATALOG_TABLE).unwrap();
+            for (table, registration) in [
+                (
+                    META_METAFLOW_CONFIGURATION_TABLE_NAME.as_str(),
+                    TableRegistration::new(FamilyIdentity::new(
+                        FamilyName::new(META_METAFLOW_CONFIGURATION_FAMILY),
+                        StoredMetaMetaflowConfigurationV9::schema_hash(),
+                        META_METAFLOW_CONFIGURATION_TABLE_NAME,
+                    )),
+                ),
+                (
+                    EFFORT_TABLE,
+                    TableRegistration::new(FamilyIdentity::new(
+                        FamilyName::new(EFFORT_FAMILY),
+                        StoredModelEffortV1::schema_hash(),
+                        TableName::new(EFFORT_TABLE),
+                    )),
+                ),
+            ] {
+                let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&registration).unwrap();
+                catalog.insert(table, bytes.as_slice()).unwrap();
+            }
+            let mut rows = write
+                .open_table(redb::TableDefinition::<String, &[u8]>::new(
+                    META_METAFLOW_CONFIGURATION_TABLE_NAME.as_str(),
+                ))
+                .unwrap();
+            for declaration in &declarations {
+                let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(declaration).unwrap();
+                rows.insert(
+                    FlowStore::address_record_key(&declaration.configure_metaflow.address),
+                    bytes.as_slice(),
+                )
+                .unwrap();
+            }
+            let mut rows = write
+                .open_table(redb::TableDefinition::<String, &[u8]>::new(EFFORT_TABLE))
+                .unwrap();
+            for (model, effort) in &model_efforts {
+                let row = StoredModelEffortV1 {
+                    model_effort: ModelEffortV1 {
+                        model: model.clone(),
+                        effort: effort.clone(),
+                    },
+                };
+                let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&row).unwrap();
+                rows.insert(FlowStore::model_record_key(model), bytes.as_slice())
+                    .unwrap();
+            }
+        }
+        write.commit().unwrap();
+        drop(database);
+        let spelled = |spelling: &str| meta_signal_flow::Effort::Native(spelling.into());
+        for _ in 0..2 {
+            let snapshot = ConfigurationOnlyStore::open(&fixture.path())
+                .unwrap()
+                .configuration_snapshot()
+                .unwrap()
+                .unwrap();
+            let efforts: Vec<_> = snapshot
+                .model_efforts
+                .iter()
+                .map(|entry| (entry.model.clone(), entry.effort.clone()))
+                .collect();
+            assert_eq!(
+                efforts,
+                vec![
+                    (signal_flow::Model::Fable, spelled("high")),
+                    (signal_flow::Model::Opus, meta_signal_flow::Effort::Default),
+                    (signal_flow::Model::Sol, spelled("medium")),
+                    (signal_flow::Model::Terra, spelled("low")),
+                ]
+            );
+            for (declaration, effort) in declarations
+                .iter()
+                .zip([meta_signal_flow::Effort::Default, spelled("low")])
+            {
+                let row = snapshot
+                    .metaflows
+                    .iter()
+                    .find(|row| row.address == declaration.configure_metaflow.address)
+                    .unwrap();
+                assert_eq!(row.effort, effort);
+                assert_eq!(row.refresh_mode, meta_signal_flow::RefreshMode::Manual);
+                assert_eq!(row.purpose, declaration.configure_metaflow.purpose);
+            }
+            let running = FlowStore::open_configured(&fixture.path()).unwrap();
+            // A permaflow's None takes its model's; its own spelling wins.
+            assert_eq!(
+                running
+                    .launch_effort(&declarations[0].configure_metaflow.address)
+                    .unwrap(),
+                "medium"
+            );
+            assert_eq!(
+                running
+                    .launch_effort(&declarations[1].configure_metaflow.address)
+                    .unwrap(),
+                "low"
+            );
+        }
     }
 
     #[test]

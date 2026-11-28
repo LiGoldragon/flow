@@ -669,11 +669,7 @@ impl LaunchesDeclared for RunningNexus {
             prompt_modules: declaration.prompt_modules,
             address: address.clone(),
             model_name: signal_flow::ModelName(model_name),
-            effort: signal_flow::Effort(
-                self.store
-                    .configured_effort(&address)
-                    .map_err(store_refused)?,
-            ),
+            effort: signal_flow::Effort(self.store.launch_effort(&address).map_err(store_refused)?),
             flow_id_option: predecessor.clone().map(flow_ethos::FlowId),
             remembering: launch.remembering,
             herdr_session_name: signal_flow::HerdrSessionName(herdr_session_name),

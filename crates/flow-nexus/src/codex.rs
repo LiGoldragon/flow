@@ -2800,7 +2800,10 @@ mod tests {
 
     #[test]
     fn configured_effort_controls_thread_and_turn_settings() {
-        for effort in ["", "high", "medium", "low"] {
+        // Any spelling is passed unchanged; the empty one omits the setting.
+        for effort in [
+            "", "high", "medium", "low", "xhigh", "minimal", "none", "ultra",
+        ] {
             let mut launch = lean_codex_launch();
             launch.launch_profile.effort = signal_flow::Effort(effort.into());
             let config = CodexAdapter::exclusion_config(&launch);
@@ -2836,6 +2839,49 @@ mod tests {
 
     /// The title a test's opened thread is named with.
     const OPENED_TITLE: &str = "{ Field Flow Tertiary 123456 }";
+
+    /// An effort the model does not take is configured and carried as
+    /// written; the app-server refuses it at thread/start, and the launch
+    /// fails with what the app-server said, opening and naming nothing.
+    #[test]
+    fn an_effort_the_model_refuses_fails_the_launch_with_the_harness_s_words() {
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
+        let mut launch = lean_codex_launch();
+        launch.launch_profile.effort = signal_flow::Effort("max".into());
+        let said = "Reasoning effort `max` is not supported for gpt-6-astra. Supported reasoning efforts: low, medium, high, xhigh";
+        let fake = FakeProxy;
+        let frames = [
+            fake.websocket_frame(r#"{"id":1,"result":{}}"#),
+            fake.websocket_frame(
+                &serde_json::json!({"id":2,"error":{"code":-32602,"message":said}}).to_string(),
+            ),
+        ];
+        let (_directory, executable, record) = RecordingFakeProxy.install_probed(&frames);
+        let workspace = tempfile::tempdir().expect("metaflow workspace");
+        let mut named = Vec::new();
+        let refusal = lean_adapter_at(executable, &launch)
+            .open_thread_in(&launch, workspace.path(), &mut |thread| {
+                named.push(thread.to_owned());
+                Ok(OPENED_TITLE.into())
+            })
+            .map(|(thread, _)| thread)
+            .unwrap_err();
+        match &refusal {
+            CodexAdapterUnavailable::Refused { method, detail } => {
+                assert_eq!(method, "thread/start");
+                assert!(detail.contains(said), "{detail}");
+            }
+            other => panic!("refused otherwise: {other:?}"),
+        }
+        assert!(refusal.to_string().contains(said));
+        assert!(named.is_empty());
+        let requests = record.requests(3);
+        assert_eq!(requests[2]["method"], "thread/start");
+        assert_eq!(
+            requests[2]["params"]["config"]["model_reasoning_effort"],
+            "max"
+        );
+    }
 
     /// The thread is opened lean through the app-server, its readback
     /// checked, and it is named with its title and the name read back, with

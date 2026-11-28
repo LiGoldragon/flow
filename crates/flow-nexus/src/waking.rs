@@ -2893,7 +2893,7 @@ impl WakesInParts for RunningNexus {
             model_name: model,
             effort: self
                 .store
-                .configured_effort(address)
+                .launch_effort(address)
                 .map_err(|_| FreshRefusal::Failed(Failed_Data::StoreRefused))?,
             herdr_session_name: fresh.herdr_session_name.0,
             system_modules: fresh.system_modules,
@@ -3107,7 +3107,7 @@ impl WakesInParts for RunningNexus {
             address: address.clone(),
             launch_request_id,
             model_name: model,
-            effort: self.store.configured_effort(&address).ok()?,
+            effort: self.store.launch_effort(&address).ok()?,
             herdr_session_name: fresh.herdr_session_name.0,
             system_modules: fresh.system_modules,
             prompt_modules: fresh.prompt_modules,

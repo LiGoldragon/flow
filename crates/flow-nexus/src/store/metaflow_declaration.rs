@@ -3,7 +3,8 @@
 //! its workspace, its leave-outs, the belief modules an ordinary Launch of
 //! that Address composes into the system prompt and into the first user
 //! message, its kind, tool set, continuity, purpose and records. v7 (0.55.0)
-//! carries the leave-outs; v8 adds effort. Earlier declarations upgrade on
+//! carries the leave-outs; v8 adds effort, v9 RefreshMode, and v10 holds
+//! effort as the native spelling. Earlier declarations upgrade on
 //! open through `leave_out_upgrade` and `effort_upgrade`.
 
 use super::{FlowStore, ReadsFlowMemory, StoreError};
@@ -20,7 +21,7 @@ pub(super) const META_METAFLOW_CONFIGURATION_TABLE_NAME: TableName =
 pub(super) const META_METAFLOW_CONFIGURATION_FAMILY: &str =
     "flow-nexus-meta-metaflow-configuration";
 pub(super) const META_METAFLOW_CONFIGURATION_SCHEMA: &str =
-    "flow-nexus-meta-metaflow-configuration-v9";
+    "flow-nexus-meta-metaflow-configuration-v10";
 
 impl EngineRecord for StoredMetaMetaflowConfiguration {
     fn record_key(&self) -> RecordKey {
@@ -32,7 +33,7 @@ impl EngineRecord for StoredMetaMetaflowConfiguration {
 
 impl MemoryDefinition for StoredMetaMetaflowConfiguration {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(9)
+        MemoryVersion::new(10)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -54,6 +55,7 @@ impl DescribesMetaflowDeclarationTable for StoredMetaMetaflowConfiguration {
         .with_predecessor::<super::leave_out_upgrade::StoredMetaMetaflowConfigurationV6>()
         .with_predecessor::<super::effort_upgrade::StoredMetaMetaflowConfigurationV7>()
         .with_predecessor::<super::effort_upgrade::StoredMetaMetaflowConfigurationV8>()
+        .with_predecessor::<super::effort_upgrade::StoredMetaMetaflowConfigurationV9>()
     }
 }
 

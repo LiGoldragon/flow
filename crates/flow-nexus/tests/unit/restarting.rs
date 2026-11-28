@@ -458,8 +458,8 @@ fn left_by_dead_nexus(fixture: &NexusFixture, world: &RestartWorld, resumed: boo
 }
 
 /// abc123 Awake and resting is restarted as its own session: Restarted, the
-/// same FlowId; `claude --resume <session>` in a new pane, with this
-/// Nexus's hook socket, the title, model and effort its Address configures;
+/// same FlowId; `claude --resume <session>` in a new pane, with no hook,
+/// the title, model and effort its Address configures;
 /// nothing typed; the old pane closed; the flow Active and Awake.
 #[test]
 fn restart_awake_resting_claude_resumes_same_session() {
@@ -482,8 +482,8 @@ fn restart_awake_resting_claude_resumes_same_session() {
     );
     assert!(!resume.contains("--session-id"), "{resume}");
     assert!(
-        resume.contains("/fixture/run/flow-next/flow/flow.sock"),
-        "the hook reports to this Nexus: {resume}"
+        !resume.contains("flow.sock") && !resume.contains("\"hooks\""),
+        "a resumed seat carries no hook: {resume}"
     );
     assert!(
         resume.contains("--name { Mind flow Sol abc123 }"),
@@ -768,9 +768,9 @@ fn restart_new_seat_real_exit_ends() {
     assert_eq!(node(&second).flow_lifecycle, FlowLifecycle::Exited);
 }
 
-/// The resumed seat's hook reports to this Nexus and acts: the hook command
-/// names this Nexus's socket, a Stop no caller stands behind settles
-/// nothing, and the same Stop from the resumed seat's hook drains its queue.
+/// The resumed seat carries no hook; a report naming no harness settles
+/// nothing, and the same Stop naming the resumed seat's harness by its
+/// birth acts and drains its queue.
 #[test]
 fn restart_resumed_hooks_report_to_live_nexus() {
     let mut fixture = NexusFixture::new();
@@ -779,7 +779,7 @@ fn restart_resumed_hooks_report_to_live_nexus() {
         restarted(&fixture),
         Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
-    assert!(world.resumes()[0].contains("/fixture/run/flow-next/flow/flow.sock"));
+    assert!(!world.resumes()[0].contains("flow.sock"));
     let mut queued = stored(&fixture, Model::Sol);
     queued.queue = flow_ethos::Queue(vec![signal_flow::QueueEntry {
         logical_delivery_id: flow_ethos::LogicalDeliveryId("after-restart".into()),
@@ -912,8 +912,9 @@ fn restart_resume_refused_custody_kept() {
     assert_eq!(record(&fixture), None);
 }
 
-/// The old pane is already gone and no harness of it is seen or recorded:
-/// a pane's absence proves no exit, so the restart is refused
+/// The old pane is already gone, no harness of it is seen or recorded, and
+/// Claude's record of its sessions is not there to read: a pane's absence
+/// proves no exit, nor does an unread record, so the restart is refused
 /// ExitUnwitnessed before any write: no record, nothing closed or started,
 /// abc123 Active and Awake in w1:p3 as it was.
 #[test]
@@ -979,6 +980,166 @@ fn restart_first_old_pane_gone_harness_exited_proceeds() {
     assert_eq!(route_pane(&fixture), NEW_PANE);
     assert_eq!(node(&fixture).session_id.0, world.seat.session);
     assert_eq!(record(&fixture), None);
+}
+
+/// Claude's own record of abc123's session as a harness that ended leaves
+/// it: the session named, its process gone. No live process holds it.
+fn session_unheld(fixture: &NexusFixture, world: &RestartWorld) {
+    let registry = &fixture.nexus.herdr.claude_sessions.directory;
+    assert!(registry.starts_with(fixture.directory.path()));
+    fs::create_dir_all(registry).unwrap();
+    let ended = exited_process();
+    fs::write(
+        registry.join(format!("{}.json", ended.pid.0)),
+        serde_json::json!({
+            "sessionId": world.seat.session,
+            "pid": ended.pid.0,
+            "procStart": ended.started.0,
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+/// abc123's pane is closed from outside: no harness of it is seen or
+/// recorded, and Claude's record of its sessions names no live process
+/// running its session. One Restart starts it again from what Flow holds:
+/// nothing closed, `claude --resume <the same session>` in a new pane of
+/// the session Flow launches into, with the model, effort and title its
+/// Address configures and no hook; the flow Active and Awake there, its
+/// transcript the same file, and a Send then reaches it.
+#[test]
+fn restart_pane_gone_session_unheld_restarts_once() {
+    use crate::waking::ReadsClaudeDelivery;
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(false);
+    session_unheld(&fixture, &world);
+    let transcript = fixture.nexus.claude_transcript(&node(&fixture));
+    assert!(transcript.is_some());
+
+    assert_eq!(
+        restarted(&fixture),
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
+
+    assert!(
+        world.calls_naming("pane close").is_empty(),
+        "{}",
+        world.fresh.calls()
+    );
+    let resumes = world.resumes();
+    assert_eq!(resumes.len(), 1, "{}", world.fresh.calls());
+    let resume = &resumes[0];
+    assert!(resume.contains("--session fixture-session"), "{resume}");
+    assert!(resume.contains(&format!("--pane {NEW_PANE}")), "{resume}");
+    assert!(
+        resume.contains(&format!("--resume {}", world.seat.session)),
+        "{resume}"
+    );
+    assert!(!resume.contains("--session-id"), "{resume}");
+    assert!(
+        resume.contains("--name { Mind flow Sol abc123 }"),
+        "{resume}"
+    );
+    assert!(resume.contains("--model claude-fixture"), "{resume}");
+    assert!(resume.contains("--effort medium"), "{resume}");
+    assert!(
+        !resume.contains("flow.sock") && !resume.contains("\"hooks\""),
+        "a resumed seat carries no hook: {resume}"
+    );
+    assert!(world.calls_naming("agent prompt").is_empty());
+
+    let after = node(&fixture);
+    assert_eq!(after.session_id.0, world.seat.session);
+    assert_eq!(after.flow_lifecycle, FlowLifecycle::Active);
+    assert_eq!(route_pane(&fixture), NEW_PANE);
+    assert_eq!(fixture.nexus.claude_transcript(&after), transcript);
+    assert_eq!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(flow_ethos::FlowId(FLOW.into()))
+    );
+    assert_eq!(record(&fixture), None);
+
+    let from = bound_sender(&fixture);
+    send(&fixture, &from, "after the dead pane");
+    assert_eq!(received(&world, &fixture, "after the dead pane"), 1);
+}
+
+/// abc123 bound with no pane, its route recorded no more, and no live
+/// process holding its session: one Restart resumes the same session in a
+/// new pane of the session Flow launches into, closing nothing.
+#[test]
+fn restart_paneless_session_unheld_restarts_once() {
+    use crate::store::AltersFlowRowsForTests;
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(false);
+    session_unheld(&fixture, &world);
+    fixture.nexus.store.forget_route(FLOW);
+    assert_eq!(
+        node(&fixture).herdr_route_selection,
+        HerdrRouteSelection::Unavailable
+    );
+
+    assert_eq!(
+        restarted(&fixture),
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
+    assert!(world.calls_naming("pane close").is_empty());
+    let resumes = world.resumes();
+    assert_eq!(resumes.len(), 1, "{}", world.fresh.calls());
+    assert!(resumes[0].contains("--session fixture-session"));
+    assert!(resumes[0].contains(&format!("--resume {}", world.seat.session)));
+    assert_eq!(route_pane(&fixture), NEW_PANE);
+    assert_eq!(node(&fixture).session_id.0, world.seat.session);
+    assert_eq!(record(&fixture), None);
+}
+
+/// abc123's pane is gone and its session not held by Flow: the restart
+/// answers NoHeldSession, writes nothing and starts nothing; a Bind
+/// supplies the session.
+#[test]
+fn restart_pane_gone_no_held_session_refused() {
+    use crate::store::AltersFlowRowsForTests;
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(false);
+    session_unheld(&fixture, &world);
+    fixture.nexus.store.forget_route(FLOW);
+    fixture.nexus.store.forget_session(FLOW);
+    assert_eq!(
+        restarted(&fixture),
+        Output::RestartRefused(RestartRefusal::NoHeldSession(flow_ethos::FlowId(
+            FLOW.into()
+        )))
+    );
+    assert_eq!(record(&fixture), None);
+    assert!(world.resumes().is_empty(), "{}", world.fresh.calls());
+}
+
+/// The old pane is gone and no harness of it is seen or recorded, but
+/// Claude's record of its sessions names a live process running the
+/// session: nothing proves its harness gone, so the restart is refused
+/// ExitUnwitnessed before any write.
+#[test]
+fn restart_pane_gone_session_held_refused_unwitnessed() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(false);
+    let running = live_process();
+    let registry = &fixture.nexus.herdr.claude_sessions.directory;
+    fs::create_dir_all(registry).unwrap();
+    fs::write(
+        registry.join(format!("{}.json", running.1.pid.0)),
+        serde_json::json!({
+            "sessionId": world.seat.session,
+            "pid": running.1.pid.0,
+            "procStart": running.1.started.0,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(restarted(&fixture), resume_refused("ExitUnwitnessed"));
+    assert_eq!(record(&fixture), None, "nothing written");
+    assert!(world.resumes().is_empty(), "{}", world.fresh.calls());
+    assert!(FlowStore::process_is_live(&running.1));
 }
 
 /// A restart bound abc123's seat at the route it runs in now, `process` its
@@ -1742,8 +1903,7 @@ fn restart_command_line_refused_old_harness_untouched() {
 }
 
 /// Composed first, a restart still closes the old harness once, before the
-/// new pane, then resumes the same session with `--resume`, its hooks aimed
-/// at this Nexus's socket and no other.
+/// new pane, then resumes the same session with `--resume` and no hook.
 #[test]
 fn restart_precomposed_success_closes_once_resumes_same_session() {
     let mut fixture = NexusFixture::new();
@@ -1781,14 +1941,10 @@ fn restart_precomposed_success_closes_once_resumes_same_session() {
         "{resume}"
     );
     assert!(!resume.contains("--session-id"), "{resume}");
-    let sockets = resume.matches(".sock").count();
-    assert!(sockets > 0, "{resume}");
     assert_eq!(
-        resume
-            .matches("/fixture/run/flow-next/flow/flow.sock")
-            .count(),
-        sockets,
-        "the hooks report to this Nexus only: {resume}"
+        resume.matches(".sock").count(),
+        0,
+        "a resumed seat carries no hook: {resume}"
     );
     assert_eq!(node(&fixture).session_id.0, world.seat.session);
     assert_eq!(route_pane(&fixture), NEW_PANE);
@@ -2924,8 +3080,8 @@ fn reported_to(nexus: &crate::RunningNexus, event: Event, birth: Option<Process>
 /// hook's reports and an Observe's Gone of the adopted seat; none acts.
 /// Through all of it the new custody stands: abc123 Active in w7:p1 on the
 /// same session and claim, Awake, its seat birth unchanged, no restart,
-/// exit or successor recorded; and the resumed seat's hooks, aimed at
-/// NEW_SOCKET only, act on the new Nexus.
+/// exit or successor recorded; and the resumed seat, carrying no hook,
+/// acts on the new Nexus by reports naming its birth.
 #[test]
 fn restart_cutover_two_nexus() {
     use crate::sending::BindsSeats;
@@ -3003,7 +3159,7 @@ fn restart_cutover_two_nexus() {
         resumes[0]
     );
     assert!(resumes[0].contains(&format!("--pane {NEW_PANE}")));
-    assert!(resumes[0].contains(NEW_SOCKET), "{}", resumes[0]);
+    assert!(!resumes[0].contains(NEW_SOCKET), "{}", resumes[0]);
     assert!(!resumes[0].contains(OLD_SOCKET), "{}", resumes[0]);
     let bound = new_node(&new);
     assert_eq!(bound.session_id.0, world.seat.session);
@@ -3627,8 +3783,8 @@ fn adopted_on_new(
 /// the FlowId, native session, actual model, transcript, claims and queue
 /// unchanged. A retry while still refused is refused alike and closes
 /// nothing. Once Model words are taken, a retry answers Restarted: the old
-/// pane closed once, `claude --resume <the same session>` with hooks naming
-/// only the new Nexus's socket, and the queue handed over once.
+/// pane closed once, `claude --resume <the same session>` with no hook, and
+/// the queue handed over once.
 #[test]
 fn restart_not_composed_refused_then_recovered() {
     let mut fixture = NexusFixture::new();
@@ -3731,12 +3887,12 @@ fn restart_not_composed_refused_then_recovered() {
     );
     assert!(!resume.contains("--session-id"), "{resume}");
     assert!(resume.contains(&format!("--pane {NEW_PANE}")), "{resume}");
-    assert!(resume.contains(NEW_SOCKET), "{resume}");
+    assert!(!resume.contains(NEW_SOCKET), "{resume}");
     assert!(!resume.contains(OLD_SOCKET), "{resume}");
     assert_eq!(
         resume.matches("flow.sock").count(),
-        resume.matches(NEW_SOCKET).count(),
-        "every hook socket is the new Nexus's: {resume}"
+        0,
+        "a resumed seat carries no hook: {resume}"
     );
     assert_eq!(world.calls_naming("agent start").len(), 1);
     assert_eq!(new.store.restart_record(FLOW).unwrap(), None);

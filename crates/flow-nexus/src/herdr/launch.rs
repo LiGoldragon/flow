@@ -102,7 +102,7 @@ pub(crate) trait StartsConfiguredNativeHerdrHarness {
 }
 
 /// How a harness is told its native session at spawn.
-enum ClaudeSession {
+pub(crate) enum ClaudeSession {
     /// The harness chooses its own session.
     Unchosen,
     /// The session Flow chose for a reserved Claude launch: `--session-id`.
@@ -114,11 +114,63 @@ enum ClaudeSession {
     Resumed(String),
 }
 
+/// How a Claude seat's state reaches Flow, the one value its flag settings
+/// differ by: a first start's carries Flow's hook on the configured native
+/// events; a resumed session's carries none, its state coming by the watch
+/// of its transcript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaudeReporting {
+    /// `flow-hook` on the configured native events, each a Report.
+    Hook,
+    /// No hook: Flow reads the session's state from its transcript.
+    TranscriptWatch,
+}
+
+impl ClaudeSession {
+    /// How the seat this session starts reports: a resumed session by the
+    /// watch of its transcript, every other start by Flow's hook.
+    pub(crate) fn reporting(&self) -> ClaudeReporting {
+        match self {
+            ClaudeSession::Resumed(_) => ClaudeReporting::TranscriptWatch,
+            ClaudeSession::Unchosen | ClaudeSession::Chosen(_) | ClaudeSession::Attached(_) => {
+                ClaudeReporting::Hook
+            }
+        }
+    }
+
+    /// The session a Claude command chooses, `--session-id`.
+    pub(crate) fn chosen(&self) -> Option<String> {
+        match self {
+            ClaudeSession::Chosen(session) => Some(session.clone()),
+            ClaudeSession::Unchosen | ClaudeSession::Attached(_) | ClaudeSession::Resumed(_) => {
+                None
+            }
+        }
+    }
+
+    /// The session a Claude command resumes, `--resume`.
+    pub(crate) fn resumed(&self) -> Option<String> {
+        match self {
+            ClaudeSession::Resumed(session) => Some(session.clone()),
+            ClaudeSession::Unchosen | ClaudeSession::Attached(_) | ClaudeSession::Chosen(_) => None,
+        }
+    }
+
+    /// The Codex thread a TUI attaches to, `resume <thread>`.
+    pub(crate) fn attached(&self) -> Option<String> {
+        match self {
+            ClaudeSession::Attached(thread) => Some(thread.clone()),
+            ClaudeSession::Chosen(_) | ClaudeSession::Unchosen | ClaudeSession::Resumed(_) => None,
+        }
+    }
+}
+
 /// Starts a restarted flow's harness in the restart's new pane as the
 /// native session the flow already holds, with no positional prompt. A
 /// Claude flow runs `--resume <session>` where a launch passes
 /// `--session-id`, with its FlowId exported into the pane as at launch, the
-/// launch's title, settings and hook; that a resume keeps the session's id
+/// launch's title and settings, and no hook (`ClaudeReporting`); that a
+/// resume keeps the session's id
 /// is Claude Code's own claim, and Bind checks the pane reports it. A Codex
 /// flow's TUI attaches through the app-server to the thread it already
 /// holds, `resume <thread>`, as at launch: the app-server keeps the thread.
@@ -469,8 +521,9 @@ pub(crate) trait PreparesClaudePane {
     /// the flow's turn end, a submitted prompt the receipt of a queued
     /// request, and a session's end the flow's exit.
     /// A launch that leaves out the attribution reminder sets the
-    /// attribution lines empty here.
-    fn claude_flag_settings(&self, lean: &LeanStart) -> String;
+    /// attribution lines empty here. A seat reported by its transcript
+    /// watch (`ClaudeReporting::TranscriptWatch`) carries no hook.
+    fn claude_flag_settings(&self, lean: &LeanStart, reporting: ClaudeReporting) -> String;
     fn prepare_claude_pane_environment(
         &self,
         launch: &ComposedLaunch,
@@ -480,7 +533,7 @@ pub(crate) trait PreparesClaudePane {
 }
 
 impl PreparesClaudePane for HerdrCli {
-    fn claude_flag_settings(&self, lean: &LeanStart) -> String {
+    fn claude_flag_settings(&self, lean: &LeanStart, reporting: ClaudeReporting) -> String {
         let configuration = HookConfiguration {
             ordinary_socket_path: flow_ethos::OrdinarySocketPath(
                 self.ordinary_socket.to_string_lossy().into_owned(),
@@ -525,8 +578,10 @@ impl PreparesClaudePane for HerdrCli {
         }
         let mut settings = serde_json::json!({
             "permissions": { "defaultMode": "bypassPermissions" },
-            "hooks": hooks,
         });
+        if reporting == ClaudeReporting::Hook {
+            settings["hooks"] = serde_json::Value::Object(hooks);
+        }
         if lean.attribution_off() {
             settings["attribution"] = serde_json::json!({ "commit": "", "pr": "" });
         }
@@ -2039,27 +2094,12 @@ impl SpawnsNativeHarness for HerdrCli {
             program,
             codex_socket: codex_endpoint.map(|endpoint| endpoint.socket.clone()),
             claude_settings: (launch.harness_kind == HarnessKind::Claude)
-                .then(|| self.claude_flag_settings(&launch.lean_start())),
+                .then(|| self.claude_flag_settings(&launch.lean_start(), session.reporting())),
             claude_title: claude_title.map(|title| title.as_str().to_owned()),
             prompt_fd,
-            claude_session: match &session {
-                ClaudeSession::Chosen(session) => Some(session.clone()),
-                ClaudeSession::Unchosen
-                | ClaudeSession::Attached(_)
-                | ClaudeSession::Resumed(_) => None,
-            },
-            claude_resume: match &session {
-                ClaudeSession::Resumed(session) => Some(session.clone()),
-                ClaudeSession::Unchosen | ClaudeSession::Attached(_) | ClaudeSession::Chosen(_) => {
-                    None
-                }
-            },
-            thread: match &session {
-                ClaudeSession::Attached(thread) => Some(thread.clone()),
-                ClaudeSession::Chosen(_) | ClaudeSession::Unchosen | ClaudeSession::Resumed(_) => {
-                    None
-                }
-            },
+            claude_session: session.chosen(),
+            claude_resume: session.resumed(),
+            thread: session.attached(),
         };
         let command = self
             .harness_command(launch, resources, harness_arguments)
@@ -2984,6 +3024,7 @@ pub(crate) mod tests {
     use crate::herdr::HerdrCli;
     use crate::herdr::launch::ChecksComposedLaunch;
     use crate::herdr::launch::ClaimsNativeIdentity;
+    use crate::herdr::launch::ClaudeReporting;
     use crate::herdr::launch::PreparesClaudePane;
     use crate::herdr::launch::ReadsLaunchText;
     use crate::herdr::launch::TitlesClaudeSession;
@@ -3531,23 +3572,34 @@ printf '%s\n' "$alias"
         let adapter = HerdrCli::default();
         let lean = launch(HarnessKind::Claude).lean_start();
         let empty: serde_json::Value =
-            serde_json::from_str(&adapter.claude_flag_settings(&lean)).unwrap();
+            serde_json::from_str(&adapter.claude_flag_settings(&lean, ClaudeReporting::Hook))
+                .unwrap();
         assert!(empty["hooks"].as_object().unwrap().is_empty());
         adapter.configure_harness_hook_events(&[
             HarnessHookEvent::Stop,
             HarnessHookEvent::PostToolUse,
         ]);
         let selected: serde_json::Value =
-            serde_json::from_str(&adapter.claude_flag_settings(&lean)).unwrap();
+            serde_json::from_str(&adapter.claude_flag_settings(&lean, ClaudeReporting::Hook))
+                .unwrap();
         assert_eq!(selected["hooks"].as_object().unwrap().len(), 2);
         assert!(selected["hooks"].get("Stop").is_some());
         assert_eq!(selected["hooks"]["PostToolUse"][0]["matcher"], "*");
         assert!(selected["hooks"].get("SessionStart").is_none());
         assert!(selected["hooks"].get("UserPromptSubmit").is_none());
         assert!(selected["hooks"].get("SessionEnd").is_none());
+        // A resumed seat, reported by its transcript watch, carries no hook
+        // whatever events are configured; the rest of its settings stand.
+        let watched: serde_json::Value = serde_json::from_str(
+            &adapter.claude_flag_settings(&lean, ClaudeReporting::TranscriptWatch),
+        )
+        .unwrap();
+        assert!(watched.get("hooks").is_none(), "{watched}");
+        assert_eq!(watched["permissions"], selected["permissions"]);
         adapter.configure_harness_hook_events(&[]);
         let cleared: serde_json::Value =
-            serde_json::from_str(&adapter.claude_flag_settings(&lean)).unwrap();
+            serde_json::from_str(&adapter.claude_flag_settings(&lean, ClaudeReporting::Hook))
+                .unwrap();
         assert!(cleared["hooks"].as_object().unwrap().is_empty());
     }
 
@@ -3562,9 +3614,10 @@ printf '%s\n' "$alias"
                 meta_signal_flow::HarnessHookEvent::Stop,
                 meta_signal_flow::HarnessHookEvent::SessionEnd,
             ]);
-        let settings: serde_json::Value = serde_json::from_str(
-            &adapter.claude_flag_settings(&launch(HarnessKind::Claude).lean_start()),
-        )
+        let settings: serde_json::Value = serde_json::from_str(&adapter.claude_flag_settings(
+            &launch(HarnessKind::Claude).lean_start(),
+            ClaudeReporting::Hook,
+        ))
         .expect("settings JSON");
         for event in [
             "SessionStart",
@@ -3818,6 +3871,65 @@ printf '%s\n' "$alias"
         );
     }
 
+    /// A restart's resume is the first start of the same composed launch,
+    /// word for word, but for its session, `--resume <session>` where the
+    /// first start chose it with `--session-id`, and for its settings,
+    /// which carry no hook.
+    #[test]
+    fn a_resume_is_the_first_start_with_its_session_resumed_and_no_hook() {
+        use super::ResumesHarness;
+        use crate::herdr::reservation::ChoosesNativeSession;
+        use meta_signal_flow::HarnessHookEvent;
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let launch = launch(HarnessKind::Claude);
+        let request = launch.launch_profile.launch_request_id.0.clone();
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        adapter.configure_harness_hook_events(&[HarnessHookEvent::Stop]);
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        adapter
+            .start_native_harness(&launch, &pane, Some("123456"))
+            .expect("first start");
+        let session = adapter
+            .reserved_native_session_id(&launch)
+            .expect("a Claude launch chooses its session");
+        let first_prompt = adapter
+            .held_system_prompt_path(&request)
+            .expect("the first start's system prompt is held");
+        adapter.release_system_prompt(&request);
+        adapter
+            .resume_configured_harness(&launch, &pane, "123456", &session, &[])
+            .expect("resumed");
+        let resumed_prompt = adapter
+            .held_system_prompt_path(&request)
+            .expect("the resume's system prompt is held");
+        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+        let starts = calls
+            .lines()
+            .filter(|line| line.contains("agent start"))
+            .collect::<Vec<_>>();
+        assert_eq!(starts.len(), 2, "{calls}");
+        let hooked = adapter.claude_flag_settings(&launch.lean_start(), ClaudeReporting::Hook);
+        let watched =
+            adapter.claude_flag_settings(&launch.lean_start(), ClaudeReporting::TranscriptWatch);
+        assert!(starts[0].contains(&hooked), "{}", starts[0]);
+        assert!(hooked.contains("\"Stop\""), "{hooked}");
+        let expected = starts[0]
+            .replace(&hooked, &watched)
+            .replace(
+                &format!("--session-id {session}"),
+                &format!("--resume {session}"),
+            )
+            .replace(&first_prompt, &resumed_prompt);
+        assert_eq!(starts[1], expected);
+        assert!(!starts[1].contains("\"hooks\""), "{}", starts[1]);
+    }
+
     #[test]
     fn stages_pane_native_claim_registration_and_one_ambiguous_prompt_write() {
         use crate::herdr::reservation::ChoosesNativeSession;
@@ -3862,7 +3974,7 @@ printf '%s\n' "$alias"
             SYSTEM_TEXT,
             "the harness read the composed system prompt whole from the held file"
         );
-        let settings = adapter.claude_flag_settings(&launch.lean_start());
+        let settings = adapter.claude_flag_settings(&launch.lean_start(), ClaudeReporting::Hook);
         assert!(start_call.ends_with(&format!(
             "-- --settings {settings} --remote-control {title} --name {title} --system-prompt-file {system_prompt_file} --session-id {session} --model model-current --effort high",
         )));

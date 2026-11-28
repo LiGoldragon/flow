@@ -1016,7 +1016,7 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     let seeded = ask(&nexus, "Configuration");
     assert!(
         seeded.ends_with(&format!(
-            " None 30 None [] {{ 1 3 1 }} 64 3 Unconfigured [] [] «{APPROVED_RECOVERY_TEXT}» 64 [ {{ Astra Medium }} {{ Fable Medium }} {{ Haiku Medium }} {{ Luna Medium }} {{ Opus Medium }} {{ Sol Medium }} {{ Sonnet Medium }} {{ Terra Low }} ] }}"
+            " None 30 None [] {{ 1 3 1 }} 64 3 Unconfigured [] [] «{APPROVED_RECOVERY_TEXT}» 64 [] }}"
         )),
         "seeded at 30: {seeded}"
     );
@@ -1047,7 +1047,7 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     let declared = ask(&nexus, "Configuration");
     assert!(
         declared.ends_with(&format!(
-            " None 45 None [] {{ 1 3 1 }} 64 3 Unconfigured [] [] «{APPROVED_RECOVERY_TEXT}» 64 [ {{ Astra Medium }} {{ Fable Medium }} {{ Haiku Medium }} {{ Luna Medium }} {{ Opus Medium }} {{ Sol Medium }} {{ Sonnet Medium }} {{ Terra Low }} ] }}"
+            " None 45 None [] {{ 1 3 1 }} 64 3 Unconfigured [] [] «{APPROVED_RECOVERY_TEXT}» 64 [] }}"
         )),
         "{declared}"
     );
@@ -1056,7 +1056,7 @@ fn configure_default_minutes_is_seeded_declared_kept_and_ruled() {
     let kept = ask(&reopened, "Configuration");
     assert!(
         kept.ends_with(&format!(
-            " None 45 None [] {{ 1 3 1 }} 64 3 Unconfigured [] [] «{APPROVED_RECOVERY_TEXT}» 64 [ {{ Astra Medium }} {{ Fable Medium }} {{ Haiku Medium }} {{ Luna Medium }} {{ Opus Medium }} {{ Sol Medium }} {{ Sonnet Medium }} {{ Terra Low }} ] }}"
+            " None 45 None [] {{ 1 3 1 }} 64 3 Unconfigured [] [] «{APPROVED_RECOVERY_TEXT}» 64 [] }}"
         )),
         "kept across a reopen: {kept}"
     );
@@ -1095,7 +1095,7 @@ fn configured_counters_are_kept_across_a_reopen() {
     let kept = ask(&reopened, "Configuration");
     assert!(
         kept.ends_with(&format!(
-            " None 30 None [] {{ 120 45 300 }} 64 3 Unconfigured [] [] «{APPROVED_RECOVERY_TEXT}» 64 [ {{ Astra Medium }} {{ Fable Medium }} {{ Haiku Medium }} {{ Luna Medium }} {{ Opus Medium }} {{ Sol Medium }} {{ Sonnet Medium }} {{ Terra Low }} ] }}"
+            " None 30 None [] {{ 120 45 300 }} 64 3 Unconfigured [] [] «{APPROVED_RECOVERY_TEXT}» 64 [] }}"
         )),
         "kept across a reopen: {kept}"
     );

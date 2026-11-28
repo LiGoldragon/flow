@@ -490,7 +490,8 @@ fn restart_awake_resting_claude_resumes_same_session() {
         "{resume}"
     );
     assert!(resume.contains("--model claude-fixture"), "{resume}");
-    assert!(resume.contains("--effort medium"), "{resume}");
+    // No effort is configured: Default omits the argument.
+    assert!(!resume.contains("--effort"), "{resume}");
     assert!(
         world.calls_naming("agent prompt").is_empty(),
         "nothing is submitted: {}",

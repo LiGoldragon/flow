@@ -6985,7 +6985,7 @@ mod tests {
                     model: signal_flow::Model::Sol,
                 },
                 model_name: flow_ethos::ModelName("fixture-model".into()),
-                effort: signal_flow::Effort("medium".into()),
+                effort: signal_flow::Effort(String::new()),
                 flow_id_option: predecessor.map(str::to_owned).map(flow_ethos::FlowId),
                 remembering: signal_flow::Remembering::Predecessors(signal_flow::RememberingDepth(
                     0,
@@ -8631,7 +8631,7 @@ mod tests {
             profile.model_name,
             flow_ethos::ModelName("gpt-6-luna".into())
         );
-        assert_eq!(profile.effort, signal_flow::Effort("low".into()));
+        assert_eq!(profile.effort, signal_flow::Effort(String::new()));
         assert_eq!(profile.flow_id_option, None);
         // Every launch opens in the one Herdr session the Nexus declares,
         // whoever asks: the fixture's live session, then another declared.

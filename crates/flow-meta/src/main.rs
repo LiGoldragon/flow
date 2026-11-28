@@ -91,6 +91,7 @@ impl ParsesMetaCommand for FlowMetaClient {
 trait PrintsSignal {
     fn contract(&self) -> ethos_printout::Contract;
     fn printout(&self) -> String {
+        use ethos_printout::{Printed, Printing};
         self.contract()
             .printout()
             .map(|printout| printout.text())
@@ -216,6 +217,7 @@ mod tests {
     #[test]
     fn printout_checks_and_its_examples_decode() {
         use datom_codec::{Actualizing, Budget, Potential};
+        use ethos_printout::{Printed, Printing};
         let printout = FlowMetaClient
             .contract()
             .printout()
@@ -229,12 +231,16 @@ mod tests {
         };
         let mut refused = Vec::new();
         for example in printout.input_examples() {
-            if let Err(error) = Potential::<meta_signal_flow::Input>::from(example.clone()).actualize(&mut budget()) {
+            if let Err(error) =
+                Potential::<meta_signal_flow::Input>::from(example.clone()).actualize(&mut budget())
+            {
                 refused.push(format!("input {example}: {error:?}"));
             }
         }
         for example in printout.output_examples() {
-            if let Err(error) = Potential::<meta_signal_flow::Output>::from(example.clone()).actualize(&mut budget()) {
+            if let Err(error) = Potential::<meta_signal_flow::Output>::from(example.clone())
+                .actualize(&mut budget())
+            {
                 refused.push(format!("output {example}: {error:?}"));
             }
         }

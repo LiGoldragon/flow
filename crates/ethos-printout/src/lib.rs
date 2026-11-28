@@ -10,8 +10,8 @@
 //! it, so the printout declares every name once.
 
 use ethos_zero::{
-    Actualizing, File, Identity, Import, Name, Position, Potential, Printable, Reference,
-    Signal, TypeDeclaration, Validating, Variant,
+    Actualizing, File, Identity, Import, Name, Position, Potential, Printable, Reference, Signal,
+    TypeDeclaration, Validating, Variant,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -82,8 +82,19 @@ pub struct Printout {
     prose: String,
 }
 
-impl Contract {
-    pub fn printout(&self) -> Result<Printout, Refusal> {
+/// The printing of a contract.
+pub trait Printing {
+    fn printout(&self) -> Result<Printout, Refusal>;
+}
+
+/// The reading of a contract's files.
+trait Reads {
+    fn read(&self) -> Result<Reading, Refusal>;
+    fn prose(&self) -> String;
+}
+
+impl Printing for Contract {
+    fn printout(&self) -> Result<Printout, Refusal> {
         let reading = self.read()?;
         let resolved = reading.resolve();
         Ok(Printout {
@@ -91,7 +102,9 @@ impl Contract {
             prose: reading.prose,
         })
     }
+}
 
+impl Reads for Contract {
     fn read(&self) -> Result<Reading, Refusal> {
         let own = Potential::<File>::from(self.signal)
             .actualize()
@@ -113,12 +126,12 @@ impl Contract {
         for origin in &self.origins {
             let mut files = Vec::new();
             for text in &origin.texts {
-                let file = Potential::<File>::from(*text).actualize().map_err(|error| {
-                    Refusal::Unreadable {
+                let file = Potential::<File>::from(*text)
+                    .actualize()
+                    .map_err(|error| Refusal::Unreadable {
                         origin: origin.name.into(),
                         error: format!("{error:?}"),
-                    }
-                })?;
+                    })?;
                 files.push(Parts::of(file));
             }
             origins.push(Read::of(origin.name.into(), files, &[]));
@@ -147,7 +160,11 @@ impl Contract {
     }
 }
 
-impl Parts {
+trait ReadsParts {
+    fn of(file: File) -> Self;
+}
+
+impl ReadsParts for Parts {
     fn of(file: File) -> Self {
         match file {
             File::Library(library) => Self {
@@ -174,7 +191,11 @@ impl Parts {
     }
 }
 
-impl Read {
+trait ReadsCrate {
+    fn of(name: String, files: Vec<Parts>, variants: &[&Vec<Variant>]) -> Self;
+}
+
+impl ReadsCrate for Read {
     fn of(name: String, files: Vec<Parts>, variants: &[&Vec<Variant>]) -> Self {
         let mut declared = BTreeMap::new();
         for (file, parts) in files.iter().enumerate() {
@@ -411,7 +432,17 @@ impl Walked for TypeDeclaration {
     }
 }
 
-impl Reading {
+/// The resolution of a contract's names across the crates it imports from.
+trait Resolves {
+    fn origin_of(&self, from: usize, source: &str) -> Option<usize>;
+    fn find(&self, origin: usize, name: &str) -> Option<Item>;
+    fn find_bare(&self, origin: usize, file: usize, name: &str) -> Option<Item>;
+    fn find_reference(&self, origin: usize, written: &str) -> Option<Item>;
+    fn declaration(&self, item: &Item) -> Option<&TypeDeclaration>;
+    fn resolve(&self) -> Signal;
+}
+
+impl Resolves for Reading {
     /// The crate an import's source names, seen from a crate.
     fn origin_of(&self, from: usize, source: &str) -> Option<usize> {
         let source = source.trim_start_matches("::");
@@ -559,7 +590,10 @@ impl Reading {
                     reach(item.origin, file, reference, bare, &mut reached, &mut units)
                 });
                 declaration.variant_names(&mut |name| {
-                    units.entry(name.into()).or_default().insert((item.origin, file));
+                    units
+                        .entry(name.into())
+                        .or_default()
+                        .insert((item.origin, file));
                 });
                 queue.extend(reached);
             }
@@ -884,10 +918,22 @@ impl Pascal for String {
 /// something before it stops at the smallest value.
 const EXAMPLE_DEPTH: usize = 6;
 
-impl Printout {
+/// The printout's text, its check and its examples.
+pub trait Printed {
+    fn text(&self) -> String;
+    fn check(&self) -> Result<(), String>;
+    fn input_examples(&self) -> Vec<String>;
+    fn output_examples(&self) -> Vec<String>;
+}
+
+trait Exemplifies {
+    fn examples(&self, variants: &[Variant]) -> Vec<String>;
+}
+
+impl Printed for Printout {
     /// The whole printout: the prose, the resolved Ethos, then one example
     /// per input and per output as comments, inputs first.
-    pub fn text(&self) -> String {
+    fn text(&self) -> String {
         let mut text = self.prose.clone();
         text.push_str(&File::Signal(self.resolved.clone()).print());
         for section in [self.input_examples(), self.output_examples()] {
@@ -903,7 +949,7 @@ impl Printout {
 
     /// The printed text, read back by ethos-zero as it stands and checked
     /// whole: the error that refuses it, if any.
-    pub fn check(&self) -> Result<(), String> {
+    fn check(&self) -> Result<(), String> {
         File::Signal(self.resolved.clone())
             .validate()
             .map_err(|error| format!("{error:?}"))?;
@@ -914,14 +960,16 @@ impl Printout {
             .map_err(|error| format!("{error:?}"))
     }
 
-    pub fn input_examples(&self) -> Vec<String> {
+    fn input_examples(&self) -> Vec<String> {
         self.examples(&self.resolved.inputs)
     }
 
-    pub fn output_examples(&self) -> Vec<String> {
+    fn output_examples(&self) -> Vec<String> {
         self.examples(&self.resolved.outputs)
     }
+}
 
+impl Exemplifies for Printout {
     fn examples(&self, variants: &[Variant]) -> Vec<String> {
         let mut declarations = BTreeMap::new();
         for declaration in &self.resolved.types {
@@ -988,17 +1036,33 @@ struct Examples<'a> {
     declarations: BTreeMap<String, &'a TypeDeclaration>,
 }
 
-impl Examples<'_> {
+trait Exemplifying {
+    fn variant(&self, variant: &Variant, depth: usize) -> String;
+    fn choice(&self, variants: &[Variant], depth: usize) -> String;
+    fn positions(&self, positions: &[Position], depth: usize) -> String;
+    fn declaration(&self, declaration: &TypeDeclaration, depth: usize) -> String;
+    fn reference(&self, reference: &Reference, holder: Option<&str>, depth: usize) -> String;
+}
+
+impl Exemplifying for Examples<'_> {
     fn variant(&self, variant: &Variant, depth: usize) -> String {
         match variant {
             Variant::Bare(name) => match self.declarations.get(name.as_ref()) {
                 Some(declaration) => {
-                    format!("{}.{}", name.as_ref(), self.declaration(declaration, depth + 1))
+                    format!(
+                        "{}.{}",
+                        name.as_ref(),
+                        self.declaration(declaration, depth + 1)
+                    )
                 }
                 None => name.as_ref().to_owned(),
             },
             Variant::Typed(name, reference) => {
-                format!("{}.{}", name.as_ref(), self.reference(reference, None, depth + 1))
+                format!(
+                    "{}.{}",
+                    name.as_ref(),
+                    self.reference(reference, None, depth + 1)
+                )
             }
             Variant::Struct(name, positions) => {
                 format!("{}.{}", name.as_ref(), self.positions(positions, depth + 1))

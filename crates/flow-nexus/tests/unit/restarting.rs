@@ -1123,6 +1123,16 @@ fn restart_pane_gone_no_held_session_refused() {
 fn restart_pane_gone_session_held_refused_unwitnessed() {
     let mut fixture = NexusFixture::new();
     let world = fixture.restart_world(false);
+    let running = session_held(&fixture, &world);
+    assert_eq!(restarted(&fixture), resume_refused("ExitUnwitnessed"));
+    assert_eq!(record(&fixture), None, "nothing written");
+    assert!(world.resumes().is_empty(), "{}", world.fresh.calls());
+    assert!(FlowStore::process_is_live(&running.1));
+}
+
+/// Claude's own record of abc123's session names a live process running
+/// it, by its birth: that process, ended when dropped.
+fn session_held(fixture: &NexusFixture, world: &RestartWorld) -> LiveProcess {
     let running = live_process();
     let registry = &fixture.nexus.herdr.claude_sessions.directory;
     fs::create_dir_all(registry).unwrap();
@@ -1136,10 +1146,72 @@ fn restart_pane_gone_session_held_refused_unwitnessed() {
         .to_string(),
     )
     .unwrap();
+    running
+}
+
+/// abc123's pane is gone and no live process holds its session, so its
+/// restart closes nothing and its old seat records no harness. Every
+/// resume is refused before a harness is seen in its pane, the restart's
+/// run and its one reopen alike: the restart stays Failed, its old seat the
+/// discarded pane with no harness, the bound spent. While a live process
+/// holds the session, the owner's Restart is refused ExitUnwitnessed and
+/// changes nothing. Once none holds it, the retry takes the session proof
+/// a first restart and a close take, and resumes the same session in a new
+/// pane, the flow bound there.
+#[test]
+fn restart_failed_unrecorded_retry_takes_session_proof() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(false);
+    session_unheld(&fixture, &world);
+    fs::write(world.fresh.state.join("resume-refused"), "").unwrap();
+
+    assert_eq!(restarted(&fixture), resume_refused("SpawnRefused"));
+    let failed = record(&fixture).expect("record");
+    assert_eq!(
+        (failed.restart_phase.clone(), failed.attempts.0),
+        (
+            RestartPhase::Failed(RestartFailure::ResumeRefused("SpawnRefused".into())),
+            2
+        ),
+        "the restart's run and one reopen"
+    );
+    assert_eq!(failed.old_seat.herdr_route.herdr_pane_id.0, REOPENED_PANE);
+    assert_eq!(failed.old_seat.process_option, None);
+    assert_eq!(world.resumes().len(), 2, "{}", world.fresh.calls());
+    assert!(
+        world
+            .calls_naming(&format!("pane close {OLD_PANE}"))
+            .is_empty()
+    );
+    fs::remove_file(world.fresh.state.join("resume-refused")).unwrap();
+
+    let holder = session_held(&fixture, &world);
     assert_eq!(restarted(&fixture), resume_refused("ExitUnwitnessed"));
-    assert_eq!(record(&fixture), None, "nothing written");
-    assert!(world.resumes().is_empty(), "{}", world.fresh.calls());
-    assert!(FlowStore::process_is_live(&running.1));
+    assert_eq!(record(&fixture), Some(failed.clone()));
+    assert_eq!(world.resumes().len(), 2, "{}", world.fresh.calls());
+    drop(holder);
+
+    assert_eq!(
+        restarted(&fixture),
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
+    let resumes = world.resumes();
+    assert_eq!(resumes.len(), 3, "{}", world.fresh.calls());
+    assert!(
+        resumes[2].contains(&format!("--resume {}", world.seat.session)),
+        "{}",
+        resumes[2]
+    );
+    assert!(!resumes[2].contains("--session-id"), "{}", resumes[2]);
+    assert_eq!(record(&fixture), None);
+    let after = node(&fixture);
+    assert_eq!(after.session_id.0, world.seat.session);
+    assert_eq!(after.flow_lifecycle, FlowLifecycle::Active);
+    assert_ne!(
+        route_pane(&fixture),
+        failed.old_seat.herdr_route.herdr_pane_id.0
+    );
+    never_two_live(&world);
 }
 
 /// A restart bound abc123's seat at the route it runs in now, `process` its
@@ -2723,7 +2795,8 @@ fn restart_live_orphan_not_reopened_at_start() {
     killed(&orphan);
 }
 
-/// The resume is refused before any harness is seen in its pane: nothing
+/// The resume is refused before any harness is seen in its pane, and
+/// Claude's own record of its sessions cannot be read whole: nothing
 /// proves no harness holds the session, so the restart stays Failed, its
 /// old seat the discarded pane and no harness, at its start and after a
 /// Nexus start alike. The owner's retry is refused ExitUnwitnessed and
@@ -2733,6 +2806,16 @@ fn restart_live_orphan_not_reopened_at_start() {
 fn restart_missing_witness_not_reopened_retry_refused() {
     let mut fixture = NexusFixture::new();
     let world = fixture.restart_world(true);
+    fs::write(
+        fixture
+            .nexus
+            .herdr
+            .claude_sessions
+            .directory
+            .join("unreadable.json"),
+        "not a session record",
+    )
+    .unwrap();
     queued_for_seat(&fixture, "held until a reopen is proven");
     fs::write(world.fresh.state.join("resume-refused-once"), "").unwrap();
 

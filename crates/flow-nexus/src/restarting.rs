@@ -58,11 +58,13 @@
 //! no more than `AUTOMATIC_REOPENS`, every run counted in its Attempts, the
 //! owner's retries included. It reopens only once the seat is proven
 //! quiescent, under the gate: the record still the Failed one, the old
-//! seat's harness recorded and proven exited by its birth, the old seat's
+//! seat's harness recorded and proven exited by its birth, or, none
+//! recorded, no live process holding its Claude session, the old seat's
 //! pane gone, and no pane of the old seat's, the flow's or the resume's
 //! Herdr session holding the session. A pid, or a pane's absence, proves no
 //! exit: a harness can outlive its pane. A record whose harness was never
-//! seen (`ExitUnwitnessed`) or is not proven exited (`ExitUnproven`) stays
+//! seen and whose session is not proven unheld (`ExitUnwitnessed`), or
+//! whose harness is not proven exited (`ExitUnproven`), stays
 //! Failed, logged so, its session, queue and Address held; the owner's
 //! retry is refused `ResumeRefused` with that word, unless the old seat's
 //! pane stands for the retry to close; the owner's Stop and Retire stand.
@@ -567,7 +569,7 @@ trait RestartsInSteps {
     /// the gate, then bound or abandoned under it.
     fn resumed_once(&self, prepared: PreparedRestart) -> Resumption;
     /// A Failed restart opened again by itself: under the bound, its old
-    /// seat's harness recorded and exited within `patience`, the record
+    /// seat's harness proven gone (`exit_witness`) within `patience`, the record
     /// unchanged and the seat proven quiescent, Closed written with the run
     /// counted. `resume_launch` is the launch the failed run held; None, it
     /// is composed again.
@@ -577,11 +579,13 @@ trait RestartsInSteps {
         resume_launch: Option<ResumeLaunch>,
         patience: Duration,
     ) -> Reopening;
-    /// Whether the old seat's harness is recorded and, by its birth, exited
-    /// now or within `patience`. Reads only.
+    /// Whether the old seat's harness is proven gone: recorded and, by its
+    /// birth, exited now or within `patience`; none recorded, by no live
+    /// process holding its session (`session_unheld`), as a first restart
+    /// and a close prove it. Reads only.
     fn exit_witness(&self, record: &RestartRecord, patience: Duration) -> Result<(), MissingExit>;
     /// Whether, as Herdr and the kernel show it now, nothing holds the
-    /// session: the old seat's harness recorded and exited, its pane gone,
+    /// session: the old seat's harness proven gone (`exit_witness`), its pane gone,
     /// and no pane of the old seat's, the flow's or `herdr_session_name`
     /// Herdr session holding the session. Reads only.
     fn proven_quiescent(&self, record: &RestartRecord, herdr_session_name: &str) -> bool;
@@ -754,8 +758,10 @@ impl RestartsInSteps for RunningNexus {
                 return match record.restart_phase {
                     RestartPhase::Failed(_) => {
                         // The old seat's harness proven exited by its birth,
-                        // or its pane standing for the retry to close and
-                        // prove; refused, the Failed record stays as it was.
+                        // or, none recorded, its session held by no live
+                        // process; or its pane standing for the retry to
+                        // close and prove. Refused, the Failed record stays
+                        // as it was.
                         if let Err(missing) = self.exit_witness(&record, Duration::ZERO) {
                             let pane_stands = missing == MissingExit::ExitUnproven
                                 && self
@@ -1166,7 +1172,7 @@ impl RestartsInSteps for RunningNexus {
             return Reopening::Kept;
         }
         // Off the gate: the old seat's harness, as recorded, given its
-        // moment to exit; never seen, nothing proves it gone.
+        // moment to exit; never seen, only its session unheld proves it gone.
         if let Err(missing) = self.exit_witness(&failed, patience) {
             let pane = &failed.old_seat.herdr_route.herdr_pane_id;
             match &failed.old_seat.process_option {
@@ -1178,7 +1184,7 @@ impl RestartsInSteps for RunningNexus {
                     pane = pane.0
                 ),
                 None => eprintln!(
-                    "flow-nexus: restart of flow {flow_id} stays Failed: {missing:?}: no harness of pane {pane} was seen running the session",
+                    "flow-nexus: restart of flow {flow_id} stays Failed: {missing:?}: no harness of pane {pane} was seen running the session, and no record proves the session held by no live process",
                     flow_id = flow_id.0,
                     pane = pane.0
                 ),
@@ -1242,7 +1248,13 @@ impl RestartsInSteps for RunningNexus {
 
     fn exit_witness(&self, record: &RestartRecord, patience: Duration) -> Result<(), MissingExit> {
         match &record.old_seat.process_option {
-            None => Err(MissingExit::ExitUnwitnessed),
+            // No harness recorded: the session proves it gone, as it does
+            // for a first restart and a close; unread, or held by a live
+            // process, it proves nothing.
+            None => match self.seat_node(record, record.old_seat.herdr_route.clone()) {
+                Some(old) if self.session_unheld(&old) => Ok(()),
+                _ => Err(MissingExit::ExitUnwitnessed),
+            },
             Some(process) => match process.exit_proof_within(&ProcFs, patience) {
                 ExitProof::Exited(_) => Ok(()),
                 ExitProof::Running | ExitProof::Unproven(_) => Err(MissingExit::ExitUnproven),

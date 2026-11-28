@@ -2535,6 +2535,10 @@ pub trait ReadsLaunchAttempt {
 pub trait ReadsFlowRows {
     fn flow_node(&self, flow_id: &str) -> Result<Option<FlowNode>, StoreError>;
     fn flow_nodes(&self) -> Result<Vec<FlowNode>, StoreError>;
+    /// Every live Claude flow whose stored native session begins with
+    /// `named`: a Harness Nexus names a session by its first six
+    /// characters.
+    fn live_claude_sessions_named(&self, named: &str) -> Result<Vec<FlowNode>, StoreError>;
 }
 
 /// Changes lifecycle only after the corresponding Herdr operation succeeds.
@@ -5285,6 +5289,30 @@ impl ReadsFlowRows for FlowStore {
             .flatten()
             .collect::<Vec<_>>();
         nodes.sort_by(|left, right| left.flow_id.cmp(&right.flow_id));
+        Ok(nodes)
+    }
+
+    fn live_claude_sessions_named(&self, named: &str) -> Result<Vec<FlowNode>, StoreError> {
+        let flow_ids = self
+            .engine
+            .match_records(QueryPlan::all(self.flows))?
+            .records()
+            .iter()
+            .filter(|flow| {
+                flow.harness_kind == HarnessKind::Claude
+                    && flow.flow_lifecycle.is_live()
+                    && flow.session_id_option.as_ref().is_some_and(|session| {
+                        !named.is_empty() && session.0.chars().take(6).collect::<String>() == named
+                    })
+            })
+            .map(|flow| flow.flow_id.0.clone())
+            .collect::<Vec<_>>();
+        let mut nodes = Vec::new();
+        for flow_id in flow_ids {
+            if let Some(node) = self.flow_node(&flow_id)? {
+                nodes.push(node);
+            }
+        }
         Ok(nodes)
     }
 }

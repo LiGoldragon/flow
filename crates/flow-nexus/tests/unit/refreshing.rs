@@ -949,6 +949,7 @@ fn an_idle_unwritable_claude_predecessor_yields_queued_work_to_its_ordered_succe
         &flow_ethos::FlowId(CLAUDE_SEAT.into()),
         &super::waking::claude_stop(&fixture),
     );
+    super::harness_subscription::rested_now(&fixture);
     let successor_id = flow_ethos::FlowId("908786".into());
     let current = stored(&fixture);
     assert_eq!(current.state, State::Awake(successor_id.clone()));
@@ -1691,5 +1692,72 @@ fn the_current_flow_and_any_other_caller_refresh_the_current_flow() {
             .nexus
             .origin_refresh_caller(Origin::Unbound, &seat_address()),
         RefreshCaller::Elsewhere(Origin::Unbound)
+    );
+}
+
+/// The Director's case: a flow whose pane was resumed bare, without
+/// FLOW_ID, reports nothing. Its harness tells its session Working, its
+/// own Refresh is queued, and at the Rested its harness tells, with no
+/// report at all, the ordered Refresh starts and confirms its successor
+/// and reaps it.
+#[test]
+fn an_ordered_refresh_is_taken_at_the_rest_the_harness_tells_with_no_report() {
+    use super::harness_subscription::{
+        holds_within, seat_state, tell_rested, tell_working, with_fake_harness,
+    };
+    use crate::store::events::RecordsHarnessEvents;
+    use crate::store::ordered_replacement::OrdersReplacements;
+    let (mut fixture, _) = refreshable_with_queue(Continuity::OnDemand, vec![], true);
+    let reported = fixture.nexus.store.events(CLAUDE_SEAT).unwrap().unwrap();
+    with_fake_harness(&mut fixture, |fixture, stream| {
+        tell_working(stream);
+        assert!(holds_within(
+            || seat_state(fixture) == Some(meta_signal_flow::State::Acting)
+        ));
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_from(Input::Refresh(seat_address()), own_seat()),
+            Output::RefreshQueued(_)
+        ));
+        assert!(!closed(fixture), "the working flow's pane stays open");
+        tell_rested(stream);
+        assert!(
+            holds_within(
+                || stored(fixture).state == State::Awake(flow_ethos::FlowId("908786".into()))
+            ),
+            "the queued Refresh starts its successor at the told rest"
+        );
+        assert!(
+            holds_within(|| {
+                use crate::store::pending_reap::RecordsPendingReaps;
+                !fixture.nexus.store.pending_reaps().unwrap().is_empty()
+            }),
+            "the predecessor is owed its reap"
+        );
+        super::reaping::finish_owned_reaps(fixture);
+        assert!(
+            closed(fixture),
+            "the predecessor's pane is closed by its reap"
+        );
+        assert_eq!(lifecycle(fixture), FlowLifecycle::Stopped);
+        assert_eq!(
+            stored(fixture).past,
+            flow_ethos::Past(vec![flow_ethos::FlowId(CLAUDE_SEAT.to_owned())])
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .ordered_replacement(&seat_address())
+                .unwrap(),
+            None,
+            "the order is spent"
+        );
+    });
+    assert_eq!(
+        fixture.nexus.store.events(CLAUDE_SEAT).unwrap().unwrap(),
+        reported,
+        "no report was made"
     );
 }

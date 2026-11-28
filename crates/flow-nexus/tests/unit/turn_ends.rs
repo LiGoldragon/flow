@@ -76,6 +76,7 @@ fn report(fixture: &NexusFixture, event: Event) {
         &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
         &event,
     );
+    super::harness_subscription::told_as_reported(fixture, &event);
 }
 
 fn codex(fixture: &NexusFixture, events: Vec<LedgerEvent>) {

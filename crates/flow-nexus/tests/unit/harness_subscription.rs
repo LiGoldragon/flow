@@ -3,7 +3,8 @@
 //! each Changed held as the flow's witness; a dropped connection dialed
 //! again, its fresh Subscribed replacing what the socket had told; and a
 //! disagreement with Flow's own state kept once its grace has passed, none
-//! when the two agree. Nothing here rests, drains, wakes or closes a flow.
+//! when the two agree. A subscription is a Claude flow's only source of its
+//! state: told Working it acts and told Rested it rests, with no report.
 
 use super::waking::{CLAUDE_SEAT, claude_agent, claude_seat};
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
@@ -286,21 +287,34 @@ fn a_subscription_s_witnesses_follow_its_changes_and_a_redial_replaces_them() {
             observed("ffffff", harness::State::Dry, 0),
         ]));
         assert!(fixture.witnessed_until(&mut |fixture| witness_of(fixture, "ffffff").is_some()));
+        assert!(holds_within(
+            || seat_state(&fixture) == Some(meta_signal_flow::State::Acting)
+        ));
         assert_eq!(
             fixture
                 .nexus
                 .harness_observed()
                 .unwrap()
                 .harness_witness_vector,
-            vec![HarnessWitness {
-                flow_id: seat(),
-                harness_socket: socket.clone(),
-                harness_event: harness::Event::InFlight(vec![]),
-                harness_state: flowing(harness::Flow::Working),
-                harness_tokens: HarnessTokens(40_000),
-                state_option: Some(meta_signal_flow::State::Resting),
-            }],
-            "only the flow Flow holds is listed, with Flow's own state"
+            vec![
+                HarnessWitness {
+                    flow_id: seat(),
+                    harness_socket: socket.clone(),
+                    harness_event: harness::Event::InFlight(vec![]),
+                    harness_state: flowing(harness::Flow::Working),
+                    harness_tokens: HarnessTokens(40_000),
+                    state_option: Some(meta_signal_flow::State::Acting),
+                },
+                HarnessWitness {
+                    flow_id: FlowId("ffffff".into()),
+                    harness_socket: socket.clone(),
+                    harness_event: harness::Event::InFlight(vec![]),
+                    harness_state: harness::State::Dry,
+                    harness_tokens: HarnessTokens(0),
+                    state_option: None,
+                }
+            ],
+            "every session is listed: the flow Flow holds with its own state, which the snapshot set, the unbound one with none"
         );
         first.write_output(&signal_harness::Output::Changed(signal_harness::Changed {
             flow_id: seat(),
@@ -315,25 +329,28 @@ fn a_subscription_s_witnesses_follow_its_changes_and_a_redial_replaces_them() {
         assert!(fixture.witnessed_until(&mut |fixture| {
             witness_of(fixture, CLAUDE_SEAT) == Some(flowing(harness::Flow::Rested))
         }));
+        assert!(holds_within(
+            || seat_state(&fixture) == Some(meta_signal_flow::State::Resting)
+        ));
         assert_eq!(
             fixture
                 .nexus
                 .harness_observed()
                 .unwrap()
-                .harness_witness_vector,
-            vec![HarnessWitness {
+                .harness_witness_vector[0],
+            HarnessWitness {
                 flow_id: seat(),
                 harness_socket: socket.clone(),
                 harness_event: harness::Event::TurnEnded,
                 harness_state: flowing(harness::Flow::Rested),
                 harness_tokens: HarnessTokens(41_234),
                 state_option: Some(meta_signal_flow::State::Resting),
-            }]
+            }
         );
         assert_eq!(
             fixture.observe_harness_as_printed(),
             format!(
-                "HarnessObserved.{{ [ {{ {CLAUDE_SEAT} {socket_name} TurnEnded Flowing.Rested 41234 Some.Resting }} ] [] }}"
+                "HarnessObserved.{{ [ {{ {CLAUDE_SEAT} {socket_name} TurnEnded Flowing.Rested 41234 Some.Resting }} {{ ffffff {socket_name} InFlight.[] Dry 0 None }} ] [] }}"
             ),
             "ObserveHarness as the meta client prints its answer"
         );
@@ -345,6 +362,10 @@ fn a_subscription_s_witnesses_follow_its_changes_and_a_redial_replaces_them() {
         assert!(fixture.witnessed_until(&mut |fixture| {
             witness_of(fixture, CLAUDE_SEAT) == Some(harness::State::Ended)
         }));
+        assert!(
+            holds_within(|| seat_state(&fixture) == Some(meta_signal_flow::State::Asleep)),
+            "the harness's end ends the seat"
+        );
         drop(first);
         // The part dials again at once; until the fresh Subscribed the
         // socket's witnesses stand as it last told them.
@@ -560,7 +581,9 @@ fn a_disagreement_is_kept_after_its_grace_and_none_when_the_states_agree() {
 }
 
 /// The judge waits on the deadline as an event: a disagreement told over
-/// the socket is kept only after its grace of one second has passed.
+/// the socket is kept only after its grace of one second has passed. The
+/// end of a session /clear ended moves no seat, so Flow still holds the
+/// seat Resting.
 #[test]
 fn the_judge_keeps_a_disagreement_once_its_grace_has_passed() {
     let directory = tempfile::tempdir().expect("a socket directory");
@@ -576,7 +599,7 @@ fn the_judge_keeps_a_disagreement_once_its_grace_has_passed() {
         let told = Instant::now();
         stream.write_output(&signal_harness::Output::Changed(signal_harness::Changed {
             flow_id: seat(),
-            event: harness::Event::Ended(harness::EndReason::Died),
+            event: harness::Event::Ended(harness::EndReason::Cleared),
             state: harness::State::Ended,
         }));
         assert!(fixture.witnessed_until(&mut |fixture| {
@@ -610,4 +633,324 @@ fn the_judge_keeps_a_disagreement_once_its_grace_has_passed() {
         // the Nexus stops.
         fixture.nexus.stop(&[]);
     });
+}
+
+/// The name a Harness Nexus gives the seat's session: its first six
+/// characters, whatever Flow's own flow id is.
+pub(super) fn told_seat() -> FlowId {
+    FlowId(super::waking::CLAUDE_SESSION.chars().take(6).collect())
+}
+
+/// Whether `holds` comes to hold within twenty seconds, looked at every
+/// ten milliseconds: a told rest is settled on the part's own thread.
+pub(super) fn holds_within(mut holds: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if holds() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    holds()
+}
+
+/// Flow's own state of the seat.
+pub(super) fn seat_state(fixture: &NexusFixture) -> Option<meta_signal_flow::State> {
+    use crate::generated::transitions::{AskedFlow, RecordsTransitions};
+    fixture.nexus.store.state_of(AskedFlow(seat())).unwrap()
+}
+
+/// One Changed of the seat's session, as the fake Harness Nexus sends it.
+pub(super) fn tell(stream: &mut UnixStream, event: harness::Event, state: harness::State) {
+    stream.write_output(&signal_harness::Output::Changed(signal_harness::Changed {
+        flow_id: told_seat(),
+        event,
+        state,
+    }));
+}
+
+pub(super) fn tell_working(stream: &mut UnixStream) {
+    tell(
+        stream,
+        harness::Event::PromptSubmitted,
+        flowing(harness::Flow::Working),
+    );
+}
+
+pub(super) fn tell_rested(stream: &mut UnixStream) {
+    tell(
+        stream,
+        harness::Event::TurnEnded,
+        flowing(harness::Flow::Rested),
+    );
+}
+
+/// Runs `body` with the part subscribed to a fake Harness Nexus that has
+/// answered Subscribe with an empty snapshot; the Nexus is stopped after
+/// it, whatever `body` does, so every thread of the part ends.
+pub(super) fn with_fake_harness(
+    fixture: &mut NexusFixture,
+    body: impl FnOnce(&NexusFixture, &mut UnixStream),
+) {
+    let directory = tempfile::tempdir().expect("a socket directory");
+    let path = directory.path().join("subscription.sock");
+    let name = path.to_string_lossy().into_owned();
+    fixture.nexus.harness_witnesses.configuration = Some(configuration(&[&name], 3_600, 8));
+    let listener = UnixListener::bind(&path).expect("the fake subscription socket");
+    let fixture = &*fixture;
+    std::thread::scope(|scope| {
+        fixture.nexus.witness_harnesses(scope);
+        let (mut stream, _) = listener.accept().expect("the part subscribes");
+        assert_eq!(stream.read_input(), signal_harness::Input::Subscribe);
+        stream.write_output(&signal_harness::Output::Subscribed(vec![]));
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(fixture, &mut stream)));
+        fixture.nexus.stop(&[]);
+        drop(stream);
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    });
+}
+
+/// A Claude flow whose harness tells its session Working and then Rested
+/// is Acting and then Resting, with no report at all: nothing is added to
+/// the events its hooks would have reported.
+#[test]
+fn a_claude_flow_rests_as_its_harness_tells_it_with_no_report() {
+    use crate::store::events::RecordsHarnessEvents;
+    let mut fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    claude_seat(&fixture, 40_000);
+    let reported = fixture.nexus.store.events(CLAUDE_SEAT).unwrap().unwrap();
+    assert_eq!(seat_state(&fixture), Some(meta_signal_flow::State::Resting));
+    with_fake_harness(&mut fixture, |fixture, stream| {
+        tell_working(stream);
+        assert!(
+            holds_within(|| seat_state(fixture) == Some(meta_signal_flow::State::Acting)),
+            "the harness's Working makes the seat Acting"
+        );
+        tell(
+            stream,
+            harness::Event::ContextSize(harness::Tokens(41_000)),
+            flowing(harness::Flow::Working),
+        );
+        tell_rested(stream);
+        assert!(
+            holds_within(|| seat_state(fixture) == Some(meta_signal_flow::State::Resting)),
+            "the harness's Rested makes the seat Resting"
+        );
+    });
+    assert_eq!(
+        fixture.nexus.store.events(CLAUDE_SEAT).unwrap().unwrap(),
+        reported,
+        "no report was made"
+    );
+}
+
+/// An unbound session the harness tells of is listed by ObserveHarness,
+/// with no state of Flow's.
+#[test]
+fn an_unbound_session_is_listed_with_no_state_of_flow_s() {
+    let fixture = seat_witnessed_by(&[SOCKET], 30, 2);
+    fixture.nexus.harness_witnesses.take(
+        &socket(),
+        HarnessObservation::Snapshot(vec![observed("ffffff", flowing(harness::Flow::Rested), 12)]),
+        Instant::now(),
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .harness_observed()
+            .unwrap()
+            .harness_witness_vector,
+        vec![HarnessWitness {
+            flow_id: FlowId("ffffff".into()),
+            harness_socket: socket(),
+            harness_event: harness::Event::InFlight(vec![]),
+            harness_state: flowing(harness::Flow::Rested),
+            harness_tokens: HarnessTokens(12),
+            state_option: None,
+        }]
+    );
+}
+
+/// What the Claude Harness Nexus tells of `session` taken at once, on the
+/// caller's thread, as the part takes a Changed: the seat row written and
+/// every rest it tells settled.
+pub(super) fn told_of(
+    fixture: &NexusFixture,
+    session: &str,
+    event: harness::Event,
+    state: harness::State,
+) {
+    told_to(&fixture.nexus, session, event, state);
+}
+
+/// As [`told_of`], to one Nexus.
+pub(super) fn told_to(
+    nexus: &crate::RunningNexus,
+    session: &str,
+    event: harness::Event,
+    state: harness::State,
+) {
+    use crate::harness_subscription::FollowsClaudeHarness;
+    let observation = HarnessObservation::Changed(signal_harness::Changed {
+        flow_id: FlowId(session.chars().take(6).collect()),
+        event,
+        state,
+    });
+    for rest in nexus.follow_claude_harness(&observation) {
+        nexus.settle_told_rest(&rest);
+    }
+}
+
+/// The harness's end of `session`, told to `nexus` at once.
+pub(super) fn ended_to(nexus: &crate::RunningNexus, session: &str) {
+    told_to(
+        nexus,
+        session,
+        harness::Event::Ended(harness::EndReason::Exited),
+        harness::State::Ended,
+    );
+}
+
+/// The seat's session told Working, at once.
+pub(super) fn working_now(fixture: &NexusFixture) {
+    told_of(
+        fixture,
+        super::waking::CLAUDE_SESSION,
+        harness::Event::PromptSubmitted,
+        flowing(harness::Flow::Working),
+    );
+}
+
+/// The seat's session told Rested, at once: its turn ended.
+pub(super) fn rested_now(fixture: &NexusFixture) {
+    told_of(
+        fixture,
+        super::waking::CLAUDE_SESSION,
+        harness::Event::TurnEnded,
+        flowing(harness::Flow::Rested),
+    );
+}
+
+/// The seat's session told Waiting on work in flight, at once: a turn
+/// ended with background work is no rest.
+pub(super) fn waiting_now(fixture: &NexusFixture) {
+    told_of(
+        fixture,
+        super::waking::CLAUDE_SESSION,
+        harness::Event::TurnEnded,
+        flowing(harness::Flow::Waiting),
+    );
+}
+
+/// A hook's Stop and its session end are kept raw and move no Claude
+/// seat: the seat the harness told Working stays Acting, and its flow
+/// stays live.
+#[test]
+fn a_hook_stop_or_end_of_a_claude_flow_moves_no_seat() {
+    use crate::reporting::RecordsReports;
+    use crate::store::ReadsFlowRows;
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    claude_seat(&fixture, 40_000);
+    working_now(&fixture);
+    assert_eq!(seat_state(&fixture), Some(meta_signal_flow::State::Acting));
+    let stop = super::waking::claude_stop(&fixture);
+    let end = signal_flow::Event::Ended(Some(signal_flow::NativeSessionId(
+        super::waking::CLAUDE_SESSION.into(),
+    )));
+    for event in [stop, end] {
+        assert_eq!(
+            fixture.nexus.report(signal_flow::Report_Data {
+                flow_id: seat(),
+                process_option: None,
+                event: event.clone(),
+            }),
+            signal_flow::Output::Reported
+        );
+        fixture.nexus.after_report(&seat(), &event);
+        assert_eq!(
+            seat_state(&fixture),
+            Some(meta_signal_flow::State::Acting),
+            "{event:?} moves no seat"
+        );
+    }
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .flow_node(CLAUDE_SEAT)
+            .unwrap()
+            .unwrap()
+            .flow_lifecycle,
+        signal_flow::FlowLifecycle::Active
+    );
+}
+
+/// What the Claude Harness Nexus tells alongside a hook's event of the
+/// seat's own session, told at once: a prompt is Working, a Stop Rested
+/// with nothing in flight and Waiting with work in flight, an end Ended.
+/// An event of another session, or none the harness tells, tells nothing.
+pub(super) fn told_as_reported(fixture: &NexusFixture, event: &signal_flow::Event) {
+    told_as_reported_to(&fixture.nexus, CLAUDE_SEAT, event);
+}
+
+/// As [`told_as_reported`], of flow `flow_id` to one Nexus.
+pub(super) fn told_as_reported_to(
+    nexus: &crate::RunningNexus,
+    flow_id: &str,
+    event: &signal_flow::Event,
+) {
+    use crate::store::ReadsFlowRows;
+    let Some(node) = nexus.store.flow_node(flow_id).unwrap() else {
+        return;
+    };
+    let session = node.session_id.0;
+    let own =
+        |told: Option<&signal_flow::NativeSessionId>| told.is_some_and(|told| told.0 == session);
+    let (event, state) = match event {
+        signal_flow::Event::PromptSubmitted(prompt)
+            if own(prompt.native_session_id_option.as_ref()) =>
+        {
+            (
+                harness::Event::PromptSubmitted,
+                flowing(harness::Flow::Working),
+            )
+        }
+        signal_flow::Event::Stopped(stop) if own(stop.native_session_id_option.as_ref()) => (
+            harness::Event::TurnEnded,
+            flowing(if stop.background_work.0.is_empty() {
+                harness::Flow::Rested
+            } else {
+                harness::Flow::Waiting
+            }),
+        ),
+        signal_flow::Event::Ended(told) if own(told.as_ref()) => (
+            harness::Event::Ended(harness::EndReason::Exited),
+            harness::State::Ended,
+        ),
+        _ => return,
+    };
+    told_to(nexus, &session, event, state);
+}
+
+/// The seat row of `session` as its harness tells it, written at once and
+/// with no rest settled: a world built resting.
+pub(super) fn standing_told(nexus: &crate::RunningNexus, session: &str, state: harness::State) {
+    use crate::harness_subscription::FollowsClaudeHarness;
+    nexus.follow_claude_harness(&HarnessObservation::Snapshot(vec![harness::Observed {
+        flow_id: FlowId(session.chars().take(6).collect()),
+        state,
+        tokens: harness::Tokens(0),
+        background_work_vector: vec![],
+    }]));
 }

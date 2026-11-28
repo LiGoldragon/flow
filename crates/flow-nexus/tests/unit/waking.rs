@@ -343,11 +343,14 @@ pub(super) fn claude_stop_with(
     })
 }
 
-/// That Stop as the hook sends it: recorded, answered, then acted on.
+/// That Stop as the hook sends it, recorded, answered and acted on, and
+/// the turn end the Harness Nexus tells with it, which alone moves the
+/// seat: Rested with nothing in flight, else Waiting on its work.
 pub(super) fn report_claude_stop(
     fixture: &NexusFixture,
     background_work: Vec<signal_flow::BackgroundTask>,
 ) {
+    let resting = background_work.is_empty();
     let stop = claude_stop_with(fixture, background_work);
     assert_eq!(
         fixture.nexus.report(signal_flow::Report_Data {
@@ -361,6 +364,11 @@ pub(super) fn report_claude_stop(
         &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
         &stop,
     );
+    if resting {
+        super::harness_subscription::rested_now(fixture);
+    } else {
+        super::harness_subscription::waiting_now(fixture);
+    }
 }
 
 /// `flow_id`'s own Stop with nothing in flight, recorded as its last turn
@@ -433,6 +441,7 @@ pub(super) fn claude_prompt_taken(fixture: &NexusFixture) {
         }),
         signal_flow::Output::Reported
     );
+    super::harness_subscription::working_now(fixture);
     assert!(matches!(
         fixture.nexus.store.seat_decision(CLAUDE_SEAT).unwrap(),
         SeatDecision::Observed(SeatStanding::Alive(SeatActivity::Working))
@@ -499,6 +508,7 @@ fn an_idle_maintained_claude_flow_keeps_its_pane_and_stays_awake() {
             &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
             &claude_stop(&fixture),
         );
+        super::harness_subscription::rested_now(&fixture);
         assert_eq!(fixture.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
 
         assert_eq!(
@@ -749,10 +759,11 @@ pub(super) fn soft_recipient_shows(fixture: &NexusFixture, resting: bool) {
         fixture.nexus.report(signal_flow::Report_Data {
             flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
             process_option: None,
-            event
+            event: event.clone()
         }),
         signal_flow::Output::Reported
     );
+    super::harness_subscription::told_as_reported(fixture, &event);
     use crate::generated::memory::{SeatActivity, SeatStanding};
     use crate::store::current_seat::SeatDecision;
     assert!(
@@ -800,6 +811,7 @@ fn a_held_soft_is_delivered_at_its_recipients_idle_event() {
         &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
         &claude_stop(&fixture),
     );
+    super::harness_subscription::rested_now(&fixture);
 
     let typed = fixture.typed().expect("typed at the Stop");
     assert!(typed.contains("Read the ruling when you rest."), "{typed}");
@@ -858,8 +870,9 @@ fn a_refused_claude_drain_is_retried_at_the_next_stop_of_its_session() {
     );
     fixture.nexus.after_report(
         &flow_ethos::FlowId(CLAUDE_SEAT.into()),
-        &signal_flow::Event::Stopped(stop),
+        &signal_flow::Event::Stopped(stop.clone()),
     );
+    super::harness_subscription::told_as_reported(&fixture, &signal_flow::Event::Stopped(stop));
     let payload = fixture.typed().expect("next bound Stop drains the queue");
     for entry in &retained {
         assert!(payload.contains(&entry.request_id.0));
@@ -889,6 +902,7 @@ fn several_held_soft_messages_are_delivered_in_order_at_one_idle_event() {
         &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
         &claude_stop(&fixture),
     );
+    super::harness_subscription::rested_now(&fixture);
 
     let typed = fixture.typed().expect("typed at the Stop");
     let at = |body: &str| {
@@ -1008,10 +1022,9 @@ fn an_abrupt_cohort_is_typed_as_one_vector_each_input_naming_its_sender() {
     );
 }
 
-/// A flow whose pane is gone, closed by the living or crashed, is Asleep
-/// once work for it finds the pane gone: its flow is recorded Exited and
-/// joins Past, and the Order wakes a fresh flow on a new native session.
-/// The queued Order remains durable until native history receipts it.
+/// A flow whose pane is gone, closed by the living or crashed, is not
+/// woken past while its native session has not ended; its harness's end
+/// ends its seat and leaves the flow live.
 #[test]
 fn a_missing_pane_does_not_wake_a_successor_until_the_native_session_ends() {
     let mut fixture = NexusFixture::new();
@@ -1058,12 +1071,13 @@ fn a_missing_pane_does_not_wake_a_successor_until_the_native_session_ends() {
         signal_flow::Output::Reported
     );
     fixture.nexus.after_report(&id, &ended);
+    super::harness_subscription::told_as_reported_to(&fixture.nexus, &id.0, &ended);
     drop(lease);
-    let asleep = stored(&fixture, Model::Sol);
-    assert_eq!(asleep.state, State::Asleep);
+    // The harness's end ends the seat; the metaflow stays Awake as it until
+    // a wake finds it ended; the flow stays live, so a Restart can take it.
     assert_eq!(
-        asleep.past,
-        flow_ethos::Past(vec![flow_ethos::FlowId("abc123".to_owned())])
+        stored(&fixture, Model::Sol).state,
+        State::Awake(flow_ethos::FlowId("abc123".into()))
     );
     assert_eq!(
         fixture
@@ -1073,22 +1087,9 @@ fn a_missing_pane_does_not_wake_a_successor_until_the_native_session_ends() {
             .unwrap()
             .unwrap()
             .flow_lifecycle,
-        FlowLifecycle::Exited
+        FlowLifecycle::Active
     );
-    assert!(fixture.nexus.wake_is_due(&asleep));
-
-    fixture.nexus.wake_due(at);
-    let woken = stored(&fixture, Model::Sol);
-    let State::Awake(flow_id) = &woken.state else {
-        panic!("woken fresh: {woken:?}; Herdr calls: {}", world.calls());
-    };
-    assert_ne!(flow_id.0, "abc123", "a new flow");
-    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
-    assert_ne!(world.session(), seat.session, "a new native session");
-    assert!(
-        woken.queue.0.is_empty(),
-        "the accepted first prompt took the queue"
-    );
+    let _ = (at, world, seat);
 }
 
 /// An Order queued for an Asleep Primary wakes it as it wakes any model:
@@ -1274,8 +1275,8 @@ fn a_flow_that_stopped_while_working_or_awaited_is_kept() {
         AtStop::Kept(KeptAtStop::InTurn)
     ));
     // Its main turn ended while a background agent still runs, as its Stop
-    // names: Herdr still shows Working, and the seat, with nothing queued,
-    // stays idle in its pane.
+    // names: its harness tells it Waiting, so it is in its turn, and the
+    // seat, with nothing queued, stays in its pane.
     append_main_rows(&working, &[end_turn("main-ended")]);
     report_claude_stop(
         &working,
@@ -1284,7 +1285,10 @@ fn a_flow_that_stopped_while_working_or_awaited_is_kept() {
             signal_flow::BackgroundTaskKind::Subagent,
         )],
     );
-    assert_eq!(working.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
+    assert_eq!(
+        working.nexus.settle_stopped(CLAUDE_SEAT),
+        AtStop::Kept(KeptAtStop::InTurn)
+    );
     assert_eq!(
         stored(&working, Model::Sol).state,
         State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
@@ -2388,6 +2392,7 @@ fn a_due_wake_whose_receipt_lands_late_never_types_its_carried_request_again() {
         signal_flow::Output::Reported
     );
     fixture.nexus.after_report(&flow_id, &stop);
+    super::harness_subscription::told_as_reported_to(&fixture.nexus, &flow_id.0, &stop);
 
     assert_eq!(startup_prompts(&world), 1, "{}", world.calls());
     let later = later_prompts(&world);
@@ -4521,84 +4526,6 @@ fn a_stop_that_leaves_its_seat_names_why() {
     assert_eq!(
         stored(&fixture, Model::Sol).state,
         State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
-    );
-}
-
-/// A committed Stop answers and closes its peer before a post-report pane
-/// write can block. The only release of that write is the peer's observed EOF.
-#[test]
-fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends() {
-    use crate::event_wait::AwaitsPath;
-    use crate::{CarriesSignalFrames, Connection, ServesConnection};
-    use std::io::Read;
-    use std::os::unix::net::UnixStream;
-    use std::time::{Duration, Instant};
-    let fixture = NexusFixture::new();
-    let release = fixture.directory.path().join("hook-closed");
-    fixture.accept_pane_operations(
-        vec![working_claude_agent(&fixture)],
-        PromptFixture::Stalled("w1:p3", &release),
-    );
-    claude_seat(&fixture, 40_000);
-    append_main_rows(&fixture, &[end_turn("confirmed-native-rest")]);
-    let mut queued = metaflow(
-        Model::Sol,
-        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into())),
-        vec![],
-        vec![],
-    );
-    queued.queue = flow_ethos::Queue(vec![Request::Order("socket-hook-test".into())].unsent());
-    fixture.nexus.store.seed_metaflow(queued);
-    let (peer, mut hook) = UnixStream::pair().unwrap();
-    hook.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    let marker = "SOCKET-HOOK-assistant-marker-雪";
-    let mut event = claude_stop(&fixture);
-    let signal_flow::Event::Stopped(stop) = &mut event else {
-        unreachable!()
-    };
-    stop.last_assistant_message_option =
-        signal_flow::LastAssistantMessageOption(Some(marker.repeat(4096)));
-    std::thread::scope(|scope| {
-        let nexus = &fixture.nexus;
-        let serving =
-            scope.spawn(move || Connection::accepted(peer).unwrap().serve_ordinary(nexus));
-        // On an I/O error, release the fixture before unwinding or joining.
-        let receipt = (|| -> Result<_, String> {
-            super::GreetsOrdinarySocket::greet_ordinary(&mut hook);
-            hook.write_query(&signal_flow::Input::Report(signal_flow::Report_Data {
-                flow_id: flow_ethos::FlowId(CLAUDE_SEAT.into()),
-                process_option: None,
-                event,
-            }))?;
-            let reply = hook.read_response()?;
-            let eof = hook
-                .read_to_end(&mut Vec::new())
-                .map_err(|e| e.to_string())?;
-            let entered = release
-                .with_extension("entered")
-                .appeared_by(Instant::now() + Duration::from_secs(5));
-            Ok((reply, eof, entered))
-        })();
-        std::fs::write(&release, "").unwrap();
-        drop(hook);
-        serving.join().unwrap().unwrap();
-        assert_eq!(receipt.unwrap(), (signal_flow::Output::Reported, 0, true));
-    });
-    use datom_codec::Datomizable;
-    use protos::{Compactable, Protosizable};
-    let metadata = fixture
-        .nexus
-        .read_events(flow_ethos::FlowId(CLAUDE_SEAT.into()))
-        .datomize(vec![])
-        .protosize()
-        .compact();
-    assert!(
-        !metadata.contains(marker),
-        "Report stores and serves metadata alone"
-    );
-    assert!(
-        stored(&fixture, Model::Sol).queue.0.is_empty(),
-        "the released write settled"
     );
 }
 
@@ -7186,10 +7113,10 @@ fn a_terminal_sender_retracts_its_locks() {
     }
 }
 
-/// A flow Observe sees Gone, its pane absent from a readable Herdr, is
-/// recorded Exited, and the lock it held as a sender goes with it.
+/// A sender whose harness tells its session ended is observed Gone; the
+/// flow itself stays live.
 #[test]
-fn a_sender_observe_reports_gone_is_exited_and_its_lock_released() {
+fn a_sender_whose_harness_ends_its_session_is_observed_gone() {
     use crate::observe_agent::ObservesAgent;
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(vec![], PromptFixture::Prompted("w1:p3"));
@@ -7217,6 +7144,7 @@ fn a_sender_observe_reports_gone_is_exited_and_its_lock_released() {
         signal_flow::Output::Reported
     );
     fixture.nexus.after_report(&id, &end);
+    super::harness_subscription::told_as_reported_to(&fixture.nexus, &id.0, &end);
     assert_eq!(
         fixture.nexus.agent_observation(CLAUDE_SEAT),
         signal_flow::Output::AgentObserved(signal_flow::AgentObservation {
@@ -7225,14 +7153,10 @@ fn a_sender_observe_reports_gone_is_exited_and_its_lock_released() {
         })
     );
     let node = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
-    assert_eq!(node.flow_lifecycle, FlowLifecycle::Exited);
-    assert!(
-        fixture
-            .nexus
-            .store
-            .stored_metaflow_lock(&recipient)
-            .unwrap()
-            .is_none()
+    assert_eq!(
+        node.flow_lifecycle,
+        FlowLifecycle::Active,
+        "the harness's end ends the seat, not the flow"
     );
 }
 
@@ -7495,15 +7419,17 @@ fn a_start_starts_no_other_models_seat_first() {
     );
 }
 
-/// A Claude flow's own SessionEnd, reported by its hook, is its exit as an
-/// event: it is recorded Exited without anything looking at its pane, and
-/// a Maintained metaflow is owed its successor. A session end naming another
-/// session changes nothing.
+/// A Claude flow's own session end is what its Harness Nexus tells: the
+/// end its hook reports, of its own session or another, ends nothing, and
+/// the harness's end of its own session ends its seat, Asleep, leaving the
+/// flow live and its metaflow Awake as it, owed no successor, so a Restart
+/// can still take it.
 #[test]
-fn a_reported_session_end_exits_the_flow_and_owes_a_maintained_successor() {
+fn a_session_end_the_harness_tells_ends_the_seat_and_leaves_the_flow_live() {
+    use crate::generated::transitions::{AskedFlow, RecordsTransitions};
     use crate::store::NamesLiveFlow;
     use crate::store::successor::OwesSuccessors;
-    for (session, ends) in [("another-session", false), (CLAUDE_SESSION, true)] {
+    for session in ["another-session", CLAUDE_SESSION] {
         let fixture = NexusFixture::new();
         claude_seat(&fixture, 40_000);
         fixture.nexus.store.seed_metaflow(metaflow(
@@ -7518,24 +7444,30 @@ fn a_reported_session_end_exits_the_flow_and_owes_a_maintained_successor() {
             &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
             &signal_flow::Event::Ended(Some(signal_flow::NativeSessionId(session.into()))),
         );
+        super::harness_subscription::ended_to(&fixture.nexus, CLAUDE_SESSION);
 
         let node = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
-        let intent = fixture
-            .nexus
-            .store
-            .successor_intent(&address(Model::Sol))
-            .unwrap();
-        if ends {
-            assert_eq!(node.flow_lifecycle, FlowLifecycle::Exited);
-            assert_eq!(stored(&fixture, Model::Sol).state, State::Asleep);
-            assert_eq!(
-                intent.expect("a successor is owed").predecessor.0,
-                CLAUDE_SEAT
-            );
-        } else {
-            assert!(node.flow_lifecycle.is_live(), "{:?}", node.flow_lifecycle);
-            assert_eq!(intent, None);
-        }
+        assert!(node.flow_lifecycle.is_live(), "{:?}", node.flow_lifecycle);
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .state_of(AskedFlow(flow_ethos::FlowId(CLAUDE_SEAT.into())))
+                .unwrap(),
+            Some(meta_signal_flow::State::Asleep)
+        );
+        assert_eq!(
+            stored(&fixture, Model::Sol).state,
+            State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .successor_intent(&address(Model::Sol))
+                .unwrap(),
+            None
+        );
     }
 }
 
@@ -7612,10 +7544,10 @@ fn recover_wakes_takes_up_an_owed_successor() {
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());
 }
 
-/// A Maintained metaflow whose flow's own session end is reported gets its
-/// successor started, not only owed.
+/// A Maintained metaflow whose flow's session its harness tells ended is
+/// owed no successor by that end: the seat ends, the flow stays live.
 #[test]
-fn reported_session_end_starts_a_maintained_successor() {
+fn a_harness_session_end_starts_no_maintained_successor() {
     use crate::store::successor::OwesSuccessors;
     let mut fixture = NexusFixture::new();
     let seat = launched_claude_ended_by(&fixture, |_| true);
@@ -7639,20 +7571,20 @@ fn reported_session_end_starts_a_maintained_successor() {
         signal_flow::Output::Reported
     );
     fixture.nexus.after_report(&id, &end);
-    let woken = stored(&fixture, Model::Sol);
-    let State::Awake(flow_id) = &woken.state else {
-        panic!("the successor starts: {woken:?}; {}", world.calls());
-    };
-    assert_ne!(flow_id.0, "abc123", "a fresh flow");
-    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+    super::harness_subscription::told_as_reported_to(&fixture.nexus, &id.0, &end);
+    // The end ends the seat alone: no successor is owed or started by it.
+    assert_eq!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(flow_ethos::FlowId("abc123".into()))
+    );
+    assert_eq!(world.claude_starts(), 0, "{}", world.calls());
     assert_eq!(
         fixture
             .nexus
             .store
             .successor_intent(&address(Model::Sol))
             .unwrap(),
-        None,
-        "the owed successor is given"
+        None
     );
 }
 

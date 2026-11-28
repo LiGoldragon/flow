@@ -1,5 +1,7 @@
 //! Takeover observes the native source before the Nexus serves. A later
 //! source-availability announcement retries only a seat without a record.
+//! A Claude seat is never observed here: its state is its Harness Nexus's
+//! alone (`harness_subscription`).
 use crate::RunningNexus;
 use crate::claude::{ReadsClaudeSessions, ReadsClaudeTurns};
 use crate::codex::{ReadsThreadStanding, SelectsCodexEndpoint};
@@ -61,8 +63,10 @@ impl ObservesCurrentSeats for RunningNexus {
             }
         }
         for seat in self.store.list_metaflows()? {
+            // A Claude seat's state is its Harness Nexus's to tell.
             if let flow_ethos::State::Awake(id) = seat.state
                 && let Some(node) = self.store.flow_node(&id.0)?
+                && node.harness_kind != HarnessKind::Claude
             {
                 self.store
                     .record_observation(&id.0, self.read_native_standing(&node))?;
@@ -72,6 +76,9 @@ impl ObservesCurrentSeats for RunningNexus {
     }
 
     fn observe_returning_source(&self, node: &FlowNode) {
+        if node.harness_kind == HarnessKind::Claude {
+            return;
+        }
         if matches!(
             self.store.current_seat(&node.flow_id.0),
             Ok(CurrentSeatRead::NoRecord)

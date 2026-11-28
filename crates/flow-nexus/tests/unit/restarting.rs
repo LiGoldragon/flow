@@ -20,7 +20,6 @@ use crate::performing::Performs;
 use crate::reporting::RecordsReports;
 use crate::restarting::{
     ExitDoubt, ExitEvidence, ExitProof, FencesSeatEvents, ProcFs, ProvesExit, ReadsProcessStatus,
-    SeatWitness,
 };
 use crate::store::metaflow::{MutatesMetaflows, SeedsMetaflow};
 use crate::store::restart::RecordsRestarts;
@@ -145,6 +144,12 @@ impl SeatsRestartWorld for NexusFixture {
             )
             .unwrap();
             crate::seat_observation::ObservesCurrentSeats::observe_takeover(&self.nexus).unwrap();
+            // The seat's state is what its Harness Nexus tells: at rest.
+            super::harness_subscription::standing_told(
+                &self.nexus,
+                &seat.session,
+                harness::State::Flowing(harness::Flow::Rested),
+            );
             await_path(&hook);
         }
         let HerdrRouteSelection::Available(route) = self
@@ -301,6 +306,9 @@ fn report_from(fixture: &NexusFixture, event: Event, birth: Option<Process>) -> 
         fixture
             .nexus
             .after_attributed_report(&flow_ethos::FlowId(FLOW.to_owned().to_owned()), &event);
+        // The bound seat's own harness tells the same turn to its Harness
+        // Nexus, which alone moves the seat.
+        super::harness_subscription::told_as_reported_to(&fixture.nexus, FLOW, &event);
     }
     acts
 }
@@ -707,10 +715,7 @@ fn restart_old_session_end_fenced() {
         Some(old_hook.clone())
     ));
     assert!(!report_from(&fixture, ended.clone(), None));
-    use crate::observe_agent::RecordsWitnessedExit;
-    fixture
-        .nexus
-        .exited_as_witnessed_by(FLOW, Some(&old_witness));
+    let _ = old_witness;
 
     assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Active);
     assert_eq!(
@@ -732,13 +737,12 @@ fn restart_old_session_end_fenced() {
     );
 }
 
-/// After Restarted the new seat's own exit ends the flow as today: its
-/// hook's SessionEnd, attributed by the hook's ancestry though Claude
-/// scrubbed the hook's environment; and, in a second world, an Observe's
-/// Gone of the pane the new seat runs in.
+/// After Restarted the new seat's own exit is its Harness Nexus's to tell:
+/// its hook's SessionEnd ends nothing, and the harness's end of its session
+/// ends the seat, Asleep, while the flow stays live for a Restart to take.
 #[test]
 fn restart_new_seat_real_exit_ends() {
-    use crate::observe_agent::RecordsWitnessedExit;
+    use crate::generated::transitions::{AskedFlow, RecordsTransitions};
     let mut fixture = NexusFixture::new();
     let world = fixture.restart_world(true);
     assert_eq!(
@@ -746,26 +750,24 @@ fn restart_new_seat_real_exit_ends() {
         Output::Restarted(flow_ethos::FlowId(FLOW.into()))
     );
     let hook = world.new_hook();
-    assert!(report_from(
+    report_from(
         &fixture,
         Event::Ended(Some(signal_flow::NativeSessionId(
-            world.seat.session.clone()
+            world.seat.session.clone(),
         ))),
-        Some(hook)
-    ));
-    assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Exited);
-    assert_eq!(stored(&fixture, Model::Sol).state, State::Asleep);
-
-    let mut second = NexusFixture::new();
-    let _world = second.restart_world(true);
-    assert_eq!(
-        restarted(&second),
-        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
+        Some(hook),
     );
-    let witness: SeatWitness = second.nexus.seat_witness(FLOW).expect("witness");
-    assert_eq!(witness.route.herdr_pane_id.0, NEW_PANE);
-    second.nexus.exited_as_witnessed_by(FLOW, Some(&witness));
-    assert_eq!(node(&second).flow_lifecycle, FlowLifecycle::Exited);
+    assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Active);
+    super::harness_subscription::ended_to(&fixture.nexus, &world.seat.session);
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .state_of(AskedFlow(flow_ethos::FlowId(FLOW.into())))
+            .unwrap(),
+        Some(meta_signal_flow::State::Asleep)
+    );
+    assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Active);
 }
 
 /// The resumed seat's hook reports to this Nexus and acts: the hook command
@@ -1439,9 +1441,12 @@ fn restart_crash_around_bind_commit_delivers_once() {
                 &fixture.nexus.herdr.claude_sessions.directory,
             )
             .unwrap();
-            crate::seat_observation::ObservesCurrentSeats::observe_returning_source(
+            // The returning source is the Harness Nexus telling the seat
+            // at rest.
+            super::harness_subscription::standing_told(
                 &fixture.nexus,
-                &node(&fixture),
+                &node(&fixture).session_id.0,
+                harness::State::Flowing(harness::Flow::Rested),
             );
             fixture.nexus.wake_due(address(Model::Sol));
         }
@@ -2906,6 +2911,7 @@ fn reported_to(nexus: &crate::RunningNexus, event: Event, birth: Option<Process>
     );
     if acts {
         nexus.after_attributed_report(&flow_ethos::FlowId(FLOW.to_owned().to_owned()), &event);
+        super::harness_subscription::told_as_reported_to(nexus, FLOW, &event);
     }
     acts
 }
@@ -2969,7 +2975,6 @@ fn restart_cutover_two_nexus() {
     // Adoption binds identity, not activity: a displayed idle pane must
     // not by itself authorize this restart. Observe the fake harness's own
     // PID/birth and completed native turn at the newly bound Nexus.
-    use crate::seat_observation::ObservesCurrentSeats;
     use crate::store::current_seat::{RecordsCurrentSeats, SeatDecision};
     assert!(matches!(
         new.store.seat_decision(FLOW).unwrap(),
@@ -2981,7 +2986,11 @@ fn restart_cutover_two_nexus() {
             FLOW.into()
         )))
     );
-    new.observe_returning_source(&new_node(&new));
+    super::harness_subscription::standing_told(
+        &new,
+        &new_node(&new).session_id.0,
+        harness::State::Flowing(harness::Flow::Rested),
+    );
     assert!(matches!(
         new.store.seat_decision(FLOW).unwrap(),
         SeatDecision::Observed(crate::generated::memory::SeatStanding::Alive(
@@ -3070,29 +3079,17 @@ fn restart_cutover_two_nexus() {
         ))),
         Some(old_hook.clone())
     ));
-    {
-        use crate::observe_agent::RecordsWitnessedExit;
-        fixture
-            .nexus
-            .exited_as_witnessed_by(FLOW, Some(&old_witness));
-    }
+    let _ = old_witness;
     fixture.nexus.wake_due(address(Model::Sol));
     fixture.nexus.drain_awake(&address(Model::Sol));
     assert_eq!(
         node(&fixture).flow_lifecycle,
-        FlowLifecycle::Exited,
-        "the old Nexus recorded the old seat's exit"
+        FlowLifecycle::Active,
+        "the old Nexus records the old seat's end, not an exit"
     );
-    // Its Maintained metaflow owes a successor, and every wake of it is
-    // refused while the resumed session runs in Herdr: nothing is launched,
-    // and what it holds stays with it.
-    let old_metaflow = stored(&fixture, Model::Sol);
-    assert_eq!(old_metaflow.state, State::Asleep);
-    assert_eq!(old_metaflow.queue.0.len(), 1);
-    assert!(matches!(
-        fixture.nexus.store.successor_intent(&address(Model::Sol)),
-        Ok(Some(intent)) if intent.predecessor.0 == FLOW
-    ));
+    // Every wake of its metaflow is refused while the resumed session runs
+    // in Herdr: nothing is launched, and what it holds stays with it.
+    assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 1);
 
     // The same old reports reach the new Nexus, and an Observe's Gone of
     // the seat it adopted: none acts.
@@ -3110,10 +3107,7 @@ fn restart_cutover_two_nexus() {
         ))),
         None
     ));
-    {
-        use crate::observe_agent::RecordsWitnessedExit;
-        new.exited_as_witnessed_by(FLOW, Some(&adopted_witness));
-    }
+    let _ = adopted_witness;
 
     // Nothing the old side did touched the new seat.
     let calls = world.fresh.calls();
@@ -3606,11 +3600,14 @@ fn adopted_on_new(
     );
     // Adoption supplies identity, never activity. The fixture's live
     // registered process and native transcript establish current standing.
-    use crate::seat_observation::ObservesCurrentSeats;
     use crate::store::current_seat::{RecordsCurrentSeats, SeatDecision};
     let adopted = new.store.flow_node(FLOW).unwrap().expect("adopted seat");
     assert_eq!(adopted.session_id.0, world.seat.session);
-    new.observe_returning_source(&adopted);
+    super::harness_subscription::standing_told(
+        &new,
+        &adopted.session_id.0,
+        harness::State::Flowing(harness::Flow::Rested),
+    );
     assert!(matches!(
         new.store.seat_decision(FLOW).unwrap(),
         SeatDecision::Observed(crate::generated::memory::SeatStanding::Alive(

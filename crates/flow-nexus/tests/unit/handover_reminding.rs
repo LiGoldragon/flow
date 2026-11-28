@@ -511,6 +511,7 @@ fn stop_measurement_opens_first_warning_before_the_next_timer_tick() {
             &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
             &claude_stop(&fixture),
         );
+        super::harness_subscription::rested_now(&fixture);
         let reminder = fixture.nexus.store.handover_reminder(&address, 0).unwrap();
         if tokens == 85 {
             assert!(reminder.is_none());

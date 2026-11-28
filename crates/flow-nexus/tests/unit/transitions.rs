@@ -73,6 +73,7 @@ fn report(fixture: &NexusFixture, event: signal_flow::Event) {
         signal_flow::Output::Reported
     );
     fixture.nexus.after_report(&flow_id, &event);
+    super::harness_subscription::told_as_reported(fixture, &event);
 }
 
 #[test]
@@ -122,35 +123,23 @@ fn held(fixture: &NexusFixture, flow_id: &str) -> Vec<(meta::State, Cause)> {
         .collect()
 }
 
-/// Every Claude hook report is one Event: the fresh session Started, its
-/// own prompt and a tool boundary Working, its own Stop Idle with the size
-/// its transcript shows, a Started of the same session its rest when the
-/// main turn ended, a Cleared nothing, and its own session's end Ended.
-/// Each leads to its state.
+/// Every Claude hook report is kept raw and is no Event of the audit: the
+/// audit of a Claude flow is what its Harness Nexus tells. Its Working is
+/// one Event leading to Acting, with the size Flow last measured; its rest
+/// one leading to Resting; its end one leading to Asleep.
 #[test]
-fn each_claude_report_is_one_event_leading_to_its_state() {
+fn each_claude_harness_state_is_one_event_leading_to_its_state() {
+    use super::harness_subscription::{ended_to, rested_now, working_now};
     let fixture = NexusFixture::new();
     awake_claude_seat(&fixture);
     let seat = CLAUDE_SEAT;
     assert!(transitions(&fixture, seat).is_empty());
 
     report(&fixture, signal_flow::Event::Started(session()));
+    report(&fixture, signal_flow::Event::ToolUsed("Bash".into()));
     assert!(
         held(&fixture, seat).is_empty(),
-        "session attachment is not a launch or a change of activity"
-    );
-
-    report(
-        &fixture,
-        signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
-            native_session_id_option: session(),
-            prompt_id_option: None,
-            prompt_sha256: signal_flow::PromptSha256("ab".repeat(32)),
-        }),
-    );
-    assert_eq!(
-        held(&fixture, seat).last().cloned(),
-        Some(reported(meta::State::Acting, Event::Working(Tokens(0))))
+        "no hook report is an event of the audit"
     );
 
     fixture
@@ -158,47 +147,18 @@ fn each_claude_report_is_one_event_leading_to_its_state() {
         .store
         .record_context_size(seat, 12_000)
         .unwrap();
-    report(&fixture, signal_flow::Event::ToolUsed("Bash".into()));
+    working_now(&fixture);
     assert_eq!(
         held(&fixture, seat).last().cloned(),
         Some(reported(
             meta::State::Acting,
             Event::Working(Tokens(12_000))
         )),
-        "a tool boundary carries the size Flow last measured"
+        "Working carries the size Flow last measured"
     );
-
-    report_claude_stop(&fixture, vec![]);
-    assert!(
-        held(&fixture, seat).contains(&reported(meta::State::Resting, Event::Idle(Tokens(40_000)))),
-        "its own Stop is Idle with its transcript's size: {:?}",
-        held(&fixture, seat)
-    );
+    rested_now(&fixture);
     assert_eq!(last(&fixture, seat).state, meta::State::Resting);
-
-    // A Cleared is no event.
-    let before = transitions(&fixture, seat).len();
-    report(&fixture, signal_flow::Event::Cleared(session()));
-    assert_eq!(transitions(&fixture, seat).len(), before);
-
-    // The same session started again past its main turn's end: its rest.
-    append_main_rows(&fixture, &[end_turn("ended-turn")]);
-    report(&fixture, signal_flow::Event::Started(session()));
-    assert_eq!(
-        held(&fixture, seat).last().cloned(),
-        Some(reported(meta::State::Resting, Event::Idle(Tokens(40_000)))),
-        "{:?}",
-        held(&fixture, seat)
-    );
-
-    // Another session's end is no event of this flow; its own is Ended.
-    let before = transitions(&fixture, seat).len();
-    report(
-        &fixture,
-        signal_flow::Event::Ended(Some(signal_flow::NativeSessionId("another".into()))),
-    );
-    assert_eq!(transitions(&fixture, seat).len(), before);
-    report(&fixture, signal_flow::Event::Ended(session()));
+    ended_to(&fixture.nexus, CLAUDE_SESSION);
     assert_eq!(
         held(&fixture, seat).last().cloned(),
         Some(reported(meta::State::Asleep, Event::Ended))
@@ -222,6 +182,7 @@ fn a_claude_compaction_is_compacting_and_keeps_the_state() {
     use std::io::Write;
     let fixture = NexusFixture::new();
     awake_claude_seat(&fixture);
+    super::harness_subscription::working_now(&fixture);
     report_claude_stop(&fixture, vec![]);
     assert_eq!(last(&fixture, CLAUDE_SEAT).state, meta::State::Resting);
     let mut file = std::fs::OpenOptions::new()
@@ -256,6 +217,7 @@ fn a_claude_compaction_is_compacting_and_keeps_the_state() {
 fn a_delivered_request_arrives_at_its_flow() {
     let fixture = NexusFixture::new();
     awake_claude_seat(&fixture);
+    super::harness_subscription::working_now(&fixture);
     report_claude_stop(&fixture, vec![]);
     assert_eq!(last(&fixture, CLAUDE_SEAT).state, meta::State::Resting);
     let PrivateSendResponse::SendAccepted(accepted) = fixture
@@ -455,6 +417,12 @@ fn the_current_decision_state_is_not_an_audit_transition() {
     );
 
     report(&fixture, signal_flow::Event::ToolUsed("Bash".into()));
+    assert_eq!(
+        state(&fixture),
+        Some(meta::State::Resting),
+        "a hook's tool boundary moves no seat"
+    );
+    super::harness_subscription::working_now(&fixture);
     assert_eq!(state(&fixture), Some(meta::State::Acting));
     assert!(!fixture.nexus.rests_now(CLAUDE_SEAT));
     assert_eq!(

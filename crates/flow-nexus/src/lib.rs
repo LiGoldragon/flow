@@ -2221,6 +2221,18 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         use harness_subscription::ObservesHarness;
         self.nexus.harness_observed()
     }
+
+    fn bind(
+        &self,
+        bind: &meta_signal_flow::Bind_Data,
+    ) -> Result<meta_signal_flow::Bound_Data, meta_signal_flow::Output> {
+        let _ = bind;
+        Err(meta_signal_flow::Output::Refused(
+            meta_signal_flow::Refused_Data::StoreRefused(meta_signal_flow::StoreFailure(
+                "Bind is not yet served".into(),
+            )),
+        ))
+    }
 }
 
 pub trait OpensRunningNexus {

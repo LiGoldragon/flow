@@ -333,6 +333,7 @@ fn a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_fl
         &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
         &claude_stop(&fixture),
     );
+    super::harness_subscription::rested_now(&fixture);
     assert_eq!(
         fixture.nexus.store.context_size(CLAUDE_SEAT).unwrap(),
         Some(230_000)
@@ -404,6 +405,7 @@ fn a_seat_past_its_threshold_shown_working_is_refreshed_at_its_stop() {
         &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
         &claude_stop(&fixture),
     );
+    super::harness_subscription::rested_now(&fixture);
 
     assert!(closed(&fixture), "the working seat's pane is closed");
     assert!(fixture.typed().is_none(), "nothing is typed into it");
@@ -448,29 +450,10 @@ fn an_overdue_refresh_preserves_live_background_work_until_a_safe_stop() {
             background_task("m1", BackgroundTaskKind::Monitor),
         ],
     );
-    use crate::generated::memory::{SeatActivity, SeatStanding};
-    use crate::store::current_seat::{CurrentSeatRead, RecordsCurrentSeats};
+    // Work in flight is the harness's Waiting: the seat is in its turn.
     use crate::waking::JudgesClosingRest;
     assert!(!closed(&fixture));
     assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Active);
-    // Temporarily losing the source cannot certify that either job ended.
-    fixture
-        .nexus
-        .store
-        .record_observation(CLAUDE_SEAT, None)
-        .unwrap();
-    assert!(matches!(
-        fixture.nexus.store.current_seat(CLAUDE_SEAT).unwrap(),
-        CurrentSeatRead::NoRecord
-    ));
-    fixture
-        .nexus
-        .store
-        .record_observation(
-            CLAUDE_SEAT,
-            Some(SeatStanding::Alive(SeatActivity::Resting)),
-        )
-        .unwrap();
     assert!(!fixture.nexus.rests_for_closing(CLAUDE_SEAT));
     report_claude_stop(&fixture, vec![]);
     assert!(closed(&fixture), "the seat's pane is closed");
@@ -647,6 +630,7 @@ fn a_seat_whose_successor_cannot_compose_stays_and_is_handed_its_queue() {
         &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
         &claude_stop(&fixture),
     );
+    super::harness_subscription::rested_now(&fixture);
 
     assert!(!closed(&fixture), "the seat's pane stays open");
     assert!(
@@ -1570,6 +1554,7 @@ fn a_protected_seat_past_its_threshold_is_kept_and_handed_its_work() {
         &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
         &claude_stop(&fixture),
     );
+    super::harness_subscription::rested_now(&fixture);
 
     assert!(!closed(&fixture), "the protected seat's pane stays");
     assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Active);
@@ -1612,6 +1597,7 @@ fn an_unprotected_fable_seat_past_its_threshold_is_refreshed() {
         &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
         &claude_stop(&fixture),
     );
+    super::harness_subscription::rested_now(&fixture);
 
     assert!(closed(&fixture), "the seat's pane is closed");
     assert!(fixture.typed().is_none(), "nothing is typed into it");
@@ -1632,4 +1618,51 @@ fn an_unprotected_fable_seat_past_its_threshold_is_refreshed() {
         1,
         "the work waits for the next flow"
     );
+}
+
+/// A seat past its model's threshold whose harness tells it Rested, with
+/// no report, is refreshed at that rest: its pane is closed, its flow
+/// recorded Stopped and its metaflow Asleep, its work kept for the next.
+#[test]
+fn a_seat_past_its_threshold_is_refreshed_at_the_rest_its_harness_tells() {
+    use super::harness_subscription::{holds_within, tell_rested, tell_working, with_fake_harness};
+    let mut fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    claude_seat(&fixture, 230_000);
+    append_main_rows(&fixture, &[end_turn("last-turn")]);
+    seat_refreshing_at(&fixture, 200_000);
+    declare_seat(
+        &fixture,
+        Continuity::OnDemand,
+        vec!["spirit:core:0".into(), "intent:flow:0".into()],
+    );
+    seat_metaflow(
+        &fixture,
+        vec![Request::Notice("Held for the next flow.".into())],
+    );
+    with_fake_harness(&mut fixture, |fixture, stream| {
+        tell_working(stream);
+        tell_rested(stream);
+        assert!(
+            holds_within(|| lifecycle(fixture, CLAUDE_SEAT) == FlowLifecycle::Stopped),
+            "the seat is refreshed at its told rest"
+        );
+        assert_eq!(
+            fixture.nexus.store.context_size(CLAUDE_SEAT).unwrap(),
+            Some(230_000),
+            "its size is read from its transcript at the rest"
+        );
+        assert!(closed(fixture), "the seat's pane is closed");
+        assert!(fixture.typed().is_none(), "nothing is typed into it");
+        let metaflow = seat_metaflow_now(fixture);
+        assert_eq!(metaflow.state, State::Asleep);
+        assert_eq!(
+            metaflow.queue.0.len(),
+            1,
+            "the work waits for the next flow"
+        );
+    });
 }

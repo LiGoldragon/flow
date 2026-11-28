@@ -32,13 +32,14 @@ use crate::generated::startup::{
     Reason,
 };
 use crate::place::{FindsFlowPlace, PlaceName, ReportsPlaceRefusal};
+use crate::store::current_seat::HarnessStanding;
 use crate::store::{AnnouncesLaunchChanges, LaunchChanges};
 use crate::{HoldsStopRequest, Stopping};
 use harness::{Event, Flow, Observed, State, Tokens};
 use meta_signal_flow::{
     HarnessDisagreement, HarnessObserved_Data, HarnessSocket, HarnessTokens, HarnessWitness, Seen,
 };
-use signal_flow::FlowId;
+use signal_flow::{FlowId, FlowNode};
 use signal_harness::Changed;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Read, Write};
@@ -466,7 +467,18 @@ impl JudgesHarnessWitnesses for RunningNexus {
     fn judge_due_comparisons(&self, now: Instant, seen: i64) {
         use crate::generated::transitions::{AskedFlow, RecordsTransitions};
         for comparison in self.harness_witnesses.due_comparisons(now) {
-            let flow_state = match self.store.state_of(AskedFlow(comparison.flow_id.clone())) {
+            let held = match self.flow_told_as(&comparison.flow_id) {
+                Ok(Some(held)) => held,
+                Ok(None) => continue,
+                Err(error) => {
+                    eprintln!(
+                        "flow-nexus: the flow of harness session {} could not be read to compare with its harness: {error}",
+                        comparison.flow_id.0
+                    );
+                    continue;
+                }
+            };
+            let flow_state = match self.store.state_of(AskedFlow(held)) {
                 Ok(Some(flow_state)) => flow_state,
                 Ok(None) => continue,
                 Err(error) => {
@@ -521,16 +533,27 @@ impl JudgesHarnessWitnesses for RunningNexus {
 
 /// Meta `ObserveHarness`.
 pub trait ObservesHarness {
-    /// Every witness of a flow Flow holds (its events row), each with
-    /// Flow's own state of the flow now, and the disagreements kept, oldest
-    /// first. A store that cannot be read refuses it.
+    /// Every witness, each with Flow's own state of the flow it names now,
+    /// None for a session Flow holds no flow for, and the disagreements
+    /// kept, oldest first. A store that cannot be read refuses it.
     fn harness_observed(&self) -> Result<HarnessObserved_Data, meta_signal_flow::Output>;
+    /// The flow Flow holds for a session a harness names: the live Claude
+    /// flow of that session, else the flow of that very id (its events
+    /// row), else None.
+    fn flow_told_as(&self, told: &FlowId) -> Result<Option<FlowId>, crate::store::StoreError>;
 }
 
 impl ObservesHarness for RunningNexus {
+    fn flow_told_as(&self, told: &FlowId) -> Result<Option<FlowId>, crate::store::StoreError> {
+        use crate::store::events::RecordsHarnessEvents;
+        if let Some(node) = self.claude_flow_named(told) {
+            return Ok(Some(node.flow_id));
+        }
+        Ok(self.store.events(&told.0)?.map(|_| told.clone()))
+    }
+
     fn harness_observed(&self) -> Result<HarnessObserved_Data, meta_signal_flow::Output> {
         use crate::generated::transitions::{AskedFlow, RecordsTransitions};
-        use crate::store::events::RecordsHarnessEvents;
         let refused = |error: crate::store::StoreError| {
             meta_signal_flow::Output::Refused(meta_signal_flow::Refused_Data::StoreRefused(
                 meta_signal_flow::StoreFailure(error.to_string()),
@@ -539,13 +562,10 @@ impl ObservesHarness for RunningNexus {
         let disagreements = self.harness_witnesses.disagreements();
         let mut harness_witness_vector = Vec::new();
         for (socket, flow_id, witnessed) in self.harness_witnesses.witnesses() {
-            if self.store.events(&flow_id.0).map_err(refused)?.is_none() {
-                continue;
-            }
-            let state_option = self
-                .store
-                .state_of(AskedFlow(flow_id.clone()))
-                .map_err(refused)?;
+            let state_option = match self.flow_told_as(&flow_id).map_err(refused)? {
+                Some(held) => self.store.state_of(AskedFlow(held)).map_err(refused)?,
+                None => None,
+            };
             harness_witness_vector.push(HarnessWitness {
                 flow_id,
                 harness_socket: socket,
@@ -656,11 +676,164 @@ impl AwaitsSocketPlacement for SocketPlacement {
     }
 }
 
-/// One socket's subscriber: the Nexus whose witnesses it writes, and the
-/// socket it dials.
+/// A turn end or rest a Harness Nexus told of a Claude flow Flow holds:
+/// the flow and its session, settled off the subscriber's thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToldRest {
+    pub flow_id: String,
+    pub session: String,
+}
+
+/// What a told harness state is for a Claude flow's seat: None for Dry and
+/// for the end of a session /clear ended, which goes on in the next one.
+trait ReadsHarnessStanding {
+    fn harness_standing(&self, event: Option<&Event>) -> Option<HarnessStanding>;
+}
+
+impl ReadsHarnessStanding for State {
+    fn harness_standing(&self, event: Option<&Event>) -> Option<HarnessStanding> {
+        match self {
+            State::Dry => None,
+            State::Flowing(Flow::Working | Flow::Waiting | Flow::Blocked) => {
+                Some(HarnessStanding::Working)
+            }
+            State::Flowing(Flow::Rested) => Some(HarnessStanding::Rested),
+            State::Ended => match event {
+                Some(Event::Ended(harness::EndReason::Cleared)) => None,
+                _ => Some(HarnessStanding::Ended),
+            },
+        }
+    }
+}
+
+/// A Claude flow's state, taken from its Harness Nexus subscription alone.
+pub trait FollowsClaudeHarness {
+    /// The live Claude flow whose stored session the harness names by
+    /// `told`, its first six characters. None when Flow holds none, or
+    /// when two live flows share the name: that collision is logged and
+    /// decides nothing for either.
+    fn claude_flow_named(&self, told: &FlowId) -> Option<FlowNode>;
+    /// Writes the seat row of every live Claude flow the observation tells
+    /// of, under the restart fence, and returns the turn ends and rests it
+    /// told: a seat told TurnEnded, whatever its state, or one that moved
+    /// to Resting.
+    fn follow_claude_harness(&self, observation: &HarnessObservation) -> Vec<ToldRest>;
+    /// What a correlated hook Stop set going, set going by a told rest:
+    /// launches waiting on a Stop are cued, the turn end is published, a
+    /// simplified seat's answer is queued, and the rest is settled (drain,
+    /// refresh ordered or due, sleep), remembered when Herdr does not yet
+    /// show it.
+    fn settle_told_rest(&self, rest: &ToldRest);
+}
+
+impl FollowsClaudeHarness for RunningNexus {
+    fn claude_flow_named(&self, told: &FlowId) -> Option<FlowNode> {
+        use crate::store::ReadsFlowRows;
+        match self.store.live_claude_sessions_named(&told.0) {
+            Ok(mut nodes) if nodes.len() == 1 => nodes.pop(),
+            Ok(nodes) if nodes.is_empty() => None,
+            Ok(nodes) => {
+                eprintln!(
+                    "flow-nexus: the Harness Nexus names session {} which live flows {:?} share; it is refused and decides nothing for either",
+                    told.0,
+                    nodes
+                        .iter()
+                        .map(|node| node.flow_id.0.as_str())
+                        .collect::<Vec<_>>()
+                );
+                None
+            }
+            Err(error) => {
+                eprintln!(
+                    "flow-nexus: the flow of harness session {} could not be read: {error}",
+                    told.0
+                );
+                None
+            }
+        }
+    }
+
+    fn follow_claude_harness(&self, observation: &HarnessObservation) -> Vec<ToldRest> {
+        use crate::store::current_seat::RecordsHarnessStandings;
+        use crate::store::restart::RecordsRestarts;
+        let told: Vec<(&FlowId, Option<&Event>, &State)> = match observation {
+            HarnessObservation::Snapshot(observed) => observed
+                .iter()
+                .map(|session| (&session.flow_id, None, &session.state))
+                .collect(),
+            HarnessObservation::Changed(changed) => {
+                vec![(&changed.flow_id, Some(&changed.event), &changed.state)]
+            }
+        };
+        let mut rests = Vec::new();
+        for (flow_id, event, state) in told {
+            let Some(standing) = state.harness_standing(event) else {
+                continue;
+            };
+            let Some(node) = self.claude_flow_named(flow_id) else {
+                continue;
+            };
+            let id = node.flow_id.0.clone();
+            // A restart holds the flow: its seat is the restart's to write.
+            if !matches!(self.store.restart_record(&id), Ok(None)) {
+                eprintln!(
+                    "flow-nexus: flow {id} is restarting; its harness's {state:?} decides nothing"
+                );
+                continue;
+            }
+            let moved = match self.store.record_harness_standing(&id, standing) {
+                Ok(moved) => moved,
+                Err(error) => {
+                    eprintln!(
+                        "flow-nexus: flow {id} has its harness's {state:?} unrecorded: {error}"
+                    );
+                    continue;
+                }
+            };
+            // A turn's end is settled as a correlated hook Stop was, work in
+            // flight or not: its size is read and its warning sent, and
+            // only a seat at rest is drained, refreshed or put to sleep.
+            if matches!(event, Some(Event::TurnEnded))
+                || (standing == HarnessStanding::Rested && moved)
+            {
+                rests.push(ToldRest {
+                    flow_id: id,
+                    session: node.session_id.0,
+                });
+            }
+        }
+        rests
+    }
+
+    fn settle_told_rest(&self, rest: &ToldRest) {
+        use crate::rest_watching::RemembersPendingRest;
+        use crate::waking::{AtStop, KeptAtStop, QueuesSimplifiedAnswers, SleepsAndWakesSeats};
+        // A launch sending its first message in parts waits on a rest
+        // before its next part.
+        self.store.launch_changes.announce();
+        crate::turn_ends::RecordsTurnEnd::turn_ended(self, &rest.flow_id);
+        {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.queue_simplified_answer(&rest.flow_id);
+        }
+        if matches!(
+            self.settle_native_rest(&rest.flow_id, &rest.session),
+            AtStop::Kept(KeptAtStop::NotResting(_))
+        ) {
+            self.remember_pending_rest(&rest.flow_id, &rest.session);
+        }
+    }
+}
+
+/// One socket's subscriber: the Nexus whose witnesses it writes, the
+/// socket it dials, and where the rests it is told are settled.
 pub struct HarnessSubscriber<'nexus> {
     pub nexus: &'nexus RunningNexus,
     pub socket: HarnessSocket,
+    pub rests: std::sync::mpsc::Sender<ToldRest>,
 }
 
 pub trait HoldsHarnessSubscription {
@@ -792,7 +965,11 @@ impl HoldsHarnessSubscription for HarnessSubscriber<'_> {
             };
             nexus
                 .harness_witnesses
-                .take(&self.socket, observation, Instant::now());
+                .take(&self.socket, observation.clone(), Instant::now());
+            for rest in nexus.follow_claude_harness(&observation) {
+                // The settling thread ends with the subscribers.
+                let _ = self.rests.send(rest);
+            }
         }
     }
 }
@@ -822,13 +999,24 @@ impl SubscribesToHarnesses for RunningNexus {
         if configuration.harness_subscription_path_vector.is_empty() {
             return;
         }
+        let (rests, told) = std::sync::mpsc::channel::<ToldRest>();
         for path in &configuration.harness_subscription_path_vector {
             let subscriber = HarnessSubscriber {
                 nexus: self,
                 socket: HarnessSocket(path.0.clone()),
+                rests: rests.clone(),
             };
             scope.spawn(move || subscriber.keep_subscribed());
         }
+        drop(rests);
+        // A told rest may start a successor and wait on its launch: it is
+        // settled here, so the subscribers go on reading meanwhile. This
+        // thread ends once every subscriber has.
+        scope.spawn(move || {
+            for rest in told {
+                self.settle_told_rest(&rest);
+            }
+        });
         scope.spawn(move || self.keep_judging());
     }
 }

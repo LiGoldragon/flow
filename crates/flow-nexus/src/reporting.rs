@@ -3,17 +3,14 @@
 //! which appends the event to the events Flow's Memory holds for that flow.
 //! A FlowId Flow does not hold is refused as `Refused.UnknownFlow`, never
 //! adopted. The owner reads the events back over the meta socket with
-//! `ReadEvents`. A `Stopped` event, once answered, lets a launch waiting on
-//! it send its next part; when it names the flow's registered session and
-//! that session's transcript, it is the flow's turn end: the hand-overs
-//! that turn took settle on their receipts, then its rest is recorded, so
-//! the rest is the flow's last transition; it writes the flow's context
-//! size, and may drain its queue. A `PromptSubmitted` event
-//! in the flow's registered session is the seat's word that it took a
-//! prompt, which a writer that typed into its pane waits for
-//! (`submission`); whose digest is exactly the request a hand-over typed is
-//! that request's receipt, and settles it (`after_report`). An event naming
-//! another session is kept and acts on nothing.
+//! `ReadEvents`. A report decides no seat: a Claude flow's state, its rest
+//! and its end are its Harness Nexus subscription's alone
+//! (`harness_subscription`), so a pane resumed without FLOW_ID still rests,
+//! drains and refreshes. A `Stopped` event, once answered, lets a launch
+//! waiting on it send its next part. A `PromptSubmitted` event in the
+//! flow's registered session is the seat's word that it took a prompt,
+//! which a writer that typed into its pane waits for (`submission`). An
+//! event naming another session is kept and acts on nothing.
 //!
 //! A Claude session /clear ends is a session change, not an exit: its
 //! `Cleared` is kept and records nothing else, the flow stays live and its
@@ -21,10 +18,7 @@
 //! session, and the flow is rebound to that session; its FlowId stays.
 
 use crate::RunningNexus;
-use crate::store::current_seat::RecordsCurrentSeats;
-use crate::store::events::RecordsSeatReports;
-
-use crate::generated::transitions::{ClaudeReport, ReportedEvent, ReportsEvents};
+use crate::store::events::{EventRecording, RecordsSeatReports};
 
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::events::RecordsHarnessEvents;
@@ -32,9 +26,7 @@ use crate::store::events::{ProjectsHarnessEventMetadata, RecordedHarnessEvent};
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::queue_delivery::{AccountsQueueDelivery, ShowsQueueDelivery};
 use crate::store::{ReadsFlowRows, RebindsNativeSession};
-use crate::waking::{
-    CorrelatesNativeEvents, QueuesSimplifiedAnswers, SimplifiedAnswer, SleepsAndWakesSeats,
-};
+use crate::waking::CorrelatesNativeEvents;
 use meta_signal_flow::{
     EventsRead_Data, QueueDeliveriesRead_Data, QueueDeliveryResolution, QueueDeliveryResolved_Data,
     QueueResolutionRecord, ReadEventsRejected_Data, ReadQueueDeliveriesRejected_Data,
@@ -70,37 +62,11 @@ pub trait RecordsReports {
 
 impl RecordsReports for RunningNexus {
     fn report(&self, report: Report_Data) -> Output {
-        use crate::generated::memory::{Event as StateReport, SeatActivity};
-        use crate::restarting::FencesSeatEvents;
-        use crate::store::current_seat::SeatEvent;
-        use crate::store::events::EventRecording;
-        let Report_Data {
-            flow_id,
-            event,
-            process_option,
-        } = report;
-        let typed = self
-            .report_acts(&flow_id.0, process_option.as_ref())
-            .then(|| {
-                self.claude_event(ClaudeReport {
-                    flow_id: flow_id.clone(),
-                    hook_event: event.clone(),
-                })
-            })
-            .flatten();
-        let state_event = match typed {
-            Some(StateReport::Working(_)) => Some(SeatEvent::Activity(SeatActivity::Working)),
-            Some(StateReport::Idle(_)) => Some(match &event {
-                Event::Stopped(stop) => SeatEvent::Stopped(stop.background_work.clone()),
-                _ => SeatEvent::Activity(SeatActivity::Resting),
-            }),
-            Some(StateReport::Ended) => Some(SeatEvent::Ended),
-            _ => None,
-        };
-        match self
-            .store
-            .record_seat_report(&flow_id.0, event, state_event)
-        {
+        // A hook's event is kept raw and decides no seat: a Claude flow's
+        // state is its Harness Nexus subscription's alone
+        // (`harness_subscription`).
+        let Report_Data { flow_id, event, .. } = report;
+        match self.store.record_seat_report(&flow_id.0, event, None) {
             Ok(EventRecording::Recorded) => Output::Reported,
             Ok(EventRecording::UnknownFlow) => Output::Refused(signal_flow::Refusal::Unknown(
                 signal_flow::Unknown_Data::FlowId(flow_id),
@@ -134,25 +100,19 @@ impl RecordsReports for RunningNexus {
 
     fn after_attributed_report(&self, flow_id: &FlowId, event: &Event) {
         // A foreign Stop remains raw audit. It is not a cue to reconcile,
-        // submit, announce a turn end, or spend work owed by the bound seat.
+        // submit, or announce a turn end.
         if let Event::Stopped(stop) = event
             && !self.correlated_stop(&flow_id.0, stop)
         {
+            eprintln!(
+                "flow-nexus: a Stop reported for flow {flow_id} names session {:?}, not its own; it settles nothing",
+                stop.native_session_id_option,
+                flow_id = flow_id.0
+            );
             return;
         }
-        if let Ok(Some(node)) = self.store.flow_node(&flow_id.0) {
-            crate::seat_observation::ObservesCurrentSeats::observe_returning_source(self, &node);
-        }
-        if matches!(
-            self.store.current_seat(&flow_id.0),
-            Err(_) | Ok(crate::store::current_seat::CurrentSeatRead::NoRecord)
-        ) {
-            return;
-        }
-        // A prompt the flow's own session took is first the seat's word of
-        // a submission: a writer that typed it waits for it, holding the
-        // gate the settlement below takes, so it is witnessed before
-        // anything here waits.
+        // A prompt the flow's own session took is the seat's word of a
+        // submission: a writer that typed it waits for it.
         if let Event::PromptSubmitted(prompt) = event
             && self.correlated_prompt(&flow_id.0, prompt)
             && let Some(session) = prompt
@@ -173,133 +133,11 @@ impl RecordsReports for RunningNexus {
         // compaction its harness made on its own; SessionStart follows one
         // at once.
         crate::compacting::WatchesCompactions::watch_claude_compactions(self, &flow_id.0);
-        // Receipt settlement and a reported transition belong to one
-        // dispatch: a Soft admission must see the committed native rest
-        // only after the previous turn's receipt has settled.
-        let committed_rest = if matches!(event, Event::ToolUsed(_)) {
-            false
-        } else {
-            let _turn = self
-                .dispatch_gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.claude_event(ClaudeReport {
-                flow_id: flow_id.clone(),
-                hook_event: event.clone(),
-            })
-            .is_some_and(|typed| {
-                let rests = matches!(typed, crate::generated::memory::Event::Idle(_));
-                self.report_event(ReportedEvent {
-                    flow_id: flow_id.clone(),
-                    event: typed,
-                }) && rests
-            })
-        };
-        // A resume at rest needs no second Stop for its queued work.
-        if committed_rest
-            && matches!(event, Event::Started(_))
-            && let Ok(Some(metaflow)) = self.store.metaflow_awake_as(&flow_id.0)
-        {
-            self.drain_awake(&metaflow.address);
-        }
         match event {
-            // A prompt the flow's own session took was its writer's word
-            // above, and settles nothing more.
-            Event::PromptSubmitted(_) => {}
-            // The flow's own Claude session ended: it has exited, its locks
-            // go with it, and a Maintained metaflow is owed its successor.
-            // Observe's Gone remains the fallback for an exit no hook
-            // reports.
-            Event::Ended(session) => {
-                let own = self
-                    .store
-                    .flow_node(&flow_id.0)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|node| {
-                        node.harness_kind == signal_flow::HarnessKind::Claude
-                            && !node.session_id.0.is_empty()
-                            && session.as_ref().map(|session| session.0.as_str())
-                                == Some(node.session_id.0.as_str())
-                    });
-                if own {
-                    crate::observe_agent::RecordsWitnessedExit::exited_as_witnessed(
-                        self, &flow_id.0,
-                    );
-                } else {
-                    eprintln!(
-                        "flow-nexus: flow {flow_id} reported a session end not its own: {session:?}",
-                        flow_id = flow_id.0
-                    );
-                }
-            }
-            Event::Stopped(stop) => {
-                // A launch sending its first message in parts waits on a
-                // Stop before its next part.
-                self.store.launch_changes.announce();
-                if self.correlated_stop(&flow_id.0, stop) {
-                    // A Stop in the flow's own session ends a turn, whatever
-                    // background work it names.
-                    crate::turn_ends::RecordsTurnEnd::turn_ended(self, &flow_id.0);
-                    // A simplified seat's answer is read from its own
-                    // transcript once its input is received there: the
-                    // payloads typed into it were settled above, before the
-                    // rest, since the prompt's hook may have reported before
-                    // Claude wrote its user row.
-                    let answer = {
-                        let _turn = self
-                            .dispatch_gate
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        self.queue_simplified_answer(&flow_id.0)
-                    };
-                    let later = "it is looked for again at the seat's next rest or drain";
-                    match &answer {
-                        SimplifiedAnswer::NoneOwed => {}
-                        SimplifiedAnswer::Queued { recipient, .. } => eprintln!(
-                            "flow-nexus: simplified answer of {flow_id} queued to {:?} {} {:?}",
-                            recipient.aspect,
-                            recipient.topic.0,
-                            recipient.model,
-                            flow_id = flow_id.0
-                        ),
-                        SimplifiedAnswer::InputUnreceived { .. } => eprintln!(
-                            "flow-nexus: simplified answer of {flow_id} not queued at its Stop: its input is not yet Delivered; {later}",
-                            flow_id = flow_id.0
-                        ),
-                        SimplifiedAnswer::TurnUnanswered { .. } => eprintln!(
-                            "flow-nexus: simplified answer of {flow_id} not queued at its Stop: its transcript shows no ended answer; {later}",
-                            flow_id = flow_id.0
-                        ),
-                        SimplifiedAnswer::Undelivered { .. } => eprintln!(
-                            "flow-nexus: simplified answer of {flow_id} refused by the store: its recipient is unknown or its receipt changed; {later}",
-                            flow_id = flow_id.0
-                        ),
-                        SimplifiedAnswer::StoreRefused => eprintln!(
-                            "flow-nexus: simplified answer of {flow_id} not queued at its Stop: the store refused; {later}",
-                            flow_id = flow_id.0
-                        ),
-                    }
-                    if committed_rest
-                        && let Some(session) = &stop.native_session_id_option
-                        && matches!(
-                            self.settle_native_rest(&flow_id.0, &session.0),
-                            crate::waking::AtStop::Kept(crate::waking::KeptAtStop::NotResting(_))
-                        )
-                    {
-                        use crate::rest_watching::RemembersPendingRest;
-                        self.remember_pending_rest(&flow_id.0, &session.0);
-                    }
-                } else {
-                    eprintln!(
-                        "flow-nexus: a Stop reported for flow {flow_id} names session {:?}, not its own; it settles nothing",
-                        stop.native_session_id_option,
-                        flow_id = flow_id.0
-                    );
-                }
-            }
-            // A cleared session is not an exit: the harness goes on in the
-            // session the next Started names.
+            // A launch sending its first message in parts waits on a Stop
+            // before its next part. The rest itself, its drain, refresh and
+            // sleep, is the Harness Nexus's to tell.
+            Event::Stopped(_) => self.store.launch_changes.announce(),
             Event::ToolUsed(_) => {
                 use crate::store::context::NamesFlowModel;
                 use crate::store::context_warnings::ReadsContextWarningConfiguration;
@@ -314,17 +152,11 @@ impl RecordsReports for RunningNexus {
                         self, &flow_id.0,
                     );
                 }
-                if let Some(typed) = self.claude_event(ClaudeReport {
-                    flow_id: flow_id.clone(),
-                    hook_event: event.clone(),
-                }) {
-                    self.report_event(ReportedEvent {
-                        flow_id: flow_id.clone(),
-                        event: typed,
-                    });
-                }
             }
-            Event::Started(_) | Event::Cleared(_) => {}
+            // A session's end is the Harness Nexus's to tell; a cleared
+            // session goes on in the session the next Started names.
+            Event::PromptSubmitted(_) | Event::Ended(_) | Event::Started(_) | Event::Cleared(_) => {
+            }
         }
     }
 

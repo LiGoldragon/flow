@@ -1,20 +1,16 @@
 //! Bound routes hold their session stream even with no client observer.
-//! An event invalidates transport ownership; only the native source can end
-//! a seat. All validated Claude process descriptors share the same wait.
+//! An event invalidates transport ownership. A Claude seat's state and its
+//! end are its Harness Nexus's alone (`harness_subscription`): nothing here
+//! observes or ends one.
 use crate::caller::KnowsHerdrServers;
-use crate::claude::ReadsClaudeSessions;
 use crate::claude_changes::{ClaudeDirectories, ReadsClaudeChanges};
 use crate::event_wait::{AnnouncesOnce, AwaitsDescriptors, OpensExitDescriptor};
 use crate::herdr::LocatesNativeTranscripts;
 use crate::herdr::session_stream::{ReadsSessionChanges, SessionCursor, SharesSessionStreams};
 use crate::herdr::{PaneOwnership, ReadsHerdrPanes, ReadsHerdrRoster};
-use crate::observe_agent::RecordsWitnessedExit;
 use crate::restarting::{FencesSeatEvents, SeatWitness};
-use crate::seat_observation::ReadsNativeStanding;
-use crate::store::current_seat::{CurrentSeatRead, RecordsCurrentSeats};
 use crate::store::metaflow_watch::WatchesMetaflows;
 use crate::store::recipient_retries::RetriesRecipients;
-use crate::store::restart::RecordsRestarts;
 use crate::store::{AnnouncesLaunchChanges, LaunchChanges, ManagesMetaflowState, ReadsFlowRows};
 use crate::{HoldsStopRequest, RunningNexus};
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,50 +27,6 @@ struct BoundTransport {
 pub trait ServesBoundRoutes {
     fn serve_bound_routes(&self);
 }
-trait WatchesNativeProcess {
-    fn watch_claude_process(
-        &self,
-        node: &signal_flow::FlowNode,
-        seat: &SeatWitness,
-    ) -> Option<OwnedFd>;
-}
-impl WatchesNativeProcess for RunningNexus {
-    fn watch_claude_process(
-        &self,
-        node: &signal_flow::FlowNode,
-        seat: &SeatWitness,
-    ) -> Option<OwnedFd> {
-        use crate::generated::memory::SeatStanding;
-        use crate::store::current_seat::KnownSeat;
-        if !matches!(
-            self.store.current_seat(&node.flow_id.0),
-            Ok(CurrentSeatRead::Known(KnownSeat {
-                seat_standing: SeatStanding::Alive(_),
-                ..
-            }))
-        ) {
-            return None;
-        }
-        let session = &node.session_id.0;
-        let registry = &self.herdr.claude_sessions;
-        let opened = registry.session_process(session)?;
-        if let Some(pid) = opened {
-            if let Ok(fd) = pid.exit_descriptor() {
-                // Revalidate the birth after opening the descriptor. A
-                // recycled numeric PID is not a witness for the old seat.
-                if registry.session_of(pid).as_deref() == Some(session) {
-                    return Some(fd);
-                }
-            }
-            if registry.session_process(session) != Some(None) {
-                return None;
-            }
-        }
-        self.exited_as_witnessed_by(&node.flow_id.0, Some(seat));
-        None
-    }
-}
-
 pub(crate) trait WatchesBoundPeers {
     fn watch_bound_peer(
         &self,
@@ -154,7 +106,6 @@ impl ServesBoundRoutes for RunningNexus {
             })
             .collect();
         let mut directories = None;
-        let mut native_seats = BTreeMap::new();
         let mut views = BTreeMap::<String, BoundTransport>::new();
         while !self.stopping.requested() {
             let Ok(changed) = changes.next_descriptor() else {
@@ -168,19 +119,13 @@ impl ServesBoundRoutes for RunningNexus {
                         .ok()
                 });
             }
-            let native = match directories.as_mut().map(ReadsClaudeChanges::changes) {
-                Some(Ok(mut records)) => {
-                    records.topology |= reopened;
-                    Some(records)
-                }
-                Some(Err(error)) => {
-                    eprintln!("flow-nexus: lost native change reader: {error}");
-                    directories = None;
-                    None
-                }
-                None => None,
-            };
-            let mut present_native = BTreeSet::new();
+            // A Claude seat's state is its Harness Nexus's to tell
+            // (`harness_subscription`); a native change only wakes this
+            // loop to follow the bound routes again.
+            if let Some(Err(error)) = directories.as_mut().map(ReadsClaudeChanges::changes) {
+                eprintln!("flow-nexus: lost native change reader: {error}");
+                directories = None;
+            }
             let sessions = self.herdr.herdr_sessions().map(|items| {
                 items
                     .into_iter()
@@ -221,86 +166,9 @@ impl ServesBoundRoutes for RunningNexus {
                 if node.flow_lifecycle != signal_flow::FlowLifecycle::Active {
                     continue;
                 }
-                if node.harness_kind == signal_flow::HarnessKind::Claude
-                    && let Some(changes) = &native
-                {
-                    present_native.insert(id.0.clone());
-                    let identity = (
-                        node.session_id.clone(),
-                        self.store.seat_birth(&id.0).ok().flatten(),
-                    );
-                    let first = native_seats.get(&id.0) != Some(&identity);
-                    if first
-                        || changes.topology
-                        || changes.registry
-                        || changes.sessions.contains(&node.session_id.0)
-                    {
-                        let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
-                        if matches!(self.store.restart_record(&id.0), Ok(None))
-                            && self.store.flow_node(&id.0).ok().flatten() == Some(node.clone())
-                            && self.store.seat_birth(&id.0).ok().flatten() == identity.1
-                        {
-                            let native_birth = || {
-                                use crate::restarting::{ExitProof, ProcFs, ProvesExit};
-                                use crate::store::{FlowStore, ReadsFlowMemory};
-                                let pid = self
-                                    .herdr
-                                    .claude_sessions
-                                    .session_process(&node.session_id.0)??;
-                                let process = FlowStore::process_identity_for_pid(pid)?;
-                                if process.exit_proof(&ProcFs) != ExitProof::Running
-                                    || self.herdr.claude_sessions.session_of(pid).as_deref()
-                                        != Some(node.session_id.0.as_str())
-                                    || identity
-                                        .1
-                                        .as_ref()
-                                        .is_some_and(|birth| birth.process != process)
-                                {
-                                    return None;
-                                }
-                                Some(process)
-                            };
-                            let before = native_birth();
-                            let observed = before
-                                .as_ref()
-                                .and_then(|_| self.read_native_standing(&node))
-                                .filter(|_| before == native_birth());
-                            // Ending a known process goes through the witnessed
-                            // exit path below; file changes convey activity.
-                            if before.is_none()
-                                && self
-                                    .herdr
-                                    .claude_sessions
-                                    .session_process(&node.session_id.0)
-                                    == Some(None)
-                            {
-                                // A newly observable missing seat gets its terminal
-                                // record. An existing Alive seat keeps its row until
-                                // the fenced native exit below can settle its duties.
-                                if matches!(
-                                    self.store.current_seat(&id.0),
-                                    Ok(CurrentSeatRead::NoRecord)
-                                ) {
-                                    let _ = self.store.establish_observation(
-                                        &id.0,
-                                        crate::generated::memory::SeatStanding::Ended,
-                                    );
-                                }
-                            } else {
-                                let _ = self.store.record_observation(&id.0, observed);
-                            }
-                        }
-                    }
-                    native_seats.insert(id.0.clone(), identity);
-                }
                 let Some(witness) = self.seat_witness(&id.0) else {
                     continue;
                 };
-                if node.harness_kind == signal_flow::HarnessKind::Claude
-                    && let Some(fd) = self.watch_claude_process(&node, &witness)
-                {
-                    processes.push(fd);
-                }
                 let route = &witness.route;
                 let Some(socket) = sessions
                     .as_ref()
@@ -349,7 +217,6 @@ impl ServesBoundRoutes for RunningNexus {
                     view.writable = writable;
                 }
             }
-            native_seats.retain(|id, _| present_native.contains(id));
             views.retain(|id, _| present.contains(id));
             let mut descriptors = vec![self.stopping.descriptor(), changed.descriptor()];
             if let Some(source) = &directories {

@@ -284,3 +284,71 @@ impl RecordsCurrentSeats for FlowStore {
         })
     }
 }
+
+/// What a Harness Nexus tells of a Claude flow's seat, as Flow's decision
+/// state takes it: Flowing.Working, Waiting and Blocked are Working,
+/// Flowing.Rested is Rested, an end that is not a /clear is Ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HarnessStanding {
+    Working,
+    Rested,
+    Ended,
+}
+
+pub(crate) trait RecordsHarnessStandings {
+    /// Writes the seat row of `id` as its harness tells it, with its audit
+    /// transition (cause Reported) when it is Awake, in one commit under
+    /// the current-state writer gate. True when the row moved; a told
+    /// standing the row already holds writes nothing. A seat with no row
+    /// is observed at the told standing; an ended seat told alive is a new
+    /// incarnation of it; a rest clears the seat's background work.
+    fn record_harness_standing(&self, id: &str, told: HarnessStanding) -> Result<bool, StoreError>;
+}
+
+impl RecordsHarnessStandings for FlowStore {
+    fn record_harness_standing(&self, id: &str, told: HarnessStanding) -> Result<bool, StoreError> {
+        use crate::store::metaflow::SleepsMetaflows;
+        use SeatStanding::{Alive, Ended};
+        let _gate = self
+            .transitions_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous = self.seat_record(id)?;
+        let standing = previous
+            .as_ref()
+            .and_then(|row| row.seat_standing_option.clone());
+        let target = match told {
+            HarnessStanding::Working => Alive(SeatActivity::Working),
+            HarnessStanding::Rested => Alive(SeatActivity::Resting),
+            HarnessStanding::Ended => Ended,
+        };
+        let idle = previous
+            .as_ref()
+            .is_none_or(|row| row.background_work.0.is_empty());
+        if standing.as_ref() == Some(&target) && (told != HarnessStanding::Rested || idle) {
+            return Ok(false);
+        }
+        let event = match (&standing, told) {
+            (_, HarnessStanding::Ended) => SeatEvent::Ended,
+            (None, _) => SeatEvent::Observed(target.clone()),
+            (Some(Ended), _) => SeatEvent::NewIncarnation(target.clone()),
+            (Some(_), HarnessStanding::Working) => SeatEvent::Activity(SeatActivity::Working),
+            (Some(_), HarnessStanding::Rested) => SeatEvent::Stopped(BackgroundWork(vec![])),
+        };
+        let commit = self.engine.begin_atomic_commit();
+        let commit = match self.metaflow_awake_as(id)? {
+            Some(seat) => self.stage_observation_audit(
+                commit,
+                crate::generated::overriding::Seat {
+                    flow_id: FlowId(id.into()),
+                    address: seat.address,
+                },
+                &target,
+            )?,
+            None => commit,
+        };
+        let commit = self.stage_current_event(commit, id, event)?;
+        self.engine.commit_atomic(commit)?;
+        Ok(true)
+    }
+}

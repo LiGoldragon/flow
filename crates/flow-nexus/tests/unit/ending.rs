@@ -1,6 +1,7 @@
 //! No pane outlives its flow: in the event that ends a flow — Stop, Retire,
-//! a refresh, a replacement's reap, an exit — Flow closes the flow's
-//! harness and its Herdr pane where they are still there. A pane already
+//! a refresh, a replacement's reap — Flow closes the flow's harness and its
+//! Herdr pane where they are still there. A Claude session's end, which its
+//! Harness Nexus tells, ends its seat and not the flow. A pane already
 //! gone is nothing to close, and a pane now running another session is
 //! never closed.
 
@@ -155,47 +156,38 @@ fn close_of_a_maintained_metaflow_s_flow_closes_it() {
     assert!(closed(&fixture), "the closed flow's pane is closed");
 }
 
-/// A flow whose own session end its hook reports is recorded Exited, and
-/// its pane, still there, is closed in the same event.
+/// A Claude flow's end is its Harness Nexus's to tell: the end its hook
+/// reports is kept raw and ends nothing; the harness's end of its session
+/// ends its seat, Asleep, and leaves the flow live and its pane open, so a
+/// Restart can still take it.
 #[test]
-fn a_flow_whose_session_ended_has_its_pane_closed() {
+fn a_flow_whose_harness_ends_its_session_is_asleep_and_stays_live() {
+    use crate::generated::transitions::{AskedFlow, RecordsTransitions};
     let fixture = NexusFixture::new();
     awake_seat(&fixture);
+    let live = lifecycle(&fixture);
 
-    fixture.nexus.after_report(
-        &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
-        &Event::Ended(Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into()))),
+    report(
+        &fixture,
+        Event::Ended(Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into()))),
     );
+    assert_eq!(lifecycle(&fixture), live, "a hook's end ends nothing");
+    super::harness_subscription::ended_to(&fixture.nexus, CLAUDE_SESSION);
 
-    assert_eq!(lifecycle(&fixture), FlowLifecycle::Exited);
-    assert!(closed(&fixture), "the exited flow's pane is closed");
     assert_eq!(
         fixture
             .nexus
             .store
-            .metaflow(&address(Model::Sol))
-            .unwrap()
-            .expect("metaflow held")
-            .state,
-        State::Asleep
+            .state_of(AskedFlow(flow_ethos::FlowId(CLAUDE_SEAT.into())))
+            .unwrap(),
+        Some(meta_signal_flow::State::Asleep)
     );
-}
-
-/// A flow whose pane Herdr shows gone is recorded Exited and nothing is
-/// closed: there is no pane left.
-#[test]
-fn a_flow_whose_pane_is_gone_exits_with_nothing_to_close() {
-    let fixture = NexusFixture::new();
-    awake_seat(&fixture);
-    fixture.accept_pane_operations(vec![], PromptFixture::Prompted("w1:p3"));
-
-    fixture.nexus.after_report(
-        &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
-        &Event::Ended(Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into()))),
+    assert_eq!(lifecycle(&fixture), live);
+    assert!(!closed(&fixture), "no pane is closed by the end");
+    assert_eq!(
+        state(&fixture),
+        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
     );
-
-    assert_eq!(lifecycle(&fixture), FlowLifecycle::Exited);
-    assert!(!closed(&fixture), "no pane is left to close");
 }
 
 /// A session /clear ended is a session change, not an exit: the flow is
@@ -238,14 +230,7 @@ fn a_cleared_session_is_not_an_exit_and_the_next_start_rebinds_the_flow() {
         &fixture,
         Event::Ended(Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into()))),
     );
-    assert_eq!(lifecycle(&fixture), live, "the old session is not its own");
-    report(
-        &fixture,
-        Event::Ended(Some(signal_flow::NativeSessionId(
-            CLEARED_SUCCESSOR_SESSION.into(),
-        ))),
-    );
-    assert_eq!(lifecycle(&fixture), FlowLifecycle::Exited);
+    assert_eq!(lifecycle(&fixture), live, "a hook's end ends nothing");
 }
 
 /// A start that follows no clear of the flow's own session rebinds
@@ -299,20 +284,4 @@ fn a_close_herdr_refuses_answers_capsule_refused_and_records_nothing() {
         state(&fixture),
         State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
     );
-}
-
-/// An exit is recorded though Herdr refuses to close the pane: the exit
-/// takes no lease and is not held back, the refused close is logged.
-#[test]
-fn an_exit_whose_close_herdr_refuses_is_recorded_all_the_same() {
-    let fixture = NexusFixture::new();
-    awake_seat(&fixture);
-    close_answers(&fixture, "exit 1");
-
-    report(
-        &fixture,
-        Event::Ended(Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into()))),
-    );
-    assert_eq!(lifecycle(&fixture), FlowLifecycle::Exited);
-    assert_eq!(state(&fixture), State::Asleep);
 }

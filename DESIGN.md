@@ -60,19 +60,23 @@ SessionStart, PostToolUse, UserPromptSubmit, Stop and SessionEnd, sends
 performs it as `Record.Harness`, appending the event to that flow's events in
 its Memory, and answers `Reported`, or `Refused.UnknownFlow` for a flow it
 does not hold, which it never adopts. The owner reads a flow's events with
-meta `ReadEvents`.
+meta `ReadEvents`. A report decides no Claude seat: the seat's state, rest
+and end are its Harness Nexus's (below); a report keeps the raw event,
+witnesses a typed prompt's submission, cues a launch waiting on a Stop,
+follows a /clear and reads the transcript for a compaction.
 
 A Claude session /clear ends is a session change, not an exit. Its
 SessionEnd, reason `clear`, reports `Cleared.Some.«session»`: Flow records
 no exit and closes no pane. SessionStart reports `Started.Some.«session»`,
 naming the session; the one that follows the flow's own `Cleared` rebinds
 the flow to that new session, in its row and its owner proof, and its
-FlowId stays. A SessionEnd with any other reason reports `Ended` and is the
-flow's exit.
+FlowId stays. A SessionEnd with any other reason reports `Ended`, kept raw;
+the flow's end is what its Harness Nexus tells.
 
 Every Harness Nexus serves one subscription (signal-harness), and Flow holds
-what each tells as a witness of each flow's state beside its own sources,
-deciding nothing by it (`harness_subscription`). The daemon reads
+what each tells as a witness of each flow's state beside its own sources
+(`harness_subscription`). For a Claude flow the subscription is the only
+source of its state. The daemon reads
 `<configuration home>/nexus/<place-name>/flow-nexus-daemon.datom` beside its
 place file, one `DaemonConfiguration.{ Vector<HarnessSubscriptionPath>
 GraceSeconds DisagreementCapacity }`; with no file nothing is subscribed to,
@@ -84,17 +88,40 @@ Subscribed replaces that socket's witnesses whole, a Changed updates one
 (its tokens too on ContextSize), and a flow told Ended stays until the
 socket's next Subscribed. A connection that ends after its Subscribed is
 dialed again at once; a socket absent, refusing, or silent before its
-Subscribed is waited on by a watch of its name. When a Changed moves a
-flow's harness state to a new value, its comparison with `state_of` falls
-due GraceSeconds later, replacing the flow's comparison not yet due, if the
-harness state is still that value and Flow records a state: Flowing.Working,
-Waiting and Blocked agree with Acting, Flowing.Rested with Resting, Ended
-with Asleep, Crystallizing with any Flowing state, and Dry is not judged.
-One judge thread waits on the witnesses' change announcement and the stop,
-bounded by the earliest due moment, and keeps each disagreement in a ring of
-DisagreementCapacity entries. Meta `ObserveHarness` answers every witness of
-a flow Flow holds, each with Flow's own state now, and the ring oldest
-first. No rest, drain, wake or close is taken from a witness.
+Subscribed is waited on by a watch of its name.
+
+A Harness Nexus names a session by its first six characters; Flow's own
+FlowId of a Claude flow is the same six unless `flow-id` lengthened it past
+a collision, so each snapshot entry and Changed is matched by session: to
+the live Claude flow whose stored session id begins with that name. Two
+live flows sharing it are a refusal, logged, and decide nothing for either.
+Unless a restart holds the flow, its seat row is written through the one
+current-state funnel, with its audit transition (cause Reported) in the
+same commit: Flowing.Working, Waiting and Blocked are Activity Working,
+Flowing.Rested is Stopped with no background work, an end that is not a
+/clear is Ended in the seat row only (the flow stays live, so a Restart can
+take it), and Dry is nothing. A seat with no row is observed at the told
+standing, and an ended seat told alive is a new incarnation. A rest the
+harness tells (a seat moved to Resting, or one told TurnEnded) is settled on
+the part's own settling thread as a correlated hook Stop was: launches
+waiting on a rest are cued, the turn end is published, a simplified seat's
+answer is queued, and `settle_native_rest` takes it: the context size read
+from the transcript, the warning pass, the drain, an ordered or threshold
+refresh, the sleep. No hook report, takeover read, bound-route observation
+or process watch decides a Claude seat any more; a Codex seat is decided by
+its thread as before.
+
+When a Changed moves a flow's harness state to a new value, its comparison
+with `state_of` falls due GraceSeconds later, replacing the flow's
+comparison not yet due, if the harness state is still that value and Flow
+records a state: Flowing.Working, Waiting and Blocked agree with Acting,
+Flowing.Rested with Resting, Ended with Asleep, Crystallizing with any
+Flowing state, and Dry is not judged. One judge thread waits on the
+witnesses' change announcement and the stop, bounded by the earliest due
+moment, and keeps each disagreement in a ring of DisagreementCapacity
+entries. Meta `ObserveHarness` answers every witness, each with Flow's own
+state of the flow it names now, None for a session Flow holds no flow for,
+and the ring oldest first.
 
 A Claude flow's FlowId exists before its harness. Reserve chooses the Claude
 session id from the launch request id (UUIDv5-shaped, so one request names

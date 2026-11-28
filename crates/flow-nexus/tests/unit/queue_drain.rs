@@ -85,7 +85,8 @@ fn seat(fixture: &NexusFixture, queue: Vec<TestRequest>) {
     });
 }
 
-/// A report as the hook sends it: recorded, answered, then acted on.
+/// A report as the hook sends it, recorded, answered and acted on, and
+/// what the Harness Nexus tells with it, which alone moves the seat.
 fn report(fixture: &NexusFixture, event: Event) {
     assert_eq!(
         fixture.nexus.report(Report_Data {
@@ -99,6 +100,7 @@ fn report(fixture: &NexusFixture, event: Event) {
         &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
         &event,
     );
+    super::harness_subscription::told_as_reported(fixture, &event);
 }
 
 fn foreign_stop() -> Event {
@@ -257,58 +259,26 @@ fn a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop() {
     );
 }
 
+/// The takeover reads no Claude seat: whatever its process registry and
+/// transcript show, the seat stays as its Harness Nexus last told it.
 #[test]
-fn takeover_reads_the_claude_process_and_transcript_not_herdr_and_recovers_on_source_return() {
+fn takeover_leaves_a_claude_seat_as_its_harness_told_it() {
     use crate::generated::memory::{SeatActivity, SeatStanding};
     use crate::seat_observation::ObservesCurrentSeats;
     use crate::store::current_seat::CurrentSeatRead;
     let fixture = NexusFixture::new();
     seat(&fixture, vec![from_core("untyped while unobserved")]);
-    // No live harness is consulted. Only the fixture's directory and the
-    // birth of the test's own process stand in for the native session.
-    let records = &fixture.nexus.herdr.claude_sessions.directory;
-    assert!(!records.exists());
+    let resting = |fixture: &NexusFixture| matches!(fixture.nexus.store.current_seat(CLAUDE_SEAT).unwrap(), CurrentSeatRead::Known(row) if row.seat_standing == SeatStanding::Alive(SeatActivity::Resting));
+    assert!(resting(&fixture));
     fixture.nexus.observe_takeover().unwrap();
-    assert!(matches!(
-        fixture.nexus.store.current_seat(CLAUDE_SEAT).unwrap(),
-        CurrentSeatRead::NoRecord
-    ));
-    assert_eq!(typed_count(&fixture, "untyped while unobserved"), 0);
-    let pid = std::process::id();
-    let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
-    let start = stat
-        .rsplit_once(") ")
-        .unwrap()
-        .1
-        .split_whitespace()
-        .nth(19)
-        .unwrap();
-    std::fs::create_dir_all(records).unwrap();
-    let record = records.join(format!("{pid}.json"));
-    std::fs::write(
-        &record,
-        serde_json::json!({"sessionId": CLAUDE_SESSION, "pid": pid, "procStart": start})
-            .to_string(),
-    )
-    .unwrap();
-    append_main_rows(&fixture, &[end_turn("current-main-turn")]);
-    fixture.nexus.observe_takeover().unwrap();
-    assert!(
-        matches!(fixture.nexus.store.current_seat(CLAUDE_SEAT).unwrap(), CurrentSeatRead::Known(row) if row.seat_standing == SeatStanding::Alive(SeatActivity::Resting))
-    );
+    assert!(resting(&fixture), "an absent process ends nothing");
     append_main_rows(
         &fixture,
         &[serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION})],
     );
     fixture.nexus.observe_takeover().unwrap();
-    assert!(
-        matches!(fixture.nexus.store.current_seat(CLAUDE_SEAT).unwrap(), CurrentSeatRead::Known(row) if row.seat_standing == SeatStanding::Alive(SeatActivity::Working))
-    );
-    std::fs::remove_file(record).unwrap();
-    fixture.nexus.observe_takeover().unwrap();
-    assert!(
-        matches!(fixture.nexus.store.current_seat(CLAUDE_SEAT).unwrap(), CurrentSeatRead::Known(row) if row.seat_standing == SeatStanding::Ended)
-    );
+    assert!(resting(&fixture), "a transcript in a turn moves nothing");
+    assert_eq!(typed_count(&fixture, "untyped while unobserved"), 0);
     assert_eq!(queue(&fixture).len(), 1);
 }
 
@@ -1166,16 +1136,13 @@ fn a_new_release_during_a_blocked_retry_stays_pending_without_a_second_writer() 
     });
 }
 
+/// A Claude seat no hook reports for, in its turn while a Soft request is
+/// queued, is handed that request at the rest its Harness Nexus tells, once:
+/// a later turn and rest type nothing again.
 #[test]
-fn a_hookless_claude_transcript_rest_delivers_queued_soft_exactly_once() {
-    use crate::HoldsStopRequest;
-    use crate::event_wait::AwaitsDirectory;
-    use crate::generated::memory::{SeatActivity, SeatStanding};
-    use crate::seat_routes::ServesBoundRoutes;
-    use crate::store::current_seat::SeatDecision;
-    use crate::store::recipient_retries::{ObservesRetryCompletion, RetriesRecipients};
+fn a_hookless_claude_harness_rest_delivers_queued_soft_exactly_once() {
+    use super::harness_subscription::{rested_now, working_now};
     use std::fs;
-    use std::time::{Duration, Instant};
     let fixture = NexusFixture::new();
     let payload = "queued for a hookless Claude";
     seat(&fixture, vec![from_core(payload)]);
@@ -1183,84 +1150,21 @@ fn a_hookless_claude_transcript_rest_delivers_queued_soft_exactly_once() {
         vec![claude_agent(&fixture)],
         PromptFixture::Prompted("w1:p3"),
     );
-    let transcript = super::waking::claude_transcript(&fixture);
-    fs::remove_file(&transcript).unwrap();
-    let store = &fixture.nexus.store;
-    store.record_observation(CLAUDE_SEAT, None).unwrap();
-    let registry = &fixture.nexus.herdr.claude_sessions.directory;
-    assert!(registry.starts_with(fixture.directory.path()));
-    fs::create_dir_all(registry).unwrap();
-    let pid = std::process::id();
-    let stat = fs::read_to_string("/proc/self/stat").unwrap();
-    let birth = stat
-        .rsplit_once(") ")
-        .unwrap()
-        .1
-        .split_whitespace()
-        .nth(19)
-        .unwrap();
-    fs::write(
-        registry.join(format!("{pid}.json")),
-        serde_json::json!({"pid":pid,"sessionId":CLAUDE_SESSION,"procStart":birth}).to_string(),
-    )
-    .unwrap();
-    fixture.nexus.watch_recipient_retries().unwrap();
-    std::thread::scope(|scope| {
-        struct Stop<'a>(&'a crate::RunningNexus);
-        impl Drop for Stop<'_> {
-            fn drop(&mut self) {
-                self.0.stopping.request();
-            }
-        }
-        scope.spawn(|| fixture.nexus.serve_recipient_retries());
-        scope.spawn(|| fixture.nexus.serve_bound_routes());
-        let _stop = Stop(&fixture.nexus);
-        let deadline = || Instant::now() + Duration::from_secs(8);
-        let user = serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"message":{"content":"native turn"}});
-        fs::write(&transcript, format!("{user}\n")).unwrap();
-        assert!(store.completed_by(&[address(Model::Sol)], deadline()));
-        assert!(matches!(
-            store.seat_decision(CLAUDE_SEAT).unwrap(),
-            SeatDecision::Observed(SeatStanding::Alive(SeatActivity::Working))
-        ));
-        assert_eq!(typed_count(&fixture, payload), 0);
-        let replacement = transcript.with_extension("replacement");
-        fs::write(
-            &replacement,
-            format!("{user}\n{}\n", end_turn("foreground-ended")),
-        )
-        .unwrap();
-        fs::rename(replacement, &transcript).unwrap();
-        assert!(
-            fixture
-                .directory
-                .path()
-                .until_holds(deadline(), &mut || typed_count(&fixture, payload) == 1)
-        );
-        use crate::store::AnnouncesLaunchChanges;
-        assert!(
-            store
-                .launch_changes
-                .until_holds(deadline(), &mut || queue(&fixture).is_empty())
-        );
-        // The recipient may append its accepted user row. Two more genuine
-        // file events traverse Working then Resting; neither retypes the input.
-        append_main_rows(&fixture, &[user]);
-        let until = |activity: SeatActivity| {
-            let signal = crate::store::LaunchChanges::default();
-            use crate::store::metaflow_watch::WatchesMetaflows;
-            store.watch_native_rests(signal.clone()).unwrap();
-            signal.until_holds(deadline(), &mut ||matches!(store.seat_decision(CLAUDE_SEAT).unwrap(),SeatDecision::Observed(SeatStanding::Alive(current)) if current==activity))
-        };
-        assert!(until(SeatActivity::Working));
-        append_main_rows(&fixture, &[end_turn("duplicate-ready")]);
-        assert!(until(SeatActivity::Resting));
-        assert_eq!(
-            fs::read_to_string(command_log)
-                .unwrap()
-                .matches("agent prompt")
-                .count(),
-            1
-        );
-    });
+    working_now(&fixture);
+    assert_eq!(typed_count(&fixture, payload), 0, "nothing typed in a turn");
+    append_main_rows(&fixture, &[end_turn("foreground-ended")]);
+    rested_now(&fixture);
+    assert_eq!(typed_count(&fixture, payload), 1);
+    assert!(queue(&fixture).is_empty());
+    working_now(&fixture);
+    append_main_rows(&fixture, &[end_turn("duplicate-ready")]);
+    rested_now(&fixture);
+    assert_eq!(
+        fs::read_to_string(command_log)
+            .unwrap()
+            .matches("agent prompt")
+            .count(),
+        1,
+        "a later rest types nothing again"
+    );
 }

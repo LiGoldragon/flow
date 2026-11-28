@@ -100,6 +100,7 @@ pub mod seat_observation;
 pub mod seat_routes;
 pub mod send_tool;
 pub mod sending;
+pub mod session_binding;
 pub mod store;
 pub mod store_check;
 pub mod submission;
@@ -2222,16 +2223,13 @@ impl meta_signal_flow::Answering for MetaCall<'_> {
         self.nexus.harness_observed()
     }
 
+    // An owner's override: the Address is Awake as the session it names.
     fn bind(
         &self,
         bind: &meta_signal_flow::Bind_Data,
     ) -> Result<meta_signal_flow::Bound_Data, meta_signal_flow::Output> {
-        let _ = bind;
-        Err(meta_signal_flow::Output::Refused(
-            meta_signal_flow::Refused_Data::StoreRefused(meta_signal_flow::StoreFailure(
-                "Bind is not yet served".into(),
-            )),
-        ))
+        use session_binding::BindsSessions;
+        self.nexus.bind_session(bind)
     }
 }
 
@@ -3576,6 +3574,7 @@ mod tests {
     mod seat_binding;
     mod send_admission;
     mod send_tool;
+    mod session_binding;
     mod snapshot_sends;
     mod start_admission;
     mod submission;

@@ -63,6 +63,7 @@ pub(crate) mod send_call;
 pub(crate) mod send_outcome;
 pub(crate) mod send_server;
 pub(crate) mod sent;
+pub(crate) mod session_binding;
 mod staged_open;
 pub(crate) mod successor;
 pub(crate) mod successor_upgrade;

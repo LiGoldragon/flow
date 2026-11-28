@@ -449,8 +449,9 @@ impl ReadsComposer for Composer {
                 glyph: '›',
                 retraction: Retraction::LineByLine,
             },
-            // OpenCode's composer is not yet read: its glyph is not known,
-            // and its text is retracted a line at a time.
+            // OpenCode 2.4.1's composer, as a Herdr pane showed it: each line
+            // behind `┃`; its text is retracted a line at a time (not yet
+            // tried).
             HarnessKind::OpenCode => Self {
                 glyph: '┃',
                 retraction: Retraction::LineByLine,

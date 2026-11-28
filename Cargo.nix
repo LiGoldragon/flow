@@ -123,6 +123,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "flow-recover" = rec {
+      packageId = "flow-recover";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "flow-recover";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "meta-signal-flow-before-request-ids" = rec {
       packageId = "meta-signal-flow-before-request-ids";
       build = internal.buildRustCrateWithFeatures {
@@ -1382,6 +1392,67 @@ rec {
           }
         ];
 
+      };
+      "flow-recover" = rec {
+        crateName = "flow-recover";
+        version = "0.1.0";
+        edition = "2024";
+        crateBin = [
+          {
+            name = "flow-recover";
+            path = "src/main.rs";
+            requiredFeatures = [ ];
+          }
+        ];
+        src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/flow-recover; };
+        libName = "flow_recover";
+        dependencies = [
+          {
+            name = "datom-codec";
+            packageId = "datom-codec";
+          }
+          {
+            name = "flow-ethos";
+            packageId = "flow-ethos";
+            usesDefaultFeatures = false;
+            features = [ "datom" ];
+          }
+          {
+            name = "protos";
+            packageId = "protos";
+          }
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+          {
+            name = "serde_json";
+            packageId = "serde_json";
+          }
+          {
+            name = "signal-flow";
+            packageId = "signal-flow 0.70.0";
+            features = [ "datom" ];
+          }
+        ];
+        buildDependencies = [
+          {
+            name = "ethos-zero";
+            packageId = "ethos-zero 29.0.0";
+          }
+        ];
+        devDependencies = [
+          {
+            name = "tempfile";
+            packageId = "tempfile";
+          }
+        ];
+        features = {
+          "default" = [ "datom" ];
+        };
+        resolvedDefaultFeatures = [ "datom" "default" ];
       };
       "fsevent-sys" = rec {
         crateName = "fsevent-sys";

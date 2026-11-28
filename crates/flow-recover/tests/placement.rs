@@ -50,10 +50,26 @@ fn newest_claim_binds_and_the_rest_are_reported() {
     write(&older, &snapshot("{ Mind flowNexus Opus }", "aaaaaa"), 600);
     write(&newer, &snapshot("{ Mind flowNexus Opus }", "bbbbbb"), 60);
     write(&other, &snapshot("{ Psyche test Haiku }", "cccccc"), 60);
-    write(&bare, "{\"type\":\"user\",\"message\":\"Metaflow: { Psyche test Opus }\"}\n", 60);
-    write(&unknown_model, &snapshot("{ Psyche audit Primary }", "eeeeee"), 60);
-    write(&project.join("aaaaaa11/subagents/agent-1.jsonl"), &snapshot("{ Field x Opus }", "ffffff"), 0);
-    write(&project.join("notes.txt"), &snapshot("{ Field y Opus }", "gggggg"), 0);
+    write(
+        &bare,
+        "{\"type\":\"user\",\"message\":\"Metaflow: { Psyche test Opus }\"}\n",
+        60,
+    );
+    write(
+        &unknown_model,
+        &snapshot("{ Psyche audit Primary }", "eeeeee"),
+        60,
+    );
+    write(
+        &project.join("aaaaaa11/subagents/agent-1.jsonl"),
+        &snapshot("{ Field x Opus }", "ffffff"),
+        0,
+    );
+    write(
+        &project.join("notes.txt"),
+        &snapshot("{ Field y Opus }", "gggggg"),
+        0,
+    );
 
     let lines: Vec<String> = recovery(root.path())
         .placements()
@@ -67,7 +83,10 @@ fn newest_claim_binds_and_the_rest_are_reported() {
         vec![
             format!("Bind.{{ {{ Mind flowNexus Opus }} {} }}", at(&newer)),
             format!("Bind.{{ {{ Psyche test Haiku }} {} }}", at(&other)),
-            format!("Contested.{{ {{ Mind flowNexus Opus }} [ {} ] }}", at(&older)),
+            format!(
+                "Contested.{{ {{ Mind flowNexus Opus }} [ {} ] }}",
+                at(&older)
+            ),
             format!("Unidentified.{}", at(&bare)),
             format!("Unidentified.{}", at(&unknown_model)),
         ]

@@ -373,6 +373,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "flow-recover"
+version = "0.1.0"
+dependencies = [
+ "datom-codec",
+ "ethos-zero 29.0.0",
+ "flow-ethos",
+ "protos",
+ "rkyv",
+ "serde_json",
+ "signal-flow 0.70.0",
+ "tempfile",
+]
+
+[[package]]
 name = "fsevent-sys"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

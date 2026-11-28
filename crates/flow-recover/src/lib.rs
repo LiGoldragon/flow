@@ -8,16 +8,14 @@ pub mod generated;
 pub use generated::recovery::*;
 
 use datom_codec::{Actualizing, Budget, Composing, Datomizable, Potential};
-use flow_ethos::Address;
+use flow_ethos::{Address, FlowId};
 use protos::{Compactable, Protosizable, ReaderBudget};
 use serde_json::Value;
 use signal_flow::TranscriptPath;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs,
-    io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    time::SystemTime,
 };
 
 /// A value read from one datom text.
@@ -50,41 +48,130 @@ impl<T: Datomizable> PrintsDatom for T {
     }
 }
 
-/// The session files under the transcript root.
+/// What one session file says of itself: the identity its launcher wrote,
+/// if it names one, and the time of its last record that carries one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionReading {
+    pub identity: Option<SessionIdentity>,
+    pub time: Option<String>,
+}
+
+/// The identity lines of one session file, and the session id of the
+/// record that held them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionIdentity {
+    pub address: Address,
+    pub flow_id: FlowId,
+    pub session_id: Option<SessionId>,
+}
+
+/// One file that claims a flow id as an Address's, with its time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FlowClaim {
+    pub address: Address,
+    pub time: Option<String>,
+    pub file: PathBuf,
+}
+
+/// One flow in an Address's chain: its flow id, its newest time, and the
+/// files that claim it; more than one file is a contested flow.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChainedFlow {
+    pub flow_id: FlowId,
+    pub time: Option<String>,
+    pub files: Vec<PathBuf>,
+}
+
+/// The session files under the transcript root, no deeper than its Depth.
 pub trait FindsSessionFiles {
     fn session_files(&self) -> Result<Vec<PathBuf>, String>;
 }
 
-/// The Address one session file names as its own, if it names one.
-pub trait ReadsSessionIdentity {
-    fn session_identity(&self, file: &Path) -> Option<Address>;
+/// The session files in one directory and, while depth remains, in the
+/// directories below it.
+pub trait CollectsSessionFiles {
+    fn collect_session_files(&self, directory: &Path, depth: i64, files: &mut Vec<PathBuf>);
 }
 
-/// The Address the launcher's identity lines of one session's prompts name:
-/// both an Address line that reads as an Address and a Flow ID line that
-/// is not empty.
+/// What one session file says of itself.
+pub trait ReadsSession {
+    fn session_reading(&self, file: &Path) -> SessionReading;
+}
+
+/// The Address and flow id the launcher's identity lines of one session's
+/// prompts name: an Address line that reads as an Address and a Flow ID
+/// line that is not empty.
 pub trait ReadsPromptIdentity {
-    fn prompt_identity(&self, prompts: &[&str]) -> Option<Address>;
+    fn prompt_identity(&self, prompts: &[&str]) -> Option<(Address, FlowId)>;
 }
 
-/// Every session file under the root, placed: one Bind for each Address,
-/// then the Contested Addresses, then the Unidentified files.
+/// Whether a flow id is the start of the session id it was written in.
+pub trait StartsSession {
+    fn starts_session(&self, session_id: &SessionId) -> bool;
+}
+
+impl StartsSession for FlowId {
+    fn starts_session(&self, session_id: &SessionId) -> bool {
+        !self.0.is_empty() && session_id.0.starts_with(self.0.as_str())
+    }
+}
+
+/// One Address's chain of flows, placed: its current flow bound, its older
+/// flows past, its newest flows contested where they cannot be ordered.
+pub trait PlacesChain {
+    fn chain_placements(&self, address: &Address) -> Vec<Placement>;
+}
+
+impl PlacesChain for [ChainedFlow] {
+    fn chain_placements(&self, address: &Address) -> Vec<Placement> {
+        let mut flows: Vec<&ChainedFlow> = self.iter().collect();
+        flows.sort_by(|one, other| {
+            other
+                .time
+                .cmp(&one.time)
+                .then_with(|| one.flow_id.cmp(&other.flow_id))
+        });
+        let Some(newest) = flows.first() else {
+            return Vec::new();
+        };
+        let tied = flows
+            .iter()
+            .take_while(|flow| flow.time == newest.time)
+            .count();
+        let mut placements = Vec::new();
+        if tied > 1 {
+            placements.push(Placement::Contested(Contest::Unordered(Unordered_Data {
+                address: address.clone(),
+                transcript_path_vector: flows[..tied]
+                    .iter()
+                    .flat_map(|flow| flow.files.iter())
+                    .map(|file| file.transcript_path())
+                    .collect(),
+            })));
+        } else if let [file] = newest.files.as_slice() {
+            placements.push(Placement::Bind(Bind_Data {
+                address: address.clone(),
+                transcript_path: file.transcript_path(),
+            }));
+        }
+        for flow in &flows[tied..] {
+            if let [file] = flow.files.as_slice() {
+                placements.push(Placement::Past(Past_Data {
+                    address: address.clone(),
+                    flow_id: flow.flow_id.clone(),
+                    transcript_path: file.transcript_path(),
+                }));
+            }
+        }
+        placements
+    }
+}
+
+/// Every session file under the root, placed: the Binds, the Past flows,
+/// the Contested flows and Addresses, the Mismatched files, then the
+/// Unidentified ones.
 pub trait PlacesSessions {
     fn placements(&self) -> Result<Vec<Placement>, String>;
-}
-
-/// When a file was last written; a file whose time cannot be read is the
-/// oldest.
-pub trait WrittenAt {
-    fn written_at(&self) -> SystemTime;
-}
-
-impl WrittenAt for Path {
-    fn written_at(&self) -> SystemTime {
-        fs::metadata(self)
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH)
-    }
 }
 
 /// A file's path as the meta Signal carries it.
@@ -98,38 +185,44 @@ impl AsTranscriptPath for Path {
     }
 }
 
+impl CollectsSessionFiles for FileSuffix {
+    fn collect_session_files(&self, directory: &Path, depth: i64, files: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if depth > 0 {
+                    self.collect_session_files(&path, depth - 1, files);
+                }
+            } else if path.is_file()
+                && path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().ends_with(self.0.as_str()))
+            {
+                files.push(path);
+            }
+        }
+    }
+}
+
 impl FindsSessionFiles for Recovery {
     fn session_files(&self) -> Result<Vec<PathBuf>, String> {
         let root = Path::new(&self.transcript_root.0);
-        let suffix = self.session_shape.file_suffix.0.as_str();
-        let projects = fs::read_dir(root)
+        fs::read_dir(root)
             .map_err(|error| format!("transcript root {}: {error}", root.display()))?;
         let mut files = Vec::new();
-        for project in projects.flatten() {
-            let project = project.path();
-            if !project.is_dir() {
-                continue;
-            }
-            let Ok(entries) = fs::read_dir(&project) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let file = entry.path();
-                let named = file
-                    .file_name()
-                    .is_some_and(|name| name.to_string_lossy().ends_with(suffix));
-                if named && file.is_file() {
-                    files.push(file);
-                }
-            }
-        }
+        self.session_shape
+            .file_suffix
+            .collect_session_files(root, self.depth.0, &mut files);
         files.sort();
         Ok(files)
     }
 }
 
 impl ReadsPromptIdentity for IdentityMarks {
-    fn prompt_identity(&self, prompts: &[&str]) -> Option<Address> {
+    fn prompt_identity(&self, prompts: &[&str]) -> Option<(Address, FlowId)> {
         let mut address = None;
         let mut flow_id = None;
         for line in prompts.iter().flat_map(|prompt| prompt.lines()) {
@@ -139,25 +232,29 @@ impl ReadsPromptIdentity for IdentityMarks {
             if let Some(rest) = line.strip_prefix(self.flow_id_mark.0.as_str()) {
                 let rest = rest.trim();
                 if !rest.is_empty() {
-                    flow_id = flow_id.or(Some(rest));
+                    flow_id = flow_id.or_else(|| Some(FlowId(rest.to_owned())));
                 }
             }
         }
-        flow_id.and(address)
+        Some((address?, flow_id?))
     }
 }
 
-impl ReadsSessionIdentity for Recovery {
-    fn session_identity(&self, file: &Path) -> Option<Address> {
+impl ReadsSession for Recovery {
+    fn session_reading(&self, file: &Path) -> SessionReading {
         let shape = &self.session_shape;
         let kind = shape.snapshot_kind.0.as_str();
-        let reader = BufReader::new(fs::File::open(file).ok()?);
-        let mut held = None;
-        for line in reader.split(b'\n') {
-            let Ok(line) = line else {
-                break;
+        let time_field = shape.time_field.0.as_str();
+        let Ok(content) = fs::read(file) else {
+            return SessionReading {
+                identity: None,
+                time: None,
             };
-            let text = String::from_utf8_lossy(&line);
+        };
+        let records: Vec<&[u8]> = content.split(|byte| *byte == b'\n').collect();
+        let mut identity = None;
+        for line in &records {
+            let text = String::from_utf8_lossy(line);
             if !text.contains(kind) {
                 continue;
             }
@@ -175,50 +272,109 @@ impl ReadsSessionIdentity for Recovery {
                 Some(Value::String(prompt)) => vec![prompt.as_str()],
                 _ => continue,
             };
-            if let Some(address) = self.identity_marks.prompt_identity(&prompts) {
-                held = Some(address);
+            if let Some((address, flow_id)) = self.identity_marks.prompt_identity(&prompts) {
+                identity = Some(SessionIdentity {
+                    address,
+                    flow_id,
+                    session_id: record
+                        .get(&shape.session_field.0)
+                        .and_then(Value::as_str)
+                        .map(|session| SessionId(session.to_owned())),
+                });
             }
         }
-        held
+        let time = records.iter().rev().find_map(|line| {
+            let text = String::from_utf8_lossy(line);
+            if !text.contains(time_field) {
+                return None;
+            }
+            serde_json::from_str::<Value>(&text)
+                .ok()?
+                .get(time_field)?
+                .as_str()
+                .map(str::to_owned)
+        });
+        SessionReading { identity, time }
     }
 }
 
 impl PlacesSessions for Recovery {
     fn placements(&self) -> Result<Vec<Placement>, String> {
-        let mut claims: HashMap<Address, Vec<(SystemTime, PathBuf)>> = HashMap::new();
+        let mut flows: BTreeMap<FlowId, Vec<FlowClaim>> = BTreeMap::new();
+        let mut mismatched = Vec::new();
         let mut unidentified = Vec::new();
         for file in self.session_files()? {
-            match self.session_identity(&file) {
-                Some(address) => claims
-                    .entry(address)
+            let reading = self.session_reading(&file);
+            let Some(identity) = reading.identity else {
+                unidentified.push(Placement::Unidentified(file.transcript_path()));
+                continue;
+            };
+            let started = identity
+                .session_id
+                .as_ref()
+                .is_some_and(|session| identity.flow_id.starts_session(session));
+            if !started {
+                mismatched.push(Placement::Mismatched(Mismatched_Data {
+                    transcript_path: file.transcript_path(),
+                    flow_id: identity.flow_id,
+                    session_id_option: identity.session_id,
+                }));
+                continue;
+            }
+            flows.entry(identity.flow_id).or_default().push(FlowClaim {
+                address: identity.address,
+                time: reading.time,
+                file,
+            });
+        }
+        let mut contested = Vec::new();
+        let mut chains: HashMap<Address, Vec<ChainedFlow>> = HashMap::new();
+        for (flow_id, claims) in flows {
+            let files: Vec<PathBuf> = claims.iter().map(|claim| claim.file.clone()).collect();
+            if files.len() > 1 {
+                contested.push(Placement::Contested(Contest::SharedFlow(SharedFlow_Data {
+                    flow_id: flow_id.clone(),
+                    transcript_path_vector: files
+                        .iter()
+                        .map(|file| file.transcript_path())
+                        .collect(),
+                })));
+            }
+            let time = claims.iter().filter_map(|claim| claim.time.clone()).max();
+            let mut addresses: Vec<&Address> = Vec::new();
+            for claim in &claims {
+                if !addresses.contains(&&claim.address) {
+                    addresses.push(&claim.address);
+                }
+            }
+            for address in addresses {
+                chains
+                    .entry(address.clone())
                     .or_default()
-                    .push((file.written_at(), file)),
-                None => unidentified.push(Placement::Unidentified(file.transcript_path())),
+                    .push(ChainedFlow {
+                        flow_id: flow_id.clone(),
+                        time: time.clone(),
+                        files: files.clone(),
+                    });
             }
         }
         let mut binds = Vec::new();
-        let mut contested = Vec::new();
-        for (address, mut files) in claims {
-            files.sort_by(|one, other| other.0.cmp(&one.0).then_with(|| one.1.cmp(&other.1)));
-            let others: Vec<TranscriptPath> = files
-                .iter()
-                .skip(1)
-                .map(|(_, file)| file.transcript_path())
-                .collect();
-            binds.push(Placement::Bind(Bind_Data {
-                address: address.clone(),
-                transcript_path: files[0].1.transcript_path(),
-            }));
-            if !others.is_empty() {
-                contested.push(Placement::Contested(Contested_Data {
-                    address,
-                    transcript_path_vector: others,
-                }));
+        let mut past = Vec::new();
+        for (address, chain) in chains {
+            for placement in chain.chain_placements(&address) {
+                match placement {
+                    Placement::Bind(_) => binds.push(placement),
+                    Placement::Past(_) => past.push(placement),
+                    _ => contested.push(placement),
+                }
             }
         }
         binds.sort_by_cached_key(PrintsDatom::datom_text);
+        past.sort_by_cached_key(PrintsDatom::datom_text);
         contested.sort_by_cached_key(PrintsDatom::datom_text);
+        binds.extend(past);
         binds.extend(contested);
+        binds.extend(mismatched);
         binds.extend(unidentified);
         Ok(binds)
     }

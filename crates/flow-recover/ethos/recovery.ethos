@@ -1,41 +1,59 @@
 ; Recovery: which transcript is which permaflow's, read from the
 ; transcripts themselves, after the Flow Nexus has lost it.
 ;
-; The one input is a Recovery: the transcript root, where a session's start
-; stands in a session file, and the marks of its identity lines. Nothing is
-; read from the environment and nothing of these is written in the code.
+; The one input is a Recovery: the transcript root, how deep under it
+; session files are read, where a session's start, its session id and a
+; record's time stand in a session file, and the marks of its identity
+; lines. Nothing is read from the environment and nothing of these is
+; written in the code.
 ;
-; A session file is a file directly in a directory directly under the root
-; whose name ends in the FileSuffix. Its identity is read from its records
-; whose RecordField holds a KindField equal to SnapshotKind: each string
-; under that record's PromptField is read line by line, the line opening
-; with the AddressMark giving the Address, the line opening with the
-; FlowIdMark the flow id the launcher wrote. The last such record with both
-; holds for the file.
+; A session file is a file whose name ends in the FileSuffix, standing at
+; most Depth directories below the root. Its identity is read from its
+; records whose RecordField holds a KindField equal to SnapshotKind: each
+; string under that record's PromptField is read line by line, the line
+; opening with the AddressMark giving the Address, the line opening with
+; the FlowIdMark the flow id the launcher wrote. The last such record with
+; both holds for the file, and its SessionField is the file's session id.
+; The file's time is the TimeField of its last record that carries one as
+; text; times are compared as text.
+;
+; A flow is a flow id: one session, one file. A file whose flow id is not
+; the start of its session id is Mismatched and not placed. An Address has
+; a chain of flows, ordered by their files' times: the newest is its
+; current flow, its one Bind; the older ones are Past. Contested is a flow
+; id two files claim, or the newest flows of an Address whose times do not
+; order them; neither binds. Unidentified is a session file no identity
+; could be read from.
 ;
 ; Each output line is one Placement. Bind is the meta Signal's Bind input
-; (meta-signal-flow 0.95.0), printed as flow-meta reads it, one for each
-; Address found: the file written newest of those that claim it. Contested
-; names an Address and the other files that claim it; Unidentified a
-; session file no identity could be read from.
+; (meta-signal-flow 0.95.0), printed as flow-meta reads it.
 
 Library
 [ flow_ethos:Address
+  flow_ethos:FlowId
   signal_flow:TranscriptPath ]
 [ TranscriptRoot.String
+  Depth.Integer
   FileSuffix.String
   RecordField.String
   KindField.String
   SnapshotKind.String
   PromptField.String
+  SessionField.String
+  TimeField.String
   AddressMark.String
   FlowIdMark.String
-  SessionShape.{ FileSuffix RecordField KindField SnapshotKind PromptField }
+  SessionId.String
+  SessionShape.{ FileSuffix RecordField KindField SnapshotKind PromptField SessionField TimeField }
   IdentityMarks.{ AddressMark FlowIdMark }
-  Recovery.{ TranscriptRoot SessionShape IdentityMarks }
+  Recovery.{ TranscriptRoot Depth SessionShape IdentityMarks }
+  Contest.[ SharedFlow.{ FlowId Vector<TranscriptPath> }
+            Unordered.{ Address Vector<TranscriptPath> } ]
   ; The printed form of every output line; Bind is declared here alone.
   Placement.[ Bind.{ Address TranscriptPath }
-              Unidentified.TranscriptPath
-              Contested.{ Address Vector<TranscriptPath> } ] ]
+              Past.{ Address FlowId TranscriptPath }
+              Contested.Contest
+              Mismatched.{ TranscriptPath FlowId Option<SessionId> }
+              Unidentified.TranscriptPath ] ]
 []
 []

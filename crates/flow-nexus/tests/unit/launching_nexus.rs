@@ -2,7 +2,9 @@
 //! report to in Runtime. Durable Nexus settings come from the committed Meta
 //! configuration snapshot, and a Configure applies to the running Nexus.
 
-use crate::herdr::launch::{ChecksComposedLaunch, PreparesClaudePane, tests::launch};
+use crate::herdr::launch::{
+    ChecksComposedLaunch, ClaudeReporting, PreparesClaudePane, tests::launch,
+};
 use crate::live::HoldsLiveValue;
 use crate::place::{LaysOutPlace, Place};
 use crate::store::ConfiguresOnlyStore;
@@ -75,11 +77,10 @@ fn configured(place: &Place, root: &Path) {
 
 /// Every hook command a Claude flow is launched with.
 fn hook_commands(nexus: &RunningNexus) -> Vec<String> {
-    let settings: serde_json::Value = serde_json::from_str(
-        &nexus
-            .herdr
-            .claude_flag_settings(&launch(HarnessKind::Claude).lean_start()),
-    )
+    let settings: serde_json::Value = serde_json::from_str(&nexus.herdr.claude_flag_settings(
+        &launch(HarnessKind::Claude).lean_start(),
+        ClaudeReporting::Hook,
+    ))
     .expect("settings JSON");
     [
         "SessionStart",

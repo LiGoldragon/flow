@@ -3,9 +3,20 @@
 ;; Usage: flow-capsule <flow-package> [--workspace-only] [--keep-going] [--log <path>]
 ;;        flow-capsule --takeover <old flow package> <new flow package> [--log <path>]
 ;;
+;;        flow-capsule --harness <flow package> <claude harness nexus package>
+;;                     [--translator <package>] [--keep-going] [--log <path>]
+;;
 ;; --takeover runs the bie3.6 takeover and rollback instead of the
 ;; scenarios (see the takeover section); FLOW_CAPSULE_SKIP_CODEX=1 skips its
 ;; Codex seats as it skips the Codex scenarios.
+;;
+;; --harness runs, without Codex, a Claude Harness Nexus beside Flow and
+;; proves a Claude flow's refresh and the restart of a dead pane with the
+;; state that Nexus tells (see the harness section). Its translator is the
+;; nexus package's own claude-harness-translator, or --translator's.
+;;
+;; A machine with no curriculum-nexus.service names the running
+;; Curriculum's environment in a file, FLOW_CAPSULE_CURRICULUM_ENVIRONMENT.
 ;;
 ;; A run keeps its raw Nexus log and every flow transcript past teardown,
 ;; copied before the state root is deleted into
@@ -1280,12 +1291,20 @@
    ["CURRICULUM_MIND_CONTEXT_DIR" "CURRICULUM_MIND_CONTEXT_URL" "mind-belief"]
    ["CURRICULUM_FIELD_CONTEXT_DIR" "CURRICULUM_FIELD_CONTEXT_URL" "field-belief"]])
 
+(def curriculum-environment-file
+  "A file of the running Curriculum's environment, one KEY=VALUE a line, for
+  a machine that runs no Curriculum unit; read in place of the unit."
+  (not-empty (System/getenv "FLOW_CAPSULE_CURRICULUM_ENVIRONMENT")))
+
 (defn stable-curriculum-environment
   "The running Curriculum's configuration: its unit's environment, read
-  through systemd and never written."
+  through systemd and never written, or the file
+  FLOW_CAPSULE_CURRICULUM_ENVIRONMENT names."
   []
-  (let [{:keys [exit out err]} (run {:env (merge (clean-env) {"XDG_RUNTIME_DIR" runtime-root})}
-                                    "systemctl" "--user" "show" curriculum-unit "-p" "Environment" "--value")]
+  (let [{:keys [exit out err]} (if curriculum-environment-file
+                                 {:exit 0 :out (slurp curriculum-environment-file)}
+                                 (run {:env (merge (clean-env) {"XDG_RUNTIME_DIR" runtime-root})}
+                                      "systemctl" "--user" "show" curriculum-unit "-p" "Environment" "--value"))]
     (when-not (zero? exit) (throw (ex-info "the running Curriculum's unit environment is unreadable" {:err err})))
     (into {} (keep #(let [[k v] (str/split % #"=" 2)] (when v [k v])) (str/split (str/trim out) #"\s+")))))
 
@@ -1530,6 +1549,10 @@
                            (seq (remove @armed left)) ::rearm)))))
 
 (def herdr-session-left (atom nil))
+;; The Claude Harness Nexus and its translator, when the harness mode started
+;; them; and the witnesses it keeps beside the normal run's, by name.
+(def harness-processes (atom []))
+(def harness-witnesses (atom {}))
 
 (declare stop-sender! stop-poller!)
 
@@ -1560,6 +1583,9 @@
     (when-let [n @nexus]
       (p/destroy n)
       (swap! steps conj (str "Nexus stopped, exit " (:exit (deref n 20000 {:exit "still running"})))))
+    (doseq [[label proc] @harness-processes :when (p/alive? proc)]
+      (p/destroy proc)
+      (swap! steps conj (str label " stopped, exit " (:exit (deref proc 20000 {:exit "still running"})))))
     (when-let [c @codex-server]
       (p/destroy-tree c)
       (swap! steps conj (str "Codex app-server stopped, exit " (:exit (deref c 20000 {:exit "still running"})))))
@@ -1575,9 +1601,10 @@
     ;; flow transcript are kept before the state root and traces go.
     (when-let [dir @witness-dir]
       (swap! steps conj
-             (try (keep-witnesses! dir {"nexus.log" @run-log
-                                        "claude-transcripts" capsule-transcripts
-                                        "codex-sessions" (str codex-home "/sessions")})
+             (try (keep-witnesses! dir (merge {"nexus.log" @run-log
+                                               "claude-transcripts" capsule-transcripts
+                                               "codex-sessions" (str codex-home "/sessions")}
+                                              @harness-witnesses))
                   (str "witnesses kept in " dir)
                   (catch Exception e (str "witnesses not kept in " dir ": " (.getMessage e))))))
     ;; The capsule's Herdr keeps its sessions in the capsule's own config
@@ -1950,8 +1977,8 @@
   "The takeover's declarations from the capsule's Configure lines: every
   seat it keeps Awake is Maintained, a Codex Sol on the Codex
   Haiku's model, leaving out what the Codex Terra does, and an OnDemand
-  Fable that stays asleep are added. :old omits DefaultMinutes, which the
-  old Nexus does not know, and gives it the leave-outs as a LeaveOuts
+  Fable that stays asleep are added. :old omits DefaultMinutes and
+  HarnessHookEvents, which the old Nexus does not know, and gives it the leave-outs as a LeaveOuts
   family of their own; :replay is every line, in the file's order."
   [lines]
   (let [codex-model (some #(second (re-find #"\{ Terra (\S+) \}" %)) lines)
@@ -1968,7 +1995,8 @@
                     :else line))
         replay (mapv line-of lines)]
     {:old (->> replay
-               (remove #(str/starts-with? % "Configure.DefaultMinutes."))
+               (remove #(or (str/starts-with? % "Configure.DefaultMinutes.")
+                            (str/starts-with? % "Configure.HarnessHookEvents.")))
                (mapcat #(if (str/starts-with? % "Configure.Metaflows.")
                           (let [[leave-outs metaflows] (split-leave-outs %)]
                             [leave-outs
@@ -2704,9 +2732,575 @@
                       " steps passed | witnesses " @witness-dir))
         (System/exit (if (and passed clean) 0 1))))))
 
+;; ---------------------------------------------------------------- harness
+;; flow-capsule --harness <flow package> <claude harness nexus package>: a
+;; Claude flow's refresh with its state from the Claude Harness Nexus (gbkz,
+;; the Director's 8zn0), and the restart of a dead pane (nf7x). The capsule
+;; and its Curriculum start as the normal run's, without Codex; the Claude
+;; Harness Nexus starts in the capsule runtime, configured to read every
+;; transcript under the capsule's Claude projects root, and Flow subscribes
+;; to it by its daemon configuration. Each step prints PASS <step> or
+;; FAIL <step> <why>; --keep-going runs the rest after a failure.
+
+;; Every wait's deadline, in seconds.
+(def harness-socket-seconds 20)
+(def harness-awake-seconds 60)
+(def harness-rest-seconds 180)
+(def harness-pane-seconds 20)
+(def harness-resume-seconds 60)
+(def harness-turn-seconds 180)
+(def harness-witness-seconds 60)
+(def harness-handover-seconds 300)
+(def harness-crystallized-successor-seconds 60)
+(def harness-successor-seconds 180)
+(def harness-first-prompt-seconds 60)
+(def harness-answer-seconds 180)
+(def harness-print-seconds 180)
+(def harness-subscribed-seconds 10)
+;; Flow's daemon configuration: the grace before a moved harness state is
+;; compared with Flow's own, and the disagreements kept. A Changed is asked
+;; about again once that grace has passed, when Flow has judged it.
+(def harness-grace-seconds 3)
+(def harness-disagreement-capacity 64)
+(def harness-settle-seconds (inc harness-grace-seconds))
+(def harness-row-count 200)
+
+;; The Claude Harness Nexus's place: its name, short so every socket path
+;; fits a sockaddr_un, its Runtime under the capsule's places root, where its
+;; clients find it by XDG_RUNTIME_DIR, and its State in the capsule's.
+(def chn-place "ch")
+(def chn-runtime (str places-root "/" chn-place))
+(def chn-state (str state-root "/nexus/" chn-place))
+(def chn-socket (str chn-runtime "/claude-harness.sock"))
+(def chn-meta-socket (str chn-runtime "/claude-harness-meta.sock"))
+(def chn-subscription (str chn-runtime "/claude-harness-subscription.sock"))
+(def chn-emission-socket (str chn-runtime "/claude-harness-emission.sock"))
+(def chn-meta-text (str chn-runtime "/claude-harness-meta-translator.sock"))
+(def chn-subscription-text (str chn-runtime "/claude-harness-subscription-translator.sock"))
+(def daemon-configuration-file (str config-home "/nexus/main/flow-nexus-daemon.datom"))
+
+(def chn-package (atom nil))
+(def chn-translator (atom nil))
+
+(defn chn-binary [name]
+  (str (if (= name "claude-harness-nexus") @chn-package @chn-translator) "/bin/" name))
+
+(defn chn-call
+  "One call of a Claude Harness Nexus client, from no pane: its replies."
+  [client datom]
+  (reply-text (run {} (chn-binary client) datom)))
+
+(defn bare-model
+  "The capsule seats' cheap model: the one configure.datom gives the Haiku."
+  []
+  (some #(second (re-find #"\{ Haiku (\S+) \}" %))
+        (str/split-lines (slurp (fs/file libexec "configure.datom")))))
+
+;; The Director's seat is the Maintained Opus, which stays Awake at its rest;
+;; the bare threads are bound to the OnDemand Haiku and Sonnet.
+(def first-address quaternary)
+(def second-address tertiary-address)
+(def director-address secondary)
+(def unconfigured-address "{ Psyche nowhere Haiku }")
+(def brief-ready "Reply with the word ready.")
+(def brief-back "Reply with the word back.")
+(def brief-ok "Reply with the word ok.")
+(def handover-tag "Tag dh4")
+
+(defn start-harness-process! [label argv log]
+  (let [proc (p/process argv {:env (clean-env) :out :append :out-file (fs/file log)
+                              :err :append :err-file (fs/file log) :in ""})]
+    (swap! harness-processes conj [label proc])
+    proc))
+
+(defn await-sockets
+  "Whether every socket listens, all in one directory, before proc exits."
+  [proc & sockets]
+  (= :listening
+     (await-events harness-socket-seconds [(apply socket-events sockets) (exit-of proc)]
+                   #(cond (every? socket-listens? sockets) :listening
+                          (not (p/alive? proc)) :exited))))
+
+(defn start-claude-harness!
+  "The Claude Harness Nexus and its translator in their place, its client's
+  configuration naming the place, then its row count and transcript root."
+  [log]
+  (fs/create-dirs chn-runtime)
+  (fs/set-posix-file-permissions chn-runtime "rwx------")
+  (fs/create-dirs chn-state)
+  (spit (str config-home "/nexus/claude-harness-nexus.datom") (str "{ " chn-place " }\n"))
+  (let [place (str "{ «" chn-place "» «" chn-runtime "» «" chn-state "» }")
+        nexus (start-harness-process! "Claude Harness Nexus" [(chn-binary "claude-harness-nexus") place] log)
+        _ (when-not (await-sockets nexus chn-socket chn-meta-socket chn-subscription)
+            (throw (ex-info "the Claude Harness Nexus opened no sockets" {:log (str/trim (slurp log))})))
+        translator (start-harness-process! "Claude Harness translator" [(chn-binary "claude-harness-translator") place] log)
+        _ (when-not (await-sockets translator chn-meta-text chn-subscription-text chn-emission-socket)
+            (throw (ex-info "the Claude Harness translator opened no sockets" {:log (str/trim (slurp log))})))
+        rows (chn-call "claude-harness-meta" (str "Configure.RowCount." harness-row-count))
+        root (chn-call "claude-harness-meta" (str "Configure.TranscriptRoot.«" claude-projects "»"))]
+    (swap! harness-witnesses assoc "claude-harness-state" chn-state)
+    {:pass (and (str/starts-with? rows "Configured.") (str/starts-with? root "Configured."))
+     :why (str "RowCount -> " rows "; TranscriptRoot -> " root)
+     :detail (str "place " place " | RowCount -> " rows " | TranscriptRoot -> " root)}))
+
+(defn write-daemon-configuration!
+  "Flow's daemon configuration beside its place file: the Claude Harness
+  Nexus's subscription socket, the grace and the capacity."
+  []
+  (fs/create-dirs (fs/parent daemon-configuration-file))
+  (let [text (str "{ [ «" chn-subscription "» ] " harness-grace-seconds " " harness-disagreement-capacity " }\n")]
+    (spit daemon-configuration-file text)
+    (str/trim text)))
+
+(defn chn-changes
+  "A source: each line the Claude Harness Nexus's subscription sends, its
+  Subscribed and each Changed, one event, and again once Flow's grace has
+  passed, when Flow has taken it and judged it."
+  []
+  (fn [^java.util.concurrent.BlockingQueue events _deadline]
+    (let [proc (p/process [(chn-binary "claude-harness-subscription") "Subscribe"]
+                          {:env (clean-env) :out :stream :err :string :in ""})]
+      (feed! events (io/reader (:out proc))
+             (fn [line]
+               (future (Thread/sleep (* 1000 harness-settle-seconds)) (.put events ::settled))
+               line))
+      #(p/destroy-tree proc))))
+
+(defn datom-depth
+  "How many brackets a line leaves open, guillemets' text not counted."
+  [line]
+  (loop [[c & more] (seq line) quoted 0 depth 0]
+    (cond (nil? c) depth
+          (= c \«) (recur more (inc quoted) depth)
+          (= c \») (recur more (max 0 (dec quoted)) depth)
+          (pos? quoted) (recur more quoted depth)
+          (#{\{ \[ \<} c) (recur more quoted (inc depth))
+          (#{\} \] \>} c) (recur more quoted (dec depth))
+          :else (recur more quoted depth))))
+
+(defn whole-datom
+  "The next datom a reader gives, over as many lines as it is printed on."
+  [^java.io.BufferedReader reader]
+  (loop [lines [] depth 0]
+    (let [line (.readLine reader)]
+      (if (nil? line)
+        (str/join "\n" lines)
+        (let [depth (+ depth (datom-depth line))]
+          (if (and (<= depth 0) (seq (str/trim line)))
+            (str/join "\n" (conj lines line))
+            (recur (conj lines line) depth)))))))
+
+(defn chn-subscribed
+  "The Claude Harness Nexus's Subscribed: every session it observes now."
+  []
+  (let [proc (p/process [(chn-binary "claude-harness-subscription") "Subscribe"]
+                        {:env (clean-env) :out :stream :err :string :in ""})
+        reader (io/reader (:out proc))
+        text (deref (future (whole-datom reader)) (* 1000 harness-subscribed-seconds) nil)]
+    (p/destroy-tree proc)
+    (str text)))
+
+(defn await-harness
+  "Waits until f answers truthy, asked again at each line the Claude Harness
+  Nexus's subscription sends and at each write of Flow's store."
+  [seconds f]
+  (await-events seconds [(chn-changes) (file-events @nexus-store)] f))
+
+(defn entry-of
+  "The entry of a flow id in a reply: the innermost braces that open with it."
+  [reply flow-id]
+  (when (and reply flow-id)
+    (re-find (re-pattern (str "\\{\\s+" (java.util.regex.Pattern/quote flow-id) "\\s[^{}]*\\}")) reply)))
+
+(defn witness-of [flow-id] (entry-of (flow-meta "ObserveHarness") flow-id))
+
+(defn resting-witness?
+  "Whether ObserveHarness shows the flow rested by its harness and Resting
+  by Flow, and Inspect shows the address Resting."
+  [flow-id addr]
+  (let [w (witness-of flow-id)]
+    (boolean (and w (str/includes? w "Rested") (str/includes? w "Some.Resting")
+                  (str/includes? (inspect addr) "Resting")))))
+
+(defn transcript-of [session-id] (str capsule-transcripts "/" session-id ".jsonl"))
+
+(defn transcript-rows [file]
+  (if (fs/exists? file)
+    (keep #(try (json/parse-string % true) (catch Exception _ nil)) (str/split-lines (slurp file)))
+    []))
+
+(defn turn-ended? [file]
+  (boolean (some #(and (= "system" (:type %)) (= "turn_duration" (:subtype %))) (transcript-rows file))))
+
+(defn turn-ends [file]
+  (count (filter #(and (= "system" (:type %)) (= "turn_duration" (:subtype %))) (transcript-rows file))))
+
+(defn assistant-saying
+  "How many assistant rows of the transcript say word."
+  [file word]
+  (count (filter (fn [row]
+                   (and (= "assistant" (:type row))
+                        (some #(and (= "text" (:type %)) (str/includes? (str/lower-case (str (:text %))) word))
+                              (let [c (get-in row [:message :content])] (if (sequential? c) c [])))))
+                 (transcript-rows file))))
+
+(defn await-file
+  "Waits until f answers truthy over the transcripts, asked again at each
+  write in the capsule's projects."
+  [seconds f]
+  (await-transcript seconds f))
+
+(defn open-pane!
+  "A new workspace of the capsule session in the source root, its shell
+  running command: its root pane."
+  [label command]
+  (let [created (herdr-json "workspace" "create" "--cwd" source-root "--label" label "--no-focus")
+        pane (get-in created [:result :root_pane :pane_id])]
+    (when-not pane (throw (ex-info "Herdr opened no workspace" {:label label :answer created})))
+    (herdr "pane" "run" pane command)
+    pane))
+
+(defn close-pane!
+  "Closes the pane from outside; whether it is gone."
+  [pane]
+  (let [wait (arm [(herdr-events [{:type "pane.closed"}])])]
+    (herdr "pane" "close" pane)
+    (boolean (wait harness-pane-seconds #(not (contains? (pane-ids) pane))))))
+
+(defn claude-command [& arguments]
+  (str/join " " (cons "claude" (map shell-quote arguments))))
+
+(defn session-processes
+  "The live processes whose command line names the session."
+  [session-id]
+  (vec (for [dir (fs/list-dir "/proc")
+             :let [pid (str (fs/file-name dir))]
+             :when (re-matches #"\d+" pid)
+             :let [cmd (try (str/replace (slurp (str dir "/cmdline")) "\u0000" " ") (catch Exception _ ""))]
+             :when (and (str/includes? cmd session-id) (not (str/includes? cmd "herdr")))]
+         (parse-long pid))))
+
+(defn resume!
+  "The session resumed bare in a new pane: its pane once Claude shows there
+  the conversation it resumed (needle, a piece of it) and runs."
+  [label session-id needle]
+  (let [pane (open-pane! label (claude-command "--resume" session-id "--model" (bare-model)))]
+    (when (and (pane-holds pane needle harness-resume-seconds) (seq (session-processes session-id)))
+      pane)))
+
+(defn conversation-needle
+  "A piece of a session's first prompt its resumed pane shows: the start of
+  its first line."
+  [session-id]
+  (let [text (str (transcript-first-user session-id))
+        line (or (first (remove str/blank? (str/split-lines text))) "")]
+    (subs (str/trim line) 0 (min 16 (count (str/trim line))))))
+
+(def bare-threads (atom []))
+
+(defn bare-thread!
+  "A plain Claude thread outside Flow, one prompt, quit at its turn's end
+  and resumed bare: {:session :transcript :pane}."
+  [label]
+  (let [session-id (str (java.util.UUID/randomUUID))
+        file (transcript-of session-id)
+        pane (open-pane! label (claude-command "--session-id" session-id "--model" (bare-model) brief-ready))
+        ended (await-file harness-turn-seconds #(turn-ended? file))
+        quit (when ended (close-pane! pane))
+        resumed (when quit (resume! (str label "-resumed") session-id "ready"))]
+    {:session session-id :transcript file :pane resumed :ended ended :quit quit}))
+
+(defn bound-reply? [reply addr session-id]
+  (let [d (read-datom reply)
+        [a flow-id] (items (body d))]
+    (boolean (and (= "Bound" (head d))
+                  (= (map str (address-items addr)) (map str (items a)))
+                  (= (str flow-id) (subs session-id 0 6))))))
+
+(defn bind! [addr file] (flow-meta (str "Bind.{ " addr " «" file "» }")))
+
+(defn successor-of
+  "The flow the address is Awake as that is not predecessor and has it in
+  Past, within seconds."
+  [seconds addr predecessor]
+  (watch seconds #(let [{:keys [state flow past]} (current addr)]
+                    (when (and (= :awake state) (not= (str flow) predecessor)
+                               (some #{predecessor} (map str past)))
+                      (str flow)))))
+
+(defn session-in
+  "The first Claude session id a reply names."
+  [reply]
+  (re-find #"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" (str reply)))
+
+(defn refresh-accepted? [reply]
+  (boolean (some #(str/starts-with? (str reply) %) ["RefreshQueued." "ReapPending." "Refreshed"])))
+
+(defn first-prompt
+  "The first user turn of the session the address's Inspect names."
+  [addr]
+  (await-file harness-first-prompt-seconds #(transcript-first-user (session-in (inspect addr)))))
+
+(defn handover-sections
+  "The sections a Read answers, each [title description body]."
+  [reply]
+  (vec (for [handover (heads-named "Handover" (read-datom reply))
+             section (items (body handover))]
+         (mapv #(str (:string %)) (items section)))))
+
+(defn handover-line
+  "The first line of the handover's first section body, else its title."
+  [sections]
+  (let [[title _ text] (first sections)]
+    (or (some #(not-empty (str/trim %)) (str/split-lines (str text))) (not-empty title))))
+
+(def harness-state (atom {}))
+
+(defn harness-metaflows
+  "The capsule's Configure.Metaflows with each seat's tool set Default: a
+  Claude seat's launch refuses an empty explicit catalog as unenforceable."
+  []
+  (str/replace (configure-line "Metaflows") " Explicit.[] " " Default "))
+
+(def harness-steps
+  [["4 director: a Flow-launched flow resumed bare is refreshed with its kept handover"
+    (fn []
+      (let [launched (launch director-address)
+            started (str/starts-with? launched "Started.")
+            flow-id (when started (str (watch harness-awake-seconds #(awake-flow director-address))))
+            session-id (session-in launched)
+            pane (bound-pane launched)
+            rested (when (seq flow-id) (await-stops harness-rest-seconds #(pos? (stops-of flow-id))))
+            closed (when (and rested pane) (close-pane! pane))
+            resumed (when (and closed session-id)
+                      (resume! "director-resumed" session-id (conversation-needle session-id)))
+            kept (flow (str "Keep.{ " director-address " { «capsule» «the Director's case» «" handover-tag
+                            ": the handover kept before the refresh.» } }"))
+            refresh (flow (str "Refresh." director-address))
+            queued (refresh-accepted? refresh)
+            resting (when queued
+                      (await-stops harness-rest-seconds #(str/includes? (inspect director-address) "Resting")))
+            successor (when queued (successor-of harness-successor-seconds director-address flow-id))
+            prompt (when successor (first-prompt director-address))]
+        {:pass (boolean (and (str/starts-with? launched "Started.") resumed (str/starts-with? kept "Kept.")
+                             resting successor (str/includes? (str prompt) handover-tag)))
+         :why (cond (not (str/starts-with? launched "Started.")) (str "Launch -> " launched)
+                    (not resumed) (str "the session " session-id " was not resumed bare (pane " pane " closed " closed ")")
+                    (not (str/starts-with? kept "Kept.")) (str "Keep -> " kept)
+                    (not resting) (str "never Resting after Refresh -> " refresh)
+                    (not successor) (str "no successor of " flow-id " after Refresh -> " refresh)
+                    :else (str "the successor's first prompt lacks " handover-tag))
+         :detail (str "Launch -> " launched " | flow " flow-id " session " session-id " pane " pane
+                      " | rested " (boolean rested) " | pane closed " closed " | resumed bare in " resumed
+                      " | Keep -> " kept " | Refresh -> " refresh " | Resting " (boolean resting)
+                      " | successor " successor " first prompt "
+                      (if (str/includes? (str prompt) handover-tag) "holds" "lacks") " " handover-tag)}))]
+
+   ["5 bare: two plain Claude threads outside Flow, quit and resumed bare"
+    (fn []
+      (let [threads (reset! bare-threads (mapv bare-thread! ["bare-first" "bare-second"]))]
+        {:pass (every? :pane threads)
+         :why (str/join "; " (for [{:keys [session ended quit pane]} threads :when (not pane)]
+                               (str session (cond (not ended) " never ended its turn"
+                                                  (not quit) " was not quit"
+                                                  :else " was not resumed"))))
+         :detail (str/join " | " (for [{:keys [session transcript pane]} threads]
+                                   (str "session " session " transcript " transcript " resumed in " pane)))}))]
+
+   ["6 bind: each resumed thread bound to a configured Claude address, Resting"
+    (fn []
+      (let [[one two] @bare-threads
+            first-bound (bind! first-address (:transcript one))
+            second-bound (bind! second-address (:transcript two))
+            unknown (bind! unconfigured-address (:transcript one))
+            missing (bind! first-address (transcript-of "00000000-0000-0000-0000-000000000000"))
+            bound (and (bound-reply? first-bound first-address (:session one))
+                       (bound-reply? second-bound second-address (:session two)))
+            ids (map #(subs (:session %) 0 6) [one two])
+            resting (when bound
+                      (await-harness harness-witness-seconds
+                                     #(and (resting-witness? (first ids) first-address)
+                                           (resting-witness? (second ids) second-address))))
+            refused (and (str/starts-with? unknown "BindRefused.UnknownPermaflow.")
+                         (str/starts-with? missing "BindRefused.Unreadable."))]
+        (swap! harness-state assoc :first-flow (first ids) :second-flow (second ids))
+        {:pass (boolean (and bound resting refused))
+         :why (cond (not bound) (str "Bind -> " first-bound " / " second-bound)
+                    (not resting) (str "not both Resting: " (witness-of (first ids)) " / " (witness-of (second ids)))
+                    :else (str "refusals -> " unknown " / " missing))
+         :detail (str "Bind " first-address " -> " first-bound " | Bind " second-address " -> " second-bound
+                      " | unconfigured -> " unknown " | missing -> " missing
+                      " | witnesses " (witness-of (first ids)) " / " (witness-of (second ids)))}))]
+
+   ["7 refresh whole: CrystallizeNow on the first bound flow, its successor given the crystallization"
+    (fn []
+      (let [flow-id (:first-flow @harness-state)
+            asked (flow-meta (str "CrystallizeNow." flow-id))
+            sections (when-not (or (str/starts-with? asked "exit ") (str/includes? asked "Refused"))
+                       (await-stops harness-handover-seconds
+                                    #(not-empty (handover-sections (flow (str "Read." first-address))))))
+            own (when sections (successor-of harness-crystallized-successor-seconds first-address flow-id))
+            refresh (when (and sections (not own)) (flow (str "Refresh." first-address)))
+            successor (or own (when refresh (successor-of harness-successor-seconds first-address flow-id)))
+            line (handover-line sections)
+            prompt (when successor (first-prompt first-address))
+            session (when successor (session-in (inspect first-address)))]
+        (swap! harness-state assoc :successor-transcript (when session (transcript-of session)))
+        {:pass (boolean (and successor line (str/includes? (str prompt) line)))
+         :why (cond (not sections) (str "no handover kept after CrystallizeNow -> " asked)
+                    (not successor) (str "no successor of " flow-id " after Refresh -> " refresh)
+                    :else (str "the successor's first prompt lacks «" line "»"))
+         :detail (str "CrystallizeNow -> " asked " | handover " (count sections) " sections, first line «" line "»"
+                      " | successor " successor (if own " of the crystallization" (str " of Refresh -> " refresh))
+                      " session " session " | first prompt " (if (and line (str/includes? (str prompt) line)) "holds" "lacks")
+                      " the crystallization")}))]
+
+   ["8 restart: the Flow Nexus restarted on its store, each thread bound again, Resting"
+    (fn []
+      (let [n @nexus
+            _ (p/destroy n)
+            stopped (:exit (deref n 20000 {:exit "still running"}))
+            _ (fs/delete-if-exists ordinary-socket)
+            _ (fs/delete-if-exists meta-socket)
+            _ (start-nexus! @nexus-log)
+            [one two] @bare-threads
+            first-file (or (:successor-transcript @harness-state) (:transcript one))
+            first-session (str (fs/strip-ext (fs/file-name first-file)))
+            first-bound (bind! first-address first-file)
+            second-bound (bind! second-address (:transcript two))
+            bound (and (bound-reply? first-bound first-address first-session)
+                       (bound-reply? second-bound second-address (:session two)))
+            ids [(subs first-session 0 6) (subs (:session two) 0 6)]
+            resting (when bound
+                      (await-harness harness-witness-seconds
+                                     #(and (resting-witness? (first ids) first-address)
+                                           (resting-witness? (second ids) second-address))))]
+        {:pass (boolean (and bound resting))
+         :why (if bound
+                (str "not both Resting: " (witness-of (first ids)) " / " (witness-of (second ids)))
+                (str "Bind -> " first-bound " / " second-bound))
+         :detail (str "Nexus stopped, exit " stopped ", started on " store-path
+                      " | Bind " first-address " " first-file " -> " first-bound
+                      " | Bind " second-address " -> " second-bound)}))]
+
+   ["9 nf7x: the second thread's pane closed, Restart, a Question answered in its transcript"
+    (fn []
+      (let [two (second @bare-threads)
+            flow-id (:second-flow @harness-state)
+            closed (when (:pane two) (close-pane! (:pane two)))
+            restarted (flow-meta (str "Restart." flow-id))
+            before (assistant-saying (:transcript two) "back")
+            sent (if (str/starts-with? restarted "Restarted.")
+                   (flow (str "Send.{ " second-address " MiddleAbrupt.Question.«" brief-back "» }"))
+                   "not sent: the flow was not restarted")
+            answered (when (str/starts-with? sent "SendAccepted.")
+                       (await-file harness-answer-seconds #(> (assistant-saying (:transcript two) "back") before)))]
+        {:pass (boolean (and closed (str/starts-with? restarted "Restarted.") (str/starts-with? sent "SendAccepted.")
+                             answered))
+         :why (cond (not closed) "the pane was not closed"
+                    (not (str/starts-with? restarted "Restarted.")) (str "Restart -> " restarted)
+                    (not (str/starts-with? sent "SendAccepted.")) (str "Send -> " sent)
+                    :else (str "no «back» in " (:transcript two)))
+         :detail (str "pane " (:pane two) " closed " closed " | Restart." flow-id " -> " restarted
+                      " | Send -> " sent " | «back» in " (:transcript two) " " (boolean answered))}))]
+
+   ["10 print: claude -p outside Flow, as the Harness Nexus and Flow witness it"
+    (fn []
+      (let [session-id (str (java.util.UUID/randomUUID))
+            flow-id (subs session-id 0 6)
+            {:keys [exit out err]} (run {:env (clean-env) :timeout (* 1000 harness-print-seconds)}
+                                        "claude" "-p" brief-ok "--session-id" session-id "--model" (bare-model))
+            seen (await-events harness-witness-seconds [(chn-changes)] #(entry-of (chn-subscribed) flow-id))
+            observed (witness-of flow-id)]
+        {:pass (boolean (and (zero? exit) (str/includes? (str/lower-case out) "ok")))
+         :why (str "claude -p exit " exit ": " (str/trim (str out " " err)))
+         :detail (str "session " session-id " transcript " (transcript-of session-id) " | claude -p -> " (str/trim out)
+                      " | Claude Harness Nexus: " (or seen (let [held (str/replace (chn-subscribed) #"\s+" " ")]
+                                                             (str "no entry of " flow-id " in "
+                                                                  (subs held 0 (min 600 (count held))))))
+                      " | ObserveHarness: " (or observed (str "no witness of " flow-id)))}))]])
+
+(defn harness-step
+  "Runs one step; f answers {:pass :why :detail}. Prints its detail and its
+  PASS or FAIL line; answers whether it passed."
+  [label f]
+  (let [step (first (str/split label #" "))
+        start (System/currentTimeMillis)
+        {:keys [pass why detail]} (try (f) (catch Exception e {:pass false :why (str "exception: " (.getMessage e) " " (pr-str (ex-data e)))}))
+        line {:name label :reply (str detail) :pass pass :ms (- (System/currentTimeMillis) start) :watched (str why)}]
+    (swap! results conj line)
+    (println (str "  " label " | " detail " | " (:ms line) " ms"))
+    (println (if pass (str "PASS " step) (str "FAIL " step " " why)))
+    (flush)
+    (try (note-flows!) (catch Exception _ nil))
+    (boolean pass)))
+
+(defn harness-main [& args]
+  (let [[pkg chn & options] args
+        option (fn [flag] (second (drop-while #(not= % flag) options)))]
+    (when-not (and pkg chn (not-any? #(str/starts-with? % "--") [pkg chn]))
+      (refuse "usage: flow-capsule --harness <flow package> <claude harness nexus package> [--translator <package>] [--keep-going] [--log <path>]"))
+    (reset! package (str (fs/canonicalize pkg)))
+    (reset! package-interface {@package :place})
+    (reset! chn-package (str (fs/canonicalize chn)))
+    (reset! chn-translator (str (fs/canonicalize (or (option "--translator") chn))))
+    (reset! keep-going (boolean (some #{"--keep-going"} options)))
+    (doseq [name ["claude-harness-nexus" "claude-harness-translator" "claude-harness-meta" "claude-harness-subscription"]]
+      (when-not (fs/executable? (chn-binary name))
+        (refuse (str "no " name " at " (chn-binary name) ": name the translator package with --translator"))))
+    (let [log (or (option "--log") (str state-root "/nexus.log"))
+          wall (System/currentTimeMillis)
+          passed (atom true)
+          version (str/trim (:out (run {} (binary @package :daemon) "--version")))
+          root (witness-root (System/getenv))
+          go (fn [label f] (let [ok (harness-step label f)] (when-not ok (reset! passed false)) (or ok @keep-going)))]
+      (when-not root
+        (refuse "no witness directory: set FLOW_CAPSULE_WITNESS_DIR, or HOME and FLOW_ID (or FLOW_DIRECTORY); nothing started"))
+      (reset! witness-dir (str root "/" (witness-name (str "harness " (last (str/split version #"\s+")))
+                                                      (java.time.Instant/now))))
+      (reset! run-log log)
+      (println (str "flow-capsule --harness " @package " | " version " | claude harness nexus " @chn-package
+                    " | translator " @chn-translator " | curriculum " curriculum-package " | model " (bare-model)))
+      (println (str "witnesses | " @witness-dir))
+      (try
+        (and
+         (harness-step "1 capsule: Herdr session and Curriculum, Codex skipped"
+                       (fn [] (start-capsule! log) (start-curriculum! log)
+                         {:pass true :detail (str "driver pane " @driver-pane " | curriculum " curriculum-socket
+                                                  " | codex not started")}))
+         (harness-step "2 claude harness nexus: started in the capsule runtime and configured"
+                       (fn [] (start-claude-harness! log)))
+         (harness-step "3 flow: subscribed to the Claude Harness Nexus, started and configured"
+                       (fn []
+                         (let [daemon (write-daemon-configuration!)]
+                           (reset! nexus-log log)
+                           (start-nexus! log)
+                           (configure! log)
+                           (let [tools (flow-meta (harness-metaflows))
+                                 observed (flow-meta "ObserveHarness")]
+                             {:pass (and (str/starts-with? tools "Configured.")
+                                         (str/starts-with? observed "HarnessObserved."))
+                              :why (str "Metaflows with Default tools -> " tools " | ObserveHarness -> " observed)
+                              :detail (str daemon-configuration-file " " daemon " | Metaflows with Default tools -> "
+                                           (first (str/split tools #" ")) " | ObserveHarness -> " observed)}))))
+         (loop [[[label f] & more] harness-steps]
+           (when label
+             (if (go label f) (recur more) (println "stopped after a failure")))))
+        (catch Exception e
+          (reset! passed false)
+          (println (str "stopped: " (.getMessage e) " " (pr-str (ex-data e))))))
+      (when (some #(not (:pass %)) @results) (reset! passed false))
+      (let [clean (teardown!)]
+        (println (if clean "PASS 11" "FAIL 11 teardown left the capsule behind"))
+        (println (str "wall " (- (System/currentTimeMillis) wall) " ms | "
+                      (count (filter :pass @results)) " of " (count @results) " steps passed | witnesses " @witness-dir))
+        (System/exit (if (and @passed clean) 0 1))))))
+
 (defn -main [& args]
   (when (= "--takeover" (first args))
     (apply takeover-main (rest args)))
+  (when (= "--harness" (first args))
+    (apply harness-main (rest args)))
   (let [[pkg & options] args]
     (when-not (and pkg (not (str/starts-with? pkg "--")))
       (refuse "usage: flow-capsule <flow-package> [--keep-going] [--log <path>]"))

@@ -803,8 +803,14 @@ impl RestartsInSteps for RunningNexus {
             }
             Err(error) => return Err(Box::new(error.refused())),
         }
+        // A Claude flow whose harness ended is started again from what Flow
+        // holds of it, its session: the restart that takes it up makes it
+        // Active and its metaflow Awake as it in the record's own write.
+        let exited = node.flow_lifecycle == signal_flow::FlowLifecycle::Exited
+            && node.harness_kind == HarnessKind::Claude
+            && !node.session_id.0.is_empty();
         // The last flow of an Asleep metaflow has no harness to close.
-        if !node.flow_lifecycle.is_live() {
+        if !node.flow_lifecycle.is_live() && !exited {
             use crate::store::ManagesMetaflowState;
             let asleep = match self.store.list_metaflows() {
                 Ok(metaflows) => metaflows.iter().any(|metaflow| {
@@ -840,7 +846,18 @@ impl RestartsInSteps for RunningNexus {
                 }
             }
         };
-        let address = match self.store.metaflow_awake_as(flow_id) {
+        let awake = if exited {
+            use crate::store::ManagesMetaflowState;
+            self.store.list_metaflows().map(|metaflows| {
+                metaflows.into_iter().find(|metaflow| {
+                    metaflow.state == flow_ethos::State::Asleep
+                        && metaflow.past.0.last().is_some_and(|last| last.0 == flow_id)
+                })
+            })
+        } else {
+            self.store.metaflow_awake_as(flow_id)
+        };
+        let address = match awake {
             Ok(Some(metaflow)) => metaflow.address,
             Ok(None) => return refused(RestartRefusal::Unsupported),
             Err(error) => return Err(Box::new(error.refused())),
@@ -975,7 +992,16 @@ impl RestartsInSteps for RunningNexus {
         let resume_launch = self
             .resume_launch(&record)
             .map_err(|failure| Box::new(failure.answer(flow_id)))?;
-        if !self.written(&record) {
+        let recorded = if exited {
+            match self.store.record_restart_of_exited(record.clone()) {
+                Ok(true) => true,
+                Ok(false) => return refused(RestartRefusal::Unsupported),
+                Err(error) => return Err(Box::new(error.refused())),
+            }
+        } else {
+            self.written(&record)
+        };
+        if !recorded {
             return Err(Box::new(StoreError::StateInvariant.refused()));
         }
         Ok(PreparedRestart {

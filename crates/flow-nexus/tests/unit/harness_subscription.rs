@@ -803,8 +803,8 @@ pub(super) fn told_to(
         event,
         state,
     });
-    for rest in nexus.follow_claude_harness(&observation) {
-        nexus.settle_told_rest(&rest);
+    for told in nexus.follow_claude_harness(&observation) {
+        nexus.settle_told(&told);
     }
 }
 

@@ -97,6 +97,11 @@ pub(crate) trait RecordsRestarts {
     fn restart_records(&self) -> Result<Vec<RestartRecord>, StoreError>;
     /// Writes the record whole, as its phase now stands.
     fn record_restart(&self, record: RestartRecord) -> Result<(), StoreError>;
+    /// Writes the record of a restart that takes up an Exited flow, and in
+    /// the same write makes the flow Active again and its metaflow Awake as
+    /// it. False, writing nothing, unless the flow is Exited and the last
+    /// flow of the record's Address, which is Asleep and owed no successor.
+    fn record_restart_of_exited(&self, record: RestartRecord) -> Result<bool, StoreError>;
     /// Binds the resumed seat in one write: the flow's route becomes the
     /// birth's, the birth is kept, and the restart record is removed. False,
     /// writing nothing, unless the record is Spawning in the birth's pane.
@@ -162,6 +167,50 @@ impl RecordsRestarts for FlowStore {
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
         Ok(())
+    }
+
+    fn record_restart_of_exited(&self, record: RestartRecord) -> Result<bool, StoreError> {
+        use super::successor::OwesSuccessors;
+        use super::{ManagesMetaflowState, MetaflowState, StoredMetaflow};
+        let _gate = self
+            .transitions_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let flow_id = record.flow_id.0.clone();
+        let Some(mut flow) = self.flow(&flow_id)? else {
+            return Ok(false);
+        };
+        if flow.flow_lifecycle != signal_flow::FlowLifecycle::Exited
+            || self.restart_record(&flow_id)?.is_some()
+            || self.successor_intent(&record.address)?.is_some()
+        {
+            return Ok(false);
+        }
+        let Some(StoredMetaflow { mut metaflow }) = self.stored_metaflow(&record.address)? else {
+            return Ok(false);
+        };
+        if metaflow.state != MetaflowState::Asleep
+            || metaflow.past.0.last().is_none_or(|last| last.0 != flow_id)
+        {
+            return Ok(false);
+        }
+        flow.flow_lifecycle = signal_flow::FlowLifecycle::Active;
+        metaflow.past.0.pop();
+        metaflow.state = MetaflowState::Awake(flow_ethos::FlowId(flow_id.clone()));
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .mutate(self.flows, flow)
+            .mutate(self.metaflows, StoredMetaflow { metaflow })
+            .assert(
+                self.restarts,
+                StoredRestart {
+                    restart_record: record,
+                },
+            );
+        self.engine.commit_atomic(commit)?;
+        self.launch_changes.announce();
+        Ok(true)
     }
 
     fn rebind_restarted(

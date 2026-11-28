@@ -739,7 +739,7 @@ fn restart_old_session_end_fenced() {
 
 /// After Restarted the new seat's own exit is its Harness Nexus's to tell:
 /// its hook's SessionEnd ends nothing, and the harness's end of its session
-/// ends the seat, Asleep, while the flow stays live for a Restart to take.
+/// ends the flow, Exited, which a Restart can still take up.
 #[test]
 fn restart_new_seat_real_exit_ends() {
     use crate::generated::transitions::{AskedFlow, RecordsTransitions};
@@ -757,7 +757,6 @@ fn restart_new_seat_real_exit_ends() {
         ))),
         Some(hook),
     );
-    assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Active);
     super::harness_subscription::ended_to(&fixture.nexus, &world.seat.session);
     assert_eq!(
         fixture
@@ -767,7 +766,7 @@ fn restart_new_seat_real_exit_ends() {
             .unwrap(),
         Some(meta_signal_flow::State::Asleep)
     );
-    assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Active);
+    assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Exited);
 }
 
 /// The resumed seat carries no hook; a report naming no harness settles
@@ -1065,6 +1064,81 @@ fn restart_pane_gone_session_unheld_restarts_once() {
     let from = bound_sender(&fixture);
     send(&fixture, &from, "after the dead pane");
     assert_eq!(received(&world, &fixture, "after the dead pane"), 1);
+}
+
+/// abc123's harness died with its pane: its Harness Nexus tells Ended(Died),
+/// which ends the flow, Exited, its metaflow Asleep. A Restart takes up the
+/// Exited flow by the session Flow holds: one `claude --resume` of that
+/// session through the first-start composition, in a new pane, the flow
+/// Active again and its metaflow Awake as it, and a Send then reaches it.
+#[test]
+fn restart_of_a_flow_whose_harness_died_resumes_its_session() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(false);
+    session_unheld(&fixture, &world);
+    super::harness_subscription::told_to(
+        &fixture.nexus,
+        &world.seat.session,
+        harness::Event::Ended(harness::EndReason::Died),
+        harness::State::Ended,
+    );
+    assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Exited);
+    assert_eq!(stored(&fixture, Model::Sol).state, State::Asleep);
+
+    assert_eq!(
+        restarted(&fixture),
+        Output::Restarted(flow_ethos::FlowId(FLOW.into()))
+    );
+    let resumes = world.resumes();
+    assert_eq!(resumes.len(), 1, "{}", world.fresh.calls());
+    let resume = &resumes[0];
+    assert!(
+        resume.contains(&format!("--resume {}", world.seat.session)),
+        "{resume}"
+    );
+    assert!(resume.contains(&format!("--pane {NEW_PANE}")), "{resume}");
+    assert!(resume.contains("--model claude-fixture"), "{resume}");
+    assert!(resume.contains("--effort medium"), "{resume}");
+    assert!(
+        resume.contains("--name { Mind flow Sol abc123 }"),
+        "{resume}"
+    );
+    let after = node(&fixture);
+    assert_eq!(after.session_id.0, world.seat.session);
+    assert_eq!(after.flow_lifecycle, FlowLifecycle::Active);
+    assert_eq!(route_pane(&fixture), NEW_PANE);
+    assert_eq!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(flow_ethos::FlowId(FLOW.into()))
+    );
+    assert_eq!(record(&fixture), None);
+    let from = bound_sender(&fixture);
+    send(&fixture, &from, "after the harness died");
+    assert_eq!(received(&world, &fixture, "after the harness died"), 1);
+}
+
+/// While a restart record holds abc123, its harness's Ended(Died) is the
+/// restart's to settle: the flow stays Active and Awake.
+#[test]
+fn a_harness_end_of_a_restarting_flow_is_fenced() {
+    let mut fixture = NexusFixture::new();
+    let world = fixture.restart_world(false);
+    fixture
+        .nexus
+        .store
+        .record_restart(spawning_record(&world, next_pane("restarting")))
+        .unwrap();
+    super::harness_subscription::told_to(
+        &fixture.nexus,
+        &world.seat.session,
+        harness::Event::Ended(harness::EndReason::Died),
+        harness::State::Ended,
+    );
+    assert_eq!(node(&fixture).flow_lifecycle, FlowLifecycle::Active);
+    assert_eq!(
+        stored(&fixture, Model::Sol).state,
+        State::Awake(flow_ethos::FlowId(FLOW.into()))
+    );
 }
 
 /// abc123 bound with no pane, its route recorded no more, and no live
@@ -3323,12 +3397,19 @@ fn restart_cutover_two_nexus() {
     fixture.nexus.drain_awake(&address(Model::Sol));
     assert_eq!(
         node(&fixture).flow_lifecycle,
-        FlowLifecycle::Active,
-        "the old Nexus records the old seat's end, not an exit"
+        FlowLifecycle::Exited,
+        "the old Nexus recorded the old seat's exit"
     );
-    // Every wake of its metaflow is refused while the resumed session runs
-    // in Herdr: nothing is launched, and what it holds stays with it.
-    assert_eq!(stored(&fixture, Model::Sol).queue.0.len(), 1);
+    // Its Maintained metaflow owes a successor, and every wake of it is
+    // refused while the resumed session runs in Herdr: nothing is launched,
+    // and what it holds stays with it.
+    let old_metaflow = stored(&fixture, Model::Sol);
+    assert_eq!(old_metaflow.state, State::Asleep);
+    assert_eq!(old_metaflow.queue.0.len(), 1);
+    assert!(matches!(
+        fixture.nexus.store.successor_intent(&address(Model::Sol)),
+        Ok(Some(intent)) if intent.predecessor.0 == FLOW
+    ));
 
     // The same old reports reach the new Nexus, and an Observe's Gone of
     // the seat it adopted: none acts.

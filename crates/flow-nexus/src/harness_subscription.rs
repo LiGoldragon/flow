@@ -684,6 +684,15 @@ pub struct ToldRest {
     pub session: String,
 }
 
+/// What a Changed tells that is settled off the subscriber's thread: a
+/// rest, or the end of a live flow's harness (Died or Exited), which ends
+/// the flow and may start its Maintained successor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Told {
+    Rest(ToldRest),
+    End(signal_flow::FlowId),
+}
+
 /// What a told harness state is for a Claude flow's seat: None for Dry and
 /// for the end of a session /clear ended, which goes on in the next one.
 trait ReadsHarnessStanding {
@@ -716,14 +725,18 @@ pub trait FollowsClaudeHarness {
     /// Writes the seat row of every live Claude flow the observation tells
     /// of, under the restart fence, and returns the turn ends and rests it
     /// told: a seat told TurnEnded, whatever its state, or one that moved
-    /// to Resting.
-    fn follow_claude_harness(&self, observation: &HarnessObservation) -> Vec<ToldRest>;
+    /// to Resting; and the flows whose harness a Changed told Died or
+    /// Exited.
+    fn follow_claude_harness(&self, observation: &HarnessObservation) -> Vec<Told>;
     /// What a correlated hook Stop set going, set going by a told rest:
     /// launches waiting on a Stop are cued, the turn end is published, a
     /// simplified seat's answer is queued, and the rest is settled (drain,
     /// refresh ordered or due, sleep), remembered when Herdr does not yet
     /// show it.
     fn settle_told_rest(&self, rest: &ToldRest);
+    /// A rest settled, or an end recorded as the flow's own: Exited, its
+    /// Maintained metaflow owed a successor and woken when due.
+    fn settle_told(&self, told: &Told);
 }
 
 impl FollowsClaudeHarness for RunningNexus {
@@ -753,7 +766,7 @@ impl FollowsClaudeHarness for RunningNexus {
         }
     }
 
-    fn follow_claude_harness(&self, observation: &HarnessObservation) -> Vec<ToldRest> {
+    fn follow_claude_harness(&self, observation: &HarnessObservation) -> Vec<Told> {
         use crate::store::current_seat::RecordsHarnessStandings;
         use crate::store::restart::RecordsRestarts;
         let told: Vec<(&FlowId, Option<&Event>, &State)> = match observation {
@@ -796,13 +809,32 @@ impl FollowsClaudeHarness for RunningNexus {
             if matches!(event, Some(Event::TurnEnded))
                 || (standing == HarnessStanding::Rested && moved)
             {
-                rests.push(ToldRest {
+                rests.push(Told::Rest(ToldRest {
                     flow_id: id,
                     session: node.session_id.0,
-                });
+                }));
+            } else if matches!(
+                event,
+                Some(Event::Ended(
+                    harness::EndReason::Died | harness::EndReason::Exited
+                ))
+            ) {
+                // The harness's end of the flow's own session is the
+                // flow's end; a /clear goes on in the next session.
+                rests.push(Told::End(signal_flow::FlowId(id)));
             }
         }
         rests
+    }
+
+    fn settle_told(&self, told: &Told) {
+        match told {
+            Told::Rest(rest) => self.settle_told_rest(rest),
+            Told::End(flow_id) => {
+                use crate::observe_agent::RecordsWitnessedExit;
+                self.exited_as_witnessed(&flow_id.0)
+            }
+        }
     }
 
     fn settle_told_rest(&self, rest: &ToldRest) {
@@ -833,7 +865,7 @@ impl FollowsClaudeHarness for RunningNexus {
 pub struct HarnessSubscriber<'nexus> {
     pub nexus: &'nexus RunningNexus,
     pub socket: HarnessSocket,
-    pub rests: std::sync::mpsc::Sender<ToldRest>,
+    pub rests: std::sync::mpsc::Sender<Told>,
 }
 
 pub trait HoldsHarnessSubscription {
@@ -999,7 +1031,7 @@ impl SubscribesToHarnesses for RunningNexus {
         if configuration.harness_subscription_path_vector.is_empty() {
             return;
         }
-        let (rests, told) = std::sync::mpsc::channel::<ToldRest>();
+        let (rests, told) = std::sync::mpsc::channel::<Told>();
         for path in &configuration.harness_subscription_path_vector {
             let subscriber = HarnessSubscriber {
                 nexus: self,
@@ -1013,8 +1045,8 @@ impl SubscribesToHarnesses for RunningNexus {
         // settled here, so the subscribers go on reading meanwhile. This
         // thread ends once every subscriber has.
         scope.spawn(move || {
-            for rest in told {
-                self.settle_told_rest(&rest);
+            for told in told {
+                self.settle_told(&told);
             }
         });
         scope.spawn(move || self.keep_judging());

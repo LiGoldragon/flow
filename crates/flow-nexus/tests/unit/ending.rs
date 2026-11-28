@@ -158,10 +158,10 @@ fn close_of_a_maintained_metaflow_s_flow_closes_it() {
 
 /// A Claude flow's end is its Harness Nexus's to tell: the end its hook
 /// reports is kept raw and ends nothing; the harness's end of its session
-/// ends its seat, Asleep, and leaves the flow live and its pane open, so a
-/// Restart can still take it.
+/// ends the flow, Exited, its seat Asleep and its metaflow Asleep, its pane
+/// reaped as an exit reaps it; a Restart can still take it up by its session.
 #[test]
-fn a_flow_whose_harness_ends_its_session_is_asleep_and_stays_live() {
+fn a_flow_whose_harness_ends_its_session_is_exited() {
     use crate::generated::transitions::{AskedFlow, RecordsTransitions};
     let fixture = NexusFixture::new();
     awake_seat(&fixture);
@@ -182,12 +182,9 @@ fn a_flow_whose_harness_ends_its_session_is_asleep_and_stays_live() {
             .unwrap(),
         Some(meta_signal_flow::State::Asleep)
     );
-    assert_eq!(lifecycle(&fixture), live);
-    assert!(!closed(&fixture), "no pane is closed by the end");
-    assert_eq!(
-        state(&fixture),
-        State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
-    );
+    assert_eq!(lifecycle(&fixture), FlowLifecycle::Exited);
+    assert!(closed(&fixture), "the exited flow's pane is reaped");
+    assert_eq!(state(&fixture), State::Asleep);
 }
 
 /// A session /clear ended is a session change, not an exit: the flow is

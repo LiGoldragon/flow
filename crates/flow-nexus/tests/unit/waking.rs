@@ -1073,12 +1073,9 @@ fn a_missing_pane_does_not_wake_a_successor_until_the_native_session_ends() {
     fixture.nexus.after_report(&id, &ended);
     super::harness_subscription::told_as_reported_to(&fixture.nexus, &id.0, &ended);
     drop(lease);
-    // The harness's end ends the seat; the metaflow stays Awake as it until
-    // a wake finds it ended; the flow stays live, so a Restart can take it.
-    assert_eq!(
-        stored(&fixture, Model::Sol).state,
-        State::Awake(flow_ethos::FlowId("abc123".into()))
-    );
+    // The harness's end ends the flow, Exited, and puts its metaflow to
+    // sleep; the wake it held off is not taken here.
+    assert_eq!(stored(&fixture, Model::Sol).state, State::Asleep);
     assert_eq!(
         fixture
             .nexus
@@ -1087,7 +1084,7 @@ fn a_missing_pane_does_not_wake_a_successor_until_the_native_session_ends() {
             .unwrap()
             .unwrap()
             .flow_lifecycle,
-        FlowLifecycle::Active
+        FlowLifecycle::Exited
     );
     let _ = (at, world, seat);
 }
@@ -7155,8 +7152,17 @@ fn a_sender_whose_harness_ends_its_session_is_observed_gone() {
     let node = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
     assert_eq!(
         node.flow_lifecycle,
-        FlowLifecycle::Active,
-        "the harness's end ends the seat, not the flow"
+        FlowLifecycle::Exited,
+        "the harness's end ends the flow"
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .stored_metaflow_lock(&recipient)
+            .unwrap()
+            .is_none(),
+        "its locks as a sender are released"
     );
 }
 
@@ -7421,16 +7427,14 @@ fn a_start_starts_no_other_models_seat_first() {
 
 /// A Claude flow's own session end is what its Harness Nexus tells: the
 /// end its hook reports, of its own session or another, ends nothing, and
-/// the harness's end of its own session ends its seat, Asleep, leaving the
-/// flow live and its metaflow Awake as it, owed no successor, so a Restart
-/// can still take it.
+/// the harness's end of its own session, Died or Exited, ends the flow:
+/// Exited, its metaflow Asleep, and a Maintained one owed a successor the
+/// same write and woken at once, so its Address's next flow starts.
 #[test]
-fn a_session_end_the_harness_tells_ends_the_seat_and_leaves_the_flow_live() {
-    use crate::generated::transitions::{AskedFlow, RecordsTransitions};
+fn a_session_end_the_harness_tells_ends_the_flow_and_its_successor_starts() {
     use crate::store::NamesLiveFlow;
-    use crate::store::successor::OwesSuccessors;
-    for session in ["another-session", CLAUDE_SESSION] {
-        let fixture = NexusFixture::new();
+    for reason in [harness::EndReason::Died, harness::EndReason::Exited] {
+        let mut fixture = NexusFixture::new();
         claude_seat(&fixture, 40_000);
         fixture.nexus.store.seed_metaflow(metaflow(
             Model::Sol,
@@ -7439,35 +7443,32 @@ fn a_session_end_the_harness_tells_ends_the_seat_and_leaves_the_flow_live() {
             vec![],
         ));
         maintain(&fixture, address(Model::Sol));
+        let world = fixture.fresh_claude_world();
 
         fixture.nexus.after_report(
-            &flow_ethos::FlowId(CLAUDE_SEAT.to_owned().to_owned()),
-            &signal_flow::Event::Ended(Some(signal_flow::NativeSessionId(session.into()))),
+            &flow_ethos::FlowId(CLAUDE_SEAT.to_owned()),
+            &signal_flow::Event::Ended(Some(signal_flow::NativeSessionId(
+                CLAUDE_SESSION.into(),
+            ))),
         );
-        super::harness_subscription::ended_to(&fixture.nexus, CLAUDE_SESSION);
+        let node = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
+        assert!(node.flow_lifecycle.is_live(), "a hook's end ends nothing");
+        super::harness_subscription::told_to(
+            &fixture.nexus,
+            CLAUDE_SESSION,
+            harness::Event::Ended(reason.clone()),
+            harness::State::Ended,
+        );
 
         let node = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
-        assert!(node.flow_lifecycle.is_live(), "{:?}", node.flow_lifecycle);
-        assert_eq!(
-            fixture
-                .nexus
-                .store
-                .state_of(AskedFlow(flow_ethos::FlowId(CLAUDE_SEAT.into())))
-                .unwrap(),
-            Some(meta_signal_flow::State::Asleep)
+        assert_eq!(node.flow_lifecycle, signal_flow::FlowLifecycle::Exited);
+        let started = stored(&fixture, Model::Sol);
+        assert!(
+            matches!(&started.state, State::Awake(successor) if successor.0 != CLAUDE_SEAT),
+            "{reason:?}: {started:?}; {}",
+            world.calls()
         );
-        assert_eq!(
-            stored(&fixture, Model::Sol).state,
-            State::Awake(flow_ethos::FlowId(CLAUDE_SEAT.into()))
-        );
-        assert_eq!(
-            fixture
-                .nexus
-                .store
-                .successor_intent(&address(Model::Sol))
-                .unwrap(),
-            None
-        );
+        assert_eq!(world.claude_starts(), 1, "{}", world.calls());
     }
 }
 
@@ -7545,9 +7546,9 @@ fn recover_wakes_takes_up_an_owed_successor() {
 }
 
 /// A Maintained metaflow whose flow's session its harness tells ended is
-/// owed no successor by that end: the seat ends, the flow stays live.
+/// owed a successor by that end, which starts at once: the flow Exited.
 #[test]
-fn a_harness_session_end_starts_no_maintained_successor() {
+fn a_harness_session_end_starts_the_maintained_successor() {
     use crate::store::successor::OwesSuccessors;
     let mut fixture = NexusFixture::new();
     let seat = launched_claude_ended_by(&fixture, |_| true);
@@ -7572,12 +7573,12 @@ fn a_harness_session_end_starts_no_maintained_successor() {
     );
     fixture.nexus.after_report(&id, &end);
     super::harness_subscription::told_as_reported_to(&fixture.nexus, &id.0, &end);
-    // The end ends the seat alone: no successor is owed or started by it.
-    assert_eq!(
-        stored(&fixture, Model::Sol).state,
-        State::Awake(flow_ethos::FlowId("abc123".into()))
-    );
-    assert_eq!(world.claude_starts(), 0, "{}", world.calls());
+    // The end ends the flow: its successor is owed and started.
+    assert!(matches!(
+        &stored(&fixture, Model::Sol).state,
+        State::Awake(successor) if successor.0 != "abc123"
+    ));
+    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
     assert_eq!(
         fixture
             .nexus

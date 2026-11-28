@@ -86,6 +86,10 @@ pub mod observe_agent;
 pub mod observe_configuration;
 pub mod observe_metaflows;
 pub mod observe_sends;
+// A flow's OpenCode configuration and its server's calls; compiled for
+// tests alone until the launch starts the server.
+#[cfg(test)]
+pub(crate) mod opencode;
 pub mod overriding;
 pub mod peer;
 pub mod performing;
@@ -3532,6 +3536,7 @@ mod tests {
     mod model;
     mod observe_metaflows;
     mod open_requests;
+    mod opencode;
     mod overriding;
     mod queue_drain;
     mod queue_operations;

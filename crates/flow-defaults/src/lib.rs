@@ -105,6 +105,9 @@ pub trait LaysOutDefaults {
     const NEXT_CODEX_MODELS: [&str; 3] = ["gpt-6-sol", "gpt-6-luna", "gpt-6-astra"];
     const CODEX_CONTROL_SOCKET: &str = "app-server-control/app-server-control.sock";
     const CURRICULUM_SOCKET: &str = "curriculum/curriculum.sock";
+    /// Where, under the state directory, each OpenCode flow's own
+    /// configuration directory is written.
+    const OPENCODE_DIRECTORY: &str = "opencode";
 
     fn home(&self) -> &Path;
     fn runtime_directory(&self) -> &Path;
@@ -131,6 +134,12 @@ pub trait LaysOutDefaults {
 
     fn source_root(&self) -> PathBuf {
         self.home().join(Self::SOURCE_ROOT)
+    }
+
+    /// The directory under which Flow writes one OpenCode configuration
+    /// directory for each OpenCode flow it starts.
+    fn opencode_configuration_root(&self) -> PathBuf {
+        self.state_directory().join(Self::OPENCODE_DIRECTORY)
     }
 
     /// The socket Curriculum serves under the runtime directory.
@@ -200,6 +209,10 @@ mod tests {
         assert_eq!(
             defaults.store_path(),
             Path::new("/home/someone/.local/state/flow/flow.sema")
+        );
+        assert_eq!(
+            defaults.opencode_configuration_root(),
+            Path::new("/home/someone/.local/state/flow/opencode")
         );
         assert_eq!(
             defaults.curriculum_socket_path(),

@@ -2,7 +2,8 @@
 //! imports resolved into its own types section, followed by one example
 //! datom for each input and each output, generated from the types.
 //!
-//! Nothing here is written for a reader: the prose is the authored comment
+//! Nothing here is written for a reader in Rust: the head is this crate's
+//! data file, the same for every client, the prose is the authored comment
 //! block that opens the contract's own file, the Ethos is ethos-zero's print
 //! of the resolved file, and the examples are made from the declarations.
 //! An imported name keeps the name its import gives it; a name the import
@@ -14,6 +15,10 @@ use ethos_zero::{
     TypeDeclaration, Validating, Variant,
 };
 use std::collections::{BTreeMap, BTreeSet};
+
+/// The prose every printout opens with, whatever its contract: how a datom
+/// is written where every tool writes it alike.
+pub const HEAD: &str = include_str!("../head.txt");
 
 /// A crate a contract imports from: its Rust name, as an import's source
 /// writes it, and the Ethos text of each file whose names it exports.
@@ -931,10 +936,11 @@ trait Exemplifies {
 }
 
 impl Printed for Printout {
-    /// The whole printout: the prose, the resolved Ethos, then one example
-    /// per input and per output as comments, inputs first.
+    /// The whole printout: the head, the prose, the resolved Ethos, then one
+    /// example per input and per output as comments, inputs first.
     fn text(&self) -> String {
-        let mut text = self.prose.clone();
+        let mut text = HEAD.to_owned();
+        text.push_str(&self.prose);
         text.push_str(&File::Signal(self.resolved.clone()).print());
         for section in [self.input_examples(), self.output_examples()] {
             text.push('\n');
@@ -1140,7 +1146,7 @@ impl Exemplifying for Examples<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Contract, Origin, Printed, Printing};
+    use super::{Contract, HEAD, Origin, Printed, Printing};
 
     /// A name imported along with its neighbours, and a unit variant of
     /// another file whose name a carried type shares: the printout declares
@@ -1162,7 +1168,8 @@ mod tests {
         printout.check().expect("the printout checks");
         let text = printout.text();
         assert!(
-            text.starts_with("; The fixture's prose.\nSignal\n"),
+            text.strip_prefix(HEAD)
+                .is_some_and(|rest| rest.starts_with("; The fixture's prose.\nSignal\n")),
             "{text}"
         );
         assert!(text.contains("FixtureQueue"), "{text}");

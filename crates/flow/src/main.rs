@@ -141,7 +141,15 @@ mod tests {
             maximum_depth: 1_024,
         };
         let mut refused = Vec::new();
-        for example in printout.input_examples() {
+        // The head's own example, the datom its shell variable holds.
+        let shown = ethos_printout::HEAD
+            .lines()
+            .map(|line| line.trim_start_matches(';').trim())
+            .filter(|line| line.starts_with("Send."))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(shown.len(), 1, "the head shows one Send");
+        for example in printout.input_examples().into_iter().chain(shown) {
             if let Err(error) =
                 Potential::<signal_flow::Input>::from(example.clone()).actualize(&mut budget())
             {

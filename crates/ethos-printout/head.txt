@@ -1,0 +1,12 @@
+; How a string is written in a datom, the same in every tool: a string with
+; no whitespace and no delimiter is written bare; one with whitespace or a
+; delimiter is written in guillemets «…»; the empty string is «».
+;
+; A message holding an apostrophe passes through a shell variable:
+;
+;   m=$(cat <<'END'
+;   Send.{ { Psyche director Opus } MiddleAbrupt.Notice.«It's landed.» }
+;   END
+;   )
+;   flow "$m"
+;

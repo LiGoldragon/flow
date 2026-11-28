@@ -330,6 +330,8 @@ impl PreparesContextWarningAdmission for FlowStore {
             }
             // OpenCode's context is not yet observed, so no projection fits.
             signal_flow::HarnessKind::OpenCode => return Ok(None),
+            // Nor is Pi's.
+            signal_flow::HarnessKind::Pi => return Ok(None),
         };
         if !node.flow_lifecycle.is_live()
             || policy.context_usage_projection != native_projection

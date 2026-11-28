@@ -215,6 +215,7 @@ pub enum HarnessCommandLine {
     Claude(ClaudeCommandLine),
     Codex(CodexCommandLine),
     OpenCode(OpenCodeCommandLine),
+    Pi(PiCommandLine),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -289,6 +290,16 @@ pub struct OpenCodeAgent {
     pub model_name: flow_ethos::ModelName,
     pub effort: signal_flow::Effort,
     pub system_prompt_file: SystemPromptFile,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct PiCommandLine {
+    pub system_prompt_file: SystemPromptFile,
+    pub native_session_id: signal_flow::NativeSessionId,
+    pub model_name: flow_ethos::ModelName,
+    pub effort: signal_flow::Effort,
+    pub configured_harness_arguments: ConfiguredHarnessArguments,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

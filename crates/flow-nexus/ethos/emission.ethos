@@ -70,7 +70,7 @@ Emission
   CodexExecutable.String
   ; The harness's own command line, as Herdr types it into the pane after
   ; the program.
-  HarnessCommandLine.[ Claude.ClaudeCommandLine Codex.CodexCommandLine OpenCode.OpenCodeCommandLine ]
+  HarnessCommandLine.[ Claude.ClaudeCommandLine Codex.CodexCommandLine OpenCode.OpenCodeCommandLine Pi.PiCommandLine ]
   ; Claude: its settings document, the title it is named and
   ; remote-controlled by, the file its system prompt is read from, the
   ; session it starts or resumes, its model and effort, the parts it starts
@@ -89,6 +89,10 @@ Emission
   ; its model and effort, spoken model#effort, and the file its system
   ; prompt is read from.
   OpenCodeAgent.{ OpenCodeAgentName.String ModelName Effort SystemPromptFile }
+  ; Pi: the file its whole system prompt is read from, the session it
+  ; creates or resumes, its model as provider/id and its thinking level,
+  ; and the configured arguments.
+  PiCommandLine.{ SystemPromptFile NativeSessionId ModelName Effort ConfiguredHarnessArguments }
   ; The arguments the configuration adds, as a person wrote them.
   ConfiguredHarnessArguments.Vector<String>
   Printout.{ Stdout.String Stderr.String }

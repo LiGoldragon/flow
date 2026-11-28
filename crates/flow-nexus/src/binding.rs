@@ -318,6 +318,8 @@ impl VerifiesExistingBinding for crate::herdr::HerdrCli {
             // An OpenCode seat is not yet bound by Flow: no record of its
             // process names a session.
             (None, HarnessKind::OpenCode) => Err(FlowBindingRefusalReason::SessionUnreported),
+            // Nor is a Pi seat: its session is reported by no hook yet.
+            (None, HarnessKind::Pi) => Err(FlowBindingRefusalReason::SessionUnreported),
             (None, HarnessKind::Codex) => {
                 let proven = self
                     .native_transcript_root(&HarnessKind::Codex, &binding.model_name.0)

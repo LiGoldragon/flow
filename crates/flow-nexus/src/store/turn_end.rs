@@ -58,6 +58,7 @@ impl RanksHarness for HarnessKind {
             HarnessKind::Claude => "1-Claude",
             HarnessKind::Codex => "2-Codex",
             HarnessKind::OpenCode => "3-OpenCode",
+            HarnessKind::Pi => "4-Pi",
         }
     }
 }

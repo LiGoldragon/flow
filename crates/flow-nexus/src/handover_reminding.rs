@@ -287,9 +287,9 @@ impl RemindsHandoverCallers for crate::RunningNexus {
             ) && match self.store.flow_node(flow_id) {
                 Ok(Some(node)) => match node.harness_kind {
                     signal_flow::HarnessKind::Codex => self.codex_resting(flow_id),
-                    signal_flow::HarnessKind::Claude | signal_flow::HarnessKind::OpenCode => {
-                        self.turn_end_recorded(flow_id)
-                    }
+                    signal_flow::HarnessKind::Claude
+                    | signal_flow::HarnessKind::OpenCode
+                    | signal_flow::HarnessKind::Pi => self.turn_end_recorded(flow_id),
                 },
                 _ => false,
             } {

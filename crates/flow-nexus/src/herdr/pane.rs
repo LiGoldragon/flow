@@ -380,9 +380,17 @@ impl ReadsAgentStatus for Option<&str> {
 /// A harness's composer as its screen shows it. The prompt glyph is harness
 /// knowledge of the version witnessed, not a setup value, so it lives here.
 struct Composer {
-    glyph: char,
+    line: ComposerLine,
     /// What empties a composer an interrupt put a letter back into.
     retraction: Retraction,
+}
+
+/// Where a harness draws its composer: on the last line opening with its
+/// prompt glyph, or, where it draws no glyph, between the last two lines
+/// that are a rule of one character.
+enum ComposerLine {
+    Glyph(char),
+    BetweenRules(char),
 }
 
 /// How a harness's composer is emptied of a letter an interrupt restored.
@@ -442,29 +450,59 @@ impl ReadsComposer for Composer {
     fn of(harness_kind: &HarnessKind) -> Self {
         match harness_kind {
             HarnessKind::Claude => Self {
-                glyph: '❯',
+                line: ComposerLine::Glyph('❯'),
                 retraction: Retraction::Key("ctrl+c"),
             },
             HarnessKind::Codex => Self {
-                glyph: '›',
+                line: ComposerLine::Glyph('›'),
                 retraction: Retraction::LineByLine,
             },
             // OpenCode 2.4.1's composer, as a Herdr pane showed it: each line
             // behind `┃`; its text is retracted a line at a time (not yet
             // tried).
             HarnessKind::OpenCode => Self {
-                glyph: '┃',
+                line: ComposerLine::Glyph('┃'),
                 retraction: Retraction::LineByLine,
+            },
+            // Pi 1.6.0 draws no prompt glyph: its editor is the lines
+            // between two `─` rules above its footer. One `ctrl+c` clears
+            // a non-empty editor; a second would exit Pi, so it is pressed
+            // once.
+            HarnessKind::Pi => Self {
+                line: ComposerLine::BetweenRules('─'),
+                retraction: Retraction::Key("ctrl+c"),
             },
         }
     }
 
     fn text(&self, screen: &str) -> Option<String> {
-        let line = screen
-            .lines()
-            .map(StyledLine::from)
-            .rfind(|line| line.visible().trim_start().starts_with(self.glyph))?;
-        Some(line.text_after(self.glyph))
+        let lines = screen.lines().map(StyledLine::from).collect::<Vec<_>>();
+        match self.line {
+            ComposerLine::Glyph(glyph) => {
+                let line = lines
+                    .iter()
+                    .rfind(|line| line.visible().trim_start().starts_with(glyph))?;
+                Some(line.text_after(glyph))
+            }
+            ComposerLine::BetweenRules(rule) => {
+                let mut rules = lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, line)| line.is_rule_of(rule))
+                    .map(|(index, _)| index)
+                    .rev();
+                let (closing, opening) = (rules.next()?, rules.next()?);
+                Some(
+                    lines[opening + 1..closing]
+                        .iter()
+                        .map(StyledLine::undimmed)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        .trim()
+                        .to_owned(),
+                )
+            }
+        }
     }
 
     #[cfg(test)]
@@ -520,6 +558,10 @@ trait ReadsStyledLine {
     fn visible(&self) -> String;
     /// What follows the glyph, trimmed, with dim placeholder text left out.
     fn text_after(&self, glyph: char) -> String;
+    /// Whether the line is one character drawn across it, spaces aside.
+    fn is_rule_of(&self, rule: char) -> bool;
+    /// The line's text, trimmed, with dim placeholder text left out.
+    fn undimmed(&self) -> String;
 }
 
 impl ReadsStyledLine for StyledLine {
@@ -535,6 +577,22 @@ impl ReadsStyledLine for StyledLine {
             .iter()
             .skip_while(|(character, _)| *character != glyph)
             .skip(1)
+            .filter(|(_, dim)| !*dim)
+            .map(|(character, _)| *character)
+            .collect::<String>()
+            .trim()
+            .to_owned()
+    }
+
+    fn is_rule_of(&self, rule: char) -> bool {
+        let visible = self.visible();
+        let drawn = visible.trim();
+        !drawn.is_empty() && drawn.chars().all(|character| character == rule)
+    }
+
+    fn undimmed(&self) -> String {
+        self.characters
+            .iter()
             .filter(|(_, dim)| !*dim)
             .map(|(character, _)| *character)
             .collect::<String>()
@@ -591,5 +649,27 @@ mod tests {
         assert_eq!(claude.is_blank("───\n❯ \n───\n"), Some(true));
         assert_eq!(claude.is_blank("───\n❯ half a thought\n───\n"), Some(false));
         assert_eq!(claude.is_blank(CODEX_PLACEHOLDER), None);
+    }
+
+    /// Pi draws no glyph: its editor is read between the last two rules,
+    /// above its footer, a line or several.
+    #[test]
+    fn a_pi_composer_reads_between_its_last_two_rules() {
+        let pi = Composer::of(&HarnessKind::Pi);
+        let screen = |editor: &str| {
+            format!(
+                "─────\nan earlier answer\n─────\n{editor}\n─────\n~/work  deepseek-v4.1-flash-fast · high\n"
+            )
+        };
+        assert_eq!(pi.is_blank(&screen("")), Some(true));
+        assert_eq!(
+            pi.text(&screen("half a thought")),
+            Some("half a thought".into())
+        );
+        assert_eq!(
+            pi.text(&screen("first line\nsecond line")),
+            Some("first line\nsecond line".into())
+        );
+        assert_eq!(pi.is_blank("one rule only\n─────\n"), None);
     }
 }

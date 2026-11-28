@@ -505,11 +505,13 @@ impl FitsOneMessage for HarnessKind {
                 encoded.len() + HERDR_ENVELOPE_ALLOWANCE <= HERDR_REQUEST_LINE_LIMIT
             }),
             HarnessKind::Codex => text.chars().count() <= CODEX_TEXT_CHARACTER_LIMIT,
-            // Not established for OpenCode: its prompt is typed by Herdr as
+            // Not established for OpenCode or Pi: its prompt is typed by Herdr as
             // Claude's is, so the same request-line bound is kept.
-            HarnessKind::OpenCode => serde_json::to_string(&text).is_ok_and(|encoded| {
-                encoded.len() + HERDR_ENVELOPE_ALLOWANCE <= HERDR_REQUEST_LINE_LIMIT
-            }),
+            HarnessKind::OpenCode | HarnessKind::Pi => {
+                serde_json::to_string(&text).is_ok_and(|encoded| {
+                    encoded.len() + HERDR_ENVELOPE_ALLOWANCE <= HERDR_REQUEST_LINE_LIMIT
+                })
+            }
         }
     }
 }

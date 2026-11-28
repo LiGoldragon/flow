@@ -341,6 +341,26 @@ impl SpeaksHarness for HarnessCommandLine {
                 words.extend(opencode.configured_harness_arguments.0.iter().cloned());
                 words
             }
+            // Pi 1.6.0's TUI: `--system-prompt` replaces its whole preamble,
+            // read as a file when the path exists; `--session-id` creates
+            // the session of that id or resumes it; `--model` takes
+            // provider/id, and `--thinking` the level as the configuration
+            // spells it, which Pi itself judges.
+            HarnessCommandLine::Pi(pi) => {
+                let mut words = vec![
+                    "--system-prompt".to_owned(),
+                    pi.system_prompt_file.0.clone(),
+                    "--session-id".into(),
+                    pi.native_session_id.0.clone(),
+                    "--model".into(),
+                    pi.model_name.0.clone(),
+                ];
+                if !pi.effort.0.is_empty() {
+                    words.extend(["--thinking".into(), pi.effort.0.clone()]);
+                }
+                words.extend(pi.configured_harness_arguments.0.iter().cloned());
+                words
+            }
         }
     }
 }
@@ -688,9 +708,9 @@ impl Emittable<HerdrCli> for FlowIdentityClaim {
             signal_flow::HarnessKind::Codex => {
                 command.env("CODEX_SESSION_ID", &self.native_session_id.0);
             }
-            // The helper reads an OpenCode session as an argument, as
-            // Claude's.
-            signal_flow::HarnessKind::OpenCode => {
+            // The helper reads an OpenCode or a Pi session as an argument,
+            // as Claude's.
+            signal_flow::HarnessKind::OpenCode | signal_flow::HarnessKind::Pi => {
                 command
                     .arg("--parent-session")
                     .arg(&self.native_session_id.0);

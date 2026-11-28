@@ -4341,7 +4341,7 @@ mod tests {
                         }
                         let submission = match node.harness_kind {
                             HarnessKind::Claude => SeatSubmission::Prompt(text.prompt_sha256()),
-                            HarnessKind::Codex | HarnessKind::OpenCode => {
+                            HarnessKind::Codex | HarnessKind::OpenCode | HarnessKind::Pi => {
                                 SeatSubmission::TurnStarted
                             }
                         };

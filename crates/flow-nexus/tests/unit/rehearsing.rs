@@ -26,6 +26,7 @@ impl RehearsalFixture for Fixture {
             HarnessKind::Claude => "claude-opus-5-5",
             HarnessKind::Codex => "gpt-6.1-sol",
             HarnessKind::OpenCode => "refuseless/deepseek-v4.1-flash-fast",
+            HarnessKind::Pi => "refuseless/deepseek-v4.1-flash-fast",
         };
         let profile = LaunchProfile {
             launch_request_id: signal_flow::LaunchRequestId("request-fixture".into()),
@@ -77,13 +78,15 @@ impl RehearsalFixture for Fixture {
                 HarnessKind::Claude => "claude".into(),
                 HarnessKind::Codex => "/nix/store/codex/bin/codex".into(),
                 HarnessKind::OpenCode => "opencode".into(),
+                HarnessKind::Pi => "pi".into(),
             },
             codex_socket: (harness == &HarnessKind::Codex).then(|| "/run/codex.sock".into()),
             claude_settings: (harness == &HarnessKind::Claude)
                 .then(|| "{\"permissions\":{}}".into()),
             claude_title: (harness == &HarnessKind::Claude)
                 .then(|| "{ Mind core Sol abc123 }".into()),
-            prompt_fd: (harness == &HarnessKind::Claude).then(|| "/proc/self/fd/17".into()),
+            prompt_fd: matches!(harness, HarnessKind::Claude | HarnessKind::Pi)
+                .then(|| "/proc/self/fd/17".into()),
             claude_session: (harness == &HarnessKind::Claude).then(|| "claude-session".into()),
             claude_resume: None,
             thread: (harness == &HarnessKind::Codex).then(|| "codex-thread".into()),
@@ -93,6 +96,8 @@ impl RehearsalFixture for Fixture {
                 .then(|| "ses_flow0000000001FlowTestPerm".into()),
             system_prompt_file: (harness == &HarnessKind::OpenCode)
                 .then(|| "/run/flow/request-fixture/system".into()),
+            pi_session: (harness == &HarnessKind::Pi)
+                .then(|| "12345678-1234-5abc-8def-123456789abc".into()),
         }
     }
 
@@ -114,6 +119,7 @@ impl RehearsalFixture for Fixture {
                 "<thread>" => actual.thread.clone().unwrap(),
                 "<opencode-server>" => actual.opencode_server.clone().unwrap(),
                 "<opencode-session>" => actual.opencode_session.clone().unwrap(),
+                "<pi-session>" => actual.pi_session.clone().unwrap(),
                 other => other.to_owned(),
             };
         }
@@ -159,7 +165,7 @@ fn one_constructor_gives_actual_and_rehearsal_the_same_argv_shape() {
     let tail = "--disallowedTools 'Artifact*' ''"
         .harness_arguments()
         .unwrap();
-    for harness in [HarnessKind::Claude, HarnessKind::Codex] {
+    for harness in [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Pi] {
         let launch = Fixture::launch(harness.clone());
         let actual = herdr.command_line(
             &herdr
@@ -259,6 +265,44 @@ fn an_opencode_agent_carries_model_variant_and_system_prompt_file() {
         agent("").opencode_configuration()["agents"]["flow-mind-core-terra"]["model"],
         "refuseless/deepseek-v4.1-flash-fast"
     );
+}
+
+/// A Pi flow is rehearsed whole: its system prompt by file, the session
+/// Flow chose, its model and thinking level as configured, the configured
+/// tail last; the rehearsal the same argv as the launch with its resources
+/// in place. An effort left to the harness passes no `--thinking`.
+#[test]
+fn a_pi_flow_rehearses_its_whole_command_line() {
+    let herdr = HerdrCli::default();
+    let tail = "--approve".harness_arguments().unwrap();
+    let launch = Fixture::launch(HarnessKind::Pi);
+    let command = |launch: &ComposedLaunch, resources| {
+        herdr.command_line(&herdr.harness_command(launch, resources, &tail).unwrap())
+    };
+    let rehearsed = command(
+        &launch,
+        HarnessCommandResources::rehearsal(&HarnessKind::Pi),
+    );
+    assert_eq!(
+        Fixture::substitute(rehearsed.clone(), &HarnessKind::Pi),
+        command(&launch, Fixture::actual_resources(&HarnessKind::Pi))
+    );
+    let line = rehearsed.shell_command();
+    let herdr_word = herdr.executable.to_string_lossy().into_owned();
+    assert_eq!(
+        line,
+        format!(
+            "'{herdr_word}' '--session' '<session>' 'agent' 'start' '<agent>' '--kind' 'pi' '--pane' '<pane>' '--timeout' '30000' '--' '--system-prompt' '<prompt-fd>' '--session-id' '<pi-session>' '--model' 'refuseless/deepseek-v4.1-flash-fast' '--thinking' 'medium' '--approve'"
+        )
+    );
+    println!("Rehearsed.«{line}»");
+    let mut harness_own = launch.clone();
+    harness_own.launch_profile.effort = signal_flow::Effort(String::new());
+    let words = command(
+        &harness_own,
+        HarnessCommandResources::rehearsal(&HarnessKind::Pi),
+    );
+    assert!(!words.iter().any(|word| word == "--thinking"));
 }
 
 #[test]

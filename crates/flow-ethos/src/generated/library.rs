@@ -361,6 +361,7 @@ pub enum HarnessKind {
     Codex,
     Claude,
     OpenCode,
+    Pi,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -122,6 +122,8 @@ impl ReadsNativeStanding for RunningNexus {
             },
             // OpenCode's standing is not yet read.
             HarnessKind::OpenCode => None,
+            // Nor is Pi's.
+            HarnessKind::Pi => None,
         }
     }
 }

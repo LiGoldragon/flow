@@ -118,6 +118,9 @@ impl LocatesNativeTranscripts for HerdrCli {
                 .map_err(|error| error.to_string()),
             HarnessKind::Claude => Ok(self.claude_transcript_root.clone()),
             HarnessKind::OpenCode => Err("an OpenCode session keeps no transcript file".into()),
+            // Pi's session file is not yet read by Flow: its root is not
+            // configured, and its name carries a timestamp before the id.
+            HarnessKind::Pi => Err("a Pi session's file is not yet read".into()),
         }
     }
 }
@@ -1317,7 +1320,9 @@ impl JudgesPaneOwnership for serde_json::Value {
                     // A Claude agent that reports no session may be a new
                     // `claude` started in the shell after the Flow's own
                     // exited, before its hook reported.
-                    (None, HarnessKind::Claude | HarnessKind::OpenCode) => PaneOwnership::Unproven,
+                    (None, HarnessKind::Claude | HarnessKind::OpenCode | HarnessKind::Pi) => {
+                        PaneOwnership::Unproven
+                    }
                 },
             );
         }

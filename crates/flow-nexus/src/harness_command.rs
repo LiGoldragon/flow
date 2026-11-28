@@ -110,6 +110,8 @@ pub(crate) struct HarnessCommandResources {
     pub opencode_session: Option<String>,
     /// The file an OpenCode agent's system prompt is read from.
     pub system_prompt_file: Option<String>,
+    /// The Pi session Flow chose, which `--session-id` creates or resumes.
+    pub pi_session: Option<String>,
 }
 
 /// Produces the resource projection used by a rehearsal. It creates nothing.
@@ -136,6 +138,7 @@ impl RehearsesHarnessResources for HarnessCommandResources {
                 opencode_server: None,
                 opencode_session: None,
                 system_prompt_file: None,
+                pi_session: None,
             },
             HarnessKind::Codex => Self {
                 herdr_session: "<session>".into(),
@@ -152,6 +155,7 @@ impl RehearsesHarnessResources for HarnessCommandResources {
                 opencode_server: None,
                 opencode_session: None,
                 system_prompt_file: None,
+                pi_session: None,
             },
             HarnessKind::OpenCode => Self {
                 herdr_session: "<session>".into(),
@@ -168,6 +172,24 @@ impl RehearsesHarnessResources for HarnessCommandResources {
                 opencode_server: Some("<opencode-server>".into()),
                 opencode_session: Some("<opencode-session>".into()),
                 system_prompt_file: Some("<system-prompt-file>".into()),
+                pi_session: None,
+            },
+            HarnessKind::Pi => Self {
+                herdr_session: "<session>".into(),
+                agent: "<agent>".into(),
+                pane: "<pane>".into(),
+                program: HarnessKind::Pi.expected_harness().into(),
+                codex_socket: None,
+                claude_settings: None,
+                claude_title: None,
+                prompt_fd: Some("<prompt-fd>".into()),
+                claude_session: None,
+                claude_resume: None,
+                thread: None,
+                opencode_server: None,
+                opencode_session: None,
+                system_prompt_file: None,
+                pi_session: Some("<pi-session>".into()),
             },
         }
     }

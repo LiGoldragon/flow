@@ -4030,6 +4030,7 @@ impl RegistersFlowIdentity for FlowStore {
             HarnessKind::Codex => "codex-registered".into(),
             HarnessKind::Claude => "claude-registered".into(),
             HarnessKind::OpenCode => "opencode-registered".into(),
+            HarnessKind::Pi => "pi-registered".into(),
         };
         self.register_flow_as(flow_node, flow_type, None)
     }
@@ -4043,6 +4044,7 @@ impl RegistersFlowIdentity for FlowStore {
             HarnessKind::Codex => "codex-registered".into(),
             HarnessKind::Claude => "claude-registered".into(),
             HarnessKind::OpenCode => "opencode-registered".into(),
+            HarnessKind::Pi => "pi-registered".into(),
         };
         self.register_flow_as(flow_node, flow_type, Some(role))
     }
@@ -5726,6 +5728,7 @@ pub(crate) trait ReadsFlowMemory: ConfiguresContextWarnings {
             HarnessKind::Claude => "Claude",
             HarnessKind::Codex => "Codex",
             HarnessKind::OpenCode => "OpenCode",
+            HarnessKind::Pi => "Pi",
         }
     }
 

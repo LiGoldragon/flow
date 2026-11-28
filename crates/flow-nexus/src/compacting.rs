@@ -251,6 +251,7 @@ impl RendersCompactionWarning for CompactionWarning<'_> {
             (HarnessKind::Claude, None) => format!("Its Claude session is {}.", self.session),
             (HarnessKind::Codex, _) => format!("Its Codex thread is {}.", self.session),
             (HarnessKind::OpenCode, _) => format!("Its OpenCode session is {}.", self.session),
+            (HarnessKind::Pi, _) => format!("Its Pi session is {}.", self.session),
         };
         format!(
             "Flow warning: flow {} ({seat}) compacted its context{size} while it kept working without being given more work. {source}",
@@ -433,7 +434,7 @@ impl WatchesCompactions for RunningNexus {
             .map(|metaflow| metaflow.address);
         let transcript = match node.harness_kind {
             HarnessKind::Claude => self.claude_transcript(node),
-            HarnessKind::Codex | HarnessKind::OpenCode => None,
+            HarnessKind::Codex | HarnessKind::OpenCode | HarnessKind::Pi => None,
         };
         let warning = CompactionWarning {
             flow_id,

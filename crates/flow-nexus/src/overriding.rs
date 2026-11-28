@@ -183,6 +183,8 @@ impl InterruptsRunningTurns for RunningNexus {
             }
             // No OpenCode flow is launched yet, so none has a turn to end.
             HarnessKind::OpenCode => TurnInterruption::PaneUnreadable,
+            // No Pi flow is launched yet, so none has a turn to end.
+            HarnessKind::Pi => TurnInterruption::PaneUnreadable,
         }
     }
 }

@@ -146,6 +146,16 @@ impl DefaultsHarnessProfile for HarnessKind {
                 interrupt_keys: flow_ethos::InterruptKeys(keys(&["esc", "esc"])),
                 submit_keys: flow_ethos::SubmitKeys(keys(&["enter"])),
             },
+            // Pi 1.6.0's TUI: `/` starts a command and `!` a shell command;
+            // a single Escape interrupts (a second, on an empty editor,
+            // opens its session tree), and Enter submits (not yet tried
+            // through Herdr).
+            HarnessKind::Pi => HarnessProfile {
+                harness_kind: HarnessKind::Pi,
+                command_sigil_vector: sigils(&["/", "!"]),
+                interrupt_keys: flow_ethos::InterruptKeys(keys(&["esc"])),
+                submit_keys: flow_ethos::SubmitKeys(keys(&["enter"])),
+            },
         }
     }
 }

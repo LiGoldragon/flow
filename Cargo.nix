@@ -43,6 +43,16 @@ rec {
   # You can override the features with
   # workspaceMembers."${crateName}".build.override { features = [ "default" "feature1" ... ]; }.
   workspaceMembers = {
+    "ethos-printout" = rec {
+      packageId = "ethos-printout";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "ethos-printout";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "flow" = rec {
       packageId = "flow";
       build = internal.buildRustCrateWithFeatures {
@@ -700,6 +710,20 @@ rec {
         };
         resolvedDefaultFeatures = [ "std" ];
       };
+      "ethos-printout" = rec {
+        crateName = "ethos-printout";
+        version = "0.1.0";
+        edition = "2024";
+        src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/ethos-printout; };
+        libName = "ethos_printout";
+        dependencies = [
+          {
+            name = "ethos-zero";
+            packageId = "ethos-zero 27.0.0";
+          }
+        ];
+
+      };
       "ethos-zero 22.0.0" = rec {
         crateName = "ethos-zero";
         version = "22.0.0";
@@ -955,6 +979,10 @@ rec {
             packageId = "datom-codec";
           }
           {
+            name = "ethos-printout";
+            packageId = "ethos-printout";
+          }
+          {
             name = "flow-ethos";
             packageId = "flow-ethos";
             usesDefaultFeatures = false;
@@ -1094,6 +1122,10 @@ rec {
           {
             name = "datom-codec";
             packageId = "datom-codec";
+          }
+          {
+            name = "ethos-printout";
+            packageId = "ethos-printout";
           }
           {
             name = "flow-ethos";

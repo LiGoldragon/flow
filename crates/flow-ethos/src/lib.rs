@@ -8,3 +8,5 @@ pub use generated::library::*;
 pub use generated::message;
 
 pub const ETHOS: &str = include_str!("../ethos/library.ethos");
+/// The file `library.ethos` imports its `Delivery` and `Message` from.
+pub const DELIVERY_ETHOS: &str = include_str!("../ethos/delivery.ethos");

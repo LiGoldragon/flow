@@ -26,11 +26,8 @@ impl ParsesFlowCommand for FlowClient {
         mut arguments: impl Iterator<Item = String>,
         place: &dyn ResolvesCliPlace,
     ) -> Result<Invocation, String> {
-        let usage = || {
-            "usage: flow '<one inline Input datom>'; the place is the one $XDG_CONFIG_HOME/nexus/flow-nexus.datom names, read from its place file".to_owned()
-        };
         let (Some(value), None) = (arguments.next(), arguments.next()) else {
-            return Err(usage());
+            return Err(self.printout());
         };
         let runtime = place.place_runtime()?;
         let mut budget = Budget {
@@ -50,6 +47,32 @@ impl ParsesFlowCommand for FlowClient {
             ),
             input: query,
         })
+    }
+}
+
+/// The contract this client speaks, printed: its Signal as Ethos, the names
+/// it imports resolved, then an example datom of each input and output.
+/// A run with no datom prints it; a run it cannot read answers it.
+trait PrintsSignal {
+    fn contract(&self) -> ethos_printout::Contract;
+    fn printout(&self) -> String {
+        self.contract()
+            .printout()
+            .map(|printout| printout.text())
+            .unwrap_or_else(|refusal| format!("{refusal:?}"))
+    }
+}
+
+impl PrintsSignal for FlowClient {
+    fn contract(&self) -> ethos_printout::Contract {
+        ethos_printout::Contract {
+            name: "signal_flow",
+            signal: signal_flow::ETHOS,
+            origins: vec![ethos_printout::Origin {
+                name: "flow_ethos",
+                texts: vec![flow_ethos::ETHOS, flow_ethos::DELIVERY_ETHOS],
+            }],
+        }
     }
 }
 
@@ -76,6 +99,10 @@ fn main() {
         return;
     }
     let client = FlowClient;
+    if arguments.is_empty() {
+        print!("{}", client.printout());
+        return;
+    }
     match client
         .parse_command(arguments.into_iter(), &CliEnvironment::of_process())
         .and_then(|invocation| {
@@ -93,7 +120,38 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{AnswersVersion, ParsesFlowCommand};
+    use super::{AnswersVersion, ParsesFlowCommand, PrintsSignal};
+
+    /// The printout is Ethos ethos-zero accepts as it stands, and each
+    /// example it gives decodes as the input or output it shows.
+    #[test]
+    fn printout_checks_and_its_examples_decode() {
+        use datom_codec::{Actualizing, Budget, Potential};
+        let printout = FlowClient
+            .contract()
+            .printout()
+            .expect("the contract reads");
+        printout.check().expect("ethos-zero accepts the printout");
+        let budget = || Budget {
+            remaining: 65_536,
+            reader: protos::ReaderBudget::try_from(65_536).expect("a constant reader budget"),
+            depth: 0,
+            maximum_depth: 1_024,
+        };
+        let mut refused = Vec::new();
+        for example in printout.input_examples() {
+            if let Err(error) = Potential::<signal_flow::Input>::from(example.clone()).actualize(&mut budget()) {
+                refused.push(format!("input {example}: {error:?}"));
+            }
+        }
+        for example in printout.output_examples() {
+            if let Err(error) = Potential::<signal_flow::Output>::from(example.clone()).actualize(&mut budget()) {
+                refused.push(format!("output {example}: {error:?}"));
+            }
+        }
+        assert!(refused.is_empty(), "{}", refused.join("\n"));
+    }
+
     use flow::Invocation;
     use flow::client::{CallsFlowNexus, FlowClient, TextualizesFlowReply};
     use std::io::{Read, Write};

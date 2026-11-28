@@ -10,6 +10,7 @@ datom = []
 name = "flow-meta"
 path = "src/main.rs"
 [dependencies]
+ethos-printout = { path = "../ethos-printout" }
 flow-ethos = { path = "../flow-ethos", default-features = false, features = ["datom"] }
 flow-place = { path = "../flow-place" }
 datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09a0526" }

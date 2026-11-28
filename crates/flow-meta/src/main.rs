@@ -61,11 +61,8 @@ impl ParsesMetaCommand for FlowMetaClient {
         mut arguments: impl Iterator<Item = String>,
         place: &dyn ResolvesCliPlace,
     ) -> Result<Invocation, String> {
-        let usage = || {
-            "usage: flow-meta '<one inline Input datom>'; the place is the one $XDG_CONFIG_HOME/nexus/flow-nexus.datom names, read from its place file".to_owned()
-        };
         let (Some(source), None) = (arguments.next(), arguments.next()) else {
-            return Err(usage());
+            return Err(self.printout());
         };
         let runtime = place.place_runtime()?;
         let mut budget = Budget {
@@ -85,6 +82,38 @@ impl ParsesMetaCommand for FlowMetaClient {
             ),
             input: query,
         })
+    }
+}
+
+/// The contract this client speaks, printed: its Signal as Ethos, the names
+/// it imports resolved, then an example datom of each input and output.
+/// A run with no datom prints it; a run it cannot read answers it.
+trait PrintsSignal {
+    fn contract(&self) -> ethos_printout::Contract;
+    fn printout(&self) -> String {
+        self.contract()
+            .printout()
+            .map(|printout| printout.text())
+            .unwrap_or_else(|refusal| format!("{refusal:?}"))
+    }
+}
+
+impl PrintsSignal for FlowMetaClient {
+    fn contract(&self) -> ethos_printout::Contract {
+        ethos_printout::Contract {
+            name: "meta_signal_flow",
+            signal: meta_signal_flow::ETHOS,
+            origins: vec![
+                ethos_printout::Origin {
+                    name: "signal_flow",
+                    texts: vec![signal_flow::ETHOS],
+                },
+                ethos_printout::Origin {
+                    name: "flow_ethos",
+                    texts: vec![flow_ethos::ETHOS, flow_ethos::DELIVERY_ETHOS],
+                },
+            ],
+        }
     }
 }
 
@@ -158,8 +187,13 @@ impl CallsMetaNexus for FlowMetaClient {
 
 fn main() {
     let client = FlowMetaClient;
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    if arguments.is_empty() {
+        print!("{}", client.printout());
+        return;
+    }
     match client
-        .parse_command(env::args().skip(1), &CliEnvironment::of_process())
+        .parse_command(arguments.into_iter(), &CliEnvironment::of_process())
         .and_then(|invocation| {
             client.call(&invocation, &mut |reply| {
                 println!("{}", reply.datomize(vec![]).protosize().compact())
@@ -175,7 +209,38 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlowMetaClient, ParsesMetaCommand};
+    use super::{FlowMetaClient, ParsesMetaCommand, PrintsSignal};
+
+    /// The printout is Ethos ethos-zero accepts as it stands, and each
+    /// example it gives decodes as the input or output it shows.
+    #[test]
+    fn printout_checks_and_its_examples_decode() {
+        use datom_codec::{Actualizing, Budget, Potential};
+        let printout = FlowMetaClient
+            .contract()
+            .printout()
+            .expect("the contract reads");
+        printout.check().expect("ethos-zero accepts the printout");
+        let budget = || Budget {
+            remaining: 65_536,
+            reader: protos::ReaderBudget::try_from(65_536).expect("a constant reader budget"),
+            depth: 0,
+            maximum_depth: 1_024,
+        };
+        let mut refused = Vec::new();
+        for example in printout.input_examples() {
+            if let Err(error) = Potential::<meta_signal_flow::Input>::from(example.clone()).actualize(&mut budget()) {
+                refused.push(format!("input {example}: {error:?}"));
+            }
+        }
+        for example in printout.output_examples() {
+            if let Err(error) = Potential::<meta_signal_flow::Output>::from(example.clone()).actualize(&mut budget()) {
+                refused.push(format!("output {example}: {error:?}"));
+            }
+        }
+        assert!(refused.is_empty(), "{}", refused.join("\n"));
+    }
+
     use flow_meta::Invocation;
 
     trait ParsesTestQuery {

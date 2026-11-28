@@ -192,6 +192,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ethos-printout"
+version = "0.1.0"
+dependencies = [
+ "ethos-zero 27.0.0",
+]
+
+[[package]]
 name = "ethos-zero"
 version = "22.0.0"
 source = "git+https://github.com/LiGoldragon/ethos-zero?rev=1976e45#1976e45fe1edfd5676cb33919dba1ec20c785a02"
@@ -264,6 +271,7 @@ name = "flow"
 version = "0.60.0"
 dependencies = [
  "datom-codec",
+ "ethos-printout",
  "ethos-zero 29.0.0",
  "flow-ethos",
  "flow-native",
@@ -303,6 +311,7 @@ name = "flow-meta"
 version = "0.60.0"
 dependencies = [
  "datom-codec",
+ "ethos-printout",
  "ethos-zero 29.0.0",
  "flow-ethos",
  "flow-place",

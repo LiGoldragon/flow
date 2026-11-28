@@ -121,7 +121,7 @@ fn the_client_reaches_only_the_meta_socket_of_the_place_its_configuration_names(
     );
     assert_eq!(refused.status.code(), Some(2), "{refused:?}");
     assert!(
-        String::from_utf8_lossy(&refused.stderr).starts_with("usage: flow-meta '"),
+        String::from_utf8_lossy(&refused.stderr).contains("\nSignal\n"),
         "{refused:?}"
     );
 

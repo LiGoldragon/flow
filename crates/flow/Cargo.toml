@@ -13,6 +13,7 @@ path = "src/main.rs"
 name = "flow-hook"
 path = "src/hook.rs"
 [dependencies]
+ethos-printout = { path = "../ethos-printout" }
 flow-ethos = { path = "../flow-ethos", default-features = false, features = ["datom"] }
 flow-place = { path = "../flow-place" }
 flow-native = { path = "../flow-native" }

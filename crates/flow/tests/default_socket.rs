@@ -125,7 +125,7 @@ fn the_client_reaches_only_the_socket_of_the_place_its_configuration_names() {
         let refused = client(runtime.path(), configuration.path(), &other, typed);
         assert_eq!(refused.status.code(), Some(2), "{typed:?}: {refused:?}");
         assert!(
-            String::from_utf8_lossy(&refused.stderr).starts_with("usage: flow '"),
+            String::from_utf8_lossy(&refused.stderr).contains("\nSignal\n"),
             "{typed:?}: {refused:?}"
         );
     }

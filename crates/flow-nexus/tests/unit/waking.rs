@@ -7447,9 +7447,7 @@ fn a_session_end_the_harness_tells_ends_the_flow_and_its_successor_starts() {
 
         fixture.nexus.after_report(
             &flow_ethos::FlowId(CLAUDE_SEAT.to_owned()),
-            &signal_flow::Event::Ended(Some(signal_flow::NativeSessionId(
-                CLAUDE_SESSION.into(),
-            ))),
+            &signal_flow::Event::Ended(Some(signal_flow::NativeSessionId(CLAUDE_SESSION.into()))),
         );
         let node = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
         assert!(node.flow_lifecycle.is_live(), "a hook's end ends nothing");

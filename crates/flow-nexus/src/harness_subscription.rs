@@ -737,6 +737,23 @@ pub trait FollowsClaudeHarness {
     /// A rest settled, or an end recorded as the flow's own: Exited, its
     /// Maintained metaflow owed a successor and woken when due.
     fn settle_told(&self, told: &Told);
+    /// When the rest's flow's recorded pane is Absent, records the route of
+    /// the one pane of Flow's own Herdr session whose Claude agent reports
+    /// the rest's exact session, when that agent is no other Flow launch's
+    /// and no other live flow of this Nexus is routed there; otherwise the
+    /// route is kept and why is logged.
+    fn follow_session_route(&self, rest: &ToldRest);
+}
+
+/// Whether a Herdr agent name is one a Flow launch gives
+/// (`launch_agent_name`): the harness, a dash, then 24 hex digits of a
+/// digest of the launch request id.
+fn named_by_a_flow_launch(name: &str) -> bool {
+    name.split_once('-').is_some_and(|(harness, digest)| {
+        !harness.is_empty()
+            && digest.len() == 24
+            && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
 }
 
 impl FollowsClaudeHarness for RunningNexus {
@@ -837,9 +854,111 @@ impl FollowsClaudeHarness for RunningNexus {
         }
     }
 
+    fn follow_session_route(&self, rest: &ToldRest) {
+        use crate::herdr::{PanePresence, PaneRoute, ReadsHerdrPanes};
+        use crate::launching::NamesLaunchSession;
+        use crate::store::NamesLiveFlow;
+        use crate::store::ReadsFlowRows;
+        use crate::store::repair::RepairsMetaflows;
+        use signal_flow::HerdrRouteSelection;
+        let Ok(Some(node)) = self.store.flow_node(&rest.flow_id) else {
+            return;
+        };
+        // The recorded pane runs the session no longer: gone, or standing
+        // with no agent in it.
+        if node.session_id.0 != rest.session
+            || !matches!(
+                self.herdr.pane_presence(&node),
+                PanePresence::Absent | PanePresence::Bare
+            )
+        {
+            return;
+        }
+        let keep = |why: &str| {
+            eprintln!(
+                "flow-nexus: flow {} keeps its route, its pane gone: {why}",
+                rest.flow_id
+            )
+        };
+        let Ok(herdr_session_name) = self.launch_session() else {
+            return keep("no Herdr session is configured");
+        };
+        let Some(snapshot) = self.herdr.session_snapshot(&herdr_session_name.0) else {
+            return keep("Flow's Herdr session could not be read");
+        };
+        let showing: Vec<&serde_json::Value> = snapshot
+            .pointer("/result/snapshot/agents")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|agent| {
+                agent
+                    .pointer("/agent_session/value")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(rest.session.as_str())
+            })
+            .collect();
+        let [agent] = showing.as_slice() else {
+            return keep(&format!(
+                "{} panes of {} report session {}",
+                showing.len(),
+                herdr_session_name.0,
+                rest.session
+            ));
+        };
+        let name = agent
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let own_name = match &node.herdr_route_selection {
+            HerdrRouteSelection::Available(recorded) => recorded.herdr_agent_name.0 == name,
+            HerdrRouteSelection::Unavailable => false,
+        };
+        // A pane a Flow launch started, its own launch or another Nexus's
+        // restart of the same session, is that launch's seat, not this one.
+        if named_by_a_flow_launch(name) && !own_name {
+            return keep(&format!(
+                "the pane showing its session runs agent {name}, another Flow launch's"
+            ));
+        }
+        let Some(pane) = agent.get("pane_id").and_then(serde_json::Value::as_str) else {
+            return keep("the agent showing its session names no pane");
+        };
+        let PaneRoute::Shown(route) = self.herdr.pane_route(
+            &herdr_session_name.0,
+            pane,
+            &signal_flow::HarnessKind::Claude,
+        ) else {
+            return keep(&format!("pane {pane} shows no Claude agent"));
+        };
+        let taken = match self.store.flow_nodes() {
+            Ok(nodes) => nodes.into_iter().any(|other| {
+                other.flow_id.0 != rest.flow_id
+                    && other.flow_lifecycle.is_live()
+                    && matches!(&other.herdr_route_selection, HerdrRouteSelection::Available(routed)
+                        if routed.herdr_session_name == route.herdr_session_name
+                            && routed.herdr_pane_id == route.herdr_pane_id)
+            }),
+            Err(error) => return keep(&format!("the flows could not be read: {error}")),
+        };
+        if taken {
+            return keep(&format!("pane {pane} is another live flow's"));
+        }
+        match self.store.rebind_route(&rest.flow_id, route) {
+            Ok(()) => eprintln!(
+                "flow-nexus: flow {} follows its session {} to pane {pane}",
+                rest.flow_id, rest.session
+            ),
+            Err(error) => keep(&format!("the route was not written: {error}")),
+        }
+    }
+
     fn settle_told_rest(&self, rest: &ToldRest) {
         use crate::rest_watching::RemembersPendingRest;
         use crate::waking::{AtStop, KeptAtStop, QueuesSimplifiedAnswers, SleepsAndWakesSeats};
+        // A session resumed bare in a new pane: its route follows the
+        // session, safely, so the rest's refresh and reap find that pane.
+        self.follow_session_route(rest);
         // A launch sending its first message in parts waits on a rest
         // before its next part.
         self.store.launch_changes.announce();

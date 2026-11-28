@@ -1761,3 +1761,74 @@ fn an_ordered_refresh_is_taken_at_the_rest_the_harness_tells_with_no_report() {
         "no report was made"
     );
 }
+
+/// The Director's case with the session resumed bare in a new pane: its
+/// recorded pane w1:p3 is gone and the one pane of Flow's Herdr session
+/// that reports its session, w9:p1, runs an agent no Flow launch named. At
+/// the rest its harness tells, the route follows the session there, and
+/// the ordered Refresh starts its successor from the kept handover and
+/// owes the reap of that new pane.
+#[test]
+fn an_ordered_refresh_of_a_session_resumed_bare_in_a_new_pane_reaps_that_pane() {
+    use super::harness_subscription::{
+        holds_within, seat_state, tell_rested, tell_working, with_fake_harness,
+    };
+    let (mut fixture, _) = refreshable_with_queue(Continuity::OnDemand, vec![], true);
+    let mut moved = claude_agent(&fixture);
+    moved["name"] = serde_json::Value::String("by-hand".into());
+    moved["pane_id"] = serde_json::Value::String("w9:p1".into());
+    moved["terminal_id"] = serde_json::Value::String("term-w9".into());
+    fixture.herdr_for_replacement_showing(0, vec![moved]);
+    // Its snapshot lists the session's panes, w1:p3 not among them.
+    let script = fs::read_to_string(&fixture.snapshot_program).unwrap();
+    fs::write(
+        &fixture.snapshot_program,
+        script.replace(
+            r#""protocol":20,"#,
+            r#""panes":[{"pane_id":"w9:p1","terminal_id":"term-w9"},{"pane_id":"w1:p1","terminal_id":"fixture-terminal"}],"protocol":20,"#,
+        ),
+    )
+    .unwrap();
+    with_fake_harness(&mut fixture, |fixture, stream| {
+        tell_working(stream);
+        assert!(holds_within(
+            || seat_state(fixture) == Some(meta_signal_flow::State::Acting)
+        ));
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_from(Input::Refresh(seat_address()), own_seat()),
+            Output::RefreshQueued(_)
+        ));
+        tell_rested(stream);
+        assert!(
+            holds_within(
+                || stored(fixture).state == State::Awake(flow_ethos::FlowId("908786".into()))
+            ),
+            "the queued Refresh starts its successor at the told rest"
+        );
+        let node = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
+        let signal_flow::HerdrRouteSelection::Available(route) = node.herdr_route_selection else {
+            panic!("the flow is routed");
+        };
+        assert_eq!(route.herdr_pane_id.0, "w9:p1");
+        assert_eq!(route.herdr_terminal_id.0, "term-w9");
+        // The predecessor's reap is owed at the route it now holds, the new
+        // pane; the old pane is closed by nothing.
+        assert!(holds_within(|| {
+            use crate::store::pending_reap::RecordsPendingReaps;
+            fixture
+                .nexus
+                .store
+                .pending_reaps()
+                .unwrap()
+                .iter()
+                .any(|row| row.predecessor.0 == CLAUDE_SEAT)
+        }));
+        let calls = ["herdr-operations.log", "herdr-calls.log"]
+            .into_iter()
+            .map(|name| fs::read_to_string(fixture.directory.path().join(name)).unwrap_or_default())
+            .collect::<String>();
+        assert!(!calls.contains("pane close w1:p3"), "{calls}");
+    });
+}

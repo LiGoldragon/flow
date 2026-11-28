@@ -214,6 +214,7 @@ pub struct CodexExecutable(pub String);
 pub enum HarnessCommandLine {
     Claude(ClaudeCommandLine),
     Codex(CodexCommandLine),
+    OpenCode(OpenCodeCommandLine),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -262,6 +263,32 @@ pub struct CodexCommandLine {
     pub lean_start: flow_nexus::generated::starter::LeanStart,
     pub configured_harness_arguments: ConfiguredHarnessArguments,
     pub native_session_id_option: std::option::Option<signal_flow::NativeSessionId>,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct OpenCodeServer(pub String);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct OpenCodeCommandLine {
+    pub open_code_server: OpenCodeServer,
+    pub native_session_id: signal_flow::NativeSessionId,
+    pub open_code_agent: OpenCodeAgent,
+    pub configured_harness_arguments: ConfiguredHarnessArguments,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct OpenCodeAgentName(pub String);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct OpenCodeAgent {
+    pub open_code_agent_name: OpenCodeAgentName,
+    pub model_name: flow_ethos::ModelName,
+    pub effort: signal_flow::Effort,
+    pub system_prompt_file: SystemPromptFile,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

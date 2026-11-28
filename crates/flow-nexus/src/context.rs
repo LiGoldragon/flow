@@ -289,6 +289,7 @@ impl SelectsStartup for ContextRequest {
             target: match self.harness_kind {
                 HarnessKind::Claude => Target::Claude,
                 HarnessKind::Codex => Target::Codex,
+                HarnessKind::OpenCode => Target::OpenCode,
             },
             system_modules: signal_curriculum_nexus::SystemModules(
                 self.system_modules

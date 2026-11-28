@@ -97,7 +97,8 @@ Library
   ControlSocketPath.String
   ModelName.String
   CodexEndpoint.{ ClientPath Home ControlSocketPath Vector<ModelName> }
-  HarnessKind.[ Codex Claude ]
+  ; OpenCode is appended so a stored Codex or Claude keeps its tag.
+  HarnessKind.[ Codex Claude OpenCode ]
   KeyName.String
   CommandSigil.String
   InterruptKeys.Vector<KeyName>

@@ -472,9 +472,9 @@ fn both_harnesses_deliver_every_priority_and_only_hard_interrupts_working() {
                 };
                 agent["agent_status"] =
                     serde_json::Value::String(if working { "working" } else { "idle" }.into());
-                let harness_name = match harness_kind {
-                    signal_flow::HarnessKind::Claude => "claude",
-                    signal_flow::HarnessKind::Codex => "codex",
+                let harness_name = {
+                    use crate::herdr::launch::NamesHerdrHarness;
+                    harness_kind.expected_harness()
                 };
                 fixture.accept_pane_operations(vec![agent], PromptFixture::Prompted("w1:p3"));
                 use crate::generated::memory::SeatActivity::{Resting, Working};

@@ -328,6 +328,8 @@ impl PreparesContextWarningAdmission for FlowStore {
             signal_flow::HarnessKind::Claude => {
                 meta_signal_flow::ContextUsageProjection::ClaudeCompletedInputWithCache
             }
+            // OpenCode's context is not yet observed, so no projection fits.
+            signal_flow::HarnessKind::OpenCode => return Ok(None),
         };
         if !node.flow_lifecycle.is_live()
             || policy.context_usage_projection != native_projection

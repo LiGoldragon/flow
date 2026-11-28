@@ -327,7 +327,53 @@ impl SpeaksHarness for HarnessCommandLine {
                 }
                 words
             }
+            // OpenCode 2.4.1's TUI: `--server` attaches it to a running
+            // server, `--session` creates or continues the session of that
+            // id. It takes no model flag; the server's default agent
+            // carries the model, the effort and the system prompt.
+            HarnessCommandLine::OpenCode(opencode) => {
+                let mut words = vec![
+                    "--server".to_owned(),
+                    opencode.open_code_server.0.clone(),
+                    "--session".into(),
+                    opencode.native_session_id.0.clone(),
+                ];
+                words.extend(opencode.configured_harness_arguments.0.iter().cloned());
+                words
+            }
         }
+    }
+}
+
+/// The configuration document an OpenCode server is started with for one
+/// flow: its agent as the default, the model spoken `model#effort` (an
+/// OpenCode variant) or the model alone when the effort is the harness's
+/// own, and the system prompt read from its file by OpenCode's
+/// `{file:…}` substitution. Proved by the rehearsal tests; the launch that
+/// starts the server with it is not built yet, so it is compiled for tests
+/// alone until then.
+#[cfg(test)]
+pub(crate) trait WritesOpenCodeConfiguration {
+    fn opencode_configuration(&self) -> serde_json::Value;
+}
+
+#[cfg(test)]
+impl WritesOpenCodeConfiguration for crate::generated::emission::OpenCodeAgent {
+    fn opencode_configuration(&self) -> serde_json::Value {
+        let model = match self.effort.0.as_str() {
+            "" => self.model_name.0.clone(),
+            effort => format!("{}#{effort}", self.model_name.0),
+        };
+        let name = self.open_code_agent_name.0.clone();
+        serde_json::json!({
+            "default_agent": name,
+            "agents": {
+                name: {
+                    "model": model,
+                    "system": format!("{{file:{}}}", self.system_prompt_file.0),
+                }
+            }
+        })
     }
 }
 
@@ -641,6 +687,13 @@ impl Emittable<HerdrCli> for FlowIdentityClaim {
         match self.harness_kind {
             signal_flow::HarnessKind::Codex => {
                 command.env("CODEX_SESSION_ID", &self.native_session_id.0);
+            }
+            // The helper reads an OpenCode session as an argument, as
+            // Claude's.
+            signal_flow::HarnessKind::OpenCode => {
+                command
+                    .arg("--parent-session")
+                    .arg(&self.native_session_id.0);
             }
             signal_flow::HarnessKind::Claude => {
                 command

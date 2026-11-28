@@ -181,6 +181,8 @@ impl InterruptsRunningTurns for RunningNexus {
                     })
                     .unwrap_or_else(|error| TurnInterruption::AppServerRefused(error.to_string()))
             }
+            // No OpenCode flow is launched yet, so none has a turn to end.
+            HarnessKind::OpenCode => TurnInterruption::PaneUnreadable,
         }
     }
 }

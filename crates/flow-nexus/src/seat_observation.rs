@@ -120,6 +120,8 @@ impl ReadsNativeStanding for RunningNexus {
                     .main_turn_activity(&node.session_id.0)
                     .map(Alive),
             },
+            // OpenCode's standing is not yet read.
+            HarnessKind::OpenCode => None,
         }
     }
 }

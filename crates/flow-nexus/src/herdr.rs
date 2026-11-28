@@ -15,6 +15,7 @@ use crate::generated::emission::{
     AgentStatus, AgentWait, Emittable, HerdrCommand, HerdrSessionCommand, Milliseconds,
     ProcessReply,
 };
+use crate::herdr::launch::NamesHerdrHarness;
 use crate::live::{HoldsLiveValue, Live};
 use std::collections::BTreeSet;
 use std::{fs, path::PathBuf};
@@ -116,6 +117,7 @@ impl LocatesNativeTranscripts for HerdrCli {
                 .map(|endpoint| endpoint.transcript_root.clone())
                 .map_err(|error| error.to_string()),
             HarnessKind::Claude => Ok(self.claude_transcript_root.clone()),
+            HarnessKind::OpenCode => Err("an OpenCode session keeps no transcript file".into()),
         }
     }
 }
@@ -751,10 +753,7 @@ impl ReadsHerdrPanes for HerdrCli {
         herdr_pane_id: &str,
         harness_kind: &HarnessKind,
     ) -> PaneRoute {
-        let expected_harness = match harness_kind {
-            HarnessKind::Codex => "codex",
-            HarnessKind::Claude => "claude",
-        };
+        let expected_harness = harness_kind.expected_harness();
         let Some(snapshot) = self.session_snapshot(herdr_session_name) else {
             return PaneRoute::Unreadable;
         };
@@ -886,10 +885,7 @@ pub trait ReadsHerdrAgent {
 
 impl ReadsHerdrAgent for serde_json::Value {
     fn matches_binding(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> bool {
-        let expected_harness = match harness_kind {
-            HarnessKind::Codex => "codex",
-            HarnessKind::Claude => "claude",
-        };
+        let expected_harness = harness_kind.expected_harness();
         self.get("pane_id").and_then(serde_json::Value::as_str)
             == Some(route.herdr_pane_id.0.as_str())
             && self.get("terminal_id").and_then(serde_json::Value::as_str)
@@ -1321,7 +1317,7 @@ impl JudgesPaneOwnership for serde_json::Value {
                     // A Claude agent that reports no session may be a new
                     // `claude` started in the shell after the Flow's own
                     // exited, before its hook reported.
-                    (None, HarnessKind::Claude) => PaneOwnership::Unproven,
+                    (None, HarnessKind::Claude | HarnessKind::OpenCode) => PaneOwnership::Unproven,
                 },
             );
         }

@@ -1192,6 +1192,8 @@ impl AdoptsSeat for RunningNexus {
                     None => return unidentified(),
                 }
             }
+            // An OpenCode seat is not yet bound.
+            HarnessKind::OpenCode => return unidentified(),
         };
         let Some(process_identity) = meta_signal_flow::ProcessIdentity::of(seat_process) else {
             return unidentified();

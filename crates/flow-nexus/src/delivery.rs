@@ -657,7 +657,7 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
                     },
                 )
             }
-            HarnessKind::Codex => {
+            HarnessKind::Codex | HarnessKind::OpenCode => {
                 Box::new(|submission: &SeatSubmission| *submission == SeatSubmission::TurnStarted)
             }
         };

@@ -16,10 +16,10 @@ use crate::generated::emission::{
     ClaudeSettings, CodexCommandLine, CodexExecutable, CodexSocket, ConfiguredHarnessArguments,
     CreateWorkspace_Data, Emittable, FlowIdentityClaim, FlowsRoot, Focus, HarnessCommandLine,
     HerdrCommand, HerdrSessionCommand, HerdrSocketCall, HerdrSocketReply, Label, LineCount,
-    Milliseconds, OutputMatch, OutputSource, ProcessReply, PromptAgentByName, PromptText,
-    ReadinessMarker, RenamePane_Data, RenameWorkspace_Data, ReportPaneMetadata_Data,
-    RunInPane_Data, SessionTitle, StartAgent_Data, SystemPromptFile, WaitForAgent_Data,
-    WaitForPaneOutput_Data, WorkingDirectory,
+    Milliseconds, OpenCodeAgent, OpenCodeAgentName, OpenCodeCommandLine, OpenCodeServer,
+    OutputMatch, OutputSource, ProcessReply, PromptAgentByName, PromptText, ReadinessMarker,
+    RenamePane_Data, RenameWorkspace_Data, ReportPaneMetadata_Data, RunInPane_Data, SessionTitle,
+    StartAgent_Data, SystemPromptFile, WaitForAgent_Data, WaitForPaneOutput_Data, WorkingDirectory,
 };
 pub use crate::generated::starter::StartupProgress;
 use crate::generated::starter::{
@@ -160,6 +160,7 @@ impl ResumesHarness for HerdrCli {
                 ClaudeSession::Attached(native_session_id.to_owned()),
                 harness_arguments,
             ),
+            HarnessKind::OpenCode => Err(OPENCODE_UNLAUNCHED.to_owned().into()),
         }
     }
 }
@@ -746,7 +747,9 @@ impl ClaimsNativeIdentity for HerdrCli {
         let session = match (agent.get("agent_session"), harness) {
             (Some(session), _) => session,
             (None, HarnessKind::Codex) => return Ok(agent.clone()),
-            (None, HarnessKind::Claude) => return Err(NativeTargetRefusal::NoNativeSession),
+            (None, HarnessKind::Claude | HarnessKind::OpenCode) => {
+                return Err(NativeTargetRefusal::NoNativeSession);
+            }
         };
         if session.get("source").and_then(serde_json::Value::as_str)
             != Some(format!("herdr:{expected_harness}").as_str())
@@ -805,6 +808,11 @@ impl CapturesTranscripts for HerdrCli {
                         .transcript_root
                 }
                 HarnessKind::Claude => &self.claude_transcript_root,
+                HarnessKind::OpenCode => {
+                    return Err(TranscriptRefusal::Unreadable(
+                        "an OpenCode session keeps no transcript file".to_owned(),
+                    ));
+                }
             };
         let canonical_root = root.canonicalize().map_err(|error| {
             format!("configured native transcript root is unavailable: {error}")
@@ -995,6 +1003,11 @@ impl QuotesForShell for str {
     }
 }
 
+/// Why an OpenCode flow is rehearsed and not launched: its server, its
+/// agent's configuration file and its session are not yet made by Flow.
+pub(crate) const OPENCODE_UNLAUNCHED: &str =
+    "an OpenCode flow is rehearsed only: Flow does not yet start its server";
+
 pub(crate) trait NamesHerdrHarness {
     fn expected_harness(&self) -> &'static str;
 }
@@ -1005,6 +1018,7 @@ impl NamesHerdrHarness for HarnessKind {
         match harness {
             HarnessKind::Claude => "claude",
             HarnessKind::Codex => "codex",
+            HarnessKind::OpenCode => "opencode",
         }
     }
 }
@@ -1128,6 +1142,7 @@ impl ReadsLaunchFiles for Path {
             let matches = match harness {
                 HarnessKind::Codex => name.ends_with(".jsonl") && name.contains(native_session_id),
                 HarnessKind::Claude => name == format!("{native_session_id}.jsonl"),
+                HarnessKind::OpenCode => false,
             };
             if metadata.is_file() && matches {
                 found.push(path);
@@ -1737,6 +1752,9 @@ impl TitlesNativeFlow for HerdrCli {
                     adapter.name_bound_thread(&binding.native_session_id.0, title.as_str())
                 })
                 .map_err(|_| TitleRefusal::CodexNamingRefused)?,
+            // An OpenCode session is not yet named by Flow; its pane and
+            // workspace are labelled below.
+            HarnessKind::OpenCode => {}
         }
         self.label_herdr_pane(&binding.herdr_pane_binding, &title)
             .map_err(|_| TitleRefusal::PaneLabelRefused)?;
@@ -1942,6 +1960,33 @@ impl ConstructsHarnessCommand for HerdrCli {
                 configured_harness_arguments,
                 native_session_id_option: resources.thread.map(signal_flow::NativeSessionId),
             }),
+            HarnessKind::OpenCode => {
+                let required = |value: Option<String>, name: &str| {
+                    value.ok_or_else(|| {
+                        SpawnFailure::Unattempted(format!("OpenCode command needs {name}"))
+                    })
+                };
+                HarnessCommandLine::OpenCode(OpenCodeCommandLine {
+                    open_code_server: OpenCodeServer(required(
+                        resources.opencode_server,
+                        "its server",
+                    )?),
+                    native_session_id: signal_flow::NativeSessionId(required(
+                        resources.opencode_session,
+                        "its session",
+                    )?),
+                    open_code_agent: OpenCodeAgent {
+                        open_code_agent_name: OpenCodeAgentName(resources.agent.clone()),
+                        model_name: launch.launch_profile.model_name.clone(),
+                        effort: launch.launch_profile.effort.clone(),
+                        system_prompt_file: SystemPromptFile(required(
+                            resources.system_prompt_file,
+                            "its system prompt file",
+                        )?),
+                    },
+                    configured_harness_arguments,
+                })
+            }
         };
         let typed = std::iter::once(resources.program.clone())
             .chain(command_line.harness_words())
@@ -1974,6 +2019,9 @@ impl SpawnsNativeHarness for HerdrCli {
         harness_arguments: &[String],
     ) -> Result<(), SpawnFailure> {
         launch.binding_matches_launch(pane)?;
+        if launch.harness_kind == HarnessKind::OpenCode {
+            return Err(OPENCODE_UNLAUNCHED.to_owned().into());
+        }
         // A Claude session is named at start with its title, so its Flow ID
         // is known before the harness exists: Reserve claimed it for the
         // session Flow chose. The title is the one name the living sees,
@@ -1990,7 +2038,7 @@ impl SpawnsNativeHarness for HerdrCli {
                     "a Claude start needs its reserved Flow ID to be named by its title".into(),
                 ));
             }
-            (HarnessKind::Codex, _) => None,
+            (HarnessKind::Codex | HarnessKind::OpenCode, _) => None,
         };
         // The title is known, so the living sees it on the workspace and as
         // the pane's displayed agent before any agent runs in the pane;
@@ -2060,6 +2108,9 @@ impl SpawnsNativeHarness for HerdrCli {
                     None
                 }
             },
+            opencode_server: None,
+            opencode_session: None,
+            system_prompt_file: None,
         };
         let command = self
             .harness_command(launch, resources, harness_arguments)
@@ -2421,7 +2472,7 @@ impl ObservesBoundPane for HerdrCli {
             HarnessKind::Codex => attached
                 .filter(|thread| !thread.is_empty())
                 .map(str::to_owned),
-            HarnessKind::Claude => None,
+            HarnessKind::Claude | HarnessKind::OpenCode => None,
         };
         let expected_source = format!("herdr:{expected_harness}");
         let observed_session = agent.get("agent_session");
@@ -2452,6 +2503,7 @@ impl ObservesBoundPane for HerdrCli {
                     return Err(match launch.harness_kind {
                         HarnessKind::Claude => "observed native identity conflicts with the Flow-selected Claude session",
                         HarnessKind::Codex => "observed native identity conflicts with the Flow-selected session: the attached Codex TUI reports another thread than Flow opened",
+                        HarnessKind::OpenCode => "observed native identity conflicts with the Flow-selected OpenCode session",
                     }
                     .into());
                 }
@@ -2873,6 +2925,8 @@ impl ReadsStartupRecord for StartupReading {
                 }
                 Ok(None)
             }
+            // OpenCode keeps no transcript file to read a receipt from.
+            HarnessKind::OpenCode => Err(NativeLaunchFailure::TranscriptUnreadable),
         }
     }
 }
@@ -5820,6 +5874,7 @@ printf '%s\n' "$alias"
                 launch.launch_profile.model_name = ModelName("gpt-6-astra".into());
                 launch.launch_profile.native_title(alias).unwrap()
             }
+            HarnessKind::OpenCode => panic!("no titled OpenCode launch is made yet"),
         };
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let (root, mut adapter) = fixture_herdr(

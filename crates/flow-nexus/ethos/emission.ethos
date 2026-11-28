@@ -70,7 +70,7 @@ Emission
   CodexExecutable.String
   ; The harness's own command line, as Herdr types it into the pane after
   ; the program.
-  HarnessCommandLine.[ Claude.ClaudeCommandLine Codex.CodexCommandLine ]
+  HarnessCommandLine.[ Claude.ClaudeCommandLine Codex.CodexCommandLine OpenCode.OpenCodeCommandLine ]
   ; Claude: its settings document, the title it is named and
   ; remote-controlled by, the file its system prompt is read from, the
   ; session it starts or resumes, its model and effort, the parts it starts
@@ -81,6 +81,14 @@ Emission
   ; terminal title it shows, the parts it starts without, the configured
   ; arguments, and the opened thread it resumes.
   CodexCommandLine.{ CodexSocket.String ModelName Effort LeanStart ConfiguredHarnessArguments Option<NativeSessionId> }
+  ; OpenCode: the server its TUI attaches to, the session it creates or
+  ; continues, the agent that server runs the session with, and the
+  ; configured arguments. The TUI takes no model: the agent carries it.
+  OpenCodeCommandLine.{ OpenCodeServer.String NativeSessionId OpenCodeAgent ConfiguredHarnessArguments }
+  ; The agent a flow's OpenCode server declares as its default: its name,
+  ; its model and effort, spoken model#effort, and the file its system
+  ; prompt is read from.
+  OpenCodeAgent.{ OpenCodeAgentName.String ModelName Effort SystemPromptFile }
   ; The arguments the configuration adds, as a person wrote them.
   ConfiguredHarnessArguments.Vector<String>
   Printout.{ Stdout.String Stderr.String }

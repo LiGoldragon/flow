@@ -360,6 +360,7 @@ pub struct CodexEndpoint {
 pub enum HarnessKind {
     Codex,
     Claude,
+    OpenCode,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

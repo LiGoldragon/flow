@@ -136,6 +136,15 @@ impl DefaultsHarnessProfile for HarnessKind {
                 interrupt_keys: flow_ethos::InterruptKeys(keys(&["esc"])),
                 submit_keys: flow_ethos::SubmitKeys(Vec::new()),
             },
+            // OpenCode 2.4.1's TUI: its commands begin with `/` and its
+            // shell with `!`; Escape interrupts and Enter submits, as in
+            // Claude (not yet tried through Herdr).
+            HarnessKind::OpenCode => HarnessProfile {
+                harness_kind: HarnessKind::OpenCode,
+                command_sigil_vector: sigils(&["/", "!"]),
+                interrupt_keys: flow_ethos::InterruptKeys(keys(&["esc"])),
+                submit_keys: flow_ethos::SubmitKeys(keys(&["enter"])),
+            },
         }
     }
 }

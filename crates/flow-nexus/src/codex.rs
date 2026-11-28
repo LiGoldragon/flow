@@ -151,7 +151,7 @@ impl crate::generated::starter::DerivesHarness for CodexEndpoints {
     fn launches_exactly<N: crate::generated::starter::Textual>(&self, input: N) -> bool {
         let model = input.text();
         match crate::generated::starter::DerivesHarness::harness_for(self, model.as_str()) {
-            HarnessKind::Codex => true,
+            HarnessKind::Codex | HarnessKind::OpenCode => true,
             HarnessKind::Claude => model.strip_prefix("claude-").is_some_and(|name| {
                 !name.is_empty()
                     && name.bytes().all(|byte| {

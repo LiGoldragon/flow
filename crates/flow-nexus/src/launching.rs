@@ -1140,6 +1140,7 @@ impl AbandonsRefusedLaunch for RunningNexus {
         // opened, or the session a Claude launch's reserved FlowId claims.
         let session_id = match harness_kind {
             HarnessKind::Codex => self.store.opened_thread(launch_request_id).ok().flatten(),
+            HarnessKind::OpenCode => None,
             HarnessKind::Claude => reserved.and_then(|flow_id| {
                 self.herdr
                     .claimed_native_identity(flow_id, &HarnessKind::Claude)

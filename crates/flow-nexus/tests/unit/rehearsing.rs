@@ -25,6 +25,7 @@ impl RehearsalFixture for Fixture {
         let model = match harness {
             HarnessKind::Claude => "claude-opus-5-5",
             HarnessKind::Codex => "gpt-6.1-sol",
+            HarnessKind::OpenCode => "refuseless/deepseek-v4.1-flash-fast",
         };
         let profile = LaunchProfile {
             launch_request_id: signal_flow::LaunchRequestId("request-fixture".into()),
@@ -75,6 +76,7 @@ impl RehearsalFixture for Fixture {
             program: match harness {
                 HarnessKind::Claude => "claude".into(),
                 HarnessKind::Codex => "/nix/store/codex/bin/codex".into(),
+                HarnessKind::OpenCode => "opencode".into(),
             },
             codex_socket: (harness == &HarnessKind::Codex).then(|| "/run/codex.sock".into()),
             claude_settings: (harness == &HarnessKind::Claude)
@@ -85,6 +87,12 @@ impl RehearsalFixture for Fixture {
             claude_session: (harness == &HarnessKind::Claude).then(|| "claude-session".into()),
             claude_resume: None,
             thread: (harness == &HarnessKind::Codex).then(|| "codex-thread".into()),
+            opencode_server: (harness == &HarnessKind::OpenCode)
+                .then(|| "http://127.0.0.1:4096".into()),
+            opencode_session: (harness == &HarnessKind::OpenCode)
+                .then(|| "ses_flow0000000001FlowTestPerm".into()),
+            system_prompt_file: (harness == &HarnessKind::OpenCode)
+                .then(|| "/run/flow/request-fixture/system".into()),
         }
     }
 
@@ -104,6 +112,8 @@ impl RehearsalFixture for Fixture {
                 "<prompt-fd>" => actual.prompt_fd.clone().unwrap(),
                 "<claude-session>" => actual.claude_session.clone().unwrap(),
                 "<thread>" => actual.thread.clone().unwrap(),
+                "<opencode-server>" => actual.opencode_server.clone().unwrap(),
+                "<opencode-session>" => actual.opencode_session.clone().unwrap(),
                 other => other.to_owned(),
             };
         }
@@ -179,6 +189,76 @@ fn one_constructor_gives_actual_and_rehearsal_the_same_argv_shape() {
             assert_eq!(tail_at + tail.len(), actual.len());
         }
     }
+}
+
+/// An OpenCode flow is rehearsed whole: its TUI attached to its server with
+/// the session Flow chose, the configured tail last, and the rehearsal the
+/// same argv as the launch with its resources in place.
+#[test]
+fn an_opencode_flow_rehearses_its_tui_attached_to_its_server() {
+    let herdr = HerdrCli::default();
+    let tail = "--auto".harness_arguments().unwrap();
+    let launch = Fixture::launch(HarnessKind::OpenCode);
+    let rehearsed = herdr.command_line(
+        &herdr
+            .harness_command(
+                &launch,
+                HarnessCommandResources::rehearsal(&HarnessKind::OpenCode),
+                &tail,
+            )
+            .unwrap(),
+    );
+    let actual = herdr.command_line(
+        &herdr
+            .harness_command(
+                &launch,
+                Fixture::actual_resources(&HarnessKind::OpenCode),
+                &tail,
+            )
+            .unwrap(),
+    );
+    assert_eq!(
+        Fixture::substitute(rehearsed.clone(), &HarnessKind::OpenCode),
+        actual
+    );
+    let line = rehearsed.shell_command();
+    let herdr_word = herdr.executable.to_string_lossy().into_owned();
+    assert_eq!(
+        line,
+        format!(
+            "'{herdr_word}' '--session' '<session>' 'agent' 'start' '<agent>' '--kind' 'opencode' '--pane' '<pane>' '--timeout' '30000' '--' '--server' '<opencode-server>' '--session' '<opencode-session>' '--auto'"
+        )
+    );
+    println!("Rehearsed.«{line}»");
+}
+
+/// The agent an OpenCode flow's server is started with carries the model
+/// and its effort as OpenCode's variant, and the system prompt by file; an
+/// effort left to the harness names the model alone.
+#[test]
+fn an_opencode_agent_carries_model_variant_and_system_prompt_file() {
+    use crate::emission::WritesOpenCodeConfiguration;
+    use crate::generated::emission::{OpenCodeAgent, OpenCodeAgentName, SystemPromptFile};
+    let agent = |effort: &str| OpenCodeAgent {
+        open_code_agent_name: OpenCodeAgentName("flow-mind-core-terra".into()),
+        model_name: flow_ethos::ModelName("refuseless/deepseek-v4.1-flash-fast".into()),
+        effort: signal_flow::Effort(effort.into()),
+        system_prompt_file: SystemPromptFile("/run/flow/launch/system".into()),
+    };
+    assert_eq!(
+        agent("max").opencode_configuration(),
+        serde_json::json!({
+            "default_agent": "flow-mind-core-terra",
+            "agents": { "flow-mind-core-terra": {
+                "model": "refuseless/deepseek-v4.1-flash-fast#max",
+                "system": "{file:/run/flow/launch/system}",
+            } }
+        })
+    );
+    assert_eq!(
+        agent("").opencode_configuration()["agents"]["flow-mind-core-terra"]["model"],
+        "refuseless/deepseek-v4.1-flash-fast"
+    );
 }
 
 #[test]

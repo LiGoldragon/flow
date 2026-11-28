@@ -1,6 +1,7 @@
 //! The native harness command as typed words: configured tail parsing,
 //! effect-created resource projection, and one shell rendering.
 
+use crate::herdr::launch::NamesHerdrHarness;
 use signal_flow::{HarnessFlagsRefusal, HarnessKind};
 
 /// Parses the configured shell-word grammar without expansion or evaluation.
@@ -103,6 +104,12 @@ pub(crate) struct HarnessCommandResources {
     /// `--session-id`.
     pub claude_resume: Option<String>,
     pub thread: Option<String>,
+    /// The OpenCode server the TUI attaches to, and the session it creates
+    /// or continues there.
+    pub opencode_server: Option<String>,
+    pub opencode_session: Option<String>,
+    /// The file an OpenCode agent's system prompt is read from.
+    pub system_prompt_file: Option<String>,
 }
 
 /// Produces the resource projection used by a rehearsal. It creates nothing.
@@ -126,6 +133,9 @@ impl RehearsesHarnessResources for HarnessCommandResources {
                 claude_session: Some("<claude-session>".into()),
                 claude_resume: None,
                 thread: None,
+                opencode_server: None,
+                opencode_session: None,
+                system_prompt_file: None,
             },
             HarnessKind::Codex => Self {
                 herdr_session: "<session>".into(),
@@ -139,6 +149,25 @@ impl RehearsesHarnessResources for HarnessCommandResources {
                 claude_session: None,
                 claude_resume: None,
                 thread: Some("<thread>".into()),
+                opencode_server: None,
+                opencode_session: None,
+                system_prompt_file: None,
+            },
+            HarnessKind::OpenCode => Self {
+                herdr_session: "<session>".into(),
+                agent: "<agent>".into(),
+                pane: "<pane>".into(),
+                program: HarnessKind::OpenCode.expected_harness().into(),
+                codex_socket: None,
+                claude_settings: None,
+                claude_title: None,
+                prompt_fd: None,
+                claude_session: None,
+                claude_resume: None,
+                thread: None,
+                opencode_server: Some("<opencode-server>".into()),
+                opencode_session: Some("<opencode-session>".into()),
+                system_prompt_file: Some("<system-prompt-file>".into()),
             },
         }
     }

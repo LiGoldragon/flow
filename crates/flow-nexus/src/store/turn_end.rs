@@ -57,6 +57,7 @@ impl RanksHarness for HarnessKind {
         match self {
             HarnessKind::Claude => "1-Claude",
             HarnessKind::Codex => "2-Codex",
+            HarnessKind::OpenCode => "3-OpenCode",
         }
     }
 }

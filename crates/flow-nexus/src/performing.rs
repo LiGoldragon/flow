@@ -432,6 +432,12 @@ impl Performs for RunningNexus {
                         }
                     },
                     HarnessKind::Claude => None,
+                    HarnessKind::OpenCode => {
+                        return NativeLaunchRefusal::refused(
+                            NativeLaunchStage::Spawn,
+                            crate::herdr::launch::OPENCODE_UNLAUNCHED.into(),
+                        );
+                    }
                 };
                 // Herdr's start returns once the TUI is at rest; the thread
                 // it attaches to has no turn yet.
@@ -562,6 +568,7 @@ impl Performs for RunningNexus {
                         .herdr
                         .submit_startup_part(&composed_launch, &prompt_delivery_intent)
                         .map_err(|_| Failed_Data::HerdrRefused),
+                    HarnessKind::OpenCode => Err(Failed_Data::Unstarted),
                 };
                 match submission {
                     Ok(result) => Outcome::Submitted(result),

@@ -5,8 +5,12 @@
 //!
 //! OpenCode 2.4.1, as a test capsule showed it:
 //! - `OPENCODE_CONFIG_DIR` names the server's whole configuration directory
-//!   in place of the user's: its `opencode.json` and its `plugins/`, so a
-//!   flow's server reads Flow's directory and none of the user's.
+//!   in place of the user's, so a flow's server reads Flow's
+//!   `opencode.json` and none of the user's.
+//! - A plugin is declared in that document's `plugins`, by its directory
+//!   and its options; it loads at the session's first prompt, and the hook
+//!   it calls sees the server's environment, `FLOW_ID` and `HERDR_PANE_ID`
+//!   with it.
 //! - `POST /api/session` with an `id` creates that session, and answers the
 //!   same session, unchanged, when it already stands: Resume is the same
 //!   call as Start. It creates a session for an agent that does not exist.
@@ -28,23 +32,32 @@ use crate::emission::WritesOpenCodeConfiguration;
 use crate::generated::emission::{OpenCodeAgent, SystemPromptFile};
 
 /// OpenCode's own names, which Flow does not choose: the variable naming its
-/// configuration directory, the user its Basic authentication takes, the files it reads in that
-/// directory, and its routes.
+/// configuration directory, the user its Basic authentication takes, the
+/// file it reads in that directory, the key its plugins are declared under,
+/// and its routes.
 pub(crate) trait SpeaksOpenCode {
     const CONFIGURATION_DIRECTORY_VARIABLE: &str = "OPENCODE_CONFIG_DIR";
     const SERVER_USER: &str = "opencode";
     const CONFIGURATION_FILE: &str = "opencode.json";
-    const PLUGIN_DIRECTORY: &str = "plugins";
+    const PLUGINS_KEY: &str = "plugins";
     const SESSION_ROUTE: &str = "/api/session";
     const AGENT_ROUTE: &str = "/api/agent";
 }
 
 /// The layout Flow chooses inside a flow's configuration directory: the
-/// file its agent's system prompt is read from, and the name the report
-/// plugin is placed under.
+/// file its agent's system prompt is read from.
 pub(crate) trait LaysOutOpenCodeFlow {
     const SYSTEM_PROMPT_FILE: &str = "system.md";
-    const REPORT_PLUGIN: &str = "flow-report";
+}
+
+/// The report plugin as a flow's server declares it: the plugin's installed
+/// directory, and its two options, the hook client it calls and that
+/// client's configuration datom.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OpenCodeReportPlugin {
+    pub(crate) package: PathBuf,
+    pub(crate) hook: PathBuf,
+    pub(crate) configuration: String,
 }
 
 /// One flow's OpenCode configuration directory, under the configured root
@@ -61,14 +74,14 @@ pub(crate) trait WritesOpenCodeFlow: Sized {
     fn under(root: &Path, flow: &str) -> Self;
     /// The file the agent's system prompt is written to and read from.
     fn system_prompt_file(&self) -> SystemPromptFile;
-    /// Writes the system prompt, the configuration naming the agent as the
-    /// default, and the report plugin's place: `plugins/flow-report`, a link
-    /// to the installed plugin. A second write replaces the first.
+    /// Writes the system prompt, and the configuration naming the agent as
+    /// the default and declaring the report plugin. A second write replaces
+    /// the first.
     fn write(
         &self,
         agent: &OpenCodeAgent,
         system_prompt: &str,
-        report_plugin: &Path,
+        report_plugin: &OpenCodeReportPlugin,
     ) -> std::io::Result<()>;
     /// The environment the flow's server is started with so that it reads
     /// this directory.
@@ -95,21 +108,20 @@ impl WritesOpenCodeFlow for OpenCodeFlowDirectory {
         &self,
         agent: &OpenCodeAgent,
         system_prompt: &str,
-        report_plugin: &Path,
+        report_plugin: &OpenCodeReportPlugin,
     ) -> std::io::Result<()> {
-        let plugins = self.path.join(Self::PLUGIN_DIRECTORY);
-        std::fs::create_dir_all(&plugins)?;
+        std::fs::create_dir_all(&self.path)?;
         std::fs::write(&agent.system_prompt_file.0, system_prompt)?;
-        let configuration = serde_json::to_vec_pretty(&agent.opencode_configuration())
-            .map_err(std::io::Error::other)?;
-        std::fs::write(self.path.join(Self::CONFIGURATION_FILE), configuration)?;
-        let placed = plugins.join(Self::REPORT_PLUGIN);
-        match std::fs::symlink_metadata(&placed) {
-            Ok(_) => std::fs::remove_file(&placed)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        std::os::unix::fs::symlink(report_plugin, placed)
+        let mut document = agent.opencode_configuration();
+        document[Self::PLUGINS_KEY] = serde_json::json!([{
+            "package": report_plugin.package,
+            "options": {
+                "hook": report_plugin.hook,
+                "configuration": report_plugin.configuration,
+            },
+        }]);
+        let configuration = serde_json::to_vec_pretty(&document).map_err(std::io::Error::other)?;
+        std::fs::write(self.path.join(Self::CONFIGURATION_FILE), configuration)
     }
 
     fn server_environment(&self) -> (&'static str, PathBuf) {
@@ -189,9 +201,18 @@ impl AsksOpenCode for OpenCodeServer {
     }
 }
 
-impl OpenCodeServer {
+trait ExchangesWithOpenCode {
     /// One HTTP/1.1 exchange, the connection closed after it; the status
     /// and the body as text.
+    fn exchange(
+        &self,
+        method: &str,
+        route: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<(u16, String), OpenCodeRefusal>;
+}
+
+impl ExchangesWithOpenCode for OpenCodeServer {
     fn exchange(
         &self,
         method: &str,
@@ -226,7 +247,12 @@ impl OpenCodeServer {
 /// A whole HTTP/1.1 answer, read once its connection closed.
 struct HttpAnswer(Vec<u8>);
 
-impl HttpAnswer {
+trait ReadsHttpAnswer {
+    fn read(self) -> Result<(u16, String), OpenCodeRefusal>;
+    fn unchunked(body: &str) -> Option<String>;
+}
+
+impl ReadsHttpAnswer for HttpAnswer {
     fn read(self) -> Result<(u16, String), OpenCodeRefusal> {
         let text = String::from_utf8_lossy(&self.0).into_owned();
         let malformed = || OpenCodeRefusal::Unreachable(format!("malformed answer: {text}"));

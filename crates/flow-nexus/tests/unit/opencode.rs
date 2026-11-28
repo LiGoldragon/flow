@@ -4,7 +4,8 @@
 
 use crate::generated::emission::{OpenCodeAgent, OpenCodeAgentName};
 use crate::opencode::{
-    AsksOpenCode, OpenCodeFlowDirectory, OpenCodeRefusal, OpenCodeServer, WritesOpenCodeFlow,
+    AsksOpenCode, OpenCodeFlowDirectory, OpenCodeRefusal, OpenCodeReportPlugin, OpenCodeServer,
+    WritesOpenCodeFlow,
 };
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -90,14 +91,18 @@ const NOT_FOUND: &str = r#"{"_tag":"AgentNotFoundError","agentID":"flow-terra","
 const FOUND: &str = r#"{"location":{"directory":"/capsule/work"},"data":{"id":"flow-terra","name":"flow-terra","mode":"primary"}}"#;
 
 /// The directory Flow writes is OpenCode's whole configuration: the agent as
-/// default, the system prompt in its file, the report plugin linked under
-/// `plugins/`, and the variable a server is started with to read it.
+/// default, the system prompt in its file, the report plugin declared with
+/// its hook and the hook's configuration, and the variable a server is
+/// started with to read it.
 #[test]
 fn a_flow_directory_holds_the_agent_its_prompt_and_the_report_plugin() {
     use crate::emission::WritesOpenCodeConfiguration;
     let root = tempfile::tempdir().unwrap();
-    let plugin = root.path().join("installed/flow-report");
-    std::fs::create_dir_all(&plugin).unwrap();
+    let plugin = OpenCodeReportPlugin {
+        package: root.path().join("installed/flow-report"),
+        hook: root.path().join("installed/flow-hook"),
+        configuration: "HookConfiguration.capsule".into(),
+    };
     let directory = OpenCodeFlowDirectory::under(&root.path().join("opencode"), "f0a1b2");
     let agent = OpenCodeAgent {
         open_code_agent_name: OpenCodeAgentName("flow-terra".into()),
@@ -111,14 +116,18 @@ fn a_flow_directory_holds_the_agent_its_prompt_and_the_report_plugin() {
     let written: serde_json::Value =
         serde_json::from_slice(&std::fs::read(directory.path.join("opencode.json")).unwrap())
             .unwrap();
-    assert_eq!(written, agent.opencode_configuration());
+    let mut expected = agent.opencode_configuration();
+    expected["plugins"] = serde_json::json!([{
+        "package": root.path().join("installed/flow-report"),
+        "options": {
+            "hook": root.path().join("installed/flow-hook"),
+            "configuration": "HookConfiguration.capsule",
+        },
+    }]);
+    assert_eq!(written, expected);
     assert_eq!(
         std::fs::read_to_string(&agent.system_prompt_file.0).unwrap(),
         "Be briefer."
-    );
-    assert_eq!(
-        std::fs::read_link(directory.path.join("plugins/flow-report")).unwrap(),
-        plugin
     );
     assert_eq!(
         directory.server_environment(),

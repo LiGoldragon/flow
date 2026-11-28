@@ -1,3 +1,34 @@
+# Flow 0.62.0: a Claude flow's state is its Harness Nexus's
+
+The meta wire contract is meta-signal-flow 0.95.0, which appends `Bind`,
+answered `Bound` or `BindRefused`, after `HarnessObserved`; every later
+output moves on the wire. Upgrade the meta client with the daemon. Ordinary
+Signal and Memory are unchanged.
+
+A Claude flow's state now comes from its Claude Harness Nexus subscription
+alone. Name the Claude Harness Nexus subscription socket in
+`flow-nexus-daemon.datom` before activating: without it no Claude seat
+moves, rests or ends. The harness names a session by the first six
+characters of its session id, and Flow matches it to the live Claude flow
+whose stored session begins so. Flowing.Working, Waiting and Blocked make
+the seat Working, Flowing.Rested makes it Resting and settles the rest (its
+drain, an ordered or a threshold refresh, its sleep), and an end that is not
+a /clear makes the seat Ended, leaving the flow live for a Restart. A hook
+`Report` is kept raw and moves no seat; a pane resumed without FLOW_ID
+rests and refreshes as any other. `ObserveHarness` lists every session a
+harness tells of, with None for one Flow holds no flow for.
+
+Meta `Bind.{ Address TranscriptPath }` makes the permaflow at the Address
+Awake as the Claude session the transcript names, for example
+`Bind.{ { Mind flow Sol } «/home/li/.claude/projects/-home-li-primary/<uuid>.jsonl» }`.
+It answers `Bound.{ Address FlowId Option<FlowId> }`, naming the flow it
+replaced, which is retired in the store with its pane untouched;
+`BindRefused.UnknownPermaflow` when no permaflow is declared there;
+`BindRefused.Unreadable` when no session id is read from the file.
+
+A Claude session's end no longer records its flow Exited: the seat is
+Ended and the flow stays Active, so a Restart can take it.
+
 # Flow 0.61.0: the Harness Nexuses' witness
 
 The meta wire contract is meta-signal-flow 0.94.0, which appends

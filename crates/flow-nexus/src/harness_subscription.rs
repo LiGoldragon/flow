@@ -724,6 +724,9 @@ pub trait FollowsClaudeHarness {
     /// refresh ordered or due, sleep), remembered when Herdr does not yet
     /// show it.
     fn settle_told_rest(&self, rest: &ToldRest);
+    /// Records the route of the Herdr pane whose Claude agent shows the
+    /// rest's session when the flow's recorded route no longer shows it.
+    fn follow_session_route(&self, rest: &ToldRest);
 }
 
 impl FollowsClaudeHarness for RunningNexus {
@@ -808,6 +811,9 @@ impl FollowsClaudeHarness for RunningNexus {
     fn settle_told_rest(&self, rest: &ToldRest) {
         use crate::rest_watching::RemembersPendingRest;
         use crate::waking::{AtStop, KeptAtStop, QueuesSimplifiedAnswers, SleepsAndWakesSeats};
+        // A pane resumed bare may be a new pane: its route follows the
+        // session, so the rest's refresh and reap find the pane it runs in.
+        self.follow_session_route(rest);
         // A launch sending its first message in parts waits on a rest
         // before its next part.
         self.store.launch_changes.announce();
@@ -824,6 +830,36 @@ impl FollowsClaudeHarness for RunningNexus {
             AtStop::Kept(KeptAtStop::NotResting(_))
         ) {
             self.remember_pending_rest(&rest.flow_id, &rest.session);
+        }
+    }
+
+    fn follow_session_route(&self, rest: &ToldRest) {
+        use crate::herdr::ReadsHerdrRoster;
+        use crate::session_binding::BindsSessions;
+        use crate::store::ReadsFlowRows;
+        use crate::store::repair::RepairsMetaflows;
+        let Ok(Some(node)) = self.store.flow_node(&rest.flow_id) else {
+            return;
+        };
+        if self.herdr.current_route(&node).is_some() {
+            return;
+        }
+        let Some(route) = self.route_showing_session(&rest.session) else {
+            return;
+        };
+        if matches!(&node.herdr_route_selection, signal_flow::HerdrRouteSelection::Available(recorded) if *recorded == route)
+        {
+            return;
+        }
+        match self.store.rebind_route(&rest.flow_id, route) {
+            Ok(()) => eprintln!(
+                "flow-nexus: flow {} follows its session {} to the pane that shows it",
+                rest.flow_id, rest.session
+            ),
+            Err(error) => eprintln!(
+                "flow-nexus: flow {} was not given the pane that shows its session: {error}",
+                rest.flow_id
+            ),
         }
     }
 }

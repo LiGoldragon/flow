@@ -111,6 +111,18 @@ refresh, the sleep. No hook report, takeover read, bound-route observation
 or process watch decides a Claude seat any more; a Codex seat is decided by
 its thread as before.
 
+Meta `Bind.{ Address TranscriptPath }` is the owner's way to give an Address
+a Claude session Flow did not launch (`session_binding`): refused
+UnknownPermaflow when no permaflow is declared at the Address, Unreadable
+when the file cannot be read or its first rows name no `sessionId` equal to
+its stem. The flow id is the session's first six characters. One commit
+creates or reuses that flow, Claude and Active, records the route of the
+Herdr pane whose agent shows the session when one does, makes the Address
+Awake as it (the flow it was Awake as retired in the store, its pane
+untouched, and kept in Past), and seeds its seat row from the Claude Harness
+Nexus's witness of the session, so a bound idle session rests at once; its
+audit transition is caused Overridden. `Bound` names the flow replaced.
+
 When a Changed moves a flow's harness state to a new value, its comparison
 with `state_of` falls due GraceSeconds later, replacing the flow's
 comparison not yet due, if the harness state is still that value and Flow

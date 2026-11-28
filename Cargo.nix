@@ -1168,7 +1168,7 @@ rec {
       };
       "flow-nexus" = rec {
         crateName = "flow-nexus";
-        version = "0.61.0";
+        version = "0.62.0";
         edition = "2024";
         crateBin = [
           {

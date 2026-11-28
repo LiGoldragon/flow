@@ -1,0 +1,31 @@
+[package]
+name = "flow-recover"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+build = "build.rs"
+
+[features]
+default = ["datom"]
+datom = []
+
+[[bin]]
+name = "flow-recover"
+path = "src/main.rs"
+
+[dependencies]
+flow-ethos = { path = "../flow-ethos", default-features = false, features = ["datom"] }
+signal-flow = { workspace = true, features = ["datom"] }
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09a0526" }
+protos = { git = "https://github.com/LiGoldragon/protos", rev = "c93b598" }
+rkyv.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "f23eacf" }

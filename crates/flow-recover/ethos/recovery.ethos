@@ -1,0 +1,41 @@
+; Recovery: which transcript is which permaflow's, read from the
+; transcripts themselves, after the Flow Nexus has lost it.
+;
+; The one input is a Recovery: the transcript root, where a session's start
+; stands in a session file, and the marks of its identity lines. Nothing is
+; read from the environment and nothing of these is written in the code.
+;
+; A session file is a file directly in a directory directly under the root
+; whose name ends in the FileSuffix. Its identity is read from its records
+; whose RecordField holds a KindField equal to SnapshotKind: each string
+; under that record's PromptField is read line by line, the line opening
+; with the AddressMark giving the Address, the line opening with the
+; FlowIdMark the flow id the launcher wrote. The last such record with both
+; holds for the file.
+;
+; Each output line is one Placement. Bind is the meta Signal's Bind input
+; (meta-signal-flow 0.95.0), printed as flow-meta reads it, one for each
+; Address found: the file written newest of those that claim it. Contested
+; names an Address and the other files that claim it; Unidentified a
+; session file no identity could be read from.
+
+Library
+[ flow_ethos:Address
+  signal_flow:TranscriptPath ]
+[ TranscriptRoot.String
+  FileSuffix.String
+  RecordField.String
+  KindField.String
+  SnapshotKind.String
+  PromptField.String
+  AddressMark.String
+  FlowIdMark.String
+  SessionShape.{ FileSuffix RecordField KindField SnapshotKind PromptField }
+  IdentityMarks.{ AddressMark FlowIdMark }
+  Recovery.{ TranscriptRoot SessionShape IdentityMarks }
+  ; The printed form of every output line; Bind is declared here alone.
+  Placement.[ Bind.{ Address TranscriptPath }
+              Unidentified.TranscriptPath
+              Contested.{ Address Vector<TranscriptPath> } ] ]
+[]
+[]
